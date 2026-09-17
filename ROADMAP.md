@@ -3,9 +3,13 @@
 Stage 1 (discovery, designation, supervision) is complete and user-accepted. It contains no
 trading logic. This document is the plan for everything that does.
 
-**Stage 2a is written and unit-tested, and is awaiting validation on a demo master** — see its
-section below for the exit criterion, which only a live demo run can satisfy. Nothing beyond it
-exists: there is still no order-sending code anywhere in the package.
+**Stage 2a is complete and validated on a demo master (2026-09-17).** The exit criterion was
+met by hand: positions, pending orders, reverse copying, the restart and reconnect paths, and
+one real bug found and fixed (see "the stall", below). Nothing beyond it exists — there is
+still no order-sending code anywhere in the package.
+
+**Next: Stage 2b.** That is where `order_send` first appears, so everything in "Safety rails"
+under Stage 2c should be read before starting, not after.
 
 Read `README.md` first for the architecture and the constraints it follows from.
 
@@ -122,7 +126,7 @@ exists.
 
 ---
 
-## Stage 2a — detection only, no orders — **built, awaiting demo validation**
+## Stage 2a — detection only, no orders — **done, validated 2026-09-17**
 
 **Goal: prove the diff engine is correct before it can touch a broker.**
 
@@ -137,11 +141,32 @@ exists.
   above. A disconnected or stale slave produces no actions at all, not even a close, and the
   master's own outages break continuity through the same mechanism.
 
-Exit criterion: open, close, partially close and modify trades by hand on a demo master and
-confirm the log describes exactly what should have happened, with no spurious actions across
-restarts, reconnects and terminal restarts. **Not yet done — it needs a demo master.**
+Exit criterion — **met 2026-09-17**: opened, closed, partially closed and modified trades by
+hand on a demo master; placed, moved, cancelled and filled pending orders; ran a reversed
+slave alongside a normal one; and confirmed no spurious actions across app restarts, worker
+restarts and link drops.
 
 This stage is where the design is either right or wrong, and it costs nothing to get wrong.
+It earned its keep: the diff logic itself needed three corrections (no INCREASE action,
+declines final, a sizing path for unstopped trades) and one outright bug surfaced that would
+have been far more expensive with execution wired up.
+
+### The stall — what the dry run actually caught
+
+Deleting a pending order produced no `CANCEL`. The diff was correct; it never ran.
+
+`positions_get()` and `orders_get()` answer `None` both for "the call failed" and for "there
+is nothing to return", and the engine skips a tick entirely on an unknown read — so emptying
+the order list *looked* like a failed read and froze detection. The worker now disambiguates
+by asking `orders_total()` / `positions_total()`: zero means genuinely empty, anything else
+stays unknown.
+
+Two lessons worth keeping:
+
+- **Never let a guard be silent.** This one logged at DEBUG, below the configured level, so a
+  paused copier was indistinguishable from an idle master. It now warns on the transition and
+  the UI shows `DETECTION PAUSED`. Any future guard that can stop the copier must announce it.
+- **MT5's `None` is ambiguous everywhere**, not just here. Assume it of any `*_get()` call.
 
 ### Decisions taken while building it
 
@@ -332,7 +357,7 @@ proportionally. This is where most copier edge cases live: a partial close chang
 ratio that every later action depends on, so the mapping table must store the master volume the
 slave position was sized against, not just the tickets.
 
-## Stage 4 — pending orders — **detection built, execution pending**
+## Stage 4 — pending orders — **detection done and validated, execution pending**
 
 In scope (confirmed 2026-09-16), gated per slave by `copy_pending`, default off.
 
@@ -351,17 +376,16 @@ Still to write in 2b/2c: the `order_send` calls themselves. Note `zele-mt5` has 
 `TRADE_ACTION_MODIFY` path at all — it can modify a position's SL/TP but not a pending order's
 entry price, so that is fresh work.
 
-### Fill versus cancellation — the one unverified assumption
+### Fill versus cancellation — **confirmed on a demo, 2026-09-17**
 
 An order leaving the master's list has either been **cancelled** or **filled**, and the right
 responses are opposites: cancel the slave's copy, or leave it alone because it is about to
 fill at the same price. Cancelling a copy that was going to fill silently drops a trade.
 
 The signal used is the ticket: **MT5 gives the position opened by a pending order that
-order's own ticket**, so a departed ticket that now names a position was filled. This is the
-one assumption in the diff engine that cannot be proven without a terminal. Confirm it in a
-dry run before anything acts on it — place a limit on the master, let it fill, and check the
-log says `ORDER_FILLED` rather than `CANCEL`.
+order's own ticket**, so a departed ticket that now names a position was filled. This was the
+one assumption in the diff engine that could not be proven without a terminal; a demo run
+confirmed it — a filled limit logs `ORDER_FILLED` and a deleted one logs `CANCEL`.
 
 On a fill the ledger hands tracking from the order to the position, which is also what stops
 the position diff proposing a second copy of the same trade.
@@ -385,7 +409,7 @@ Per-slave direction inversion (`invert`, in scope, confirmed 2026-09-16), symbol
 whitelist/blacklist, plus optional size and session windows. The filters are already honoured;
 what remains is size/session windows and live validation.
 
-### Inversion is a swap, not a flip — settled 2026-09-16
+### Inversion is a swap, not a flip — settled 2026-09-16, validated 2026-09-17
 
 `effective_levels()` **swaps stop and target** for a reversed copy. The master's stop is the
 price at which its trade fails, which is precisely where the reversed trade succeeds. Passing
