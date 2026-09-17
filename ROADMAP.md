@@ -194,6 +194,38 @@ sizing path (`LOT_MULTIPLE`, off by default) rather than being unsizeable.
 **Polling rate** is still untuned: detection runs on the master's own snapshot tick, so it
 inherits `poll_interval_ms` (250ms). See the performance note at the bottom before changing it.
 
+## Per-terminal settings editor — not yet built
+
+`TerminalConfig` carries sixteen per-slave settings and the UI can edit none of them. Role
+assignment is the only thing the keyboard changes; everything else means quitting and editing
+`%APPDATA%\MT5Copier\config.json` by hand. The terminal table even *displays* a RISK column,
+which implies it can be changed there, and it cannot.
+
+This is a gap rather than a deferral — it was never planned, and it should have been. It is
+also the thing most likely to be wanted daily, since `risk_percent` is the setting a user
+actually reaches for.
+
+Shape: a modal editor on the selected terminal (`e`), grouped as role/enabled, sizing,
+no-stop policy, copy behaviour, symbol mapping and filters. Build the edited values into a
+`TerminalConfig` and let **pydantic do the validation** — surface the `ValidationError` in the
+form rather than writing something the schema would reject on next load.
+
+### Changing a setting mid-run is not uniformly safe
+
+The editor must not treat every field as equally harmless, because the ledger already believes
+things about that slave:
+
+| Change | While copies are believed |
+|---|---|
+| `risk_percent`, `risk_cash`, commission, slippage, `max_lot` | Safe. Sizing applies to future opens only; existing copies keep the volume they were sized at. |
+| `copy_sltp`, `copy_partials`, `copy_pending` | Safe. They gate future actions, and a decline already taken stays taken. |
+| Symbol filters | Safe but asymmetric — widening a whitelist does **not** adopt trades already declined, by the "a decline is final" rule. The form should say so. |
+| `invert` | **Refuse, or force a ledger clear for that slave.** A believed copy records the direction it was opened in; flipping the flag does not flip a position that already exists, so the ledger would describe the opposite of reality and every later close would be wrong. |
+| `enabled` off | Safe: the ledger prunes that slave's state, and re-enabling re-baselines — so anything open at that moment becomes permanently uncopyable for it, which is correct but worth saying in the UI. |
+
+Sequencing is open: it is not on the path to execution, but Stage 2b testing means flipping
+sizing settings repeatedly, so doing it first may well pay for itself.
+
 ## Stage 2b — execution primitives
 
 Each of these is independently testable against a single demo slave, and each is a known
