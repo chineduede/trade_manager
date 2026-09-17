@@ -318,7 +318,7 @@ dev tooling (`mypy`, `cython`, `email_validator`), and attribute-style false pos
 ## Development
 
 ```bash
-uv run pytest -q          # 229 tests, no MT5 terminal required
+uv run pytest -q          # 290 tests, no MT5 terminal required
 uv run ruff check .
 uv run ruff format .
 ```
