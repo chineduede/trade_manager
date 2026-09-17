@@ -42,7 +42,14 @@ from typing import Any
 
 from .config import NoStopPolicy, TerminalConfig
 from .logging_setup import get_logger
-from .protocol import OrderType, PendingOrder, Position, PositionType
+from .protocol import (
+    ActionKind,
+    OrderType,
+    PendingOrder,
+    Position,
+    PositionType,
+    SizingBasis,
+)
 
 log = get_logger(__name__)
 
@@ -55,49 +62,6 @@ _PRICE_EPS = 1e-8
 
 def _same(a: float, b: float, eps: float) -> bool:
     return math.isclose(a, b, rel_tol=0.0, abs_tol=eps)
-
-
-class ActionKind(StrEnum):
-    """What the copier intends to do about one master position on one slave."""
-
-    OPEN = "open"
-    CLOSE = "close"
-    """The master no longer holds it. A full close is never conditional."""
-    REDUCE = "reduce"
-    """The master partially closed; mirror the same fraction. Volume only ever moves down --
-    on a hedging account each entry is its own ticket, so an open position's volume cannot be
-    added to, only reduced."""
-    MODIFY_SLTP = "modify_sltp"
-
-    # --- pending orders ---------------------------------------------------------------------
-    PLACE = "place"
-    """Mirror a resting limit/stop order the master has placed."""
-    MODIFY_ORDER = "modify_order"
-    """The master moved a resting order's entry price, stop or target. Unlike a position, a
-    pending order's *entry* can change, which is why this is a separate kind."""
-    CANCEL = "cancel"
-    """The master deleted a resting order before it filled."""
-    ORDER_FILLED = "order_filled"
-    """The master's order filled. Reported but never sent: the slave's own copy of the order
-    rests at the same price and fills on its own. What this does is hand tracking over from
-    the order to the position it became."""
-
-
-class SizingBasis(StrEnum):
-    """How Stage 2b must compute the lots for an OPEN.
-
-    Decided here rather than there, because it depends only on the master's trade and the
-    slave's config -- both of which are pure data. Stage 2b executes the choice; it does not
-    make it.
-    """
-
-    RISK_FROM_STOP = "risk_from_stop"
-    """The normal path: the slave's own risk budget, spread over the master's entry-to-stop
-    distance, net of that slave's commission and slippage."""
-
-    MASTER_LOT_MULTIPLE = "master_lot_multiple"
-    """No stop to measure, so the master's own lot size scaled by ``no_stop_lot_multiple``.
-    The one case where a slave inherits the master's sizing, and opt-in per slave."""
 
 
 class SkipReason(StrEnum):

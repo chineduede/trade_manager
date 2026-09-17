@@ -168,6 +168,15 @@ class TerminalConfig(BaseModel):
     1.0 mirrors the master's size exactly; 0.5 takes half. Unused -- and irrelevant -- for any
     trade that has a stop, which is sized from the slave's own risk instead."""
 
+    allow_live_trading: bool = False
+    """Permit copying into an account that is not a demo.
+
+    Off, and it has to be turned on per terminal, deliberately. Most of the terminals on this
+    machine are prop or live; a role is one keypress away from landing on the wrong one, and
+    the worker refuses to trade a non-demo account without this. An account whose trade mode
+    cannot be read counts as not-demo -- "we could not tell" is not a reason to trade someone's
+    funded account."""
+
     # --- Stage 2: copy behaviour -----------------------------------------------------------
     invert: bool = False
     copy_sltp: bool = True

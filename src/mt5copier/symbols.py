@@ -21,7 +21,6 @@ from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from .config import TerminalConfig
 from .logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -67,22 +66,24 @@ def base_name(symbol: str) -> str:
     return upper
 
 
-def candidates(master_symbol: str, cfg: TerminalConfig) -> list[str]:
+def candidates(master_symbol: str, prefix: str = "", suffix: str = "") -> list[str]:
     """Names to try, most trustworthy first. Order is the whole point."""
     out = [master_symbol]
-    if cfg.symbol_prefix or cfg.symbol_suffix:
-        out.append(f"{cfg.symbol_prefix}{master_symbol}{cfg.symbol_suffix}")
+    if prefix or suffix:
+        out.append(f"{prefix}{master_symbol}{suffix}")
         # The master's own name may already carry a decoration this broker does not use.
         stripped = base_name(master_symbol)
         if stripped != master_symbol.upper():
-            out.append(f"{cfg.symbol_prefix}{stripped}{cfg.symbol_suffix}")
+            out.append(f"{prefix}{stripped}{suffix}")
     return list(dict.fromkeys(out))
 
 
 def resolve(
     master_symbol: str,
     available: Collection[str],
-    cfg: TerminalConfig,
+    prefix: str = "",
+    suffix: str = "",
+    label: str = "",
 ) -> ResolvedSymbol:
     """Resolve to a name that actually exists on this slave, or refuse.
 
@@ -97,7 +98,7 @@ def resolve(
     if master_symbol.upper() in by_upper:
         return ResolvedSymbol(by_upper[master_symbol.upper()], Resolution.EXACT)
 
-    for candidate in candidates(master_symbol, cfg)[1:]:
+    for candidate in candidates(master_symbol, prefix, suffix)[1:]:
         if candidate.upper() in by_upper:
             return ResolvedSymbol(by_upper[candidate.upper()], Resolution.CONFIGURED)
 
@@ -113,7 +114,7 @@ def resolve(
             "symbol %r matches %d names on %s (%s); refusing to guess",
             master_symbol,
             len(matches),
-            cfg.label or cfg.terminal_id[:8],
+            label or "this slave",
             ", ".join(matches[:5]),
         )
     return ResolvedSymbol(None, Resolution.UNRESOLVED)
@@ -141,14 +142,16 @@ class SymbolCache:
         terminal_id: str,
         master_symbol: str,
         available: Iterable[str],
-        cfg: TerminalConfig,
+        prefix: str = "",
+        suffix: str = "",
+        label: str = "",
     ) -> ResolvedSymbol:
         """Cached :func:`resolve`. Failures are cached too -- a symbol this broker does not
         list will not start existing, and re-scanning the whole list per tick is wasteful."""
         hit = self.get(terminal_id, master_symbol)
         if hit is not None:
             return hit
-        resolved = resolve(master_symbol, list(available), cfg)
+        resolved = resolve(master_symbol, list(available), prefix, suffix, label)
         self.put(terminal_id, master_symbol, resolved)
         return resolved
 

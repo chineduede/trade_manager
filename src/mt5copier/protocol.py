@@ -131,6 +131,53 @@ class WorkerState(StrEnum):
     STOPPED = "stopped"
 
 
+class ActionKind(StrEnum):
+    """What the copier intends to do about one master position on one slave.
+
+    Lives here rather than in :mod:`mt5copier.reconcile` because it is the vocabulary of the
+    process boundary as well as of the diff: the engine decides an :class:`ActionKind` and the
+    worker executes one. Two enums kept in sync by hand would eventually drift.
+    """
+
+    OPEN = "open"
+    CLOSE = "close"
+    """The master no longer holds it. A full close is never conditional."""
+    REDUCE = "reduce"
+    """The master partially closed; mirror the same fraction. Volume only ever moves down --
+    on a hedging account each entry is its own ticket, so an open position's volume cannot be
+    added to, only reduced."""
+    MODIFY_SLTP = "modify_sltp"
+
+    # --- pending orders ---------------------------------------------------------------------
+    PLACE = "place"
+    """Mirror a resting limit/stop order the master has placed."""
+    MODIFY_ORDER = "modify_order"
+    """The master moved a resting order's entry price, stop or target. Unlike a position, a
+    pending order's *entry* can change, which is why this is a separate kind."""
+    CANCEL = "cancel"
+    """The master deleted a resting order before it filled."""
+    ORDER_FILLED = "order_filled"
+    """The master's order filled. Reported but never sent: the slave's own copy of the order
+    rests at the same price and fills on its own. What this does is hand tracking over from
+    the order to the position it became."""
+
+
+class SizingBasis(StrEnum):
+    """How the worker must compute the lots for an OPEN or a PLACE.
+
+    Decided by the diff engine, because it follows from the master's trade and the slave's
+    config -- both pure data. The worker executes the choice; it does not make it.
+    """
+
+    RISK_FROM_STOP = "risk_from_stop"
+    """The normal path: the slave's own risk budget, spread over the master's entry-to-stop
+    distance, net of that slave's commission and slippage."""
+
+    MASTER_LOT_MULTIPLE = "master_lot_multiple"
+    """No stop to measure, so the master's own lot size scaled by ``no_stop_lot_multiple``.
+    The one case where a slave inherits the master's sizing, and opt-in per slave."""
+
+
 class CommandKind(StrEnum):
     STOP = "stop"
     RECONNECT = "reconnect"
@@ -143,6 +190,102 @@ class Command:
 
     kind: CommandKind
     seq: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class OrderCommand:
+    """Supervisor -> worker: one thing to do on this slave's terminal.
+
+    **Self-contained on purpose.** Every value the worker needs is carried here, including the
+    already-resolved risk budget and the slave's cost settings, so the worker never reads
+    config. Workers are spawned processes with a copy-on-write snapshot of the world; a
+    setting the user changed two minutes ago would otherwise be honoured by the engine and
+    ignored by the worker, which is the kind of divergence nobody notices until it matters.
+
+    The division of labour: the engine decides *what* and *how much money*, because it has the
+    config and the master's state; the worker decides *how many lots*, because only it can ask
+    the slave's terminal what one lot would lose.
+    """
+
+    command_id: int
+    op: ActionKind
+    master_ticket: int
+    master_symbol: str
+    direction: PositionType
+    """The direction on the slave -- already inverted if this slave reverse-copies."""
+
+    order_type: OrderType | None = None
+    """Set for PLACE / MODIFY_ORDER / CANCEL; None for position operations."""
+
+    entry: float = 0.0
+    sl: float = 0.0
+    tp: float = 0.0
+    """Slave-facing levels: already swapped if this slave reverse-copies."""
+
+    master_volume: float = 0.0
+    sizing_basis: SizingBasis = SizingBasis.RISK_FROM_STOP
+    lot_multiple: float | None = None
+
+    risk_amount: float = 0.0
+    """Money to risk, in this slave's account currency, already derived from its balance and
+    risk setting by the engine."""
+
+    commission_per_lot: float = 0.0
+    slippage_points: int = 0
+    max_lot: float | None = None
+    deviation_points: int = 20
+
+    close_fraction: float | None = None
+    """REDUCE only."""
+    slave_ticket: int | None = None
+    """The slave's own ticket, for anything that acts on an existing position or order."""
+
+    symbol_prefix: str = ""
+    symbol_suffix: str = ""
+    """This slave's configured symbol decoration, carried rather than looked up for the same
+    reason as everything else here."""
+
+    magic: int = 0
+    comment: str = ""
+    allow_live: bool = False
+    """Explicit per-slave override of the demo-only guard. Absent this, the worker refuses to
+    trade any account that is not a demo -- see :mod:`mt5copier.executor`."""
+
+
+@dataclass(frozen=True, slots=True)
+class OrderResult:
+    """Worker -> supervisor: what actually happened.
+
+    ``filled_volume`` is what the broker reports, never what was asked for. A partial fill
+    that is recorded as the requested size leaves the copier believing in volume that does not
+    exist, and every later partial close is then computed against a fiction.
+    """
+
+    command_id: int
+    terminal_id: str
+    op: ActionKind
+    master_ticket: int
+    ok: bool
+
+    retcode: int | None = None
+    outcome: str = ""
+    slave_ticket: int | None = None
+    slave_symbol: str | None = None
+    requested_volume: float | None = None
+    filled_volume: float | None = None
+    price: float | None = None
+    attempts: int = 0
+    error: str | None = None
+
+    def describe(self) -> str:
+        head = f"{self.op.value.upper():<12} #{self.master_ticket}"
+        if self.ok:
+            vol = f"{self.filled_volume:g}" if self.filled_volume is not None else "?"
+            where = f" {self.slave_symbol}" if self.slave_symbol else ""
+            price = f" @{self.price:g}" if self.price else ""
+            tries = f" ({self.attempts} attempts)" if self.attempts > 1 else ""
+            return f"{head}{where} filled {vol}{price}{tries}"
+        return f"{head} FAILED: {self.error or self.outcome}"
 
 
 @dataclass(frozen=True, slots=True)

@@ -26,10 +26,13 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from .executor import Executor
 from .logging_setup import configure, get_logger
 from .protocol import (
     Command,
     CommandKind,
+    OrderCommand,
+    OrderResult,
     OrderType,
     PendingOrder,
     Position,
@@ -37,6 +40,7 @@ from .protocol import (
     Snapshot,
     WorkerState,
 )
+from .sizing import SymbolFacts
 
 if TYPE_CHECKING:
     from multiprocessing.queues import Queue
@@ -114,6 +118,109 @@ class _Session:
             return ()
         log.debug("%s read returned None while %r are open; treating as unknown", what, total)
         return None
+
+    # --- what the executor needs ----------------------------------------------------------
+    #
+    # Thin, forgiving wrappers: each returns None rather than raising, because a missing or
+    # misbehaving read must become a refusal to trade, not an exception that kills the worker.
+
+    def account_trade_mode(self) -> int | None:
+        """``account_info().trade_mode``. None when it cannot be read, which the executor
+        treats as "not a demo"."""
+        try:
+            account = self._mt5.account_info()
+        except Exception as exc:
+            log.debug("account_info() raised while checking trade mode: %r", exc)
+            return None
+        mode = getattr(account, "trade_mode", None) if account is not None else None
+        try:
+            return None if mode is None else int(mode)
+        except (TypeError, ValueError):
+            return None
+
+    def symbol_names(self) -> list[str]:
+        try:
+            symbols = self._mt5.symbols_get()
+        except Exception as exc:
+            log.debug("symbols_get() raised: %r", exc)
+            return []
+        if not symbols:
+            return []
+        return [str(s.name) for s in symbols if getattr(s, "name", None)]
+
+    def symbol_facts(self, name: str) -> SymbolFacts | None:
+        """``symbol_info``, selecting the symbol first if the terminal has it hidden.
+
+        An unselected symbol returns nothing useful -- including a filling mask of zero -- so
+        the select is not optional housekeeping.
+        """
+        try:
+            info = self._mt5.symbol_info(name)
+            if info is None:
+                self._mt5.symbol_select(name, True)
+                info = self._mt5.symbol_info(name)
+        except Exception as exc:
+            log.debug("symbol_info(%r) raised: %r", name, exc)
+            return None
+        if info is None:
+            return None
+        try:
+            return SymbolFacts(
+                name=str(getattr(info, "name", name)),
+                volume_min=float(info.volume_min),
+                volume_max=float(info.volume_max),
+                volume_step=float(info.volume_step),
+                point=float(getattr(info, "point", 0.0) or 0.0),
+                digits=int(getattr(info, "digits", 5) or 5),
+                filling_mask=int(getattr(info, "filling_mode", 0) or 0),
+            )
+        except (AttributeError, TypeError, ValueError) as exc:
+            log.warning("unusable symbol_info for %r: %s", name, exc)
+            return None
+
+    def tick(self, name: str) -> tuple[float, float] | None:
+        """Current ``(bid, ask)``. Re-read on every reprice; never cached."""
+        try:
+            quote = self._mt5.symbol_info_tick(name)
+        except Exception as exc:
+            log.debug("symbol_info_tick(%r) raised: %r", name, exc)
+            return None
+        if quote is None:
+            return None
+        try:
+            return float(quote.bid), float(quote.ask)
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def loss_per_lot(
+        self, direction: PositionType, symbol: str, entry: float, sl: float
+    ) -> float | None:
+        """What one lot loses between two prices, in the account currency.
+
+        Asks the terminal via ``order_calc_profit`` rather than deriving it from tick values:
+        it is exact, and it handles cross-currency instruments without us converting anything.
+        """
+        try:
+            profit = self._mt5.order_calc_profit(int(direction), symbol, 1.0, entry, sl)
+        except Exception as exc:
+            log.debug("order_calc_profit(%r) raised: %r", symbol, exc)
+            return None
+        if profit is None:
+            return None
+        try:
+            return abs(float(profit))
+        except (TypeError, ValueError):
+            return None
+
+    def order_send(self, request: dict[str, Any]) -> Any:
+        """The one call in this project that creates an order. Returns the raw MT5 result, or
+        None if the call itself failed -- which the executor classifies as a connection
+        problem rather than a rejection."""
+        try:
+            return self._mt5.order_send(request)
+        except Exception as exc:
+            log.warning("order_send raised: %r", exc)
+            return None
 
     def poll(self, terminal_id: str, seq: int, attempts: int) -> Snapshot:
         """Read account and terminal state into a snapshot.
@@ -297,6 +404,7 @@ def run_worker(
             return _Session(mt5, path)
 
     session = _session_factory(Path(exe_path))
+    executor = Executor(terminal_id, session)
     seq = 0
     attempts = 0
     next_retry_at = 0.0
@@ -309,6 +417,18 @@ def run_worker(
             # A full queue means the supervisor is not draining; dropping a snapshot is
             # correct, since the next tick supersedes it anyway.
             wlog.debug("could not publish snapshot: %r", exc)
+
+    def publish_result(result: OrderResult) -> None:
+        """Order results are **not** droppable the way snapshots are.
+
+        A snapshot supersedes itself next tick; a result is the only record that an order was
+        attempted. Losing one leaves the supervisor believing a trade is still pending that
+        has in fact already been placed, so this blocks briefly rather than discarding.
+        """
+        try:
+            out_q.put(result, timeout=2.0)
+        except Exception as exc:
+            wlog.error("could not report order result for #%s: %r", result.master_ticket, exc)
 
     wlog.info("worker starting for %s", exe_path)
     publish(Snapshot(terminal_id=terminal_id, state=WorkerState.STARTING, seq=seq))
@@ -328,6 +448,25 @@ def run_worker(
                     wlog.info("stop requested")
                     running = False
                     break
+                if isinstance(cmd, OrderCommand):
+                    if not session.connected:
+                        # Refuse rather than queue: by the time the link returns, the master's
+                        # trade is old news and the copy would be a late join.
+                        publish_result(
+                            OrderResult(
+                                command_id=cmd.command_id,
+                                terminal_id=terminal_id,
+                                op=cmd.op,
+                                master_ticket=cmd.master_ticket,
+                                ok=False,
+                                error="terminal not connected when the command arrived",
+                            )
+                        )
+                        continue
+                    result = executor.execute(cmd)
+                    wlog.info("%s", result.describe())
+                    publish_result(result)
+                    continue
                 if isinstance(cmd, Command) and cmd.kind is CommandKind.RECONNECT:
                     wlog.info("reconnect requested")
                     session.disconnect()
