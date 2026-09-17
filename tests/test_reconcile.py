@@ -1088,6 +1088,51 @@ def test_an_empty_position_list_does_mean_flat(engine: Engine) -> None:
     assert engine.believed_copies() == 0
 
 
+def test_an_unreadable_order_list_pauses_detection_loudly(
+    engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A silent pause is indistinguishable from an idle master -- which is how "deleting a
+    pending order does not reflect" looked from the outside."""
+    wire_slave(engine)
+    watch(engine)
+    with caplog.at_level("WARNING"):
+        engine._reconcile(snap(open_positions=(pos(),), pending_orders=None))
+    assert engine.blocked_reason is not None
+    assert any("detection paused" in r.getMessage() for r in caplog.records)
+
+
+def test_the_pause_is_announced_once_not_every_tick(
+    engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    wire_slave(engine)
+    with caplog.at_level("WARNING"):
+        for _ in range(5):
+            engine._reconcile(snap(pending_orders=None))
+    assert len([r for r in caplog.records if "detection paused" in r.getMessage()]) == 1
+
+
+def test_detection_resumes_and_says_so(engine: Engine, caplog: pytest.LogCaptureFixture) -> None:
+    wire_slave(engine)
+    engine._reconcile(snap(pending_orders=None))
+    with caplog.at_level("INFO"):
+        engine._reconcile(snap(pending_orders=()))
+    assert engine.blocked_reason is None
+    assert any("detection resumed" in r.getMessage() for r in caplog.records)
+
+
+def test_an_order_deleted_on_the_master_is_cancelled(engine: Engine) -> None:
+    """End to end through the engine, which is where the dry run said nothing happened."""
+    engine.config.terminals[TID_SLAVE].copy_pending = True
+    wire_slave(engine)
+    watch(engine)
+
+    engine._reconcile(snap(pending_orders=(order(ticket=50),)))
+    assert [r.action.kind for r in engine.recent_actions()] == [ActionKind.PLACE]
+
+    engine._reconcile(snap(pending_orders=()))
+    assert engine.recent_actions()[-1].action.kind is ActionKind.CANCEL
+
+
 def test_engine_refuses_to_act_on_a_dry_run_it_cannot_honour(
     engine: Engine, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1097,7 +1142,7 @@ def test_engine_refuses_to_act_on_a_dry_run_it_cannot_honour(
     engine.config.dry_run = False
     with caplog.at_level("ERROR"):
         engine._reconcile(snap(open_positions=(pos(),)))
-    assert any("sending nothing" in r.message % r.args for r in caplog.records)
+    assert any("sending nothing" in r.getMessage() for r in caplog.records)
 
 
 def test_engine_persists_and_restores_its_ledger(engine_cfg: AppConfig, tmp_path: Path) -> None:

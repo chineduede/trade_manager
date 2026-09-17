@@ -1081,6 +1081,11 @@ class DryRunLedger:
         for tid in list(self._last_ok):
             if tid not in slave_ids:
                 del self._last_ok[tid]
+        for key in list(self._last):
+            tid, ticket, _ = key
+            still_tracked = (tid, ticket) in self._copied or (tid, ticket) in self._orders
+            if tid not in slave_ids or (ticket not in master_tickets and not still_tracked):
+                del self._last[key]
         self._warned_increase = {
             (tid, ticket)
             for tid, ticket in self._warned_increase

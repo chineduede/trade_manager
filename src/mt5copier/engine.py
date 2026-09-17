@@ -123,6 +123,7 @@ class Engine:
         self._action_total = 0
         self._state_path = state_path if state_path is not None else dryrun_state_path()
         self._warned_live = False
+        self._blocked_reason: str | None = None
 
     # --- lifecycle --------------------------------------------------------------------------
 
@@ -315,13 +316,14 @@ class Engine:
         if snap.state is not WorkerState.CONNECTED:
             return
         if snap.open_positions is None:
-            log.debug("master positions unreadable this tick; not reconciling")
+            self._set_blocked("the master's positions cannot be read")
             return
         if snap.pending_orders is None:
             # Both lists or neither. Without the orders we cannot tell a cancelled order from
             # a filled one, and guessing wrong either drops a trade or cancels a live copy.
-            log.debug("master orders unreadable this tick; not reconciling")
+            self._set_blocked("the master's pending orders cannot be read")
             return
+        self._set_blocked(None)
 
         if not self._cfg.dry_run and not self._warned_live:
             # Stage 2a has no execution code. Pretending otherwise -- or quietly continuing as
@@ -364,6 +366,29 @@ class Engine:
                 action.describe(),
             )
         self._save_state()
+
+    def _set_blocked(self, reason: str | None) -> None:
+        """Record, and announce, that detection cannot run -- or that it can again.
+
+        Announced on the *transition* rather than every tick, so it neither floods the log nor
+        disappears into it. Detection that has quietly stopped is indistinguishable from a
+        master that is simply not trading, which is precisely the failure this project keeps
+        designing against: the previous version logged this at DEBUG, below the configured
+        level, so a stall was invisible.
+        """
+        if reason == self._blocked_reason:
+            return
+        if reason is None:
+            log.info("detection resumed; previously paused because %s", self._blocked_reason)
+        else:
+            log.warning("detection paused: %s -- no actions will be derived", reason)
+        self._blocked_reason = reason
+
+    @property
+    def blocked_reason(self) -> str | None:
+        """Why detection is currently not running, if it is not."""
+        with self._lock:
+            return self._blocked_reason
 
     def _slave_links(self) -> list[SlaveLink]:
         """Each enabled slave, paired with whether its terminal is reachable right now.

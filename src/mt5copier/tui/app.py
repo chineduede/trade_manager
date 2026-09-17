@@ -194,6 +194,11 @@ class CopierApp(App[None]):
         """
         panel = self.query_one("#actions", Static)
         recorded = self._engine.recent_actions(limit=_ACTION_ROWS)
+        blocked = self._engine.blocked_reason
+        if blocked is not None and self._cfg.copying_enabled:
+            # Paused detection looks exactly like an idle master unless it is said out loud.
+            panel.update(f"[bold yellow]DETECTION PAUSED:[/] {escape(blocked)}")
+            return
         if not recorded:
             if self._cfg.copying_enabled:
                 panel.update("[dim]detecting... no master activity seen yet[/dim]")

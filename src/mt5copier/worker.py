@@ -91,6 +91,30 @@ class _Session:
         except Exception:
             return "(last_error unavailable)"
 
+    def _empty_or_unknown(self, what: str, total_attr: str) -> tuple[()] | None:
+        """Disambiguate the ``None`` that ``positions_get()`` / ``orders_get()`` return.
+
+        MT5 uses ``None`` for two entirely different answers -- "the call failed" and, on some
+        builds, "there is nothing to return" -- and the two must not be conflated: an empty
+        list is acted on (close the copies, cancel the copies) while an unknown one is skipped.
+        Guessing wrong in one direction cancels live orders; in the other it silently freezes
+        the copier.
+
+        Rather than interpret ``last_error()``, ask the matching count function. A count of
+        zero settles it; anything else, including a count that will not read, stays unknown.
+        """
+        try:
+            # Resolved inside the try: an extension that lacks the call at all must read as
+            # unknown, not raise out of the poll and take the worker down with it.
+            total = getattr(self._mt5, total_attr)()
+        except Exception as exc:
+            log.debug("%s count unavailable after a None read: %r", what, exc)
+            return None
+        if total == 0:
+            return ()
+        log.debug("%s read returned None while %r are open; treating as unknown", what, total)
+        return None
+
     def poll(self, terminal_id: str, seq: int, attempts: int) -> Snapshot:
         """Read account and terminal state into a snapshot.
 
@@ -162,7 +186,7 @@ class _Session:
             log.debug("orders_get() raised: %r", exc)
             return None
         if raw is None:
-            return None
+            return self._empty_or_unknown("orders", "orders_total")
 
         out: list[PendingOrder] = []
         for o in raw:
@@ -203,7 +227,7 @@ class _Session:
             log.debug("positions_get() raised: %r", exc)
             return None
         if raw is None:
-            return None
+            return self._empty_or_unknown("positions", "positions_total")
 
         out: list[Position] = []
         for p in raw:

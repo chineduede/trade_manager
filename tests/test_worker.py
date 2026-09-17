@@ -100,6 +100,8 @@ class FakeMT5:
         self.raise_on_read = raise_on_read
         self.positions = fake_positions() if positions is None else positions
         self.orders: tuple[FakeOrder, ...] | None = orders
+        self.positions_total_value: int | None = None
+        self.orders_total_value: int | None = None
         self.init_calls: list[str] = []
         self.shutdown_calls = 0
 
@@ -132,6 +134,19 @@ class FakeMT5:
         if self.orders is None:
             return None
         return self.orders
+
+    # MT5 returns None from the *_get calls both for "nothing found" and for a failure, so the
+    # session cross-checks these counts to tell the two apart. The overrides let a test say
+    # "the get call returned None *and* there really are three open", i.e. a genuine failure.
+    def positions_total(self) -> int:
+        if self.positions_total_value is not None:
+            return self.positions_total_value
+        return len(self.positions or ())
+
+    def orders_total(self) -> int:
+        if self.orders_total_value is not None:
+            return self.orders_total_value
+        return len(self.orders or ())
 
 
 # --- backoff -------------------------------------------------------------------------------
@@ -214,11 +229,36 @@ def test_a_failed_position_read_is_unknown_not_flat() -> None:
     missing from the master's list, so a failed read read as "flat" would close everything."""
     mt5 = FakeMT5()
     mt5.positions = None
+    mt5.positions_total_value = 3  # the get call failed; three really are open
     session = _Session(mt5, Path("x.exe"))
     session.connect()
     snap = session.poll("TID", seq=1, attempts=0)
     assert snap.open_positions is None
     assert snap.positions is None
+
+
+def test_a_none_position_read_with_a_zero_count_really_is_flat() -> None:
+    """MT5 returns None for "nothing found" as well as for failure. Reading the first as
+    unknown would freeze the copier the moment the master went flat."""
+    mt5 = FakeMT5()
+    mt5.positions = None
+    mt5.positions_total_value = 0
+    session = _Session(mt5, Path("x.exe"))
+    session.connect()
+    assert session.poll("TID", seq=1, attempts=0).open_positions == ()
+
+
+def test_a_missing_count_function_leaves_the_read_unknown() -> None:
+    """And must not raise out of poll, which would take the worker down."""
+
+    class NoTotals(FakeMT5):
+        positions_total = None  # type: ignore[assignment]
+
+    mt5 = NoTotals()
+    mt5.positions = None
+    session = _Session(mt5, Path("x.exe"))
+    session.connect()
+    assert session.poll("TID", seq=1, attempts=0).open_positions is None
 
 
 def test_positions_get_raising_is_an_unknown_read() -> None:
@@ -267,9 +307,22 @@ def test_a_failed_order_read_is_unknown_not_empty() -> None:
     propose cancelling every copied order at once."""
     mt5 = FakeMT5()
     mt5.orders = None
+    mt5.orders_total_value = 2
     session = _Session(mt5, Path("x.exe"))
     session.connect()
     assert session.poll("TID", seq=1, attempts=0).pending_orders is None
+
+
+def test_deleting_the_last_order_reads_as_empty_not_unknown() -> None:
+    """The regression behind "deleting a pending order does not reflect": MT5 can answer None
+    rather than () once the last order is gone, and an unknown read pauses detection entirely,
+    so the cancellation was never derived."""
+    mt5 = FakeMT5()
+    mt5.orders = None
+    mt5.orders_total_value = 0
+    session = _Session(mt5, Path("x.exe"))
+    session.connect()
+    assert session.poll("TID", seq=1, attempts=0).pending_orders == ()
 
 
 def test_one_unparseable_order_fails_the_whole_read() -> None:

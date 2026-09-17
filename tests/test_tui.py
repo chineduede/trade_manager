@@ -65,6 +65,10 @@ class StubEngine:
     def action_total(self) -> int:
         return 0
 
+    @property
+    def blocked_reason(self) -> str | None:
+        return None
+
     def believed_copies(self) -> int:
         return 0
 
