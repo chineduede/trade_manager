@@ -3,13 +3,38 @@
 Stage 1 (discovery, designation, supervision) is complete and user-accepted. It contains no
 trading logic. This document is the plan for everything that does.
 
-**Stage 2a is complete and validated on a demo master (2026-09-17).** The exit criterion was
-met by hand: positions, pending orders, reverse copying, the restart and reconnect paths, and
-one real bug found and fixed (see "the stall", below). Nothing beyond it exists — there is
-still no order-sending code anywhere in the package.
+## Where the project is — 2026-09-19
 
-**Next: Stage 2b.** That is where `order_send` first appears, so everything in "Safety rails"
-under Stage 2c should be read before starting, not after.
+**Nothing can send an order yet.** `executor.py` can, and is tested doing so against a fake
+session, but the engine constructs no `OrderCommand` and `dry_run = False` is still refused.
+Check with `grep -rn "OrderCommand" src/mt5copier/engine.py` rather than assuming.
+
+| Stage | State |
+|---|---|
+| 1 — discovery, designation, supervision | accepted |
+| 2a — the diff engine, dry run | **validated on a demo master 2026-09-17** |
+| 2b — execution primitives | complete (`sizing`, `symbols`, `execution`, `executor`) |
+| 2c — live copying | **half done** — mapping table and close/reduce/cancel built, not wired |
+| 3 — SL/TP sync, partial closes | executor declines MODIFY_SLTP / MODIFY_ORDER |
+| 4 — pending orders | detection validated; execution not wired |
+| 5 — reverse and filtered copying | inversion implemented, never live-tested |
+
+**The next three steps, in order** — see Stage 2c below for detail:
+
+1. **Startup reconciliation.** Per slave, `find_orphans` / `find_missing` before deriving
+   anything. Surface both; drop stale records so no CLOSE is derived against a position that has
+   already gone.
+2. **Swap the ledger's backing store** from simulation to `MappingStore`. Aim for one code
+   path: dry-run is "pretend every order succeeded", live is "believe it when the `OrderResult`
+   says so".
+3. **Engine wiring.** `Action` → `OrderCommand` down the slave's existing `cmd_q`, consume
+   `OrderResult` in the drain loop, drop the `dry_run` refusal. **This is the first commit where
+   a real order can leave the machine.** Give it its own demo run, on one slave rather than
+   fifteen.
+
+Everything in "Safety rails" under Stage 2c is already built except startup reconciliation —
+the demo-only guard landed with Stage 2b deliberately, in the same commit as the first code
+able to send.
 
 Read `README.md` first for the architecture and the constraints it follows from.
 
@@ -226,10 +251,21 @@ things about that slave:
 Sequencing is open: it is not on the path to execution, but Stage 2b testing means flipping
 sizing settings repeatedly, so doing it first may well pay for itself.
 
-## Stage 2b — execution primitives
+## Stage 2b — execution primitives — **done**
 
-Each of these is independently testable against a single demo slave, and each is a known
-failure mode rather than a hypothetical.
+Each of these was independently testable without a terminal, and each is a known failure mode
+rather than a hypothetical. All five landed, in two commits:
+
+| Built | Where |
+|---|---|
+| Risk sizing, cost-aware, with step-correct quantization | `sizing.py` |
+| Symbol resolution with the scan fallback and a per-terminal cache | `symbols.py` |
+| Filling-mode negotiation, retcode classification | `execution.py` |
+| The one module that can create an order, and the demo-only guard | `executor.py` |
+| `OrderCommand` / `OrderResult`, and the session methods the executor needs | `protocol.py`, `worker.py` |
+
+The sections below are the reasoning, kept because it is the part worth re-reading; the code
+implements all of it.
 
 ### Filling-mode negotiation
 
@@ -353,7 +389,35 @@ Classify rather than treating every non-`DONE` as fatal:
 Retries must be bounded and fast. A copy that has been retrying for seconds is no longer the
 trade the master took — better to abandon it and surface the failure prominently.
 
-## Stage 2c — live open/close on demo
+## Stage 2c — live open/close on demo — **half done**
+
+Built (`store.py`, and the close/reduce/cancel paths in `executor.py`):
+
+- ✅ SQLite mapping table, `Copy` rows keyed `(terminal_id, master_ticket)`, WAL, committed per
+  write. It also hands back `CopiedPosition` / `CopiedOrder` so the diff engine is unchanged.
+- ✅ `find_orphans` / `find_missing` — the two queries a restart needs, pure functions over the
+  store.
+- ✅ `CLOSE`, `REDUCE`, `CANCEL` in the executor, reading volume from the terminal rather than
+  from our record.
+- ✅ The demo-only guard, which landed early with Stage 2b.
+
+**Still to do, and this is the whole remaining gap before live copying:**
+
+1. **Call the reconciliation on startup.** The functions exist; nothing invokes them. Per slave,
+   before deriving any action: surface orphans, and `store.forget()` every `find_missing` row so
+   no CLOSE is derived against a position that has already gone.
+2. **Back the ledger with the store.** `DryRunLedger` still simulates its beliefs in memory and
+   persists them to `dryrun_state.json`. Live copying needs belief to come from real fills. The
+   shape to aim for is one code path where dry-run means "pretend every order succeeded" and
+   live means "believe it when the `OrderResult` says so" — the mode being the only difference
+   keeps the dry run a faithful rehearsal rather than a separate implementation.
+3. **Wire the engine.** Translate each executable `Action` into an `OrderCommand` (the engine
+   supplies `risk_amount` from `risk_budget(cfg, snap.balance)`, since it has both), push it down
+   that slave's `cmd_q`, and handle `OrderResult` in the drain loop alongside `Snapshot`. Then
+   drop the `dry_run = False` refusal in `Engine._reconcile`.
+
+A fixed copier `magic` also still needs choosing — nothing sets one, so `find_orphans` currently
+has no way to recognise our own positions.
 
 **Position mapping must survive restart.** Options considered:
 
