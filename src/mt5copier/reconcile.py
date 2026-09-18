@@ -24,11 +24,15 @@ answer and so belong to Stage 2b:
   else. The real resolver also falls back to a ``symbols_get()`` scan, which needs a
   connection.
 
-:class:`DryRunLedger` is the stateful half, kept here rather than in the engine so it is
-testable in the same breath. It holds what we *believe* each slave has, which in Stage 2a is
-purely simulated -- no order is ever sent. Stage 2c replaces that belief with the SQLite
-mapping table plus the slave's real position list, at which point :func:`reconcile_slave` is
-unchanged and only the ledger's backing store differs.
+:class:`CopyLedger` is the stateful half, kept here rather than in the engine so it is testable
+in the same breath. It holds what we believe each slave has, behind a :class:`BeliefStore` --
+scratch memory for a dry run, the SQLite mapping table when live. Swapping the store is the
+*only* difference between rehearsal and the real thing, which is what makes the rehearsal worth
+anything.
+
+Belief follows outcomes, not intentions: :meth:`CopyLedger.step` proposes and
+:meth:`CopyLedger.apply_result` believes. A dry run closes that loop itself by pretending every
+order succeeded.
 """
 
 from __future__ import annotations
@@ -38,12 +42,13 @@ import time
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, replace
 from enum import StrEnum
-from typing import Any
+from typing import Any, Protocol
 
 from .config import NoStopPolicy, TerminalConfig
 from .logging_setup import get_logger
 from .protocol import (
     ActionKind,
+    OrderResult,
     OrderType,
     PendingOrder,
     Position,
@@ -663,7 +668,161 @@ def reconcile_slave_orders(
 # --- the stateful half ----------------------------------------------------------------------
 
 DEFAULT_GRACE_SECONDS = 5.0
-"""Longest lapse in observation that still counts as continuous. See :meth:`DryRunLedger.step`."""
+"""Longest lapse in observation that still counts as continuous. See :meth:`CopyLedger.step`."""
+
+INFLIGHT_TIMEOUT_S = 30.0
+"""How long to wait for a command's result before giving up on it. Generous, because the
+executor's own retries can take two seconds and a busy terminal is slow, but finite: an entry
+left in flight forever would freeze that ticket."""
+
+
+class BeliefStore(Protocol):
+    """Where the ledger keeps what it believes each slave holds.
+
+    A protocol rather than a concrete type so the ledger does not import the SQLite store --
+    which imports the ledger's own dataclasses -- and so dry run can use a scratch
+    implementation with identical semantics. :class:`mt5copier.store.MappingStore` satisfies it.
+    """
+
+    def positions(self, terminal_id: str | None = None) -> list[CopiedPosition]: ...
+    def orders(self, terminal_id: str | None = None) -> list[CopiedOrder]: ...
+    def get_position(self, terminal_id: str, master_ticket: int) -> CopiedPosition | None: ...
+    def remember_position(self, **kw: Any) -> Any: ...
+    def remember_order(self, **kw: Any) -> Any: ...
+    def update(self, terminal_id: str, master_ticket: int, **changes: Any) -> Any: ...
+    def forget(self, terminal_id: str, master_ticket: int) -> None: ...
+
+
+class _MemoryBeliefs:
+    """Beliefs held in memory, for a dry run and for tests.
+
+    Same semantics as the SQLite store, deliberately: the dry run is only a useful rehearsal if
+    it exercises the code path live copying will use.
+    """
+
+    def __init__(self) -> None:
+        self._positions: dict[tuple[str, int], CopiedPosition] = {}
+        self._orders: dict[tuple[str, int], CopiedOrder] = {}
+
+    def positions(self, terminal_id: str | None = None) -> list[CopiedPosition]:
+        return [
+            c
+            for (tid, _), c in sorted(self._positions.items())
+            if terminal_id is None or tid == terminal_id
+        ]
+
+    def orders(self, terminal_id: str | None = None) -> list[CopiedOrder]:
+        return [
+            c
+            for (tid, _), c in sorted(self._orders.items())
+            if terminal_id is None or tid == terminal_id
+        ]
+
+    def get_position(self, terminal_id: str, master_ticket: int) -> CopiedPosition | None:
+        return self._positions.get((terminal_id, master_ticket))
+
+    def remember_position(
+        self,
+        *,
+        terminal_id: str,
+        master_ticket: int,
+        slave_symbol: str,
+        direction: PositionType,
+        master_volume: float,
+        slave_ticket: int | None = None,
+        slave_volume: float | None = None,
+        synced_sl: float = 0.0,
+        synced_tp: float = 0.0,
+    ) -> CopiedPosition:
+        key = (terminal_id, master_ticket)
+        self._orders.pop(key, None)
+        copy = CopiedPosition(
+            terminal_id=terminal_id,
+            master_ticket=master_ticket,
+            slave_symbol=slave_symbol,
+            type=direction,
+            master_volume=master_volume,
+            synced_sl=synced_sl,
+            synced_tp=synced_tp,
+            slave_ticket=slave_ticket,
+            volume=slave_volume,
+        )
+        self._positions[key] = copy
+        return copy
+
+    def remember_order(
+        self,
+        *,
+        terminal_id: str,
+        master_ticket: int,
+        slave_symbol: str,
+        direction: PositionType,
+        order_type: OrderType,
+        master_volume: float,
+        entry: float = 0.0,
+        slave_ticket: int | None = None,
+        slave_volume: float | None = None,
+        synced_sl: float = 0.0,
+        synced_tp: float = 0.0,
+    ) -> CopiedOrder:
+        copy = CopiedOrder(
+            terminal_id=terminal_id,
+            master_ticket=master_ticket,
+            slave_symbol=slave_symbol,
+            order_type=order_type,
+            master_volume=master_volume,
+            entry=entry,
+            synced_sl=synced_sl,
+            synced_tp=synced_tp,
+            slave_ticket=slave_ticket,
+            volume=slave_volume,
+        )
+        self._orders[(terminal_id, master_ticket)] = copy
+        return copy
+
+    def update(self, terminal_id: str, master_ticket: int, **changes: Any) -> Any:
+        """Apply changes, translating the store's field names to the in-memory ones.
+
+        The store calls the filled size ``slave_volume`` and these dataclasses call it
+        ``volume``; anything the target does not have is dropped rather than raising, so a
+        caller can pass one set of changes without knowing which kind it will land on.
+        """
+        key = (terminal_id, master_ticket)
+        for bucket in (self._positions, self._orders):
+            current = bucket.get(key)  # type: ignore[attr-defined]
+            if current is None:
+                continue
+            renamed = {("volume" if k == "slave_volume" else k): v for k, v in changes.items()}
+            allowed = {k: v for k, v in renamed.items() if k in current.__slots__}
+            bucket[key] = replace(current, **allowed)  # type: ignore[index,arg-type]
+            return bucket[key]
+        return None
+
+    def forget(self, terminal_id: str, master_ticket: int) -> None:
+        key = (terminal_id, master_ticket)
+        self._positions.pop(key, None)
+        self._orders.pop(key, None)
+
+
+def _simulated_result(action: Action) -> OrderResult:
+    """The outcome a dry run pretends it got: everything succeeded.
+
+    The slave ticket is the master's, **negated**. It has to be something, because the code path
+    that records belief expects one -- and a negative number is unmistakably synthetic, so if one
+    ever turned up in a real trade request it would be obvious rather than plausible.
+    """
+    return OrderResult(
+        command_id=0,
+        terminal_id=action.terminal_id,
+        op=action.kind,
+        master_ticket=action.master_ticket,
+        ok=True,
+        outcome="simulated",
+        slave_ticket=-action.master_ticket,
+        slave_symbol=action.slave_symbol,
+        requested_volume=action.volume,
+        filled_volume=action.volume,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -680,7 +839,7 @@ class SlaveLink:
     connected: bool = True
 
 
-class DryRunLedger:
+class CopyLedger:
     """Holds what we believe each slave has, and reports only decisions that are new.
 
     Two jobs, both needed for the Stage 2a exit criterion ("no spurious actions across
@@ -698,9 +857,21 @@ class DryRunLedger:
     Not thread-safe; the engine calls it from its drain thread only.
     """
 
-    def __init__(self) -> None:
-        self._copied: dict[tuple[str, int], CopiedPosition] = {}
-        self._orders: dict[tuple[str, int], CopiedOrder] = {}
+    def __init__(self, store: BeliefStore | None = None) -> None:
+        self._store: BeliefStore = store if store is not None else _MemoryBeliefs()
+        """Where belief lives. In dry run this is a scratch store; live, it is the SQLite
+        mapping table. Nothing else about the ledger changes between the two."""
+
+        self._inflight: dict[tuple[str, int, ActionKind], float] = {}
+        """Commands sent and not yet answered, with the monotonic time they went out.
+
+        **This is what stops the same order being sent twice.** In dry run an action is
+        believed the instant it is emitted, so re-derivation is naturally suppressed. Live,
+        there is a gap of unknown length between sending an OPEN and learning that it filled --
+        and during that gap the master's state is unchanged, so the diff would derive the very
+        same OPEN again and send a second order. Anything in here is withheld until its result
+        arrives or it times out.
+        """
         self._last: dict[tuple[str, int, ActionKind], Action] = {}
         self._excluded: dict[str, set[int]] = {}
         """Per slave: master position tickets that may never be opened -- either they predate
@@ -719,56 +890,25 @@ class DryRunLedger:
     # --- state ---------------------------------------------------------------------------
 
     def believed(self, terminal_id: str | None = None) -> list[CopiedPosition]:
-        return [
-            c
-            for (tid, _), c in sorted(self._copied.items())
-            if terminal_id is None or tid == terminal_id
-        ]
+        return self._store.positions(terminal_id)
 
     def believed_orders(self, terminal_id: str | None = None) -> list[CopiedOrder]:
-        return [
-            c
-            for (tid, _), c in sorted(self._orders.items())
-            if terminal_id is None or tid == terminal_id
-        ]
+        return self._store.orders(terminal_id)
 
-    def to_json(self) -> dict[str, Any]:
-        """Only believed positions are persisted, not the de-duplication memory.
+    def reset_session_state(self) -> None:
+        """Forget everything that is *not* belief: in-flight commands, de-duplication memory,
+        exclusions and continuity.
 
-        That is deliberate. After a restart the memory is empty, but an already-believed
-        position that still matches the master produces no action at all, so nothing spurious
-        appears -- while a genuine divergence is re-reported once, which is what we want to
-        see.
+        Called when the backing store is swapped -- switching between dry run and live -- so
+        simulated beliefs cannot leak into a live session or the reverse. Belief itself lives in
+        the store and is swapped with it, not cleared here.
         """
-        return {
-            "copied": [c.to_json() for c in self.believed()],
-            "orders": [c.to_json() for c in self.believed_orders()],
-        }
-
-    def load_json(self, raw: dict[str, Any]) -> None:
-        self._copied.clear()
-        self._orders.clear()
+        self._inflight.clear()
         self._last.clear()
         self._excluded.clear()
         self._excluded_orders.clear()
+        self._warned_increase.clear()
         self._last_ok.clear()
-        # Exclusions are deliberately not restored. An empty _last_ok makes the next tick
-        # re-baseline, which recomputes exactly the same set from what the master holds -- and
-        # any lapse long enough to involve a restart is far past the grace window anyway.
-        for entry in raw.get("copied") or []:
-            try:
-                c = CopiedPosition.from_json(entry)
-            except (KeyError, TypeError, ValueError) as exc:
-                log.warning("dropping unreadable dry-run ledger entry %r: %s", entry, exc)
-                continue
-            self._copied[(c.terminal_id, c.master_ticket)] = c
-        for entry in raw.get("orders") or []:
-            try:
-                o = CopiedOrder.from_json(entry)
-            except (KeyError, TypeError, ValueError) as exc:
-                log.warning("dropping unreadable dry-run order entry %r: %s", entry, exc)
-                continue
-            self._orders[(o.terminal_id, o.master_ticket)] = o
 
     # --- the tick ------------------------------------------------------------------------
 
@@ -780,6 +920,7 @@ class DryRunLedger:
         master_orders: Sequence[PendingOrder] = (),
         now: float | None = None,
         grace_seconds: float = DEFAULT_GRACE_SECONDS,
+        simulate: bool = True,
     ) -> list[Action]:
         """Reconcile every connected slave against the master's complete position and order
         lists.
@@ -837,7 +978,7 @@ class DryRunLedger:
                 link.cfg,
                 excluded=excluded_orders,
             )
-            for action in self._emit(order_actions, fresh):
+            for action in self._emit(order_actions, fresh, simulate=simulate):
                 if action.kind is ActionKind.ORDER_FILLED:
                     self._on_fill(action, positions_by_ticket.get(action.master_ticket), link.cfg)
                 elif action.kind is ActionKind.PLACE and not action.executable:
@@ -846,6 +987,7 @@ class DryRunLedger:
             for action in self._emit(
                 reconcile_slave(master_positions, self.believed(tid), link.cfg, excluded=excluded),
                 fresh,
+                simulate=simulate,
             ):
                 if action.kind is ActionKind.OPEN and not action.executable:
                     # A decline is final. Whatever the reason -- no stop, a filter, or the
@@ -860,17 +1002,39 @@ class DryRunLedger:
         self._prune(slave_ids, master_tickets)
         return fresh
 
-    def _emit(self, actions: Sequence[Action], fresh: list[Action]) -> list[Action]:
-        """Keep the actions that are new or changed, record and apply them, and return them."""
+    def _emit(
+        self, actions: Sequence[Action], fresh: list[Action], *, simulate: bool
+    ) -> list[Action]:
+        """Keep the actions that are new or changed, and hand them out once each.
+
+        Two suppressions, doing different jobs. ``_last`` drops a decision identical to the one
+        already reported -- the state has not moved, so neither has the answer. ``_inflight``
+        drops one whose *command is still out*: the decision is current and correct, but acting
+        on it again would duplicate an order that may already have filled.
+
+        ``simulate`` is the whole difference between dry run and live. Simulating applies a
+        successful outcome immediately, so the diff converges exactly as it will when real
+        fills arrive; live leaves the action in flight until the broker answers.
+        """
         kept: list[Action] = []
         for action in actions:
             key = (action.terminal_id, action.master_ticket, action.kind)
             if self._last.get(key) == action:
                 continue
+            if key in self._inflight:
+                log.debug(
+                    "withholding %s for #%s: still in flight", action.kind, action.master_ticket
+                )
+                continue
             self._last[key] = action
             fresh.append(action)
-            self._apply(action)
             kept.append(action)
+            if not action.executable:
+                continue
+            if simulate:
+                self.apply_result(_simulated_result(action), simulated=True)
+            else:
+                self._inflight[key] = time.monotonic()
         return kept
 
     def _on_fill(self, action: Action, position: Position | None, cfg: TerminalConfig) -> None:
@@ -881,20 +1045,30 @@ class DryRunLedger:
         here is also what stops the position diff from treating it as a brand-new trade and
         proposing a second copy.
         """
-        key = (action.terminal_id, action.master_ticket)
-        order = self._orders.pop(key, None)
+        order = next(
+            (
+                c
+                for c in self._store.orders(action.terminal_id)
+                if c.master_ticket == action.master_ticket
+            ),
+            None,
+        )
         if position is None or order is None:
             return
         slave_sl, slave_tp = effective_levels(position.sl, position.tp, cfg)
-        self._copied[key] = CopiedPosition(
+        # The slave's order became the slave's position, keeping its ticket -- the same MT5
+        # behaviour the fill was detected by. So the row changes kind in place rather than
+        # being deleted and reinserted under a new identity.
+        self._store.remember_position(
             terminal_id=action.terminal_id,
             master_ticket=action.master_ticket,
             slave_symbol=order.slave_symbol,
-            type=invert_type(position.type) if cfg.invert else position.type,
+            direction=invert_type(position.type) if cfg.invert else position.type,
             master_volume=position.volume,
+            slave_ticket=order.slave_ticket,
+            slave_volume=order.volume,
             synced_sl=slave_sl,
             synced_tp=slave_tp,
-            volume=order.volume,
         )
 
     def _warn_on_growth(self, terminal_id: str, master_positions: Sequence[Position]) -> None:
@@ -961,79 +1135,162 @@ class DryRunLedger:
         ]
         return notices
 
-    def _apply(self, action: Action) -> None:
-        """Fold an executable action into the believed state.
+    def apply_result(self, result: OrderResult, *, simulated: bool = False) -> None:
+        """Fold the *outcome* of a command into belief.
 
-        A skipped action changes nothing here. A skipped *open* is additionally excluded by the
-        caller, so it is never revisited; a skipped reduce or modify simply does not happen,
-        and the next change to that position is assessed on its own merits.
+        Belief follows what the broker did, not what we intended. That is the whole point of
+        splitting this from :meth:`step`: an OPEN we sent and an OPEN that filled are different
+        facts, and only the second one means a position exists.
+
+        A failure is **final**, and the ticket is excluded. The alternative -- leaving it open to
+        retry -- means a copy that failed for a permanent reason (no money, invalid stops) gets
+        re-attempted every time the master nudges its stop, and a copy that failed for a
+        transient one gets re-attempted long after the price has moved. Either way the trade
+        being placed is no longer the trade the master took. Failures are surfaced loudly
+        instead, which is the only honest answer.
         """
-        key = (action.terminal_id, action.master_ticket)
+        key = (result.terminal_id, result.master_ticket, result.op)
+        self._inflight.pop(key, None)
 
-        if action.kind is ActionKind.CLOSE:
-            self._copied.pop(key, None)
-            return
-        if action.kind is ActionKind.CANCEL:
-            self._orders.pop(key, None)
-            return
-        if action.kind is ActionKind.ORDER_FILLED:
-            # Handled by _on_fill, which needs the master position as well as the action.
-            return
-        if not action.executable:
-            return
-
-        if action.kind is ActionKind.PLACE:
-            self._orders[key] = CopiedOrder(
-                terminal_id=action.terminal_id,
-                master_ticket=action.master_ticket,
-                slave_symbol=action.slave_symbol,
-                order_type=action.order_type or OrderType.BUY_LIMIT,
-                master_volume=action.master_volume,
-                entry=action.entry,
-                synced_sl=action.sl,
-                synced_tp=action.tp,
+        if not result.ok:
+            if result.op in (ActionKind.OPEN, ActionKind.PLACE):
+                bucket = self._excluded if result.op is ActionKind.OPEN else self._excluded_orders
+                bucket.setdefault(result.terminal_id, set()).add(result.master_ticket)
+            log.error(
+                "%s for #%s on %s failed and will not be retried: %s",
+                result.op.value,
+                result.master_ticket,
+                result.terminal_id[:8],
+                result.error or result.outcome,
             )
             return
-        if action.kind is ActionKind.MODIFY_ORDER:
-            resting = self._orders.get(key)
-            if resting is not None:
-                self._orders[key] = replace(
-                    resting, entry=action.entry, synced_sl=action.sl, synced_tp=action.tp
+
+        last = self._last.get(key)
+        if result.op in (ActionKind.CLOSE, ActionKind.CANCEL):
+            self._store.forget(result.terminal_id, result.master_ticket)
+            return
+        if last is None:
+            # The action that produced this is gone from memory (a restart between sending and
+            # the answer). Belief cannot be reconstructed from the result alone, and inventing
+            # it would be worse than leaving it to startup reconciliation, which will see the
+            # position and report it as an orphan.
+            log.warning(
+                "no pending action for %s #%s; leaving it to startup reconciliation",
+                result.op.value,
+                result.master_ticket,
+            )
+            return
+
+        if result.op is ActionKind.OPEN:
+            self._store.remember_position(
+                terminal_id=last.terminal_id,
+                master_ticket=last.master_ticket,
+                slave_symbol=result.slave_symbol or last.slave_symbol,
+                direction=last.type,
+                master_volume=last.master_volume,
+                slave_ticket=result.slave_ticket,
+                slave_volume=result.filled_volume,
+                synced_sl=last.sl,
+                synced_tp=last.tp,
+            )
+        elif result.op is ActionKind.PLACE:
+            self._store.remember_order(
+                terminal_id=last.terminal_id,
+                master_ticket=last.master_ticket,
+                slave_symbol=result.slave_symbol or last.slave_symbol,
+                direction=last.type,
+                order_type=last.order_type or OrderType.BUY_LIMIT,
+                master_volume=last.master_volume,
+                entry=last.entry,
+                slave_ticket=result.slave_ticket,
+                slave_volume=result.filled_volume,
+                synced_sl=last.sl,
+                synced_tp=last.tp,
+            )
+        elif result.op is ActionKind.REDUCE:
+            # master_volume moves to what the master now holds, so the next partial is measured
+            # against the right base. slave_volume is what is *left*, from the broker's own
+            # figure where it gave one.
+            current = self._store.get_position(last.terminal_id, last.master_ticket)
+            remaining: float | None = None
+            if current is not None and current.volume is not None:
+                closed = result.filled_volume
+                remaining = (
+                    current.volume - closed
+                    if closed is not None and not simulated
+                    else current.volume * (1.0 - (last.close_fraction or 0.0))
                 )
-            return
-
-        if action.kind is ActionKind.OPEN:
-            self._copied[key] = CopiedPosition(
-                terminal_id=action.terminal_id,
-                master_ticket=action.master_ticket,
-                slave_symbol=action.slave_symbol,
-                type=action.type,
-                master_volume=action.master_volume,
-                synced_sl=action.sl,
-                synced_tp=action.tp,
+            self._store.update(
+                last.terminal_id,
+                last.master_ticket,
+                master_volume=last.master_volume,
+                slave_volume=remaining,
             )
-            return
-
-        current = self._copied.get(key)
-        if current is None:
-            return
-        if action.kind is ActionKind.REDUCE:
-            remaining = None
-            if current.volume is not None and action.close_fraction is not None:
-                remaining = current.volume * (1.0 - action.close_fraction)
-            self._copied[key] = replace(
-                current, master_volume=action.master_volume, volume=remaining
+        elif result.op is ActionKind.MODIFY_SLTP:
+            self._store.update(
+                last.terminal_id, last.master_ticket, synced_sl=last.sl, synced_tp=last.tp
             )
-        elif action.kind is ActionKind.MODIFY_SLTP:
-            self._copied[key] = replace(current, synced_sl=action.sl, synced_tp=action.tp)
+        elif result.op is ActionKind.MODIFY_ORDER:
+            self._store.update(
+                last.terminal_id,
+                last.master_ticket,
+                entry=last.entry,
+                synced_sl=last.sl,
+                synced_tp=last.tp,
+            )
+
+    def expire_inflight(self, *, timeout_s: float = INFLIGHT_TIMEOUT_S) -> list[tuple[str, int]]:
+        """Give up on commands that were never answered, and say which.
+
+        A worker can die between receiving a command and reporting on it, and the order may or
+        may not have reached the broker -- there is no way to tell from here. Leaving the entry
+        in flight would freeze that ticket forever; clearing it silently could double-send.
+
+        So: give up on it, exclude it, and say so at error level. If the order *did* go through,
+        startup reconciliation will find the position as an orphan, which is exactly the
+        mechanism for "something of ours exists that we cannot account for".
+        """
+        now = time.monotonic()
+        lost: list[tuple[str, int]] = []
+        for key, sent_at in list(self._inflight.items()):
+            if (now - sent_at) <= timeout_s:
+                continue
+            tid, ticket, op = key
+            del self._inflight[key]
+            lost.append((tid, ticket))
+            if op is ActionKind.OPEN:
+                self._excluded.setdefault(tid, set()).add(ticket)
+            elif op is ActionKind.PLACE:
+                self._excluded_orders.setdefault(tid, set()).add(ticket)
+            log.error(
+                "%s for #%s on %s was never answered after %.0fs; giving up. If it reached the "
+                "broker it will appear as an orphan on the next startup reconciliation",
+                op.value,
+                ticket,
+                tid[:8],
+                timeout_s,
+            )
+        return lost
+
+    @property
+    def inflight_count(self) -> int:
+        return len(self._inflight)
 
     def _prune(self, slave_ids: set[str], master_tickets: set[int]) -> None:
-        """Drop state for slaves that lost their role, and de-duplication memory for master
-        tickets that are gone and no longer believed, so nothing grows without bound."""
-        for store in (self._copied, self._orders):
-            for key in list(store):
-                if key[0] not in slave_ids:
-                    del store[key]  # type: ignore[arg-type]
+        """Drop session state for slaves that no longer have a role, and de-duplication memory
+        for master tickets that are gone, so nothing grows without bound.
+
+        **Belief is deliberately not pruned.** An earlier version deleted a slave's beliefs when
+        it lost its role, which was harmless while they were simulated and is not harmless now:
+        the rows describe *real open positions*, and dropping them would abandon them --
+        untracked, unclosed, and indistinguishable from a stranger's trades next startup.
+        Unassigning a slave stops the copier acting on it, which is all it should mean. If it is
+        re-assigned, startup reconciliation matches the rows back up.
+        """
+        tracked = {
+            (c.terminal_id, c.master_ticket)
+            for c in (*self._store.positions(), *self._store.orders())
+        }
         for excluded in (self._excluded, self._excluded_orders):
             for tid in list(excluded):
                 if tid not in slave_ids:
@@ -1047,17 +1304,15 @@ class DryRunLedger:
                 del self._last_ok[tid]
         for key in list(self._last):
             tid, ticket, _ = key
-            still_tracked = (tid, ticket) in self._copied or (tid, ticket) in self._orders
-            if tid not in slave_ids or (ticket not in master_tickets and not still_tracked):
+            if key in self._inflight:
+                # Its result still has to find the action that produced it.
+                continue
+            if tid not in slave_ids or (
+                ticket not in master_tickets and (tid, ticket) not in tracked
+            ):
                 del self._last[key]
         self._warned_increase = {
             (tid, ticket)
             for tid, ticket in self._warned_increase
             if tid in slave_ids and ticket in master_tickets
         }
-        for key in list(self._last):
-            tid, ticket, _ = key
-            if tid not in slave_ids or (
-                ticket not in master_tickets and (tid, ticket) not in self._copied
-            ):
-                del self._last[key]

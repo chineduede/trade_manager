@@ -69,13 +69,14 @@ def mapping_db_path() -> Path:
     return user_data_dir() / "mapping.db"
 
 
-def dryrun_state_path() -> Path:
-    """Believed-copy state for the Stage 2a dry run.
+def dryrun_store_path() -> Path:
+    """Believed copies for a dry run -- simulated, and kept well away from the real thing.
 
-    Separate from config because it is machine-owned bookkeeping, not user settings, and
-    deleting it must be harmless. Stage 2c replaces it with the SQLite mapping table.
+    A separate file from :func:`mapping_db_path` on purpose. A simulated position recorded in
+    the live table would later be indistinguishable from one that actually exists, and the
+    copier would try to close something that was never opened.
     """
-    return user_data_dir() / "dryrun_state.json"
+    return user_data_dir() / "dryrun.db"
 
 
 def mt5_terminal_root() -> Path:

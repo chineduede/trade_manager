@@ -14,11 +14,8 @@ The engine process must never import MetaTrader5. It imports :mod:`worker` only 
 
 from __future__ import annotations
 
-import json
 import multiprocessing as mp
-import os
 import queue
-import tempfile
 import threading
 import time
 from collections import deque
@@ -27,9 +24,10 @@ from pathlib import Path
 
 from .config import AppConfig, Role, TerminalConfig
 from .logging_setup import get_logger
-from .paths import dryrun_state_path, log_dir
+from .paths import dryrun_store_path, log_dir, mapping_db_path
 from .protocol import Command, CommandKind, Snapshot, WorkerState
-from .reconcile import Action, DryRunLedger, SlaveLink
+from .reconcile import Action, CopyLedger, SlaveLink
+from .store import MappingStore
 from .worker import run_worker
 
 log = get_logger(__name__)
@@ -104,7 +102,12 @@ class Engine:
     thread is the only writer of snapshot state.
     """
 
-    def __init__(self, cfg: AppConfig, state_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        cfg: AppConfig,
+        state_path: Path | None = None,
+        mapping_path: Path | None = None,
+    ) -> None:
         # Windows only offers the spawn start method; request it explicitly so behaviour is
         # identical if this ever runs on Linux for testing.
         self._ctx = mp.get_context("spawn")
@@ -117,19 +120,24 @@ class Engine:
         self._drain_thread: threading.Thread | None = None
         self._stop_drain = threading.Event()
 
-        # --- Stage 2a: detection ------------------------------------------------------------
-        self._ledger = DryRunLedger()
+        # --- detection and copying ----------------------------------------------------------
         self._actions: deque[RecordedAction] = deque(maxlen=_ACTION_HISTORY)
         self._action_total = 0
-        self._state_path = state_path if state_path is not None else dryrun_state_path()
         self._warned_live = False
         self._blocked_reason: str | None = None
+
+        self._dryrun_path = state_path if state_path is not None else dryrun_store_path()
+        self._mapping_path = mapping_path if mapping_path is not None else mapping_db_path()
+        self._store: MappingStore | None = None
+        self._store_is_dry: bool | None = None
+        """Which mode the open store belongs to, so a change of ``dry_run`` swaps it rather than
+        carrying simulated beliefs into a live session."""
+        self._ledger = CopyLedger()
 
     # --- lifecycle --------------------------------------------------------------------------
 
     def start(self) -> None:
         """Start the drain thread and bring workers in line with config."""
-        self._load_state()
         if self._drain_thread is None:
             self._stop_drain.clear()
             self._drain_thread = threading.Thread(
@@ -326,17 +334,21 @@ class Engine:
         self._set_blocked(None)
 
         if not self._cfg.dry_run and not self._warned_live:
-            # Stage 2a has no execution code. Pretending otherwise -- or quietly continuing as
-            # though dry_run were set -- is how a copier ends up trusted before it works.
+            # Nothing dispatches commands yet, so a false dry_run cannot be honoured. Saying so
+            # once is the difference between a known gap and a copier quietly trusted to work.
             self._warned_live = True
             log.error(
-                "dry_run is false but no execution exists in stage 2a; "
+                "dry_run is false but the engine does not dispatch order commands yet; "
                 "detecting only and sending nothing"
             )
 
         links = self._slave_links()
         if not links:
             return
+
+        self._ensure_store()
+        for tid, ticket in self._ledger.expire_inflight():
+            log.error("gave up waiting for #%s on %s", ticket, tid[:8])
 
         try:
             actions = self._ledger.step(
@@ -345,6 +357,9 @@ class Engine:
                 master_orders=snap.pending_orders,
                 now=time.monotonic(),
                 grace_seconds=self._cfg.join_grace_seconds,
+                # Until dispatch exists, always simulate: the ledger must not be left believing
+                # an order is in flight that nothing will ever answer.
+                simulate=True,
             )
         except Exception:
             # A crash in the diff must not kill the drain thread, which every terminal's
@@ -365,7 +380,6 @@ class Engine:
                 labels.get(action.terminal_id, action.terminal_id[:8]),
                 action.describe(),
             )
-        self._save_state()
 
     def _set_blocked(self, reason: str | None) -> None:
         """Record, and announce, that detection cannot run -- or that it can again.
@@ -433,50 +447,49 @@ class Engine:
     def clear_detection_state(self) -> None:
         """Forget every believed copy and the action history.
 
-        Needed when the dry run is restarted against a different master, where the old beliefs
-        describe positions that were never ours.
+        Safe in a dry run, where beliefs are simulated. **In live mode this abandons real
+        positions** -- they stay open with nothing tracking them -- so it warns, and the caller
+        is expected to have asked first.
         """
         with self._lock:
-            self._ledger = DryRunLedger()
+            store = self._ensure_store()
+            if not self._cfg.dry_run:
+                log.warning(
+                    "clearing %d LIVE copy records; those positions stay open and will appear "
+                    "as orphans on the next startup reconciliation",
+                    len(self._ledger.believed()),
+                )
+            store.clear()
+            self._ledger.reset_session_state()
             self._actions.clear()
-            self._save_state()
 
-    def _load_state(self) -> None:
-        with self._lock:
-            if not self._state_path.exists():
-                return
-            try:
-                raw = json.loads(self._state_path.read_text(encoding="utf-8"))
-                self._ledger.load_json(raw)
-            except (OSError, ValueError) as exc:
-                # Bookkeeping, not settings: starting over is safe, and refusing to start is
-                # not. The cost of a lost ledger is one re-proposed action per open position.
-                log.warning("could not read dry-run state from %s: %s", self._state_path, exc)
-                return
-            log.info(
-                "restored %d believed copies from %s",
-                len(self._ledger.believed()),
-                self._state_path,
-            )
+    def _ensure_store(self) -> MappingStore:
+        """The belief store for the current mode, opening or swapping it as needed.
 
-    def _save_state(self) -> None:
-        """Persist believed copies, atomically, so a restart proposes nothing spurious."""
-        payload = json.dumps(self._ledger.to_json(), indent=2) + "\n"
-        try:
-            self._state_path.parent.mkdir(parents=True, exist_ok=True)
-            fd, tmp_name = tempfile.mkstemp(
-                dir=str(self._state_path.parent), prefix=self._state_path.name + ".", suffix=".tmp"
-            )
-            tmp = Path(tmp_name)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-                    fh.write(payload)
-                os.replace(tmp, self._state_path)
-            except BaseException:
-                tmp.unlink(missing_ok=True)
-                raise
-        except OSError as exc:
-            log.warning("could not write dry-run state to %s: %s", self._state_path, exc)
+        Swapping on a mode change is the safeguard that keeps a dry run honest: simulated
+        beliefs live in their own file, so turning copying live cannot inherit a position that
+        was only ever pretended. Session state is reset with it, since exclusions and
+        continuity were reasoned about against the other set of beliefs.
+
+        Caller must hold the lock.
+        """
+        dry = self._cfg.dry_run
+        if self._store is not None and self._store_is_dry == dry:
+            return self._store
+
+        if self._store is not None:
+            self._store.close()
+        path = self._dryrun_path if dry else self._mapping_path
+        self._store = MappingStore(path)
+        self._ledger = CopyLedger(self._store)
+        self._store_is_dry = dry
+        log.info(
+            "belief store: %s (%s), %d copies known",
+            path,
+            "dry run" if dry else "LIVE",
+            len(self._ledger.believed()),
+        )
+        return self._store
 
     def views(self) -> list[TerminalView]:
         """Snapshot of all known terminals, ordered by label, for rendering.

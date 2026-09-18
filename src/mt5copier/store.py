@@ -27,7 +27,7 @@ import sqlite3
 import threading
 import time
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -215,6 +215,82 @@ class MappingStore:
             self._db.commit()
         return stamped
 
+    def remember_position(
+        self,
+        *,
+        terminal_id: str,
+        master_ticket: int,
+        slave_symbol: str,
+        direction: PositionType,
+        master_volume: float,
+        slave_ticket: int | None = None,
+        slave_volume: float | None = None,
+        synced_sl: float = 0.0,
+        synced_tp: float = 0.0,
+    ) -> Copy:
+        """Record a copied position. Keeps the original ``opened_at`` if there is one."""
+        existing = self.get(terminal_id, master_ticket)
+        return self.record(
+            Copy(
+                terminal_id=terminal_id,
+                master_ticket=master_ticket,
+                kind=CopyKind.POSITION,
+                slave_symbol=slave_symbol,
+                direction=direction,
+                master_volume=master_volume,
+                slave_ticket=slave_ticket,
+                slave_volume=slave_volume,
+                synced_sl=synced_sl,
+                synced_tp=synced_tp,
+                opened_at=existing.opened_at if existing else 0.0,
+            )
+        )
+
+    def remember_order(
+        self,
+        *,
+        terminal_id: str,
+        master_ticket: int,
+        slave_symbol: str,
+        direction: PositionType,
+        order_type: OrderType,
+        master_volume: float,
+        entry: float = 0.0,
+        slave_ticket: int | None = None,
+        slave_volume: float | None = None,
+        synced_sl: float = 0.0,
+        synced_tp: float = 0.0,
+    ) -> Copy:
+        existing = self.get(terminal_id, master_ticket)
+        return self.record(
+            Copy(
+                terminal_id=terminal_id,
+                master_ticket=master_ticket,
+                kind=CopyKind.ORDER,
+                slave_symbol=slave_symbol,
+                direction=direction,
+                order_type=order_type,
+                master_volume=master_volume,
+                entry=entry,
+                slave_ticket=slave_ticket,
+                slave_volume=slave_volume,
+                synced_sl=synced_sl,
+                synced_tp=synced_tp,
+                opened_at=existing.opened_at if existing else 0.0,
+            )
+        )
+
+    def update(self, terminal_id: str, master_ticket: int, **changes: object) -> Copy | None:
+        """Read-modify-write one copy. Returns the new row, or None if it was not there.
+
+        Read-modify-write rather than a partial UPDATE so the row that lands is always a
+        complete, validated :class:`Copy` -- there is no path by which half a row gets written.
+        """
+        current = self.get(terminal_id, master_ticket)
+        if current is None:
+            return None
+        return self.record(replace(current, **changes))  # type: ignore[arg-type]
+
     def forget(self, terminal_id: str, master_ticket: int) -> None:
         """Drop one copy -- it closed, or was cancelled."""
         with self._lock:
@@ -274,11 +350,17 @@ class MappingStore:
 
     # --- views the diff engine wants ---------------------------------------------------------
 
-    def positions(self, terminal_id: str) -> list[CopiedPosition]:
-        return [c.as_position() for c in self.for_terminal(terminal_id, CopyKind.POSITION)]
+    def positions(self, terminal_id: str | None = None) -> list[CopiedPosition]:
+        rows = self.all() if terminal_id is None else self.for_terminal(terminal_id)
+        return [c.as_position() for c in rows if c.kind is CopyKind.POSITION]
 
-    def orders(self, terminal_id: str) -> list[CopiedOrder]:
-        return [c.as_order() for c in self.for_terminal(terminal_id, CopyKind.ORDER)]
+    def orders(self, terminal_id: str | None = None) -> list[CopiedOrder]:
+        rows = self.all() if terminal_id is None else self.for_terminal(terminal_id)
+        return [c.as_order() for c in rows if c.kind is CopyKind.ORDER]
+
+    def get_position(self, terminal_id: str, master_ticket: int) -> CopiedPosition | None:
+        row = self.get(terminal_id, master_ticket)
+        return row.as_position() if row is not None and row.kind is CopyKind.POSITION else None
 
     def terminals(self) -> set[str]:
         with self._lock:

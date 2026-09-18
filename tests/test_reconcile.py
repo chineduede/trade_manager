@@ -11,7 +11,6 @@ all.
 
 from __future__ import annotations
 
-import json
 import time
 from pathlib import Path
 
@@ -20,6 +19,7 @@ import pytest
 from mt5copier.config import AppConfig, NoStopPolicy, Role, TerminalConfig
 from mt5copier.engine import Engine
 from mt5copier.protocol import (
+    OrderResult,
     OrderType,
     PendingOrder,
     Position,
@@ -28,10 +28,11 @@ from mt5copier.protocol import (
     WorkerState,
 )
 from mt5copier.reconcile import (
+    Action,
     ActionKind,
     CopiedOrder,
     CopiedPosition,
-    DryRunLedger,
+    CopyLedger,
     SizingBasis,
     SkipReason,
     SlaveLink,
@@ -40,6 +41,7 @@ from mt5copier.reconcile import (
     reconcile_slave,
     reconcile_slave_orders,
 )
+from mt5copier.store import MappingStore
 
 TID_MASTER = "A" * 32
 TID_SLAVE = "B" * 32
@@ -289,7 +291,7 @@ def test_a_growing_volume_is_never_mirrored() -> None:
 
 def test_a_growing_volume_is_warned_about_once(caplog: pytest.LogCaptureFixture) -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
     ledger.step([pos(ticket=5, volume=1.0)], [link()], now=clock.advance(1.0))
 
@@ -305,7 +307,7 @@ def test_a_partial_after_a_growth_still_uses_the_sized_volume() -> None:
     """The ratio must stay anchored to what the slave was actually sized against, or an
     impossible growth would silently corrupt every later partial."""
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
     ledger.step([pos(ticket=5, volume=1.0)], [link()], now=clock.advance(1.0))
     ledger.step([pos(ticket=5, volume=2.0)], [link()], now=clock.advance(1.0))
@@ -528,7 +530,7 @@ class Clock:
         return self.t
 
 
-def watching(ledger: DryRunLedger, clock: Clock, links: list[SlaveLink] | None = None) -> None:
+def watching(ledger: CopyLedger, clock: Clock, links: list[SlaveLink] | None = None) -> None:
     """Establish continuous observation against a flat master.
 
     Every ledger test needs this first: without a prior tick, the next one re-baselines, which
@@ -539,7 +541,7 @@ def watching(ledger: DryRunLedger, clock: Clock, links: list[SlaveLink] | None =
 
 def test_a_position_open_before_we_were_watching_is_reported_and_never_copied() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     actions = ledger.step([pos(ticket=5)], [link()], now=clock.advance(1.0))
 
     assert len(actions) == 1
@@ -555,7 +557,7 @@ def test_a_position_open_before_we_were_watching_is_reported_and_never_copied() 
 def test_a_preexisting_position_is_not_copied_when_the_master_moves_its_stop() -> None:
     """The re-report-on-change mechanism must not become a back door into adoption."""
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     ledger.step([pos(ticket=5, sl=1.08)], [link()], now=clock.advance(1.0))
     assert ledger.step([pos(ticket=5, sl=1.09)], [link()], now=clock.advance(1.0)) == []
     assert ledger.believed() == []
@@ -563,7 +565,7 @@ def test_a_preexisting_position_is_not_copied_when_the_master_moves_its_stop() -
 
 def test_a_position_opened_while_we_watch_is_copied() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
 
     actions = ledger.step([pos(ticket=5)], [link()], now=clock.advance(1.0))
@@ -574,7 +576,7 @@ def test_a_position_opened_while_we_watch_is_copied() -> None:
 
 def test_an_open_is_proposed_once_not_on_every_tick() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
     master = [pos(ticket=5)]
     assert len(ledger.step(master, [link()], now=clock.advance(1.0))) == 1
@@ -584,7 +586,7 @@ def test_an_open_is_proposed_once_not_on_every_tick() -> None:
 
 def test_a_skipped_open_is_not_believed() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
     ledger.step([pos(sl=0.0)], [link()], now=clock.advance(1.0))
     assert ledger.believed() == []
@@ -594,7 +596,7 @@ def test_a_decline_is_final_even_when_a_stop_arrives_later() -> None:
     """Attaching a stop five minutes on does not make the trade copyable -- it makes it a late
     join, and the slave would fill far from the master's entry with the risk sizing a fiction."""
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
 
     first = ledger.step([pos(ticket=9, sl=0.0)], [link()], now=clock.advance(1.0))
@@ -609,7 +611,7 @@ def test_a_decline_is_final_even_when_a_stop_arrives_later() -> None:
 def test_a_decline_is_final_for_a_filtered_symbol_too() -> None:
     """Same rule, any reason. Widening a whitelist does not retroactively adopt open trades."""
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     blocked = [link(symbol_whitelist=["GBPUSD"])]
     watching(ledger, clock, blocked)
 
@@ -623,7 +625,7 @@ def test_a_decline_is_final_for_a_filtered_symbol_too() -> None:
 
 def test_a_declined_ticket_is_forgotten_once_the_master_closes_it() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
     ledger.step([pos(ticket=9, sl=0.0)], [link()], now=clock.advance(1.0))
     assert ledger._excluded[TID_SLAVE] == {9}
@@ -634,7 +636,7 @@ def test_a_declined_ticket_is_forgotten_once_the_master_closes_it() -> None:
 
 def test_close_is_mirrored_once_then_forgotten() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
     ledger.step([pos(ticket=5)], [link()], now=clock.advance(1.0))
 
@@ -646,7 +648,7 @@ def test_close_is_mirrored_once_then_forgotten() -> None:
 
 def test_partial_is_mirrored_then_settles() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
     ledger.step([pos(ticket=5, volume=1.0)], [link()], now=clock.advance(1.0))
 
@@ -658,7 +660,7 @@ def test_partial_is_mirrored_then_settles() -> None:
 
 def test_successive_sltp_changes_are_each_mirrored() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
     ledger.step([pos(ticket=5, sl=1.08)], [link()], now=clock.advance(1.0))
 
@@ -671,7 +673,7 @@ def test_successive_sltp_changes_are_each_mirrored() -> None:
 
 def test_slaves_are_independent() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     links = [link(), link(terminal_id=TID_SLAVE2, label="Slave2", symbol_blacklist=["EURUSD"])]
     watching(ledger, clock, links)
 
@@ -682,14 +684,17 @@ def test_slaves_are_independent() -> None:
     assert [c.terminal_id for c in ledger.believed()] == [TID_SLAVE]
 
 
-def test_state_is_dropped_for_a_slave_that_lost_its_role() -> None:
+def test_a_slave_that_lost_its_role_gets_no_actions_but_keeps_its_records() -> None:
+    """Deleting the records would abandon real open positions -- untracked, unclosed, and
+    indistinguishable from a stranger's trades next startup. Unassigning means "stop acting",
+    nothing more."""
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
     ledger.step([pos(ticket=5)], [link()], now=clock.advance(1.0))
 
     assert ledger.step([pos(ticket=5)], [], now=clock.advance(1.0)) == []
-    assert ledger.believed() == []
+    assert len(ledger.believed()) == 1
 
 
 # --- the order lifecycle, through the ledger ------------------------------------------------
@@ -701,7 +706,7 @@ def pending_link(**kw: object) -> SlaveLink:
 
 def test_a_resting_order_placed_while_we_watch_is_mirrored_once() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock, [pending_link()])
 
     placed = ledger.step(
@@ -717,7 +722,7 @@ def test_a_resting_order_placed_while_we_watch_is_mirrored_once() -> None:
 
 def test_an_order_resting_before_we_watched_is_never_placed() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     actions = ledger.step(
         [], [pending_link()], master_orders=[order(ticket=50)], now=clock.advance(1.0)
     )
@@ -727,7 +732,7 @@ def test_an_order_resting_before_we_watched_is_never_placed() -> None:
 
 def test_cancelling_on_the_master_cancels_the_copy() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock, [pending_link()])
     ledger.step([], [pending_link()], master_orders=[order(ticket=50)], now=clock.advance(1.0))
 
@@ -740,7 +745,7 @@ def test_a_fill_hands_tracking_to_the_position_without_copying_it_twice() -> Non
     """The slave's own order fills at the same price, so no OPEN may be sent -- but the
     position that results is ours and its close must still be mirrored."""
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock, [pending_link()])
     ledger.step([], [pending_link()], master_orders=[order(ticket=50)], now=clock.advance(1.0))
 
@@ -760,7 +765,7 @@ def test_with_pending_copying_off_the_fill_is_still_copied_as_a_position() -> No
     """Declining to mirror the resting order says nothing about the position it becomes --
     that is a fresh entry at a current price, judged on its own."""
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
     ledger.step([], [link()], master_orders=[order(ticket=50)], now=clock.advance(1.0))
     assert ledger.believed_orders() == []
@@ -772,7 +777,7 @@ def test_with_pending_copying_off_the_fill_is_still_copied_as_a_position() -> No
 
 def test_moving_an_order_then_leaving_it_alone_settles() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock, [pending_link()])
     ledger.step(
         [],
@@ -799,19 +804,185 @@ def test_moving_an_order_then_leaving_it_alone_settles() -> None:
     )
 
 
-def test_order_state_survives_a_restart() -> None:
+def test_order_state_survives_a_restart(tmp_path: Path) -> None:
     clock = Clock()
-    ledger = DryRunLedger()
-    watching(ledger, clock, [pending_link()])
-    ledger.step([], [pending_link()], master_orders=[order(ticket=50)], now=clock.advance(1.0))
+    path = tmp_path / "beliefs.db"
+    with MappingStore(path) as store:
+        ledger = CopyLedger(store)
+        watching(ledger, clock, [pending_link()])
+        ledger.step([], [pending_link()], master_orders=[order(ticket=50)], now=clock.advance(1.0))
 
-    revived = DryRunLedger()
-    revived.load_json(json.loads(json.dumps(ledger.to_json())))
-    assert len(revived.believed_orders()) == 1
-    assert (
-        revived.step([], [pending_link()], master_orders=[order(ticket=50)], now=clock.advance(1.0))
-        == []
+    with MappingStore(path) as store:
+        revived = CopyLedger(store)
+        assert len(revived.believed_orders()) == 1
+        assert (
+            revived.step(
+                [], [pending_link()], master_orders=[order(ticket=50)], now=clock.advance(1.0)
+            )
+            == []
+        )
+
+
+# --- live mode: in-flight commands and outcome-driven belief ---------------------------------
+
+
+def result(
+    action: Action,
+    ok: bool = True,
+    slave_ticket: int | None = 900,
+    filled: float | None = 1.0,
+) -> OrderResult:
+    return OrderResult(
+        command_id=1,
+        terminal_id=action.terminal_id,
+        op=action.kind,
+        master_ticket=action.master_ticket,
+        ok=ok,
+        slave_ticket=slave_ticket,
+        slave_symbol=action.slave_symbol,
+        filled_volume=filled,
+        error=None if ok else "no money",
     )
+
+
+def test_live_mode_does_not_believe_an_open_until_it_fills() -> None:
+    """Belief follows the broker, not the intention. An OPEN we sent and an OPEN that filled are
+    different facts."""
+    clock = Clock()
+    ledger = CopyLedger()
+    watching(ledger, clock)
+
+    actions = ledger.step([pos(ticket=5)], [link()], now=clock.advance(1.0), simulate=False)
+    assert [a.kind for a in actions] == [ActionKind.OPEN]
+    assert ledger.believed() == [], "not yet -- nothing has filled"
+    assert ledger.inflight_count == 1
+
+    ledger.apply_result(result(actions[0]))
+    assert [c.master_ticket for c in ledger.believed()] == [5]
+    assert ledger.inflight_count == 0
+
+
+def test_an_open_in_flight_is_never_sent_twice() -> None:
+    """The hazard that only exists live: the master's state has not changed, so the diff derives
+    the same OPEN again -- and acting on it would place a second order against one position."""
+    clock = Clock()
+    ledger = CopyLedger()
+    watching(ledger, clock)
+    master = [pos(ticket=5)]
+
+    first = ledger.step(master, [link()], now=clock.advance(1.0), simulate=False)
+    assert len(first) == 1
+
+    # Several ticks pass with no answer from the broker.
+    for _ in range(3):
+        assert ledger.step(master, [link()], now=clock.advance(1.0), simulate=False) == []
+    assert ledger.inflight_count == 1
+
+
+def test_a_changed_decision_is_still_withheld_while_in_flight() -> None:
+    """Even a genuinely new decision must wait: the outstanding order may already have filled."""
+    clock = Clock()
+    ledger = CopyLedger()
+    watching(ledger, clock)
+    ledger.step([pos(ticket=5, sl=1.08)], [link()], now=clock.advance(1.0), simulate=False)
+
+    moved = ledger.step([pos(ticket=5, sl=1.081)], [link()], now=clock.advance(1.0), simulate=False)
+    assert moved == []
+
+
+def test_the_filled_volume_is_believed_not_the_requested_one() -> None:
+    clock = Clock()
+    ledger = CopyLedger()
+    watching(ledger, clock)
+    actions = ledger.step([pos(ticket=5)], [link()], now=clock.advance(1.0), simulate=False)
+    ledger.apply_result(result(actions[0], filled=0.37, slave_ticket=901))
+
+    believed = ledger.believed()[0]
+    assert believed.volume == pytest.approx(0.37)
+    assert believed.slave_ticket == 901
+
+
+def test_a_failed_open_is_final_and_not_retried() -> None:
+    """A permanent failure re-attempted on every stop tweak, or a transient one re-attempted
+    long after the price moved, both place a trade that is no longer the master's."""
+    clock = Clock()
+    ledger = CopyLedger()
+    watching(ledger, clock)
+    actions = ledger.step([pos(ticket=5)], [link()], now=clock.advance(1.0), simulate=False)
+    ledger.apply_result(result(actions[0], ok=False))
+
+    assert ledger.believed() == []
+    assert ledger.step([pos(ticket=5)], [link()], now=clock.advance(1.0), simulate=False) == []
+    later = ledger.step([pos(ticket=5, sl=1.09)], [link()], now=clock.advance(1.0), simulate=False)
+    assert later == [], "not even when the master moves its stop"
+
+
+def test_a_close_is_believed_gone_only_once_confirmed() -> None:
+    clock = Clock()
+    ledger = CopyLedger()
+    watching(ledger, clock)
+    opened = ledger.step([pos(ticket=5)], [link()], now=clock.advance(1.0), simulate=False)
+    ledger.apply_result(result(opened[0]))
+
+    closing = ledger.step([], [link()], now=clock.advance(1.0), simulate=False)
+    assert [a.kind for a in closing] == [ActionKind.CLOSE]
+    assert len(ledger.believed()) == 1, "still ours until the close is confirmed"
+
+    ledger.apply_result(result(closing[0]))
+    assert ledger.believed() == []
+
+
+def test_an_unanswered_command_is_given_up_on_and_flagged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A worker can die between taking a command and reporting. Leaving it in flight freezes
+    the ticket forever; clearing it silently could double-send."""
+    clock = Clock()
+    ledger = CopyLedger()
+    watching(ledger, clock)
+    ledger.step([pos(ticket=5)], [link()], now=clock.advance(1.0), simulate=False)
+    assert ledger.inflight_count == 1
+
+    with caplog.at_level("ERROR"):
+        lost = ledger.expire_inflight(timeout_s=-1.0)
+    assert lost == [(TID_SLAVE, 5)]
+    assert ledger.inflight_count == 0
+    assert any("orphan" in r.getMessage() for r in caplog.records)
+
+    assert ledger.step([pos(ticket=5)], [link()], now=clock.advance(1.0), simulate=False) == []
+
+
+def test_a_result_with_no_pending_action_is_left_to_reconciliation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A restart between sending and the answer. Belief cannot be reconstructed from the result
+    alone, and inventing it would be worse than letting it surface as an orphan."""
+    ledger = CopyLedger()
+    stray = OrderResult(
+        command_id=9,
+        terminal_id=TID_SLAVE,
+        op=ActionKind.OPEN,
+        master_ticket=5,
+        ok=True,
+        slave_ticket=900,
+    )
+    with caplog.at_level("WARNING"):
+        ledger.apply_result(stray)
+    assert ledger.believed() == []
+    assert any("startup reconciliation" in r.getMessage() for r in caplog.records)
+
+
+def test_resetting_session_state_keeps_belief() -> None:
+    """Belief lives in the store and is swapped with it; exclusions and continuity do not."""
+    clock = Clock()
+    ledger = CopyLedger()
+    watching(ledger, clock)
+    ledger.step([pos(ticket=5)], [link()], now=clock.advance(1.0))
+    assert len(ledger.believed()) == 1
+
+    ledger.reset_session_state()
+    assert len(ledger.believed()) == 1
+    assert ledger.inflight_count == 0
 
 
 # --- connection gating and the grace window -------------------------------------------------
@@ -819,7 +990,7 @@ def test_order_state_survives_a_restart() -> None:
 
 def test_a_disconnected_slave_gets_no_actions_at_all() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
     assert ledger.step([pos(ticket=5)], [link(connected=False)], now=clock.advance(1.0)) == []
     assert ledger.believed() == []
@@ -828,7 +999,7 @@ def test_a_disconnected_slave_gets_no_actions_at_all() -> None:
 def test_a_brief_blip_does_not_cost_a_trade() -> None:
     """Three seconds down, master opens in the gap: still copied when the link returns."""
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
 
     ledger.step([], [link(connected=False)], now=clock.advance(3.0))
@@ -839,7 +1010,7 @@ def test_a_brief_blip_does_not_cost_a_trade() -> None:
 
 def test_a_long_outage_excludes_what_opened_during_it() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
 
     ledger.step([], [link(connected=False)], now=clock.advance(60.0))
@@ -850,7 +1021,7 @@ def test_a_long_outage_excludes_what_opened_during_it() -> None:
 
 def test_the_grace_boundary_is_inclusive() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
     actions = ledger.step([pos(ticket=5)], [link()], now=clock.advance(5.0), grace_seconds=5.0)
     assert [a.kind for a in actions] == [ActionKind.OPEN]
@@ -859,7 +1030,7 @@ def test_the_grace_boundary_is_inclusive() -> None:
 
 def test_just_past_the_grace_boundary_re_baselines() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
     actions = ledger.step([pos(ticket=5)], [link()], now=clock.advance(5.001), grace_seconds=5.0)
     assert [a.skip_reason for a in actions] == [SkipReason.PREEXISTING]
@@ -867,7 +1038,7 @@ def test_just_past_the_grace_boundary_re_baselines() -> None:
 
 def test_zero_grace_means_any_disconnection_excludes() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
     ledger.step([], [link(connected=False)], now=clock.advance(0.2))
     actions = ledger.step([pos(ticket=5)], [link()], now=clock.advance(0.2), grace_seconds=0.0)
@@ -878,7 +1049,7 @@ def test_a_master_outage_also_breaks_continuity() -> None:
     """The master's link dropping means no tick runs at all, so the gap is the same gap --
     positions the master opened while we were blind must not be adopted."""
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
 
     # no calls for two minutes: the engine skipped reconciliation because the master was down
@@ -890,7 +1061,7 @@ def test_a_copy_made_before_an_outage_is_still_mirrored_after_it() -> None:
     """Re-baselining must not orphan a real position. It excludes what we do not own; what we
     do own stays fully tracked, including its close."""
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     watching(ledger, clock)
     ledger.step([pos(ticket=5)], [link()], now=clock.advance(1.0))
     assert len(ledger.believed()) == 1
@@ -905,7 +1076,7 @@ def test_a_copy_made_before_an_outage_is_still_mirrored_after_it() -> None:
 
 def test_exclusions_do_not_grow_without_bound() -> None:
     clock = Clock()
-    ledger = DryRunLedger()
+    ledger = CopyLedger()
     ledger.step([pos(ticket=5)], [link()], now=clock.advance(1.0))
     assert ledger._excluded[TID_SLAVE] == {5}
     ledger.step([], [link()], now=clock.advance(1.0))
@@ -915,44 +1086,58 @@ def test_exclusions_do_not_grow_without_bound() -> None:
 # --- persistence ----------------------------------------------------------------------------
 
 
-def test_a_restart_proposes_nothing_for_what_it_already_tracked() -> None:
-    """The Stage 2a exit criterion: no spurious actions across a restart."""
+def test_a_restart_proposes_nothing_for_what_it_already_tracked(tmp_path: Path) -> None:
+    """The Stage 2a exit criterion, now carried by the store rather than a JSON file."""
     clock = Clock()
-    ledger = DryRunLedger()
-    watching(ledger, clock)
+    path = tmp_path / "beliefs.db"
     master = [pos(ticket=5), pos(ticket=6, symbol="GBPUSD")]
-    assert len(ledger.step(master, [link()], now=clock.advance(1.0))) == 2
 
-    revived = DryRunLedger()
-    revived.load_json(json.loads(json.dumps(ledger.to_json())))
-    assert revived.step(master, [link()], now=clock.advance(1.0)) == []
-    assert len(revived.believed()) == 2
+    with MappingStore(path) as store:
+        ledger = CopyLedger(store)
+        watching(ledger, clock)
+        assert len(ledger.step(master, [link()], now=clock.advance(1.0))) == 2
+
+    with MappingStore(path) as store:
+        revived = CopyLedger(store)
+        assert revived.step(master, [link()], now=clock.advance(1.0)) == []
+        assert len(revived.believed()) == 2
 
 
 def test_a_restart_does_not_adopt_what_it_never_copied() -> None:
     clock = Clock()
-    revived = DryRunLedger()
-    revived.load_json({"copied": []})
+    revived = CopyLedger(MappingStore())
     actions = revived.step([pos(ticket=5)], [link()], now=clock.advance(1.0))
     assert [a.skip_reason for a in actions] == [SkipReason.PREEXISTING]
 
 
-def test_a_restarted_ledger_still_sees_what_changed_while_it_was_down() -> None:
+def test_a_restarted_ledger_still_sees_what_changed_while_it_was_down(tmp_path: Path) -> None:
     clock = Clock()
-    ledger = DryRunLedger()
-    watching(ledger, clock)
-    ledger.step([pos(ticket=5, volume=1.0)], [link()], now=clock.advance(1.0))
+    path = tmp_path / "beliefs.db"
+    with MappingStore(path) as store:
+        ledger = CopyLedger(store)
+        watching(ledger, clock)
+        ledger.step([pos(ticket=5, volume=1.0)], [link()], now=clock.advance(1.0))
 
-    revived = DryRunLedger()
-    revived.load_json(ledger.to_json())
-    actions = revived.step([pos(ticket=5, volume=0.5)], [link()], now=clock.advance(1.0))
-    assert [a.kind for a in actions] == [ActionKind.REDUCE]
+    with MappingStore(path) as store:
+        revived = CopyLedger(store)
+        actions = revived.step([pos(ticket=5, volume=0.5)], [link()], now=clock.advance(1.0))
+        assert [a.kind for a in actions] == [ActionKind.REDUCE]
 
 
-def test_unreadable_persisted_entries_are_ignored() -> None:
-    ledger = DryRunLedger()
-    ledger.load_json({"copied": [{"terminal_id": TID_SLAVE}, {"nonsense": True}]})
-    assert ledger.believed() == []
+def test_the_two_stores_behave_identically(tmp_path: Path) -> None:
+    """The dry run is only worth running if it exercises the live code path. If these two ever
+    diverge, the rehearsal stops meaning anything."""
+    master = [pos(ticket=5, volume=1.0)]
+    outcomes = []
+    for store in (None, MappingStore(tmp_path / "b.db")):
+        clock = Clock()
+        ledger = CopyLedger(store)
+        watching(ledger, clock)
+        first = ledger.step(master, [link()], now=clock.advance(1.0))
+        second = ledger.step(master, [link()], now=clock.advance(1.0))
+        reduced = ledger.step([pos(ticket=5, volume=0.5)], [link()], now=clock.advance(1.0))
+        outcomes.append(([a.kind for a in first], second, [a.close_fraction for a in reduced]))
+    assert outcomes[0] == outcomes[1]
 
 
 # --- engine guards --------------------------------------------------------------------------
@@ -1146,7 +1331,7 @@ def test_engine_refuses_to_act_on_a_dry_run_it_cannot_honour(
 
 
 def test_engine_persists_and_restores_its_ledger(engine_cfg: AppConfig, tmp_path: Path) -> None:
-    state = tmp_path / "dryrun.json"
+    state = tmp_path / "dryrun.db"
     first = Engine(engine_cfg, state_path=state)
     wire_slave(first)
     watch(first)
@@ -1156,18 +1341,31 @@ def test_engine_persists_and_restores_its_ledger(engine_cfg: AppConfig, tmp_path
 
     second = Engine(engine_cfg, state_path=state)
     wire_slave(second)
-    second._load_state()
     second._reconcile(snap(open_positions=(pos(ticket=11),)))
     assert second.recent_actions() == [], "a restart re-proposes nothing"
     assert second.believed_copies() == 1
 
 
-def test_engine_survives_unreadable_state_on_disk(engine_cfg: AppConfig, tmp_path: Path) -> None:
-    state = tmp_path / "dryrun.json"
-    state.write_text("{ not json", encoding="utf-8")
-    eng = Engine(engine_cfg, state_path=state)
-    eng._load_state()
-    assert eng.believed_copies() == 0
+def test_a_dry_run_and_a_live_session_do_not_share_beliefs(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    """A simulated position recorded in the live table would later be indistinguishable from
+    one that actually exists, and the copier would try to close something never opened."""
+    eng = Engine(
+        engine_cfg, state_path=tmp_path / "dryrun.db", mapping_path=tmp_path / "mapping.db"
+    )
+    wire_slave(eng)
+    watch(eng)
+    eng._reconcile(snap(open_positions=(pos(ticket=11),)))
+    assert eng.believed_copies() == 1
+
+    eng.config.dry_run = False
+    eng._reconcile(snap(open_positions=(pos(ticket=11),)))
+    assert eng.believed_copies() == 0, "the live store starts empty"
+
+    eng.config.dry_run = True
+    eng._reconcile(snap(open_positions=(pos(ticket=11),)))
+    assert eng.believed_copies() == 1, "and the simulated belief is still there"
 
 
 def test_clearing_the_ledger_forgets_every_belief(engine: Engine) -> None:
