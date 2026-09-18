@@ -40,6 +40,8 @@ class FakeSession:
     results: list[Any] = field(default_factory=list)
     """Scripted, one per attempt. The last one repeats once exhausted."""
     sent: list[dict[str, Any]] = field(default_factory=list)
+    positions: dict[int, tuple[str, PositionType, float]] = field(default_factory=dict)
+    resting_orders: set[int] = field(default_factory=set)
 
     def account_trade_mode(self) -> int | None:
         return self.trade_mode
@@ -61,6 +63,12 @@ class FakeSession:
 
     def tick(self, name: str) -> tuple[float, float] | None:
         return self.quote
+
+    def position(self, ticket: int) -> tuple[str, PositionType, float] | None:
+        return self.positions.get(ticket)
+
+    def order_exists(self, ticket: int) -> bool:
+        return ticket in self.resting_orders
 
     def loss_per_lot(
         self, direction: PositionType, symbol: str, entry: float, sl: float
@@ -153,12 +161,135 @@ def test_an_unpriceable_move_is_refused_rather_than_guessed() -> None:
     assert session.sent == []
 
 
-def test_operations_that_need_the_mapping_table_are_declined_not_faked() -> None:
+def test_an_operation_with_no_recorded_slave_ticket_is_declined() -> None:
+    """Without the mapping there is nothing to act on, and guessing is not an option."""
     for op in (ActionKind.CLOSE, ActionKind.REDUCE, ActionKind.CANCEL):
         session = FakeSession()
-        result = run(session, cmd(op=op))
+        result = run(session, cmd(op=op, slave_ticket=None))
         assert not result.ok
         assert session.sent == []
+
+
+def test_modifications_are_still_declined_rather_than_half_done() -> None:
+    for op in (ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER):
+        session = FakeSession()
+        assert not run(session, cmd(op=op, slave_ticket=77)).ok
+        assert session.sent == []
+
+
+# --- closing --------------------------------------------------------------------------------
+
+
+def closing_session(volume: float = 2.0, direction: PositionType = PositionType.BUY) -> FakeSession:
+    session = FakeSession()
+    session.positions[77] = ("EURUSD", direction, volume)
+    return session
+
+
+def test_closing_sends_the_opposite_side_for_the_whole_position() -> None:
+    session = closing_session(volume=2.0, direction=PositionType.BUY)
+    result = run(session, cmd(op=ActionKind.CLOSE, slave_ticket=77))
+    assert result.ok
+    request = session.sent[0]
+    assert request["position"] == 77
+    assert request["type"] == 1, "a long is closed by selling"
+    assert request["volume"] == pytest.approx(2.0)
+    assert request["price"] == pytest.approx(1.08500), "sell at the bid"
+
+
+def test_closing_a_short_buys_at_the_ask() -> None:
+    session = closing_session(direction=PositionType.SELL)
+    run(session, cmd(op=ActionKind.CLOSE, slave_ticket=77))
+    assert session.sent[0]["type"] == 0
+    assert session.sent[0]["price"] == pytest.approx(1.08510)
+
+
+def test_closing_uses_the_terminals_volume_not_the_recorded_one() -> None:
+    """Ours can be stale -- the user may have closed part of it by hand -- and a stale figure
+    either gets rejected or closes the wrong amount."""
+    session = closing_session(volume=0.30)
+    run(session, cmd(op=ActionKind.CLOSE, slave_ticket=77, master_volume=5.0))
+    assert session.sent[0]["volume"] == pytest.approx(0.30)
+
+
+def test_closing_something_already_gone_is_a_success() -> None:
+    """The desired state is "not open", and it is not open. Reporting failure would leave the
+    engine retrying a close against a position that no longer exists."""
+    session = FakeSession()
+    result = run(session, cmd(op=ActionKind.CLOSE, slave_ticket=77))
+    assert result.ok
+    assert result.filled_volume == 0.0
+    assert session.sent == []
+
+
+# --- partial closes ---------------------------------------------------------------------------
+
+
+def test_a_partial_closes_the_fraction_of_the_live_volume() -> None:
+    session = closing_session(volume=1.0)
+    run(session, cmd(op=ActionKind.REDUCE, slave_ticket=77, close_fraction=0.4))
+    assert session.sent[0]["volume"] == pytest.approx(0.4)
+
+
+def test_a_partial_is_quantized_to_the_symbols_step() -> None:
+    session = closing_session(volume=1.0)
+    session.facts = SymbolFacts(
+        name="EURUSD",
+        volume_min=0.05,
+        volume_max=100.0,
+        volume_step=0.05,
+        point=0.00001,
+        filling_mask=int(SymbolFilling.FOK | SymbolFilling.IOC),
+    )
+    run(session, cmd(op=ActionKind.REDUCE, slave_ticket=77, close_fraction=0.33))
+    assert session.sent[0]["volume"] == pytest.approx(0.30)
+
+
+def test_a_partial_too_small_to_express_closes_nothing() -> None:
+    """Over-closing cannot be undone, so leaving the position whole is the safe answer."""
+    session = closing_session(volume=0.02)
+    result = run(session, cmd(op=ActionKind.REDUCE, slave_ticket=77, close_fraction=0.1))
+    assert not result.ok
+    assert session.sent == []
+
+
+def test_a_partial_can_never_exceed_the_open_volume() -> None:
+    session = closing_session(volume=0.50)
+    run(session, cmd(op=ActionKind.REDUCE, slave_ticket=77, close_fraction=0.99))
+    assert session.sent[0]["volume"] <= 0.50
+
+
+def test_a_nonsensical_fraction_is_refused() -> None:
+    session = closing_session()
+    for fraction in (0.0, 1.0, 1.5, -0.2):
+        assert not run(
+            session, cmd(op=ActionKind.REDUCE, slave_ticket=77, close_fraction=fraction)
+        ).ok
+    assert session.sent == []
+
+
+# --- cancelling -----------------------------------------------------------------------------
+
+
+def test_cancelling_removes_the_resting_order() -> None:
+    session = FakeSession(resting_orders={88})
+    result = run(session, cmd(op=ActionKind.CANCEL, slave_ticket=88))
+    assert result.ok
+    assert session.sent[0]["action"] == 8, "TRADE_ACTION_REMOVE"
+    assert session.sent[0]["order"] == 88
+
+
+def test_cancelling_an_order_that_already_went_is_a_success() -> None:
+    """It filled, or someone removed it. Either way it is not resting."""
+    session = FakeSession(resting_orders=set())
+    result = run(session, cmd(op=ActionKind.CANCEL, slave_ticket=88))
+    assert result.ok
+    assert session.sent == []
+
+
+def test_a_rejected_cancel_is_reported() -> None:
+    session = FakeSession(resting_orders={88}, results=[FakeResult(retcode=int(Retcode.INVALID))])
+    assert not run(session, cmd(op=ActionKind.CANCEL, slave_ticket=88)).ok
 
 
 # --- the request ----------------------------------------------------------------------------

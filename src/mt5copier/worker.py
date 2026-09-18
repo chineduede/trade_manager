@@ -212,6 +212,41 @@ class _Session:
         except (TypeError, ValueError):
             return None
 
+    def position(self, ticket: int) -> tuple[str, PositionType, float] | None:
+        """``(symbol, direction, volume)`` for one open position, read live.
+
+        Closing and reducing use the terminal's current volume rather than whatever we last
+        recorded. Our record can be stale -- the user may have closed part of it by hand --
+        and a stale volume produces an INVALID_VOLUME rejection at best, or closes the wrong
+        amount at worst.
+        """
+        try:
+            found = self._mt5.positions_get(ticket=ticket)
+        except Exception as exc:
+            log.debug("positions_get(ticket=%r) raised: %r", ticket, exc)
+            return None
+        if not found:
+            return None
+        p = found[0]
+        try:
+            return str(p.symbol), PositionType(int(p.type)), float(p.volume)
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def order_exists(self, ticket: int) -> bool:
+        """Whether a pending order is still resting.
+
+        A read failure answers **True**, which sends a cancel that may be redundant. The
+        alternative -- answering False -- would report "already gone" for an order that is
+        still live, and the copier would stop tracking a real resting order.
+        """
+        try:
+            found = self._mt5.orders_get(ticket=ticket)
+        except Exception as exc:
+            log.debug("orders_get(ticket=%r) raised: %r", ticket, exc)
+            return True
+        return bool(found)
+
     def order_send(self, request: dict[str, Any]) -> Any:
         """The one call in this project that creates an order. Returns the raw MT5 result, or
         None if the call itself failed -- which the executor classifies as a connection

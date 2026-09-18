@@ -13,6 +13,23 @@ from .logging_setup import get_logger
 log = get_logger(__name__)
 
 
+class TradeAction(IntEnum):
+    """``TRADE_ACTION_*`` -- the ``action`` field of a trade request.
+
+    Note ``SLTP`` and ``MODIFY`` are different operations: SLTP changes a *position's* stop
+    and target, MODIFY changes a pending *order's* parameters including its entry price.
+    ``zele-mt5`` has no MODIFY path at all, which is why it cannot move a resting order.
+    """
+
+    DEAL = 1
+    """Market execution -- opening, closing, or reducing a position."""
+    PENDING = 5
+    SLTP = 6
+    MODIFY = 7
+    REMOVE = 8
+    """Delete a pending order."""
+
+
 class OrderFilling(IntEnum):
     """``ORDER_FILLING_*`` -- what goes *into* a trade request.
 

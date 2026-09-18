@@ -21,7 +21,14 @@ from __future__ import annotations
 import time
 from typing import Any, Protocol
 
-from .execution import OrderFilling, Outcome, alternative_filling, choose_filling, classify
+from .execution import (
+    OrderFilling,
+    Outcome,
+    TradeAction,
+    alternative_filling,
+    choose_filling,
+    classify,
+)
 from .execution import describe_retcode as _describe
 from .logging_setup import get_logger
 from .protocol import ActionKind, OrderCommand, OrderResult, PositionType, SizingBasis
@@ -31,6 +38,7 @@ from .sizing import (
     SymbolFacts,
     lots_for_master_multiple,
     lots_for_risk,
+    quantize_volume,
     widen_for_slippage,
 )
 from .symbols import SymbolCache
@@ -58,6 +66,8 @@ class Session(Protocol):
     def symbol_names(self) -> list[str]: ...
     def symbol_facts(self, name: str) -> SymbolFacts | None: ...
     def tick(self, name: str) -> tuple[float, float] | None: ...
+    def position(self, ticket: int) -> tuple[str, PositionType, float] | None: ...
+    def order_exists(self, ticket: int) -> bool: ...
     def loss_per_lot(
         self, direction: PositionType, symbol: str, entry: float, sl: float
     ) -> float | None: ...
@@ -89,8 +99,10 @@ class Executor:
         if refusal is not None:
             return refusal
 
-        if cmd.op in (ActionKind.CLOSE, ActionKind.REDUCE, ActionKind.CANCEL):
-            return self._fail(cmd, error="closing and cancelling arrive with stage 2c")
+        if cmd.op in (ActionKind.CLOSE, ActionKind.REDUCE):
+            return self._close_or_reduce(cmd)
+        if cmd.op is ActionKind.CANCEL:
+            return self._cancel(cmd)
         if cmd.op in (ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER):
             return self._fail(cmd, error="modification arrives with stage 3")
         if cmd.op not in (ActionKind.OPEN, ActionKind.PLACE):
@@ -144,6 +156,99 @@ class Executor:
         )
         return self._fail(cmd, error=f"account is not a demo ({where}); refused")
 
+    # --- closing, reducing, cancelling ------------------------------------------------------
+
+    def _close_or_reduce(self, cmd: OrderCommand) -> OrderResult:
+        """Close a copied position, in full or in part.
+
+        The volume comes from the **terminal**, not from our record. Ours can be stale -- the
+        user may have closed part of it by hand -- and a stale figure either gets rejected or,
+        worse, closes the wrong amount. Reading it costs one call and removes the whole class
+        of problem.
+
+        A position that is already gone is reported as a *success*: the desired state is "not
+        open", and it is not open. Treating it as a failure would leave the engine retrying a
+        close against a position that no longer exists.
+        """
+        if cmd.slave_ticket is None:
+            return self._fail(cmd, error="no slave ticket recorded for this copy")
+
+        live = self._session.position(cmd.slave_ticket)
+        if live is None:
+            log.info("#%s: slave position %s already gone", cmd.master_ticket, cmd.slave_ticket)
+            return self._ok(
+                cmd,
+                slave_ticket=cmd.slave_ticket,
+                filled_volume=0.0,
+                outcome="already closed",
+            )
+        symbol, direction, open_volume = live
+
+        volume = open_volume
+        if cmd.op is ActionKind.REDUCE:
+            fraction = cmd.close_fraction or 0.0
+            if not 0.0 < fraction < 1.0:
+                return self._fail(cmd, error=f"nonsensical close fraction {fraction!r}")
+            facts = self._session.symbol_facts(symbol)
+            if facts is None:
+                return self._fail(cmd, slave_symbol=symbol, error=f"no symbol_info for {symbol!r}")
+            sized = quantize_volume(open_volume * fraction, facts)
+            if not sized.ok or sized.lots is None:
+                # Too small a slice to express. Leaving the position whole is the safe
+                # answer: over-closing cannot be undone.
+                return self._fail(
+                    cmd, slave_symbol=symbol, error=f"partial close {sized.describe()}"
+                )
+            volume = min(sized.lots, open_volume)
+
+        # Closing is the opposite side of the position, at the opposite side of the book.
+        closing_direction = PositionType.SELL if direction is PositionType.BUY else PositionType.BUY
+        price = self._market_price(symbol, closing_direction)
+        if price is None:
+            return self._fail(cmd, slave_symbol=symbol, error=f"no tick for {symbol!r}")
+
+        facts = self._session.symbol_facts(symbol)
+        mask = facts.filling_mask if facts is not None else 0
+        request = {
+            "action": int(TradeAction.DEAL),
+            "position": cmd.slave_ticket,
+            "symbol": symbol,
+            "volume": volume,
+            "type": 1 if closing_direction is PositionType.SELL else 0,
+            "price": price,
+            "deviation": cmd.deviation_points,
+            "magic": cmd.magic,
+            "comment": cmd.comment[:31],
+            "type_filling": int(choose_filling(mask, is_pending=False)),
+            "type_time": 0,
+        }
+        return self._send(cmd, request, symbol, volume, mask, reprice_direction=closing_direction)
+
+    def _cancel(self, cmd: OrderCommand) -> OrderResult:
+        """Delete a copied pending order.
+
+        Like a close, an order that is already gone counts as success -- it may have been
+        filled or removed since the command was issued, and either way it is not resting.
+        """
+        if cmd.slave_ticket is None:
+            return self._fail(cmd, error="no slave ticket recorded for this copy")
+        if not self._session.order_exists(cmd.slave_ticket):
+            log.info("#%s: slave order %s already gone", cmd.master_ticket, cmd.slave_ticket)
+            return self._ok(cmd, slave_ticket=cmd.slave_ticket, outcome="already gone")
+
+        request = {"action": int(TradeAction.REMOVE), "order": cmd.slave_ticket}
+        result = self._session.order_send(request)
+        retcode = getattr(result, "retcode", None) if result is not None else None
+        outcome = classify(retcode)
+        if outcome is Outcome.SUCCEEDED:
+            return self._ok(cmd, slave_ticket=cmd.slave_ticket, outcome=outcome.value, attempts=1)
+        return self._fail(
+            cmd,
+            retcode=retcode,
+            attempts=1,
+            error=f"{_describe(retcode)} cancelling order {cmd.slave_ticket}",
+        )
+
     # --- sizing ---------------------------------------------------------------------------
 
     def _size(self, cmd: OrderCommand, symbol: str, facts: SymbolFacts) -> SizingResult:
@@ -178,18 +283,50 @@ class Executor:
         self, cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float
     ) -> OrderResult:
         is_pending = cmd.op is ActionKind.PLACE
-        filling = choose_filling(facts.filling_mask, is_pending=is_pending)
         price = cmd.entry if is_pending else self._market_price(symbol, cmd.direction)
         if price is None:
             return self._fail(cmd, slave_symbol=symbol, error=f"no tick for {symbol!r}")
+        request = self._build_request(
+            cmd,
+            symbol,
+            lots,
+            price,
+            choose_filling(facts.filling_mask, is_pending=is_pending),
+            is_pending,
+        )
+        return self._send(
+            cmd,
+            request,
+            symbol,
+            lots,
+            facts.filling_mask,
+            reprice_direction=None if is_pending else cmd.direction,
+        )
 
+    def _send(
+        self,
+        cmd: OrderCommand,
+        request: dict[str, Any],
+        symbol: str,
+        volume: float,
+        mask: int,
+        *,
+        reprice_direction: PositionType | None,
+    ) -> OrderResult:
+        """Send, classify, and retry within the caps -- shared by every order-shaped request.
+
+        ``reprice_direction`` is the side to re-read the book from on a requote, or None for
+        a request whose price is fixed (a pending order rests where it was told to).
+        """
+        filling = OrderFilling(int(request.get("type_filling", OrderFilling.IOC)))
+        price = float(request.get("price", 0.0) or 0.0)
         deadline = time.monotonic() + DEADLINE_S
         attempts = 0
         last: Any = None
+        lots = volume
 
         while attempts < MAX_ATTEMPTS and time.monotonic() < deadline:
             attempts += 1
-            request = self._build_request(cmd, symbol, lots, price, filling, is_pending)
             last = self._session.order_send(request)
             retcode = getattr(last, "retcode", None) if last is not None else None
             outcome = classify(retcode)
@@ -216,20 +353,22 @@ class Executor:
                     attempts=attempts,
                 )
 
-            if outcome is Outcome.REPRICE and not is_pending:
-                fresh = self._market_price(symbol, cmd.direction)
+            if outcome is Outcome.REPRICE and reprice_direction is not None:
+                fresh = self._market_price(symbol, reprice_direction)
                 if fresh is None:
                     break
                 price = fresh
+                request = {**request, "price": price}
                 continue
             if outcome is Outcome.REFILL:
-                nxt = alternative_filling(filling, facts.filling_mask)
+                nxt = alternative_filling(filling, mask)
                 if nxt is None:
                     break
                 log.info(
                     "#%s: %s refused, retrying as %s", cmd.master_ticket, filling.name, nxt.name
                 )
                 filling = nxt
+                request = {**request, "type_filling": int(nxt)}
                 continue
             if outcome is Outcome.BACKOFF:
                 time.sleep(BACKOFF_S)
@@ -293,13 +432,24 @@ class Executor:
     # --- helpers --------------------------------------------------------------------------
 
     def _fail(self, cmd: OrderCommand, **kw: Any) -> OrderResult:
+        kw.setdefault("outcome", Outcome.FATAL.value)
         return OrderResult(
             command_id=cmd.command_id,
             terminal_id=self._terminal_id,
             op=cmd.op,
             master_ticket=cmd.master_ticket,
             ok=False,
-            outcome=Outcome.FATAL.value,
+            **kw,
+        )
+
+    def _ok(self, cmd: OrderCommand, **kw: Any) -> OrderResult:
+        kw.setdefault("outcome", Outcome.SUCCEEDED.value)
+        return OrderResult(
+            command_id=cmd.command_id,
+            terminal_id=self._terminal_id,
+            op=cmd.op,
+            master_ticket=cmd.master_ticket,
+            ok=True,
             **kw,
         )
 

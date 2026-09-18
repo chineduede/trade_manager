@@ -59,6 +59,16 @@ def log_dir() -> Path:
     return user_data_dir() / "logs"
 
 
+def mapping_db_path() -> Path:
+    """SQLite store of which slave position belongs to which master position.
+
+    This is the copier's memory of what it owns. Losing it does not lose money, but it does
+    orphan every live copy -- the positions stay open with nothing tracking them -- so it
+    lives beside the config rather than anywhere temporary.
+    """
+    return user_data_dir() / "mapping.db"
+
+
 def dryrun_state_path() -> Path:
     """Believed-copy state for the Stage 2a dry run.
 
