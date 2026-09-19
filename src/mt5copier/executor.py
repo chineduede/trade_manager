@@ -104,6 +104,9 @@ class Executor:
         if cmd.op is ActionKind.CANCEL:
             return self._cancel(cmd)
         if cmd.op in (ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER):
+            # Kept as a backstop, not a normal path: these are absent from
+            # protocol.DISPATCHABLE_KINDS, so the engine does not send them at all. Add them
+            # there when this branch is implemented, or SL/TP sync stays silently off.
             return self._fail(cmd, error="modification arrives with stage 3")
         if cmd.op not in (ActionKind.OPEN, ActionKind.PLACE):
             return self._fail(cmd, error=f"nothing to send for {cmd.op.value}")

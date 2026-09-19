@@ -4,10 +4,19 @@ A multi-terminal MT5 trade copier in pure Python — no Expert Advisor is instal
 terminal. One process discovers every MT5 install on the machine, you designate one as Master
 and any number as Slaves, and the configuration persists.
 
-**Stage 2a (this version) still sends nothing to any broker.** It discovers, designates,
-connects, observes — and diffs the master's open positions *and resting orders* to report what
-would be copied, and why anything wouldn't be. There is no order-sending code in the package at
-all. See [Roadmap](#roadmap) and [Detection](#detection-stage-2a).
+**This version can send orders, and `dry_run` is what decides whether it does.** It defaults
+to true, in which case the copier discovers, designates, connects, observes — and diffs the
+master's open positions *and resting orders* to report what would be copied, and why anything
+wouldn't be, sending nothing. Set it to false and those same decisions are dispatched to the
+slaves.
+
+Two guards sit underneath, and neither is optional: a slave is refused unless its account is a
+**demo** (per-slave `allow_live_trading` overrides it), and a slave is not copied to until it
+has been **reconciled** against the mapping table with no unexplained positions of ours on it.
+
+**No order placed by this copier has been verified against a broker yet** — the wiring is
+tested and the dry run is validated, but the one-slave demo run in the roadmap has not been
+done. See [Roadmap](#roadmap) and [Detection](#detection-stage-2a).
 
 ## Running it
 
@@ -257,10 +266,15 @@ src/mt5copier/
   logging_setup.py   rotating file logs, no global-logger bug
   discovery.py       passive terminal enumeration
   config.py          pydantic v2 schema, merge, atomic save
-  protocol.py        Snapshot / Position / PendingOrder / Command dataclasses
+  protocol.py        wire dataclasses, COPIER_MAGIC, DISPATCHABLE_KINDS
   worker.py          one process, one MT5 connection, reconnect loop
   reconcile.py       the diff engine: pure, MT5-free, decides but never sends
-  engine.py          supervisor: spawn, aggregate, drive the diff
+  sizing.py          risk -> lots, pure arithmetic
+  symbols.py         master symbol -> slave symbol, pure, with a cache
+  execution.py       filling modes and retcode classification, pure tables
+  executor.py        the ONLY module that can create an order
+  store.py           SQLite ownership: which slave position is whose copy
+  engine.py          supervisor: spawn, aggregate, diff, reconcile, dispatch
   tui/app.py         Textual UI
 launcher.py          frozen entry point (see note below)
 copier.spec          PyInstaller spec

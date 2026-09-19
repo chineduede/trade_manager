@@ -5,35 +5,34 @@ trading logic. This document is the plan for everything that does.
 
 ## Where the project is — 2026-09-19
 
-**Nothing can send an order yet.** `executor.py` can, and is tested doing so against a fake
-session, but the engine constructs no `OrderCommand` and `dry_run = False` is still refused.
-Check with `grep -rn "OrderCommand" src/mt5copier/engine.py` rather than assuming.
+**An order can now leave this machine.** The engine builds `OrderCommand`s and consumes
+`OrderResult`s; `dry_run` is the only thing standing between a decision and a broker, and it
+still defaults to true. The executor's demo-only guard is still in place underneath.
+
+**Nothing here has been validated against a broker yet.** Every claim below is backed by tests
+and by the Stage 2a dry run, not by an order that actually filled. **The one-slave demo run in
+"Verifying the wiring" is the next thing to do, before this is pointed at anything else.**
 
 | Stage | State |
 |---|---|
 | 1 — discovery, designation, supervision | accepted |
 | 2a — the diff engine, dry run | **validated on a demo master 2026-09-17** |
 | 2b — execution primitives | complete (`sizing`, `symbols`, `execution`, `executor`) |
-| 2c — live copying | **half done** — mapping table and close/reduce/cancel built, not wired |
-| 3 — SL/TP sync, partial closes | executor declines MODIFY_SLTP / MODIFY_ORDER |
-| 4 — pending orders | detection validated; execution not wired |
+| 2c — live copying | **wired, awaiting its demo run** |
+| 3 — SL/TP sync, partial closes | executor declines MODIFY_SLTP / MODIFY_ORDER; excluded from `DISPATCHABLE_KINDS` |
+| 4 — pending orders | detection validated; PLACE/CANCEL now dispatch, untested live |
 | 5 — reverse and filtered copying | inversion implemented, never live-tested |
 
-**The next step.** The first two of the three are done:
+**The next step: verify it on one demo slave.** See "Verifying the wiring" under Stage 2c for
+the ordered checklist. Do not widen past one slave until the demo-only refusal has been seen
+working with its own eyes — it is the guard that stands between a bug here and a prop account.
 
-1. ~~**Startup reconciliation.**~~ Done. Per slave, before anything is derived: orphans are
-   surfaced and **hold that slave until acknowledged**, stale records are dropped so no CLOSE is
-   derived against a position that has already gone. `COPIER_MAGIC = 260919` is fixed.
-2. ~~**Swap the ledger's backing store**~~ Done — one code path, dry-run pretends every order
-   succeeded and live believes the `OrderResult`.
-3. **Engine wiring.** `Action` → `OrderCommand` down the slave's existing `cmd_q`, consume
-   `OrderResult` in the drain loop, drop the `dry_run` refusal. **This is the first commit where
-   a real order can leave the machine.** Give it its own demo run, on one slave rather than
-   fifteen.
+After that, Stage 3 (SL/TP sync and partial closes) is the next feature, and the first thing it
+must do is add `MODIFY_SLTP` / `MODIFY_ORDER` to `protocol.DISPATCHABLE_KINDS`. Until it does,
+stops are derived, reported, and deliberately not sent.
 
-Everything in "Safety rails" under Stage 2c is now built —
-the demo-only guard landed with Stage 2b deliberately, in the same commit as the first code
-able to send.
+Everything in "Safety rails" under Stage 2c is now built — the demo-only guard landed with
+Stage 2b deliberately, in the same commit as the first code able to send.
 
 Read `README.md` first for the architecture and the constraints it follows from.
 
@@ -443,12 +442,62 @@ the sweep would delete the whole dry run's state on its first tick.
 permanently. So a percent-of-balance slave whose balance cannot be read derives nothing until it
 can. Fixed-cash slaves never read the balance and are unaffected.
 
-**Still to do — the whole remaining gap before live copying:**
+- ✅ **The engine wiring.** Each executable `Action` becomes an `OrderCommand` on that slave's
+  `cmd_q`; `OrderResult`s come back on the shared queue and are applied to belief. `simulate`
+  now follows `dry_run` rather than being forced true, and the refusal is gone.
 
-1. **Wire the engine.** Translate each executable `Action` into an `OrderCommand` (the engine
-   supplies `risk_amount` from `risk_budget(cfg, snap.balance)`, since it has both), push it down
-   that slave's `cmd_q`, and handle `OrderResult` in the drain loop alongside `Snapshot`. Then
-   drop the `dry_run = False` refusal in `Engine._reconcile`.
+### What is dispatched, and what is deliberately not
+
+Four conditions, all of which must hold: **not** a dry run, the action is `executable`
+(a skip is a record, never an instruction), its kind is in `protocol.DISPATCHABLE_KINDS`, and
+the slave still has a worker and a snapshot.
+
+`DISPATCHABLE_KINDS` omits `MODIFY_SLTP`, `MODIFY_ORDER` and `ORDER_FILLED`. The first two
+because the executor declines them until Stage 3; the last because it is a report about the
+slave's *own* fill and must never be sent at all. `step()` takes the set so that undispatchable
+kinds are never put **in flight** either — the alternative (send it, let the executor decline)
+produces one ERROR per distinct stop value, forever, for a gap we already know about, and a log
+that trains its reader to ignore ERROR is worse than no log. The cost of filtering is that the
+gap goes quiet, so the engine warns once per session per kind instead.
+
+### Correlating results: why `command_id` is checked in the engine
+
+The ledger keys belief on `(slave, master ticket, op)` and ignores `command_id`. That is fine
+while exactly one command per key is outstanding, which `_inflight` guarantees — but not after
+`expire_inflight` gives up: the decision is re-derived, re-sent under a **new** id, and the
+stranded answer to the old one would then be applied to the new command's key and describe the
+wrong order.
+
+So the engine keeps `_pending_cmd: key -> (command_id, sent_at)` and refuses any result whose
+id does not match, loudly, without touching the ledger. The entry is left in place so a correct
+later answer can still land. Pruning is age-based rather than driven by the ledger's expiry,
+because `expire_inflight` does not report *which op* it gave up on, and dropping every entry
+for a ticket would refuse a legitimate answer to a sibling command on the same position.
+
+**A command that cannot even be sent fails immediately** rather than sitting in flight for the
+full timeout while nothing is coming. For an OPEN or PLACE that is a permanent exclusion, which
+is the honest reading of "we could not get it out in time".
+
+### Verifying the wiring — the demo run, in this order
+
+Nothing below has been done yet. One slave, on a demo account, `max_lot` small.
+
+1. `dry_run = True` first. Confirm the log still says `[dry-run]` and the command queue
+   receives nothing.
+2. **Point the slave at a non-demo terminal with `allow_live_trading = False` and confirm the
+   refusal** — `ok=False, "account is not a demo"`, and the OPEN permanently excluded. Do this
+   *before* anything else works: it is the guard protecting the other fourteen terminals.
+3. Back to demo. `dry_run = False`, `copy_sltp = False` on that slave (silences the
+   undispatchable warning for run one), `max_lot = 0.02`. Master opens 0.01 lots **with a
+   stop**. Confirm, in order: the intent line, the `-> OPEN ... (cmd 1)` dispatch line, the
+   worker's result line, a `mapping.db` row carrying the real slave ticket, and magic `260919`
+   visible in the slave terminal's Trade tab.
+4. Master closes. Confirm CLOSE dispatched, result ok, row gone.
+5. Master takes a partial. Confirm REDUCE with the right fraction.
+6. Move the master's stop. Confirm the once-per-session warning and that **nothing is sent**.
+7. Kill the slave's worker mid-OPEN. Confirm `expire_inflight` fires at 30s with its
+   "will appear as an orphan" error, then restart and confirm the orphan hold engages and `o`
+   clears it. This is the loop that startup reconciliation exists to close.
 
 **Position mapping must survive restart.** Options considered:
 

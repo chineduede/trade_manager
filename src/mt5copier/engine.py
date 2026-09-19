@@ -14,6 +14,7 @@ The engine process must never import MetaTrader5. It imports :mod:`worker` only 
 
 from __future__ import annotations
 
+import itertools
 import multiprocessing as mp
 import queue
 import threading
@@ -25,7 +26,17 @@ from pathlib import Path
 from .config import AppConfig, Role, SizingMode, TerminalConfig
 from .logging_setup import get_logger
 from .paths import dryrun_store_path, log_dir, mapping_db_path
-from .protocol import COPIER_MAGIC, Command, CommandKind, Snapshot, WorkerState
+from .protocol import (
+    COPIER_MAGIC,
+    DISPATCHABLE_KINDS,
+    ActionKind,
+    Command,
+    CommandKind,
+    OrderCommand,
+    OrderResult,
+    Snapshot,
+    WorkerState,
+)
 from .reconcile import Action, CopyLedger, SlaveLink
 from .sizing import risk_budget
 from .store import MappingStore, Orphan, find_missing, find_missing_orders, find_orphans
@@ -39,6 +50,13 @@ _ACTION_HISTORY = 500
 """How many intended actions to keep for the UI. Bounded because a busy master could otherwise
 grow this without limit over a long session."""
 
+_RESULT_HISTORY = 200
+
+_PENDING_CMD_TTL_S = 120.0
+"""How long the engine remembers which command_id it last sent for a key, so a stale answer
+can be recognised and refused. Comfortably longer than the ledger's in-flight timeout, since
+the whole point is to still know about a command the ledger has already given up on."""
+
 
 @dataclass(frozen=True, slots=True)
 class RecordedAction:
@@ -51,6 +69,14 @@ class RecordedAction:
 
     ts: float
     action: Action
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedResult:
+    """What the broker said, plus when we heard it."""
+
+    ts: float
+    result: OrderResult
 
 
 @dataclass
@@ -124,7 +150,6 @@ class Engine:
         # --- detection and copying ----------------------------------------------------------
         self._actions: deque[RecordedAction] = deque(maxlen=_ACTION_HISTORY)
         self._action_total = 0
-        self._warned_live = False
         self._blocked_reason: str | None = None
 
         # --- startup reconciliation and per-slave holds --------------------------------------
@@ -137,6 +162,15 @@ class Engine:
         a *new* orphan appearing later re-arms the hold instead of inheriting the old consent."""
         self._hold_reason: dict[str, str] = {}
         self._warned_dry_missing: set[str] = set()
+
+        # --- dispatch ------------------------------------------------------------------------
+        self._command_ids = itertools.count(1)
+        self._pending_cmd: dict[tuple[str, int, ActionKind], tuple[int, float]] = {}
+        """The command_id last sent per (slave, master ticket, op), so an answer to a command
+        we have already given up on can be recognised and refused instead of applied."""
+        self._results: deque[RecordedResult] = deque(maxlen=_RESULT_HISTORY)
+        self._failed_total = 0
+        self._warned_undispatchable: set[ActionKind] = set()
 
         self._dryrun_path = state_path if state_path is not None else dryrun_store_path()
         self._mapping_path = mapping_path if mapping_path is not None else mapping_db_path()
@@ -304,7 +338,12 @@ class Engine:
     # --- state ------------------------------------------------------------------------------
 
     def _drain_loop(self) -> None:
-        """Move snapshots off the shared queue into the latest-wins state map."""
+        """Move snapshots and order results off the shared queue.
+
+        One queue carries both, discriminated by type. Snapshots are latest-wins and droppable;
+        a result is neither, because it is the only evidence that an order we sent actually
+        happened.
+        """
         while not self._stop_drain.is_set():
             try:
                 snap = self._out_q.get(timeout=0.2)
@@ -312,6 +351,10 @@ class Engine:
                 continue
             except (EOFError, OSError):
                 break
+            if isinstance(snap, OrderResult):
+                with self._lock:
+                    self._on_result(snap)
+                continue
             if not isinstance(snap, Snapshot):
                 continue
             with self._lock:
@@ -360,15 +403,6 @@ class Engine:
             return
         self._set_blocked(None)
 
-        if not self._cfg.dry_run and not self._warned_live:
-            # Nothing dispatches commands yet, so a false dry_run cannot be honoured. Saying so
-            # once is the difference between a known gap and a copier quietly trusted to work.
-            self._warned_live = True
-            log.error(
-                "dry_run is false but the engine does not dispatch order commands yet; "
-                "detecting only and sending nothing"
-            )
-
         # Before the links, not after: deciding whether a slave may be copied to now includes
         # reconciling it against the store, so the store has to exist first.
         self._ensure_store()
@@ -378,7 +412,13 @@ class Engine:
 
         for tid, ticket in self._ledger.expire_inflight():
             log.error("gave up waiting for #%s on %s", ticket, tid[:8])
+            # If that order did reach the broker, a position exists that we have no record of.
+            # Reconciling this slave again is what turns it into a reported orphan instead of
+            # a silence -- which is exactly what the expiry message promises.
+            self._forget_reconciliation(tid)
+        self._sweep_pending()
 
+        dry = self._cfg.dry_run
         try:
             actions = self._ledger.step(
                 snap.open_positions,
@@ -386,9 +426,10 @@ class Engine:
                 master_orders=snap.pending_orders,
                 now=time.monotonic(),
                 grace_seconds=self._cfg.join_grace_seconds,
-                # Until dispatch exists, always simulate: the ledger must not be left believing
-                # an order is in flight that nothing will ever answer.
-                simulate=True,
+                # The one difference between rehearsal and the real thing: a dry run pretends
+                # every order succeeded, live believes the result when it arrives.
+                simulate=dry,
+                dispatchable=DISPATCHABLE_KINDS,
             )
         except Exception:
             # A crash in the diff must not kill the drain thread, which every terminal's
@@ -400,15 +441,198 @@ class Engine:
             return
 
         now = time.time()
-        labels = {link.cfg.terminal_id: link.cfg.label for link in links}
+        cfgs = {link.cfg.terminal_id: link.cfg for link in links}
+        prefix = "[dry-run]" if dry else "[live]"
         for action in actions:
             self._actions.append(RecordedAction(ts=now, action=action))
             self._action_total += 1
+            cfg = cfgs.get(action.terminal_id)
             log.info(
-                "[dry-run] %s: %s",
-                labels.get(action.terminal_id, action.terminal_id[:8]),
+                "%s %s: %s",
+                prefix,
+                cfg.label if cfg is not None else action.terminal_id[:8],
                 action.describe(),
             )
+
+            if not action.executable:
+                continue
+            if action.kind not in DISPATCHABLE_KINDS:
+                self._warn_undispatchable(action.kind)
+                continue
+            if dry or cfg is None:
+                continue
+            slave_snap = self._snapshots.get(action.terminal_id)
+            if slave_snap is None:
+                continue
+            self._dispatch(action, cfg, slave_snap)
+
+    def _warn_undispatchable(self, kind: ActionKind) -> None:
+        """Say once per session that we are deriving something this build cannot send.
+
+        Without this the gap is silent: filtering the kind out keeps the log clean, and a
+        clean log is indistinguishable from SL/TP sync working.
+        """
+        if kind in self._warned_undispatchable:
+            return
+        self._warned_undispatchable.add(kind)
+        log.warning(
+            "%s is being derived but this build cannot send it (executor: stage 3); "
+            "slave stops and targets will not follow the master",
+            kind,
+        )
+
+    def _dispatch(self, action: Action, cfg: TerminalConfig, snap: Snapshot) -> None:
+        """Turn one action into an order command and put it on that slave's queue.
+
+        The command is self-contained by design: the engine decides *what* and *how much
+        money*, the worker decides *how many lots*, and the worker never reads config. That is
+        why every per-slave setting is copied in here rather than looked up on the far side.
+        """
+        risk = self._risk_amount(cfg, snap)
+        if risk is None:
+            # _prepare_slave holds a slave that cannot be sized, so this should be
+            # unreachable; if it ever is reached, refusing is still the safe answer.
+            log.error(
+                "not sending %s for #%s: %s has no risk budget",
+                action.kind,
+                action.master_ticket,
+                cfg.label,
+            )
+            return
+
+        command_id = next(self._command_ids)
+        cmd = OrderCommand(
+            command_id=command_id,
+            op=action.kind,
+            master_ticket=action.master_ticket,
+            master_symbol=action.master_symbol,
+            direction=action.type,
+            order_type=action.order_type,
+            entry=action.entry,
+            sl=action.sl,
+            tp=action.tp,
+            master_volume=action.master_volume,
+            sizing_basis=action.sizing_basis,
+            lot_multiple=action.lot_multiple,
+            risk_amount=risk,
+            commission_per_lot=cfg.commission_per_lot_round_turn,
+            slippage_points=cfg.slippage_buffer_points,
+            max_lot=cfg.max_lot,
+            deviation_points=cfg.max_deviation_points,
+            close_fraction=action.close_fraction,
+            slave_ticket=action.slave_ticket,
+            symbol_prefix=cfg.symbol_prefix,
+            symbol_suffix=cfg.symbol_suffix,
+            magic=COPIER_MAGIC,
+            # Short on purpose: MT5 truncates comments, and the mapping table is the authority
+            # on ownership. This is a hint for a human reading the terminal.
+            comment=f"c{action.master_ticket}",
+            allow_live=cfg.allow_live_trading,
+        )
+
+        worker = self._workers.get(cfg.terminal_id)
+        if worker is None:
+            self._abandon(cmd, cfg.terminal_id, "no worker is running for this terminal")
+            return
+        try:
+            worker.cmd_q.put_nowait(cmd)
+        except Exception as exc:
+            self._abandon(
+                cmd, cfg.terminal_id, f"its command queue would not accept the order: {exc!r}"
+            )
+            return
+
+        self._pending_cmd[(action.terminal_id, action.master_ticket, action.kind)] = (
+            command_id,
+            time.monotonic(),
+        )
+        log.info("-> %s %s #%s (cmd %s)", cfg.label, action.kind, action.master_ticket, command_id)
+
+    def _abandon(self, cmd: OrderCommand, terminal_id: str, error: str) -> None:
+        """Fail a command we could not even send, immediately.
+
+        The alternative is leaving the key in flight for the ledger's full timeout while
+        nothing is coming, which delays the same outcome by 30s and looks like a broker that
+        went quiet. For an OPEN or a PLACE this is a *permanent* exclusion of that ticket,
+        which is the honest reading of "we could not get the order out in time": by the time
+        anything changed, the slave would be filling far from the master's entry.
+        """
+        log.error(
+            "could not send %s for #%s to %s: %s",
+            cmd.op,
+            cmd.master_ticket,
+            terminal_id[:8],
+            error,
+        )
+        result = OrderResult(
+            command_id=cmd.command_id,
+            terminal_id=terminal_id,
+            op=cmd.op,
+            master_ticket=cmd.master_ticket,
+            ok=False,
+            error=error,
+        )
+        self._record_result(result)
+        self._ledger.apply_result(result)
+
+    def _on_result(self, result: OrderResult) -> None:
+        """Believe what the broker said, if it is answering the command we are waiting for.
+
+        The correlation matters because the ledger keys belief on
+        ``(slave, master ticket, op)`` and not on the command id. Without this check, a result
+        that arrives after the ledger gave up -- and after the decision was re-derived and
+        re-sent -- would be applied to the *new* command's key and describe the wrong order.
+
+        Caller must hold the lock.
+        """
+        key = (result.terminal_id, result.master_ticket, result.op)
+        expected = self._pending_cmd.get(key)
+        if expected is None or expected[0] != result.command_id:
+            self._record_result(result)
+            log.error(
+                "dropping result for %s #%s on %s: it answers command %s, we are waiting on %s",
+                result.op,
+                result.master_ticket,
+                result.terminal_id[:8],
+                result.command_id,
+                "nothing" if expected is None else expected[0],
+            )
+            return
+        del self._pending_cmd[key]
+        self._record_result(result)
+        if result.ok:
+            log.info("%s", result.describe())
+        else:
+            log.error("%s", result.describe())
+        self._ledger.apply_result(result)
+
+    def _record_result(self, result: OrderResult) -> None:
+        self._results.append(RecordedResult(ts=time.time(), result=result))
+        if not result.ok:
+            self._failed_total += 1
+
+    def _sweep_pending(self) -> None:
+        """Forget command ids too old to be answered.
+
+        Age-based rather than driven by the ledger's expiry, because ``expire_inflight`` does
+        not report which *op* it gave up on, and dropping every entry for a ticket would
+        refuse a legitimate answer to a sibling command on the same position.
+        """
+        cutoff = time.monotonic() - _PENDING_CMD_TTL_S
+        for key in [k for k, (_, sent_at) in self._pending_cmd.items() if sent_at < cutoff]:
+            del self._pending_cmd[key]
+
+    def recent_results(self, limit: int | None = None) -> list[RecordedResult]:
+        """Most recent order results, oldest first."""
+        with self._lock:
+            items = list(self._results)
+        return items if limit is None else items[-limit:]
+
+    @property
+    def failed_total(self) -> int:
+        """Order results that came back as failures since this engine started."""
+        with self._lock:
+            return self._failed_total
 
     def _set_blocked(self, reason: str | None) -> None:
         """Record, and announce, that detection cannot run -- or that it can again.

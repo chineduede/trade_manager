@@ -176,6 +176,26 @@ class ActionKind(StrEnum):
     the order to the position it became."""
 
 
+DISPATCHABLE_KINDS = frozenset(
+    {
+        ActionKind.OPEN,
+        ActionKind.PLACE,
+        ActionKind.CLOSE,
+        ActionKind.REDUCE,
+        ActionKind.CANCEL,
+    }
+)
+"""Which actions this build can actually send, as opposed to merely derive.
+
+``MODIFY_SLTP`` and ``MODIFY_ORDER`` are absent because the executor declines them until
+Stage 3, and ``ORDER_FILLED`` because it is a report about the slave's own fill and must never
+be sent at all. Derivation is unaffected: an undispatchable action is still recorded, logged
+and shown, it just never goes in flight waiting for an answer nothing will give.
+
+Widen this when Stage 3 lands, or SL/TP sync stays silently off.
+"""
+
+
 class SizingBasis(StrEnum):
     """How the worker must compute the lots for an OPEN or a PLACE.
 

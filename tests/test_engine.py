@@ -15,7 +15,7 @@ import pytest
 
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.engine import Engine, TerminalView
-from mt5copier.protocol import Snapshot, WorkerState
+from mt5copier.protocol import ActionKind, OrderResult, Snapshot, WorkerState
 
 TID_A = "A" * 32
 TID_B = "B" * 32
@@ -222,8 +222,12 @@ def test_views_return_copies(engine: Engine, cfg: AppConfig) -> None:
 # --- drain loop ----------------------------------------------------------------------------
 
 
-def run_drain(engine: Engine, snapshots: list[Snapshot], settle: float = 1.5) -> None:
-    """Feed snapshots through the real queue and drain thread, then stop it."""
+def run_drain(engine: Engine, snapshots: list[object], settle: float = 1.5) -> None:
+    """Feed items through the real queue and drain thread, then stop it.
+
+    Takes ``object`` rather than ``Snapshot`` because one queue carries both snapshots and
+    order results, and the drain loop has to tell them apart.
+    """
     engine._stop_drain.clear()
     thread = threading.Thread(target=engine._drain_loop, daemon=True)
     thread.start()
@@ -281,11 +285,37 @@ def test_drain_keeps_last_error_after_recovery(engine: Engine) -> None:
     assert snap.error == "IPC timeout"
 
 
-def test_drain_ignores_non_snapshot_objects(engine: Engine) -> None:
+def test_drain_ignores_objects_it_does_not_recognise(engine: Engine) -> None:
+    """Anything that is neither a snapshot nor an order result is dropped, not crashed on --
+    the drain thread is what every terminal's liveness display depends on."""
     run_drain(
         engine,
         [
+            "not a snapshot",
+            42,
+            None,
             Snapshot(terminal_id=TID_A, state=WorkerState.CONNECTED, seq=1),
         ],
     )
     assert set(engine._snapshots) == {TID_A}
+
+
+def test_drain_consumes_order_results(engine: Engine) -> None:
+    """Results share the queue with snapshots. Dropping them would leave every dispatched
+    command in flight forever."""
+    run_drain(
+        engine,
+        [
+            Snapshot(terminal_id=TID_A, state=WorkerState.CONNECTED, seq=1),
+            OrderResult(
+                command_id=1,
+                terminal_id=TID_A,
+                op=ActionKind.OPEN,
+                master_ticket=11,
+                ok=False,
+                error="refused",
+            ),
+        ],
+    )
+    assert [r.result.master_ticket for r in engine.recent_results()] == [11]
+    assert engine.failed_total == 1

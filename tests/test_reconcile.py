@@ -11,6 +11,7 @@ all.
 
 from __future__ import annotations
 
+import queue
 import time
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from mt5copier.config import AppConfig, NoStopPolicy, Role, SizingMode, Terminal
 from mt5copier.engine import Engine
 from mt5copier.protocol import (
     COPIER_MAGIC,
+    OrderCommand,
     OrderResult,
     OrderType,
     PendingOrder,
@@ -1208,6 +1210,73 @@ def wire_slave(
     eng._received_at[terminal_id] = time.monotonic() - age_s
 
 
+class _FakeProcess:
+    def is_alive(self) -> bool:
+        return True
+
+    def join(self, timeout: float | None = None) -> None:
+        pass
+
+
+class _FakeQueue:
+    """Records what the engine tried to send, instead of crossing a process boundary."""
+
+    def __init__(self, accept: bool = True) -> None:
+        self.sent: list[object] = []
+        self.accept = accept
+
+    def put_nowait(self, item: object) -> None:
+        if not self.accept:
+            raise queue.Full
+        self.sent.append(item)
+
+    def close(self) -> None:
+        pass
+
+
+class _FakeWorker:
+    def __init__(self, terminal_id: str, accept: bool = True) -> None:
+        self.terminal_id = terminal_id
+        self.process = _FakeProcess()
+        self.cmd_q = _FakeQueue(accept=accept)
+        self.started_at = time.monotonic()
+
+
+def arm_slave(eng: Engine, terminal_id: str = TID_SLAVE, accept: bool = True) -> _FakeQueue:
+    """Give the engine somewhere to send commands, without spawning a process."""
+    worker = _FakeWorker(terminal_id, accept=accept)
+    eng._workers[terminal_id] = worker  # type: ignore[assignment]
+    return worker.cmd_q
+
+
+def go_live(eng: Engine) -> None:
+    eng.config.dry_run = False
+
+
+def answer(
+    eng: Engine,
+    cmd: OrderCommand,
+    *,
+    ok: bool = True,
+    slave_ticket: int = 5001,
+    command_id: int | None = None,
+) -> None:
+    """Deliver the result the worker would have published for this command."""
+    eng._on_result(
+        OrderResult(
+            command_id=cmd.command_id if command_id is None else command_id,
+            terminal_id=TID_SLAVE,
+            op=cmd.op,
+            master_ticket=cmd.master_ticket,
+            ok=ok,
+            slave_ticket=slave_ticket,
+            slave_symbol=cmd.master_symbol,
+            requested_volume=0.5,
+            filled_volume=0.5,
+        )
+    )
+
+
 def watch(eng: Engine) -> None:
     """One tick against a flat master, establishing continuity."""
     eng._reconcile(snap(open_positions=()))
@@ -1340,16 +1409,14 @@ def test_an_order_deleted_on_the_master_is_cancelled(engine: Engine) -> None:
     assert engine.recent_actions()[-1].action.kind is ActionKind.CANCEL
 
 
-def test_engine_refuses_to_act_on_a_dry_run_it_cannot_honour(
-    engine: Engine, caplog: pytest.LogCaptureFixture
-) -> None:
-    """Stage 2a has no execution code, so dry_run=False must be loudly declined, not obeyed
-    and not silently ignored."""
+def test_a_dry_run_dispatches_nothing(engine: Engine) -> None:
     wire_slave(engine)
-    engine.config.dry_run = False
-    with caplog.at_level("ERROR"):
-        engine._reconcile(snap(open_positions=(pos(),)))
-    assert any("sending nothing" in r.getMessage() for r in caplog.records)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    assert [r.action.kind for r in engine.recent_actions()] == [ActionKind.OPEN]
+    assert cmd_q.sent == [], "a rehearsal sends nothing, however complete it looks"
 
 
 def test_engine_persists_and_restores_its_ledger(engine_cfg: AppConfig, tmp_path: Path) -> None:
@@ -1670,3 +1737,221 @@ def test_a_restart_reconciles_before_deriving_anything(
     assert eng.holds() == {}
     assert eng.believed_copies() == 0
     assert all(r.action.kind is not ActionKind.CLOSE for r in eng.recent_actions())
+
+
+# --- dispatch -------------------------------------------------------------------------------
+#
+# From here on an order can actually leave the process, so these tests are about what is sent,
+# what is deliberately not sent, and what is believed only once the broker has answered.
+
+
+def test_an_executable_action_becomes_an_order_command(engine: Engine) -> None:
+    """The engine decides what and how much money; the worker decides how many lots. So every
+    per-slave setting the sizing needs has to be carried in the command itself."""
+    cfg = engine.config.terminals[TID_SLAVE]
+    cfg.symbol_prefix = "x"
+    cfg.max_lot = 0.02
+    cfg.commission_per_lot_round_turn = 7.0
+    cfg.slippage_buffer_points = 3
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    assert len(cmd_q.sent) == 1
+    cmd = cmd_q.sent[0]
+    assert isinstance(cmd, OrderCommand)
+    assert cmd.op is ActionKind.OPEN
+    assert cmd.master_ticket == 11
+    assert cmd.magic == COPIER_MAGIC
+    assert cmd.risk_amount == pytest.approx(100.0), "1% of a 10,000 balance"
+    assert cmd.allow_live is False, "the demo-only guard is not bypassed by default"
+    assert cmd.symbol_prefix == "x"
+    assert cmd.max_lot == pytest.approx(0.02)
+    assert cmd.commission_per_lot == pytest.approx(7.0)
+    assert cmd.slippage_points == 3
+    assert cmd.deviation_points == cfg.max_deviation_points
+
+
+def test_nothing_is_believed_until_the_broker_answers(engine: Engine) -> None:
+    """The hazard the in-flight mechanism exists for: between sending an open and learning it
+    filled, the master's state has not changed, so the same open derives again."""
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    assert engine.believed_copies() == 0, "not yet -- nothing has filled"
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+    assert len(cmd_q.sent) == 1, "withheld while the first command is unanswered"
+
+    answer(engine, cmd_q.sent[0])
+    assert engine.believed_copies() == 1
+    assert [r.result.ok for r in engine.recent_results()] == [True]
+
+
+def test_a_skipped_action_is_never_dispatched(engine: Engine) -> None:
+    """A trade with no stop, on a slave set to SKIP, is recorded and sent nowhere."""
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=0.0),)))
+
+    assert engine.recent_actions()[-1].action.skip_reason is not None
+    assert cmd_q.sent == []
+
+
+def test_modify_sltp_is_derived_but_never_sent(
+    engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The executor declines modification until stage 3. Filtering it out of dispatch keeps it
+    out of flight -- but the gap has to announce itself, or a clean log looks like sync
+    working."""
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.08),)))
+    answer(engine, cmd_q.sent[0])
+    sent_after_open = len(cmd_q.sent)
+
+    with caplog.at_level("WARNING"):
+        engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0825),)))
+        engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0850),)))
+
+    kinds = [r.action.kind for r in engine.recent_actions()]
+    assert ActionKind.MODIFY_SLTP in kinds, "still derived and still reported"
+    assert len(cmd_q.sent) == sent_after_open, "and never sent"
+    assert engine._ledger.inflight_count == 0, "nothing waits for an answer that never comes"
+    believed = engine._ledger.believed(TID_SLAVE)[0]
+    assert believed.synced_sl == pytest.approx(1.08), "belief did not move on an unsent sync"
+    warnings = [r for r in caplog.records if "cannot send it" in r.getMessage()]
+    assert len(warnings) == 1, "once per session, not once per stop move"
+
+
+def test_order_filled_is_never_dispatched(engine: Engine) -> None:
+    """It is a report about the slave's own fill, not an instruction. Nothing to send."""
+    engine.config.terminals[TID_SLAVE].copy_pending = True
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+
+    engine._reconcile(
+        snap(pending_orders=(order(ticket=11),), open_positions=()),
+    )
+    placed = [c for c in cmd_q.sent if isinstance(c, OrderCommand)]
+    if placed:
+        answer(engine, placed[0])
+
+    # The master's order fills: it leaves the order list and appears as a position.
+    engine._reconcile(snap(open_positions=(pos(ticket=11),), pending_orders=()))
+
+    assert all(
+        c.op is not ActionKind.ORDER_FILLED for c in cmd_q.sent if isinstance(c, OrderCommand)
+    )
+
+
+def test_a_close_is_dispatched_and_forgets_the_row(engine: Engine) -> None:
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+    answer(engine, cmd_q.sent[0])
+
+    engine._reconcile(snap(open_positions=()))
+    close = cmd_q.sent[-1]
+    assert isinstance(close, OrderCommand)
+    assert close.op is ActionKind.CLOSE
+    assert close.slave_ticket == 5001, "the real ticket the broker gave us"
+
+    answer(engine, close)
+    assert engine.believed_copies() == 0
+
+
+def test_a_result_answering_a_command_we_gave_up_on_is_dropped(
+    engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The ledger keys belief on (slave, ticket, op), not on the command id. Without this check
+    a stranded answer would be applied to whatever command now holds that key, and describe the
+    wrong order."""
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    with caplog.at_level("ERROR"):
+        answer(engine, cmd_q.sent[0], command_id=999)
+
+    assert engine.believed_copies() == 0, "belief must not move on an answer we did not await"
+    assert any("we are waiting on" in r.getMessage() for r in caplog.records)
+
+
+def test_a_result_arriving_twice_is_only_believed_once(engine: Engine) -> None:
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+    cmd = cmd_q.sent[0]
+
+    answer(engine, cmd)
+    answer(engine, cmd)
+
+    assert engine.believed_copies() == 1
+
+
+def test_a_command_that_cannot_be_queued_fails_immediately(
+    engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Leaving it in flight would delay the same outcome by the full timeout while nothing is
+    coming, and look like a broker that went quiet."""
+    go_live(engine)
+    wire_slave(engine)
+    arm_slave(engine, accept=False)
+    watch(engine)
+
+    with caplog.at_level("ERROR"):
+        engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    assert engine._ledger.inflight_count == 0
+    assert engine.failed_total == 1
+    assert engine.believed_copies() == 0
+    assert any("would not accept" in r.getMessage() for r in caplog.records)
+
+
+def test_a_failed_open_is_not_retried(engine: Engine) -> None:
+    """A decline is final. Retrying a permanent failure repeats it on every tick; retrying a
+    transient one places the trade long after the price has moved."""
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+    answer(engine, cmd_q.sent[0], ok=False)
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    assert len(cmd_q.sent) == 1, "the ticket is excluded, not attempted again"
+    assert engine.failed_total == 1
+
+
+def test_a_held_slave_is_never_dispatched_to(engine: Engine) -> None:
+    """The hold has to bite before dispatch, not merely before belief."""
+    go_live(engine)
+    wire_slave(engine, open_positions=(pos(ticket=999, magic=COPIER_MAGIC),))
+    cmd_q = arm_slave(engine)
+    watch(engine)
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    assert cmd_q.sent == []
+    assert set(engine.holds()) == {TID_SLAVE}

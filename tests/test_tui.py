@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from mt5copier.config import AppConfig, Role, TerminalConfig
-from mt5copier.engine import RecordedAction, TerminalView
+from mt5copier.engine import RecordedAction, RecordedResult, TerminalView
 from mt5copier.store import Orphan
 from mt5copier.tui.app import CopierApp
 
@@ -36,6 +36,7 @@ class StubEngine:
         self.held: dict[str, str] = {}
         self.found_orphans: dict[str, list[Orphan]] = {}
         self.acknowledged: list[str] = []
+        self.results: list[RecordedResult] = []
 
     def start(self) -> None:
         self.started = True
@@ -95,6 +96,15 @@ class StubEngine:
         self.held.pop(terminal_id, None)
         return len(found)
 
+    # --- Stage 2c dispatch ------------------------------------------------------------------
+
+    def recent_results(self, limit: int | None = None) -> list[RecordedResult]:
+        return list(self.results) if limit is None else list(self.results)[-limit:]
+
+    @property
+    def failed_total(self) -> int:
+        return sum(1 for r in self.results if not r.result.ok)
+
 
 @pytest.fixture
 def cfg(tmp_path: Path) -> AppConfig:
@@ -153,6 +163,29 @@ async def test_statusbar_reports_no_master_initially(app: CopierApp) -> None:
         text = str(app.query_one("#statusbar", Static).render())
         assert "master: (none)" in text
         assert "detection off" in text
+
+
+async def test_a_dry_run_and_a_live_session_do_not_look_alike(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    """The single most important thing this UI has to communicate. A copier that looks the same
+    whether or not it can send orders is one nobody can trust.
+    """
+    async with app.run_test():
+        from textual.widgets import Static
+
+        cfg.copying_enabled = True
+        cfg.dry_run = True
+        app._refresh()
+        dry = str(app.query_one("#statusbar", Static).render())
+
+        cfg.dry_run = False
+        app._refresh()
+        live = str(app.query_one("#statusbar", Static).render())
+
+        assert "nothing sent" in dry
+        assert "COPYING LIVE" in live
+        assert "LIVE" in app.sub_title
 
 
 # --- role assignment -----------------------------------------------------------------------

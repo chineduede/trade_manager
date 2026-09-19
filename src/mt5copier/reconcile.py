@@ -921,6 +921,7 @@ class CopyLedger:
         now: float | None = None,
         grace_seconds: float = DEFAULT_GRACE_SECONDS,
         simulate: bool = True,
+        dispatchable: frozenset[ActionKind] | None = None,
     ) -> list[Action]:
         """Reconcile every connected slave against the master's complete position and order
         lists.
@@ -944,6 +945,10 @@ class CopyLedger:
         position opened four seconds ago has none of the sizing problem that makes adopting an
         old position dishonest, since the slave still fills within a whisker of the master's
         entry.
+
+        ``dispatchable``, when given, names the action kinds the caller can actually send.
+        Anything outside it is still derived and reported but never held as belief or put in
+        flight, because nothing will answer for it. Default None means no restriction.
         """
         links = list(links)
         now = time.monotonic() if now is None else now
@@ -978,7 +983,9 @@ class CopyLedger:
                 link.cfg,
                 excluded=excluded_orders,
             )
-            for action in self._emit(order_actions, fresh, simulate=simulate):
+            for action in self._emit(
+                order_actions, fresh, simulate=simulate, dispatchable=dispatchable
+            ):
                 if action.kind is ActionKind.ORDER_FILLED:
                     self._on_fill(action, positions_by_ticket.get(action.master_ticket), link.cfg)
                 elif action.kind is ActionKind.PLACE and not action.executable:
@@ -988,6 +995,7 @@ class CopyLedger:
                 reconcile_slave(master_positions, self.believed(tid), link.cfg, excluded=excluded),
                 fresh,
                 simulate=simulate,
+                dispatchable=dispatchable,
             ):
                 if action.kind is ActionKind.OPEN and not action.executable:
                     # A decline is final. Whatever the reason -- no stop, a filter, or the
@@ -1003,7 +1011,12 @@ class CopyLedger:
         return fresh
 
     def _emit(
-        self, actions: Sequence[Action], fresh: list[Action], *, simulate: bool
+        self,
+        actions: Sequence[Action],
+        fresh: list[Action],
+        *,
+        simulate: bool,
+        dispatchable: frozenset[ActionKind] | None = None,
     ) -> list[Action]:
         """Keep the actions that are new or changed, and hand them out once each.
 
@@ -1030,6 +1043,11 @@ class CopyLedger:
             fresh.append(action)
             kept.append(action)
             if not action.executable:
+                continue
+            if dispatchable is not None and action.kind not in dispatchable:
+                # Reported, but nothing can send it, so it must not become belief either. The
+                # check precedes the simulate branch deliberately: a dry run that believed
+                # SL/TP had synced while live could not would stop being a rehearsal of live.
                 continue
             if simulate:
                 self.apply_result(_simulated_result(action), simulated=True)

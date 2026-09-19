@@ -44,6 +44,10 @@ _COLUMNS: tuple[tuple[str, str, int], ...] = (
 )
 
 _ACTION_ROWS = 6
+
+_RESULT_ROWS = 3
+"""Order results shown for the selected terminal. Few, because the detail panel is short and
+the status bar carries the running failure count."""
 """Rows of detection history on screen. The full history is in the engine and the log file."""
 
 _STATE_STYLE = {
@@ -61,15 +65,18 @@ _STATE_STYLE = {
 
 
 class CopierApp(App[None]):
-    """Discover, designate, observe -- and, from Stage 2a, report what *would* be copied.
+    """Discover, designate, observe -- and, from Stage 2c, actually copy.
 
-    Still no order ever leaves this process: the detection panel is fed by the engine's
-    dry-run diff, which decides and logs but never sends.
+    **Whether an order can leave this process now depends on one setting.** With ``dry_run``
+    true, the default, the panel reports what *would* be copied and nothing is sent. With it
+    false, the same decisions are dispatched to the slaves. The header and status bar say which
+    of the two is happening, because a copier that looks identical in both modes is one nobody
+    can trust.
     """
 
     CSS_PATH = "app.tcss"
     TITLE = "MT5 Trade Copier"
-    SUB_TITLE = "Stage 2a - detection only (dry run)"
+    SUB_TITLE = "Stage 2c - live copying"
 
     BINDINGS = [
         Binding("m", "set_master", "Master"),
@@ -238,19 +245,26 @@ class CopierApp(App[None]):
         master = self._cfg.master
         bar = self.query_one("#statusbar", Static)
 
+        dry = self._cfg.dry_run
+        # The subtitle carries the mode too, because the status bar scrolls out of a small
+        # terminal and "is this live?" must never need a scroll to answer.
+        self.sub_title = "Stage 2c - dry run" if dry else "Stage 2c - LIVE, orders are sent"
+
         if self._cfg.copying_enabled:
-            copy_state = "DETECTING (dry run - nothing sent)"
+            copy_state = "DETECTING (dry run - nothing sent)" if dry else "COPYING LIVE"
             bar.set_classes("copying")
         else:
             copy_state = "detection off"
             bar.set_classes("halted" if master else "")
 
+        failed = self._engine.failed_total
         bar.update(
             f" {copy_state}  |  master: {master.label if master else '(none)'}"
             f"  |  slaves: {len(self._cfg.slaves)}"
             f"  |  live {h['live']}/{h['supervised']}"
             + (f"  |  STALE {h['stale']}" if h["stale"] else "")
             + (f"  |  HELD {len(self._engine.holds())}" if self._engine.holds() else "")
+            + (f"  |  FAILED {failed}" if failed else "")
             + f"  |  intents {self._engine.action_total}"
             f" / tracking {self._engine.believed_copies()}" + f"  |  {h['total']} terminals known"
         )
@@ -281,6 +295,14 @@ class CopierApp(App[None]):
                 lines.append("   ".join(bits))
             if snap.error:
                 lines.append(f"[yellow]last error:[/yellow] {snap.error}")
+        results = [
+            r for r in self._engine.recent_results() if r.result.terminal_id == cfg.terminal_id
+        ][-_RESULT_ROWS:]
+        for r in results:
+            stamp = time.strftime("%H:%M:%S", time.localtime(r.ts))
+            text = escape(f"{stamp}  {r.result.describe()}")
+            lines.append(text if r.result.ok else f"[red]{text}[/red]")
+
         orphans = self._engine.orphans(cfg.terminal_id)
         if orphans:
             lines.append(
@@ -377,7 +399,14 @@ class CopierApp(App[None]):
                 return
             self._cfg.copying_enabled = True
             self._persist_and_sync()
-            self.notify("detection on: dry run, nothing will be sent")
+            if self._cfg.dry_run:
+                self.notify("detection on: dry run, nothing will be sent")
+            else:
+                self.notify(
+                    "COPYING LIVE: orders will be sent to every connected slave",
+                    severity="warning",
+                    timeout=10,
+                )
         else:
             self._cfg.copying_enabled = False
             self._persist_and_sync()
