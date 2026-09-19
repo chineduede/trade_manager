@@ -17,6 +17,20 @@ import time
 from dataclasses import dataclass, field
 from enum import IntEnum, StrEnum
 
+COPIER_MAGIC = 260919
+"""Stamped on every order this copier sends, so it can recognise its own positions.
+
+This is an identity, not a key: it says "ours", never *which* master trade it came from --
+a single 64-bit field cannot reliably carry both, so ``store.py``'s table is the authority on
+that. Its one job is letting startup reconciliation tell our forgotten positions (orphans,
+which must be surfaced) from the user's own trading on the same terminal (none of our
+business).
+
+**Fixed once live copies carry it.** Changing it makes every existing copy unrecognisable --
+they would read as someone else's trades and be silently ignored rather than reported. Chosen
+2026-09-19 against terminals running no EAs, so nothing else on them uses a magic at all.
+"""
+
 
 class PositionType(IntEnum):
     """Direction of an open position.

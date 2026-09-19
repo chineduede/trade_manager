@@ -19,20 +19,19 @@ Check with `grep -rn "OrderCommand" src/mt5copier/engine.py` rather than assumin
 | 4 — pending orders | detection validated; execution not wired |
 | 5 — reverse and filtered copying | inversion implemented, never live-tested |
 
-**The next three steps, in order** — see Stage 2c below for detail:
+**The next step.** The first two of the three are done:
 
-1. **Startup reconciliation.** Per slave, `find_orphans` / `find_missing` before deriving
-   anything. Surface both; drop stale records so no CLOSE is derived against a position that has
-   already gone.
-2. **Swap the ledger's backing store** from simulation to `MappingStore`. Aim for one code
-   path: dry-run is "pretend every order succeeded", live is "believe it when the `OrderResult`
-   says so".
+1. ~~**Startup reconciliation.**~~ Done. Per slave, before anything is derived: orphans are
+   surfaced and **hold that slave until acknowledged**, stale records are dropped so no CLOSE is
+   derived against a position that has already gone. `COPIER_MAGIC = 260919` is fixed.
+2. ~~**Swap the ledger's backing store**~~ Done — one code path, dry-run pretends every order
+   succeeded and live believes the `OrderResult`.
 3. **Engine wiring.** `Action` → `OrderCommand` down the slave's existing `cmd_q`, consume
    `OrderResult` in the drain loop, drop the `dry_run` refusal. **This is the first commit where
    a real order can leave the machine.** Give it its own demo run, on one slave rather than
    fifteen.
 
-Everything in "Safety rails" under Stage 2c is already built except startup reconciliation —
+Everything in "Safety rails" under Stage 2c is now built —
 the demo-only guard landed with Stage 2b deliberately, in the same commit as the first code
 able to send.
 
@@ -401,23 +400,55 @@ Built (`store.py`, and the close/reduce/cancel paths in `executor.py`):
   from our record.
 - ✅ The demo-only guard, which landed early with Stage 2b.
 
-**Still to do, and this is the whole remaining gap before live copying:**
+- ✅ `COPIER_MAGIC = 260919` (`protocol.py`), stamped on every order so `find_orphans` can tell
+  our positions from the user's own trading. **Fixed once live copies carry it** — changing it
+  makes every existing copy unrecognisable, and it would be ignored rather than reported.
+- ✅ `find_missing_orders`, the fourth query. It takes *two* ticket lists because an MT5 pending
+  order that fills becomes a position with the **same ticket**: an order row whose ticket now
+  names a live position has not gone anywhere, it filled, and `ORDER_FILLED` is waiting to
+  convert it in place. Forgetting it would copy the trade a second time as a fresh open.
+- ✅ **Startup reconciliation, per slave, before anything is derived.** It runs inside
+  `_slave_links()`, which is the single gate answering "may we copy to this slave now?" — four
+  conditions: CONNECTED, reports are fresh, reconciled with no unacknowledged orphans, and
+  sizeable. That placement makes the ordering structural rather than conventional: an
+  unreconciled slave is held, so stale rows are always dropped before a diff runs against them.
 
-1. **Call the reconciliation on startup.** The functions exist; nothing invokes them. Per slave,
-   before deriving any action: surface orphans, and `store.forget()` every `find_missing` row so
-   no CLOSE is derived against a position that has already gone.
-2. **Back the ledger with the store.** `DryRunLedger` still simulates its beliefs in memory and
-   persists them to `dryrun_state.json`. Live copying needs belief to come from real fills. The
-   shape to aim for is one code path where dry-run means "pretend every order succeeded" and
-   live means "believe it when the `OrderResult` says so" — the mode being the only difference
-   keeps the dry run a faithful rehearsal rather than a separate implementation.
-3. **Wire the engine.** Translate each executable `Action` into an `OrderCommand` (the engine
+### How a hold works, and why it is expressed as a broken link
+
+A held slave is passed to the ledger as `SlaveLink(connected=False)` rather than omitted. That
+one choice buys three things: the ledger derives nothing for it, its continuity clock stops, and
+so **lifting the hold forces a re-baseline** — while we were held we were not copying, so
+whatever the master opened meanwhile is not ours to adopt. Omitting the link instead would let
+`_prune` discard that slave's exclusions, losing "a decline is final" decisions.
+
+The cost, stated plainly: **a master close during a hold is deferred, not lost.** The belief row
+survives, so the CLOSE is derived the moment the slave is copyable again — but until then the
+copy rides the move. This is the one place the orphan policy can cost money, and it is the same
+behaviour an ordinary link drop already has.
+
+**Orphans are surfaced and never resolved.** Adopting one silently would break sizing honesty,
+since we cannot know what it was sized against; closing one silently would be the copier taking
+a trading action nobody asked for. Acknowledging (`o` in the UI) records that a human looked —
+it closes nothing, and the orphans stay listed afterwards, because they are still real, still
+open and still untracked. Consent is keyed to specific slave tickets, so a *new* orphan re-arms
+the hold rather than inheriting the old sign-off.
+
+**One mode-dependent branch, and it is load-bearing:** in dry run the stale-row sweep is
+**skipped**. Simulated beliefs carry a negated master ticket as their slave ticket
+(`_simulated_result`), so every one of them looks missing against a real position list — running
+the sweep would delete the whole dry run's state on its first tick.
+
+**An unreadable risk budget is a hold, not a zero.** A zero `risk_amount` is not a soft failure:
+`lots_for_risk` refuses it, the executor reports a failed order, and a failed open is excluded
+permanently. So a percent-of-balance slave whose balance cannot be read derives nothing until it
+can. Fixed-cash slaves never read the balance and are unaffected.
+
+**Still to do — the whole remaining gap before live copying:**
+
+1. **Wire the engine.** Translate each executable `Action` into an `OrderCommand` (the engine
    supplies `risk_amount` from `risk_budget(cfg, snap.balance)`, since it has both), push it down
    that slave's `cmd_q`, and handle `OrderResult` in the drain loop alongside `Snapshot`. Then
    drop the `dry_run = False` refusal in `Engine._reconcile`.
-
-A fixed copier `magic` also still needs choosing — nothing sets one, so `find_orphans` currently
-has no way to recognise our own positions.
 
 **Position mapping must survive restart.** Options considered:
 

@@ -14,6 +14,7 @@ import pytest
 
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.engine import RecordedAction, TerminalView
+from mt5copier.store import Orphan
 from mt5copier.tui.app import CopierApp
 
 TID_MASTER = "A" * 32
@@ -32,6 +33,9 @@ class StubEngine:
         self.started = False
         self.stopped = False
         self.cleared = 0
+        self.held: dict[str, str] = {}
+        self.found_orphans: dict[str, list[Orphan]] = {}
+        self.acknowledged: list[str] = []
 
     def start(self) -> None:
         self.started = True
@@ -74,6 +78,22 @@ class StubEngine:
 
     def clear_detection_state(self) -> None:
         self.cleared += 1
+
+    # --- Stage 2c startup reconciliation ----------------------------------------------------
+
+    def holds(self) -> dict[str, str]:
+        return dict(self.held)
+
+    def orphans(self, terminal_id: str | None = None) -> list[Orphan]:
+        if terminal_id is not None:
+            return list(self.found_orphans.get(terminal_id, []))
+        return [o for items in self.found_orphans.values() for o in items]
+
+    def acknowledge_orphans(self, terminal_id: str) -> int:
+        self.acknowledged.append(terminal_id)
+        found = self.found_orphans.get(terminal_id, [])
+        self.held.pop(terminal_id, None)
+        return len(found)
 
 
 @pytest.fixture
@@ -280,6 +300,33 @@ async def test_detection_state_can_be_cleared(app: CopierApp) -> None:
     async with app.run_test() as pilot:
         await pilot.press("ctrl+l")
         assert app._engine.cleared == 1  # type: ignore[attr-defined]
+
+
+async def test_o_acknowledges_orphans_on_the_selected_slave(app: CopierApp) -> None:
+    async with app.run_test() as pilot:
+        engine = app._engine  # type: ignore[attr-defined]
+        tid = app._row_ids[0]
+        engine.found_orphans[tid] = [Orphan(tid, 5521, "EURUSD", 0.12)]
+        engine.held[tid] = "1 untracked position(s) of ours: #5521"
+        await pilot.press("o")
+
+        assert engine.acknowledged == [tid]
+
+
+async def test_a_held_slave_is_announced_in_the_action_panel(app: CopierApp) -> None:
+    """A hold is one slave going quiet while the others carry on, which is the easiest kind of
+    silence to miss."""
+    async with app.run_test() as pilot:
+        engine = app._engine  # type: ignore[attr-defined]
+        tid = app._row_ids[0]
+        engine.held[tid] = "1 untracked position(s) of ours: #5521"
+        await pilot.pause()
+        app._refresh()
+
+        from textual.widgets import Static
+
+        rendered = str(app.query_one("#actions", Static).render())
+        assert "HELD" in rendered
 
 
 async def test_panic_halts_copying_and_leaves_roles_alone(app: CopierApp, cfg: AppConfig) -> None:

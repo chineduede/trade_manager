@@ -12,7 +12,14 @@ from pathlib import Path
 import pytest
 
 from mt5copier.protocol import OrderType, PositionType
-from mt5copier.store import Copy, CopyKind, MappingStore, find_missing, find_orphans
+from mt5copier.store import (
+    Copy,
+    CopyKind,
+    MappingStore,
+    find_missing,
+    find_missing_orders,
+    find_orphans,
+)
 
 TID_A = "A" * 32
 TID_B = "B" * 32
@@ -186,6 +193,44 @@ def test_orders_are_not_counted_as_missing_positions() -> None:
     store = MappingStore()
     store.record(position_copy(master_ticket=3, slave_ticket=79, kind=CopyKind.ORDER))
     assert find_missing(store, TID_A, []) == []
+
+
+def test_a_filled_pending_order_is_not_a_stale_order_row() -> None:
+    """The trap this query exists to avoid.
+
+    An MT5 pending order that fills becomes a position carrying the same ticket. Reading that
+    as "the order is gone" and forgetting the row would lose the handover and copy the trade a
+    second time as a fresh open.
+    """
+    store = MappingStore()
+    store.record(position_copy(master_ticket=3, slave_ticket=79, kind=CopyKind.ORDER))
+    assert (
+        find_missing_orders(store, TID_A, slave_order_tickets=[], slave_position_tickets=[79]) == []
+    )
+
+
+def test_an_order_still_resting_is_not_stale() -> None:
+    store = MappingStore()
+    store.record(position_copy(master_ticket=3, slave_ticket=79, kind=CopyKind.ORDER))
+    assert (
+        find_missing_orders(store, TID_A, slave_order_tickets=[79], slave_position_tickets=[]) == []
+    )
+
+
+def test_an_order_that_is_neither_resting_nor_filled_is_stale() -> None:
+    """Cancelled, expired or rejected while we were not running."""
+    store = MappingStore()
+    store.record(position_copy(master_ticket=3, slave_ticket=79, kind=CopyKind.ORDER))
+    stale = find_missing_orders(store, TID_A, slave_order_tickets=[], slave_position_tickets=[])
+    assert [c.master_ticket for c in stale] == [3]
+
+
+def test_positions_are_not_counted_as_missing_orders() -> None:
+    store = MappingStore()
+    store.record(position_copy(master_ticket=1, slave_ticket=77))
+    assert (
+        find_missing_orders(store, TID_A, slave_order_tickets=[], slave_position_tickets=[]) == []
+    )
 
 
 # --- durability -----------------------------------------------------------------------------

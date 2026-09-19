@@ -16,9 +16,10 @@ from pathlib import Path
 
 import pytest
 
-from mt5copier.config import AppConfig, NoStopPolicy, Role, TerminalConfig
+from mt5copier.config import AppConfig, NoStopPolicy, Role, SizingMode, TerminalConfig
 from mt5copier.engine import Engine
 from mt5copier.protocol import (
+    COPIER_MAGIC,
     OrderResult,
     OrderType,
     PendingOrder,
@@ -41,7 +42,7 @@ from mt5copier.reconcile import (
     reconcile_slave,
     reconcile_slave_orders,
 )
-from mt5copier.store import MappingStore
+from mt5copier.store import Copy, CopyKind, MappingStore
 
 TID_MASTER = "A" * 32
 TID_SLAVE = "B" * 32
@@ -56,6 +57,7 @@ def pos(
     price_open: float = 1.08500,
     sl: float = 1.08000,
     tp: float = 0.0,
+    magic: int = 0,
 ) -> Position:
     return Position(
         ticket=ticket,
@@ -66,7 +68,7 @@ def pos(
         sl=sl,
         tp=tp,
         time=1_700_000_000,
-        magic=0,
+        magic=magic,
         comment="",
     )
 
@@ -1171,19 +1173,39 @@ def snap(
     state: WorkerState = WorkerState.CONNECTED,
     open_positions: tuple[Position, ...] | None = (),
     pending_orders: tuple[PendingOrder, ...] | None = (),
+    balance: float | None = 10_000.0,
 ) -> Snapshot:
     return Snapshot(
         terminal_id=terminal_id,
         state=state,
         open_positions=open_positions,
         pending_orders=pending_orders,
+        balance=balance,
     )
 
 
-def wire_slave(eng: Engine, state: WorkerState = WorkerState.CONNECTED, age_s: float = 0.0) -> None:
-    """Give the engine a slave snapshot, as the drain thread would have."""
-    eng._snapshots[TID_SLAVE] = snap(terminal_id=TID_SLAVE, state=state)
-    eng._received_at[TID_SLAVE] = time.monotonic() - age_s
+def wire_slave(
+    eng: Engine,
+    state: WorkerState = WorkerState.CONNECTED,
+    age_s: float = 0.0,
+    terminal_id: str = TID_SLAVE,
+    open_positions: tuple[Position, ...] | None = (),
+    pending_orders: tuple[PendingOrder, ...] | None = (),
+    balance: float | None = 10_000.0,
+) -> None:
+    """Give the engine a slave snapshot, as the drain thread would have.
+
+    The balance is not incidental: a percent-of-balance slave whose balance cannot be read
+    cannot be sized, and the engine holds it rather than guessing.
+    """
+    eng._snapshots[terminal_id] = snap(
+        terminal_id=terminal_id,
+        state=state,
+        open_positions=open_positions,
+        pending_orders=pending_orders,
+        balance=balance,
+    )
+    eng._received_at[terminal_id] = time.monotonic() - age_s
 
 
 def watch(eng: Engine) -> None:
@@ -1375,3 +1397,276 @@ def test_clearing_the_ledger_forgets_every_belief(engine: Engine) -> None:
     engine.clear_detection_state()
     assert engine.believed_copies() == 0
     assert engine.recent_actions() == []
+
+
+# --- startup reconciliation -----------------------------------------------------------------
+#
+# The store and the terminal can only disagree while the copier is not running, and they
+# disagree in two directions: a record whose position is gone, and a position of ours with no
+# record. The first derives a close against nothing; the second leaves real money untracked.
+
+
+def live_engine(cfg: AppConfig, tmp_path: Path) -> Engine:
+    """An engine in live mode, so the stale-record sweep actually runs."""
+    eng = Engine(cfg, state_path=tmp_path / "dryrun.db", mapping_path=tmp_path / "mapping.db")
+    eng.config.dry_run = False
+    return eng
+
+
+def seed_live_store(tmp_path: Path, copy: Copy) -> None:
+    """Put a row in the live mapping table before the engine opens it."""
+    with MappingStore(tmp_path / "mapping.db") as store:
+        store.record(copy)
+
+
+def stale_row(master_ticket: int = 11, slave_ticket: int = 900) -> Copy:
+    return Copy(
+        terminal_id=TID_SLAVE,
+        master_ticket=master_ticket,
+        kind=CopyKind.POSITION,
+        slave_symbol="EURUSD",
+        direction=PositionType.BUY,
+        master_volume=1.0,
+        slave_ticket=slave_ticket,
+        slave_volume=0.5,
+    )
+
+
+def test_a_slave_is_not_copied_to_until_it_has_been_reconciled(engine: Engine) -> None:
+    """An unreadable position list means reconciliation cannot run, and a slave that has not
+    been reconciled must not be copied to -- we do not know what it is already holding."""
+    wire_slave(engine, open_positions=None)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    assert engine.recent_actions() == []
+    assert "cannot be read" in engine.holds()[TID_SLAVE]
+
+
+def test_startup_reconciliation_drops_a_record_whose_slave_position_is_gone(
+    engine_cfg: AppConfig, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Stopped out, or closed by hand, while we were not running. There is nothing left to
+    close, so the record must go rather than produce a CLOSE against thin air."""
+    seed_live_store(tmp_path, stale_row())
+    eng = live_engine(engine_cfg, tmp_path)
+    wire_slave(eng, open_positions=())
+
+    with caplog.at_level("WARNING"):
+        eng._reconcile(snap(open_positions=()))
+
+    assert eng.believed_copies() == 0
+    assert [r.action.kind for r in eng.recent_actions()] == []
+    assert any("stale record" in r.getMessage() for r in caplog.records)
+
+
+def test_a_forgotten_record_does_not_become_a_fresh_open(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    """The ordering guarantee. The row is dropped first, so the baseline that follows sees the
+    master's position as unbelieved and excludes it -- a trade closed by hand during downtime
+    is neither closed again nor re-opened."""
+    seed_live_store(tmp_path, stale_row(master_ticket=11))
+    eng = live_engine(engine_cfg, tmp_path)
+    wire_slave(eng, open_positions=())
+
+    eng._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    opens = [
+        r for r in eng.recent_actions() if r.action.executable and r.action.kind is ActionKind.OPEN
+    ]
+    assert opens == [], "the position was already open; dropping our record does not make it new"
+    assert eng.recent_actions()[-1].action.skip_reason is SkipReason.PREEXISTING
+    assert eng.believed_copies() == 0
+
+
+def test_an_orphan_holds_that_slave_and_says_so(
+    engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A position carrying our magic with no record is one we opened and never recorded.
+    Nobody is tracking it, so the master closing will not close it."""
+    wire_slave(engine, open_positions=(pos(ticket=999, magic=COPIER_MAGIC),))
+    with caplog.at_level("ERROR"):
+        watch(engine)
+        engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    assert engine.recent_actions() == []
+    assert [o.slave_ticket for o in engine.orphans()] == [999]
+    assert any("orphan" in r.getMessage() for r in caplog.records)
+
+
+def test_an_orphan_pending_order_holds_the_slave_too(engine: Engine) -> None:
+    """It has not moved money yet, but it will the moment it fills, with nothing tracking it."""
+    wire_slave(
+        engine,
+        pending_orders=(
+            PendingOrder(
+                ticket=888,
+                symbol="EURUSD",
+                type=OrderType.BUY_LIMIT,
+                volume=1.0,
+                price_open=1.07,
+                magic=COPIER_MAGIC,
+            ),
+        ),
+    )
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    assert engine.recent_actions() == []
+    assert [o.slave_ticket for o in engine.orphans()] == [888]
+
+
+def test_the_users_own_position_on_a_slave_is_not_an_orphan(engine: Engine) -> None:
+    """Anything without our magic is their trading and none of our business."""
+    wire_slave(engine, open_positions=(pos(ticket=999, magic=0),))
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    assert engine.orphans() == []
+    assert engine.holds() == {}
+    assert [r.action.kind for r in engine.recent_actions()] == [ActionKind.OPEN]
+
+
+def test_other_slaves_keep_copying_while_one_is_held(engine_cfg: AppConfig, tmp_path: Path) -> None:
+    """A hold is one slave's problem. Fifteen terminals must not stop because one has an
+    unexplained position."""
+    exe = tmp_path / "terminal64.exe"
+    engine_cfg.terminals[TID_SLAVE2] = TerminalConfig(
+        terminal_id=TID_SLAVE2, label="Slave2", exe_path=exe, role=Role.SLAVE
+    )
+    eng = Engine(engine_cfg, state_path=tmp_path / "dryrun.db")
+    wire_slave(eng, open_positions=(pos(ticket=999, magic=COPIER_MAGIC),))
+    wire_slave(eng, terminal_id=TID_SLAVE2)
+
+    watch(eng)
+    eng._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    copied_to = {r.action.terminal_id for r in eng.recent_actions()}
+    assert copied_to == {TID_SLAVE2}
+    assert set(eng.holds()) == {TID_SLAVE}
+
+
+def test_acknowledging_releases_the_hold_and_re_baselines(engine: Engine) -> None:
+    """Acknowledging means "I have dealt with these", not "copy as if nothing happened". While
+    held we were not copying, so whatever the master opened meanwhile is not ours to adopt."""
+    wire_slave(engine, open_positions=(pos(ticket=999, magic=COPIER_MAGIC),))
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+    assert engine.recent_actions() == []
+
+    assert engine.acknowledge_orphans(TID_SLAVE) == 1
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    assert engine.holds() == {}
+    assert engine.recent_actions()[-1].action.skip_reason is SkipReason.PREEXISTING
+    assert engine.believed_copies() == 0
+
+
+def test_acknowledging_keeps_the_orphans_visible(engine: Engine) -> None:
+    """They are still real, still open and still untracked. Erasing the only record of them
+    the moment the user clicks is the silent loss this mechanism exists to prevent."""
+    wire_slave(engine, open_positions=(pos(ticket=999, magic=COPIER_MAGIC),))
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+    engine.acknowledge_orphans(TID_SLAVE)
+
+    assert [o.slave_ticket for o in engine.orphans()] == [999]
+
+
+def test_acknowledging_nothing_is_harmless(engine: Engine) -> None:
+    assert engine.acknowledge_orphans(TID_SLAVE) == 0
+
+
+def test_a_close_during_a_hold_is_mirrored_once_it_lifts(engine: Engine) -> None:
+    """Deferred, not lost. The belief survives the hold, so the close is derived as soon as the
+    slave is copyable again. This is the one place the hold costs money: it rides the move."""
+    wire_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+    assert engine.believed_copies() == 1
+
+    wire_slave(engine, balance=None)
+    engine._reconcile(snap(open_positions=()))
+    assert [r.action.kind for r in engine.recent_actions()] == [ActionKind.OPEN], "held"
+
+    wire_slave(engine, balance=10_000.0)
+    engine._reconcile(snap(open_positions=()))
+    assert engine.recent_actions()[-1].action.kind is ActionKind.CLOSE
+
+
+def test_a_slave_with_no_readable_balance_is_not_copied_to(engine: Engine) -> None:
+    """A zero budget is not a safe fallback: the executor reports it as a failed order, and a
+    failed open is final. Refusing to derive anything is the only non-destructive answer."""
+    wire_slave(engine, balance=None)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    assert engine.recent_actions() == []
+    assert "balance" in engine.holds()[TID_SLAVE]
+
+
+def test_a_fixed_cash_slave_copies_without_a_balance(engine_cfg: AppConfig, tmp_path: Path) -> None:
+    """Fixed-cash sizing never reads the balance, so an unreadable one need not stop it."""
+    engine_cfg.terminals[TID_SLAVE].sizing_mode = SizingMode.FIXED_CASH_RISK
+    eng = Engine(engine_cfg, state_path=tmp_path / "dryrun.db")
+    wire_slave(eng, balance=None)
+    watch(eng)
+    eng._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    assert [r.action.kind for r in eng.recent_actions()] == [ActionKind.OPEN]
+
+
+def test_a_dry_run_does_not_drop_its_simulated_beliefs(engine: Engine) -> None:
+    """Simulated beliefs carry a negated master ticket as their slave ticket, so every one of
+    them looks missing against a real position list. Sweeping stale rows in a dry run would
+    delete the whole session's state on its first tick."""
+    wire_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+    assert engine.believed_copies() == 1
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+    assert engine.believed_copies() == 1, "the simulated belief survived reconciliation"
+
+
+def test_the_hold_is_announced_once_not_every_tick(
+    engine: Engine, caplog: pytest.LogCaptureFixture
+) -> None:
+    wire_slave(engine, balance=None)
+    with caplog.at_level("WARNING"):
+        watch(engine)
+        engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+        engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    held = [r for r in caplog.records if "held" in r.getMessage()]
+    assert len(held) == 1, "announce the transition, not every tick"
+
+
+def test_lifting_a_hold_is_announced(engine: Engine, caplog: pytest.LogCaptureFixture) -> None:
+    """A copier that goes quiet and then quietly resumes is indistinguishable from one that
+    never stopped, so the recovery is said out loud too."""
+    wire_slave(engine, balance=None)
+    watch(engine)
+    with caplog.at_level("INFO"):
+        wire_slave(engine, balance=10_000.0)
+        engine._reconcile(snap(open_positions=()))
+
+    assert any("resumed" in r.getMessage() for r in caplog.records)
+
+
+def test_a_restart_reconciles_before_deriving_anything(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    """The whole point, end to end: a live record whose position vanished during downtime is
+    dropped on the first tick, and no close is ever proposed for it."""
+    seed_live_store(tmp_path, stale_row(master_ticket=11, slave_ticket=900))
+    eng = live_engine(engine_cfg, tmp_path)
+    wire_slave(eng, open_positions=(pos(ticket=555, magic=0),))
+
+    eng._reconcile(snap(open_positions=()))
+
+    assert eng.orphans() == [], "the user's own trade is not ours"
+    assert eng.holds() == {}
+    assert eng.believed_copies() == 0
+    assert all(r.action.kind is not ActionKind.CLOSE for r in eng.recent_actions())

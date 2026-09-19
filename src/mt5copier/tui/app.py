@@ -80,6 +80,7 @@ class CopierApp(App[None]):
         Binding("d", "toggle_detection", "Detect"),
         Binding("ctrl+r", "restart_worker", "Restart worker"),
         Binding("ctrl+l", "clear_detection", "Clear ledger"),
+        Binding("o", "acknowledge_orphans", "Ack orphans"),
         Binding("f9", "panic", "PANIC halt"),
         Binding("q", "quit", "Quit"),
     ]
@@ -199,15 +200,26 @@ class CopierApp(App[None]):
             # Paused detection looks exactly like an idle master unless it is said out loud.
             panel.update(f"[bold yellow]DETECTION PAUSED:[/] {escape(blocked)}")
             return
+
+        labels = {t.terminal_id: t.label for t in self._cfg.terminals.values()}
+        # A hold is one slave going quiet while the others carry on, which is easy to miss --
+        # so it is prepended rather than replacing the panel the way a global pause does.
+        held = [
+            f"[bold red]HELD[/] {escape(labels.get(tid, tid[:8]))}: {escape(reason)}"
+            f"  [dim](press o to acknowledge)[/dim]"
+            for tid, reason in sorted(self._engine.holds().items())
+        ]
+
         if not recorded:
-            if self._cfg.copying_enabled:
+            if held:
+                panel.update("\n".join(held))
+            elif self._cfg.copying_enabled:
                 panel.update("[dim]detecting... no master activity seen yet[/dim]")
             else:
                 panel.update("[dim]detection off - press d to start the dry run[/dim]")
             return
 
-        labels = {t.terminal_id: t.label for t in self._cfg.terminals.values()}
-        lines = []
+        lines = list(held)
         for rec in recorded:
             a = rec.action
             stamp = time.strftime("%H:%M:%S", time.localtime(rec.ts))
@@ -238,6 +250,7 @@ class CopierApp(App[None]):
             f"  |  slaves: {len(self._cfg.slaves)}"
             f"  |  live {h['live']}/{h['supervised']}"
             + (f"  |  STALE {h['stale']}" if h["stale"] else "")
+            + (f"  |  HELD {len(self._engine.holds())}" if self._engine.holds() else "")
             + f"  |  intents {self._engine.action_total}"
             f" / tracking {self._engine.believed_copies()}" + f"  |  {h['total']} terminals known"
         )
@@ -268,7 +281,15 @@ class CopierApp(App[None]):
                 lines.append("   ".join(bits))
             if snap.error:
                 lines.append(f"[yellow]last error:[/yellow] {snap.error}")
-        elif cfg.role is Role.UNASSIGNED:
+        orphans = self._engine.orphans(cfg.terminal_id)
+        if orphans:
+            lines.append(
+                f"[bold red]{len(orphans)} untracked position(s) of ours[/] "
+                "-- open, unmanaged, and not closed by the master:"
+            )
+            for o in orphans:
+                lines.append(f"  #{o.slave_ticket}  {escape(o.symbol)}  {o.volume} lots")
+        if cfg.role is Role.UNASSIGNED and snap is None:
             lines.append("[dim]assign a role to connect (nothing is launched until you do)[/dim]")
         detail.update("\n".join(lines))
 
@@ -371,6 +392,28 @@ class CopierApp(App[None]):
         self._engine.clear_detection_state()
         self._refresh()
         self.notify("detection ledger cleared")
+
+    def action_acknowledge_orphans(self) -> None:
+        """Sign off the selected slave's untracked positions and let it copy again.
+
+        This closes nothing and modifies nothing -- it records that a human has looked. The
+        positions stay open and stay untracked, which is why they remain listed afterwards.
+        """
+        tid = self._selected_id()
+        if tid is None:
+            return
+        cfg = self._cfg.terminals[tid]
+        count = self._engine.acknowledge_orphans(tid)
+        if count == 0:
+            self.notify(f"{cfg.label} has no unacknowledged orphans")
+            return
+        self._refresh()
+        self.notify(
+            f"acknowledged {count} orphan(s) on {cfg.label}. They stay open and untracked; "
+            "anything the master opened while it was held will not be copied to it.",
+            severity="warning",
+            timeout=10,
+        )
 
     def action_panic(self) -> None:
         """Halt copying. Deliberately does not close or modify any position.

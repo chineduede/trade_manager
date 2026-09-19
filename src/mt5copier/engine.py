@@ -22,12 +22,13 @@ from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from .config import AppConfig, Role, TerminalConfig
+from .config import AppConfig, Role, SizingMode, TerminalConfig
 from .logging_setup import get_logger
 from .paths import dryrun_store_path, log_dir, mapping_db_path
-from .protocol import Command, CommandKind, Snapshot, WorkerState
+from .protocol import COPIER_MAGIC, Command, CommandKind, Snapshot, WorkerState
 from .reconcile import Action, CopyLedger, SlaveLink
-from .store import MappingStore
+from .sizing import risk_budget
+from .store import MappingStore, Orphan, find_missing, find_missing_orders, find_orphans
 from .worker import run_worker
 
 log = get_logger(__name__)
@@ -125,6 +126,17 @@ class Engine:
         self._action_total = 0
         self._warned_live = False
         self._blocked_reason: str | None = None
+
+        # --- startup reconciliation and per-slave holds --------------------------------------
+        self._reconciled: set[str] = set()
+        """Slaves matched against the belief store since this store was opened. A slave outside
+        this set has not been reconciled yet and must not be copied to."""
+        self._orphans: dict[str, list[Orphan]] = {}
+        self._orphan_ack: dict[str, set[int]] = {}
+        """Slave tickets the user has signed off. Keyed per ticket rather than per terminal so
+        a *new* orphan appearing later re-arms the hold instead of inheriting the old consent."""
+        self._hold_reason: dict[str, str] = {}
+        self._warned_dry_missing: set[str] = set()
 
         self._dryrun_path = state_path if state_path is not None else dryrun_store_path()
         self._mapping_path = mapping_path if mapping_path is not None else mapping_db_path()
@@ -273,6 +285,21 @@ class Engine:
                 pass
         self._snapshots.pop(terminal_id, None)
         self._received_at.pop(terminal_id, None)
+        # A worker that died or restarted may have missed closes, so its slave has to be
+        # matched against the store again before anything is derived for it.
+        self._forget_reconciliation(terminal_id)
+
+    def _forget_reconciliation(self, terminal_id: str) -> None:
+        """Drop what we knew about this slave's agreement with the store.
+
+        Not the beliefs themselves -- those are the store's and describe real positions. Only
+        the conclusion that we had checked them, which is what expires.
+        """
+        self._reconciled.discard(terminal_id)
+        self._orphans.pop(terminal_id, None)
+        self._orphan_ack.pop(terminal_id, None)
+        self._hold_reason.pop(terminal_id, None)
+        self._warned_dry_missing.discard(terminal_id)
 
     # --- state ------------------------------------------------------------------------------
 
@@ -342,11 +369,13 @@ class Engine:
                 "detecting only and sending nothing"
             )
 
+        # Before the links, not after: deciding whether a slave may be copied to now includes
+        # reconciling it against the store, so the store has to exist first.
+        self._ensure_store()
         links = self._slave_links()
         if not links:
             return
 
-        self._ensure_store()
         for tid, ticket in self._ledger.expire_inflight():
             log.error("gave up waiting for #%s on %s", ticket, tid[:8])
 
@@ -404,14 +433,162 @@ class Engine:
         with self._lock:
             return self._blocked_reason
 
-    def _slave_links(self) -> list[SlaveLink]:
-        """Each enabled slave, paired with whether its terminal is reachable right now.
+    def _set_hold(self, terminal_id: str, reason: str | None) -> None:
+        """Record, and announce, that one slave is not being copied to -- or that it is again.
 
-        A slave is only live if its worker is reporting CONNECTED *and* those reports are
-        fresh. Stale-but-CONNECTED is the trap: the last snapshot says the link was fine, and
-        if that were trusted, a wedged worker would look copyable forever. Copying into a
-        terminal we are no longer hearing from is exactly the failure this whole design is
-        built to avoid.
+        Deliberately the same shape as :meth:`_set_blocked`: announced on the transition, and
+        the recovery announced too. The difference is scope. A block stops detection for
+        everyone; a hold stops one slave while the rest go on copying, which is quieter and
+        therefore easier to miss, so it gets the same edge-triggered treatment.
+        """
+        current = self._hold_reason.get(terminal_id)
+        if reason == current:
+            return
+        if reason is None:
+            self._hold_reason.pop(terminal_id, None)
+            log.info("copying to %s resumed; previously held because %s", terminal_id[:8], current)
+        else:
+            self._hold_reason[terminal_id] = reason
+            log.warning("copying to %s held: %s", terminal_id[:8], reason)
+
+    def _risk_amount(self, cfg: TerminalConfig, snap: Snapshot) -> float | None:
+        """This slave's risk budget for one trade, or None if it cannot be known right now.
+
+        A fixed-cash slave needs no balance at all, so an unreadable balance only stops the
+        percent-of-balance ones. None means "do not derive anything for this slave", never
+        "size it at zero" -- a zero budget is not a soft failure downstream, it is a refusal
+        the executor reports as a failed order, which excludes the trade permanently.
+        """
+        if cfg.sizing_mode is SizingMode.FIXED_CASH_RISK:
+            return cfg.risk_cash
+        if snap.balance is None:
+            return None
+        return risk_budget(cfg, snap.balance)
+
+    def _startup_reconcile(self, cfg: TerminalConfig, snap: Snapshot, store: MappingStore) -> None:
+        """Match one slave's real positions against the belief store, before anything is derived.
+
+        The store and the terminal can only disagree while we are not running, and they
+        disagree in two directions. A record whose position is gone is stale and must be
+        dropped, or the first thing the master does is mirrored onto nothing. A position of
+        ours with no record is an *orphan*: we opened it and never recorded it, so nobody is
+        tracking it and the master closing will not close it.
+
+        Orphans are surfaced and never resolved here. Adopting one silently would break sizing
+        honesty, since we cannot know what it was sized against; closing one silently would be
+        the copier taking a trading action nobody asked for. A human decides.
+
+        Caller must hold the lock, and must have checked both lists are readable.
+        """
+        tid = cfg.terminal_id
+        positions = snap.open_positions or ()
+        orders = snap.pending_orders or ()
+        position_tickets = [p.ticket for p in positions]
+        order_tickets = [o.ticket for o in orders]
+
+        # A resting order of ours is an orphan on the same grounds as a position: it has not
+        # moved money yet, but it will the moment it fills, and nothing would be tracking it.
+        orphans = find_orphans(
+            store, tid, [(p.ticket, p.symbol, p.volume, p.magic) for p in positions], COPIER_MAGIC
+        )
+        orphans += find_orphans(
+            store, tid, [(o.ticket, o.symbol, o.volume, o.magic) for o in orders], COPIER_MAGIC
+        )
+        self._orphans[tid] = orphans
+        self._orphan_ack.setdefault(tid, set())
+        for orphan in orphans:
+            log.error(
+                "orphan on %s: #%s %s %s lots carries our magic but has no record; "
+                "copying to this slave is held until it is acknowledged",
+                tid[:8],
+                orphan.slave_ticket,
+                orphan.symbol,
+                orphan.volume,
+            )
+
+        stale: list[object] = []
+        if self._cfg.dry_run:
+            # Simulated beliefs carry a negated master ticket as their slave ticket, so every
+            # one of them looks missing against a real position list. Running the stale-row
+            # sweep here would delete the whole dry run's state on its first tick.
+            if tid not in self._warned_dry_missing:
+                self._warned_dry_missing.add(tid)
+                log.info(
+                    "dry run: not sweeping stale records for %s, its beliefs are simulated",
+                    tid[:8],
+                )
+        else:
+            gone = find_missing(store, tid, position_tickets)
+            gone_orders = find_missing_orders(store, tid, order_tickets, position_tickets)
+            stale = [*gone, *gone_orders]
+            for copy in [*gone, *gone_orders]:
+                log.warning(
+                    "dropping stale record on %s: #%s (%s) is no longer on the terminal; "
+                    "it closed while we were not running",
+                    tid[:8],
+                    copy.slave_ticket,
+                    copy.slave_symbol,
+                )
+                store.forget(tid, copy.master_ticket)
+
+        log.info(
+            "startup reconciliation for %s: %d tracked, %d orphans, %d stale",
+            cfg.label or tid[:8],
+            len(store.for_terminal(tid)),
+            len(orphans),
+            len(stale),
+        )
+
+    def _unacknowledged(self, terminal_id: str) -> list[Orphan]:
+        acked = self._orphan_ack.get(terminal_id, set())
+        return [o for o in self._orphans.get(terminal_id, []) if o.slave_ticket not in acked]
+
+    def _prepare_slave(self, cfg: TerminalConfig, snap: Snapshot) -> str | None:
+        """Why this slave must not be copied to right now, or None if it may be.
+
+        Reconciliation happens here, on the master's tick, rather than when the slave's own
+        snapshot arrives. The slave's positions are already in ``_snapshots`` and at most one
+        poll old, this is the only place the concrete store and every slave's state are in
+        scope together, and it makes the ordering structural: an unreconciled slave is held, so
+        stale records are always dropped before a single action is derived against them.
+
+        Caller must hold the lock.
+        """
+        tid = cfg.terminal_id
+        if snap.open_positions is None or snap.pending_orders is None:
+            # Both lists or neither, matching the master's guard. Without the orders we cannot
+            # tell a filled copy from a cancelled one, which is what makes a record stale.
+            return "its own positions cannot be read, so it cannot be reconciled"
+
+        if tid not in self._reconciled:
+            self._startup_reconcile(cfg, snap, self._ensure_store())
+            self._reconciled.add(tid)
+
+        outstanding = self._unacknowledged(tid)
+        if outstanding:
+            tickets = ", ".join(f"#{o.slave_ticket}" for o in outstanding)
+            return f"{len(outstanding)} untracked position(s) of ours: {tickets}"
+
+        if self._risk_amount(cfg, snap) is None:
+            return "its balance cannot be read, so a risk budget cannot be sized"
+
+        return None
+
+    def _slave_links(self) -> list[SlaveLink]:
+        """Each enabled slave, paired with whether it may be copied to right now.
+
+        Four conditions, all of which have cost money in copiers that skipped one: the worker
+        reports CONNECTED, those reports are *fresh*, the slave has been reconciled against
+        the store with no unacknowledged orphans, and it can be sized. Stale-but-CONNECTED is
+        the trap in the second one: the last snapshot says the link was fine, and if that were
+        trusted a wedged worker would look copyable forever.
+
+        A slave that fails any of them is passed through as ``connected=False`` rather than
+        omitted. That is what makes a hold safe: the ledger derives nothing for it, its
+        continuity clock stops, and so lifting the hold forces a re-baseline -- while we were
+        held we were not copying, so we must not adopt whatever the master opened meanwhile.
+        Omitting it instead would let ``_prune`` discard its exclusions, losing decisions that
+        are supposed to be final.
 
         Caller must hold the lock.
         """
@@ -425,8 +602,51 @@ class Engine:
             received_at = self._received_at.get(cfg.terminal_id)
             fresh = received_at is not None and (monotonic_now - received_at) <= timeout
             connected = snap is not None and snap.state is WorkerState.CONNECTED and fresh
+            if connected and snap is not None:
+                hold = self._prepare_slave(cfg, snap)
+                self._set_hold(cfg.terminal_id, hold)
+                if hold is not None:
+                    connected = False
             links.append(SlaveLink(cfg=cfg, connected=connected))
         return links
+
+    def orphans(self, terminal_id: str | None = None) -> list[Orphan]:
+        """Untracked positions of ours found by startup reconciliation.
+
+        Acknowledged ones stay in this list. Erasing the only record of a real, still-open,
+        untracked position the moment the user clicks is the silent loss this whole mechanism
+        exists to prevent; the UI dims them instead.
+        """
+        with self._lock:
+            if terminal_id is not None:
+                return list(self._orphans.get(terminal_id, []))
+            return [o for items in self._orphans.values() for o in items]
+
+    def holds(self) -> dict[str, str]:
+        """Held slaves, mapped to why. Empty when every slave is free to copy."""
+        with self._lock:
+            return dict(self._hold_reason)
+
+    def acknowledge_orphans(self, terminal_id: str) -> int:
+        """Sign off this slave's orphans and let it copy again. Returns how many were signed off.
+
+        Acknowledging says "I have seen these positions and taken care of them", not "close
+        them" -- nothing here touches a position. The slave re-baselines on its next tick, so
+        whatever the master opened during the hold becomes permanently uncopyable for it.
+        """
+        with self._lock:
+            outstanding = self._unacknowledged(terminal_id)
+            if not outstanding:
+                return 0
+            acked = self._orphan_ack.setdefault(terminal_id, set())
+            for orphan in outstanding:
+                acked.add(orphan.slave_ticket)
+            log.warning(
+                "acknowledged %d orphan(s) on %s; they remain open and untracked",
+                len(outstanding),
+                terminal_id[:8],
+            )
+            return len(outstanding)
 
     def recent_actions(self, limit: int | None = None) -> list[RecordedAction]:
         """Most recent intended actions, oldest first."""
@@ -462,6 +682,10 @@ class Engine:
             store.clear()
             self._ledger.reset_session_state()
             self._actions.clear()
+            # Every position that was ours is now unrecorded, which is the definition of an
+            # orphan. Re-reconcile rather than carry forward a clean bill of health.
+            for tid in list(self._cfg.terminals):
+                self._forget_reconciliation(tid)
 
     def _ensure_store(self) -> MappingStore:
         """The belief store for the current mode, opening or swapping it as needed.
@@ -479,10 +703,21 @@ class Engine:
 
         if self._store is not None:
             self._store.close()
+            outstanding = self._ledger.inflight_count
+            if outstanding:
+                log.warning(
+                    "changing dry_run with %d command(s) in flight; their results can no "
+                    "longer be matched and will be dropped",
+                    outstanding,
+                )
         path = self._dryrun_path if dry else self._mapping_path
         self._store = MappingStore(path)
         self._ledger = CopyLedger(self._store)
         self._store_is_dry = dry
+        # The rows in the new store are a different set of claims about the world, so every
+        # slave has to be matched against them again before it may be copied to.
+        for tid in list(self._reconciled | set(self._orphans) | set(self._hold_reason)):
+            self._forget_reconciliation(tid)
         log.info(
             "belief store: %s (%s), %d copies known",
             path,

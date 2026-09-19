@@ -423,6 +423,35 @@ def find_missing(
     ]
 
 
+def find_missing_orders(
+    store: MappingStore,
+    terminal_id: str,
+    slave_order_tickets: Iterable[int],
+    slave_position_tickets: Iterable[int],
+) -> list[Copy]:
+    """Order copies whose slave order is neither still resting nor filled into a position.
+
+    **A filled order is not missing, and this is the whole reason the function takes two
+    ticket lists.** In MT5 a pending order that fills becomes a position carrying the *same*
+    ticket, so an order row whose ticket now names a live position has not gone anywhere -- it
+    has been filled, and ``reconcile_slave_orders`` is waiting to report ``ORDER_FILLED`` and
+    convert the row in place. Forgetting it here would throw away the handover and copy the
+    trade a second time as a fresh open.
+
+    What is left after both checks is genuinely gone: cancelled by hand, expired, or rejected
+    while we were not running.
+    """
+    resting = set(slave_order_tickets)
+    filled = set(slave_position_tickets)
+    return [
+        c
+        for c in store.for_terminal(terminal_id, CopyKind.ORDER)
+        if c.slave_ticket is not None
+        and c.slave_ticket not in resting
+        and c.slave_ticket not in filled
+    ]
+
+
 def _from_row(row: sqlite3.Row) -> Copy:
     return Copy(
         terminal_id=row["terminal_id"],
