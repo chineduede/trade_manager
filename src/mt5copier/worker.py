@@ -26,7 +26,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .executor import Executor
+from .executor import UNREADABLE, Executor, LivePosition, ReadFailure
 from .logging_setup import configure, get_logger
 from .protocol import (
     Command,
@@ -212,40 +212,61 @@ class _Session:
         except (TypeError, ValueError):
             return None
 
-    def position(self, ticket: int) -> tuple[str, PositionType, float] | None:
+    def position(self, ticket: int) -> LivePosition | None | ReadFailure:
         """``(symbol, direction, volume)`` for one open position, read live.
 
-        Closing and reducing use the terminal's current volume rather than whatever we last
-        recorded. Our record can be stale -- the user may have closed part of it by hand --
-        and a stale volume produces an INVALID_VOLUME rejection at best, or closes the wrong
+        Closing, reducing and modifying use the terminal's own figures rather than whatever we
+        last recorded. Our record can be stale -- the user may have closed part of it by hand
+        -- and a stale volume produces an INVALID_VOLUME rejection at best, or closes the wrong
         amount at worst.
+
+        **Three answers, not two.** ``None`` means the terminal answered and the position is
+        not there; ``UNREADABLE`` means it would not answer. The executor reports "not there"
+        as a success, so collapsing the two would turn a momentary read failure into a close
+        that never happened or a stop that never moved -- recorded as done either way. An
+        empty sequence is MT5's unambiguous "nothing matched"; a bare ``None`` is its
+        overloaded one, and is read here as unknown.
         """
         try:
             found = self._mt5.positions_get(ticket=ticket)
         except Exception as exc:
             log.debug("positions_get(ticket=%r) raised: %r", ticket, exc)
-            return None
-        if not found:
+            return UNREADABLE
+        if found is None:
+            return UNREADABLE
+        if len(found) == 0:
             return None
         p = found[0]
         try:
             return str(p.symbol), PositionType(int(p.type)), float(p.volume)
-        except (AttributeError, TypeError, ValueError):
-            return None
+        except (AttributeError, TypeError, ValueError) as exc:
+            # Unparseable is not absent, for the same reason it is not in _read_positions.
+            log.warning("unusable position %r for ticket %s: %s", p, ticket, exc)
+            return UNREADABLE
 
     def order_exists(self, ticket: int) -> bool:
         """Whether a pending order is still resting.
 
-        A read failure answers **True**, which sends a cancel that may be redundant. The
-        alternative -- answering False -- would report "already gone" for an order that is
-        still live, and the copier would stop tracking a real resting order.
+        A read failure answers **True**, which sends a cancel or a modify that may be
+        redundant -- both are no-ops against an order that has gone. The alternative is far
+        worse: answering False reports "already gone", and every caller treats that as the
+        desired state already being true, so a live resting order would be dropped from
+        belief and left untracked.
+
+        That means a bare ``None`` has to answer True as well, not just an exception. MT5
+        overloads ``None`` for "the call failed" and "nothing matched" -- the same trap
+        :meth:`_empty_or_unknown` exists for -- and ``bool(None)`` quietly picks the wrong
+        one. Only an empty sequence is an unambiguous "not there".
         """
         try:
             found = self._mt5.orders_get(ticket=ticket)
         except Exception as exc:
             log.debug("orders_get(ticket=%r) raised: %r", ticket, exc)
             return True
-        return bool(found)
+        if found is None:
+            log.debug("orders_get(ticket=%r) gave None; assuming it is still resting", ticket)
+            return True
+        return len(found) > 0
 
     def order_send(self, request: dict[str, Any]) -> Any:
         """The one call in this project that creates an order. Returns the raw MT5 result, or
@@ -486,7 +507,9 @@ def run_worker(
                 if isinstance(cmd, OrderCommand):
                     if not session.connected:
                         # Refuse rather than queue: by the time the link returns, the master's
-                        # trade is old news and the copy would be a late join.
+                        # trade is old news and the copy would be a late join. Transient, so
+                        # the ledger may derive it again -- which it will for a close or a
+                        # modify, whose target state does not go stale, and never for an open.
                         publish_result(
                             OrderResult(
                                 command_id=cmd.command_id,
@@ -494,6 +517,7 @@ def run_worker(
                                 op=cmd.op,
                                 master_ticket=cmd.master_ticket,
                                 ok=False,
+                                retryable=True,
                                 error="terminal not connected when the command arrived",
                             )
                         )

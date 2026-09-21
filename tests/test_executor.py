@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from mt5copier.execution import OrderFilling, Retcode, SymbolFilling
-from mt5copier.executor import Executor
+from mt5copier.executor import UNREADABLE, Executor, ReadFailure
 from mt5copier.protocol import ActionKind, OrderCommand, OrderType, PositionType, SizingBasis
 from mt5copier.sizing import SymbolFacts
 
@@ -42,6 +42,8 @@ class FakeSession:
     sent: list[dict[str, Any]] = field(default_factory=list)
     positions: dict[int, tuple[str, PositionType, float]] = field(default_factory=dict)
     resting_orders: set[int] = field(default_factory=set)
+    position_unreadable: bool = False
+    """The terminal refusing the read, which is not the same as the position being gone."""
 
     def account_trade_mode(self) -> int | None:
         return self.trade_mode
@@ -64,7 +66,9 @@ class FakeSession:
     def tick(self, name: str) -> tuple[float, float] | None:
         return self.quote
 
-    def position(self, ticket: int) -> tuple[str, PositionType, float] | None:
+    def position(self, ticket: int) -> tuple[str, PositionType, float] | None | ReadFailure:
+        if self.position_unreadable:
+            return UNREADABLE
         return self.positions.get(ticket)
 
     def order_exists(self, ticket: int) -> bool:
@@ -163,17 +167,16 @@ def test_an_unpriceable_move_is_refused_rather_than_guessed() -> None:
 
 def test_an_operation_with_no_recorded_slave_ticket_is_declined() -> None:
     """Without the mapping there is nothing to act on, and guessing is not an option."""
-    for op in (ActionKind.CLOSE, ActionKind.REDUCE, ActionKind.CANCEL):
+    for op in (
+        ActionKind.CLOSE,
+        ActionKind.REDUCE,
+        ActionKind.CANCEL,
+        ActionKind.MODIFY_SLTP,
+        ActionKind.MODIFY_ORDER,
+    ):
         session = FakeSession()
         result = run(session, cmd(op=op, slave_ticket=None))
         assert not result.ok
-        assert session.sent == []
-
-
-def test_modifications_are_still_declined_rather_than_half_done() -> None:
-    for op in (ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER):
-        session = FakeSession()
-        assert not run(session, cmd(op=op, slave_ticket=77)).ok
         assert session.sent == []
 
 
@@ -290,6 +293,198 @@ def test_cancelling_an_order_that_already_went_is_a_success() -> None:
 def test_a_rejected_cancel_is_reported() -> None:
     session = FakeSession(resting_orders={88}, results=[FakeResult(retcode=int(Retcode.INVALID))])
     assert not run(session, cmd(op=ActionKind.CANCEL, slave_ticket=88)).ok
+
+
+# --- modifying a position's stop and target ---------------------------------------------------
+
+
+def modify(**kw: object) -> OrderCommand:
+    base: dict[str, Any] = {"op": ActionKind.MODIFY_SLTP, "slave_ticket": 77, "tp": 1.09500}
+    base.update(kw)
+    return cmd(**base)
+
+
+def test_a_stop_move_is_sent_as_an_sltp_action_on_the_position() -> None:
+    """SLTP changes a position's levels and nothing else -- no volume, no fill mode, no price."""
+    session = closing_session()
+    run(session, modify(sl=1.08250))
+    request = session.sent[0]
+    assert request["action"] == 6, "TRADE_ACTION_SLTP"
+    assert request["position"] == 77
+    assert request["sl"] == pytest.approx(1.08250)
+    assert request["tp"] == pytest.approx(1.09500)
+    for absent in ("volume", "type_filling", "price", "deviation", "type"):
+        assert absent not in request, f"{absent} is not part of an SLTP request"
+
+
+def test_an_sltp_request_takes_its_symbol_from_the_terminal_not_our_record() -> None:
+    """Our record is the master's spelling put through a prefix/suffix; the position knows
+    what it actually is. Same reason the close volume is read live."""
+    session = FakeSession()
+    session.positions[77] = ("EURUSD.r", PositionType.BUY, 1.0)
+    run(session, modify(master_symbol="GBPUSD"))
+    assert session.sent[0]["symbol"] == "EURUSD.r"
+
+
+def test_clearing_a_stop_is_sent_as_zero_rather_than_omitted() -> None:
+    """A master removing its stop is a real action to mirror. Under TRADE_ACTION_SLTP an
+    omitted field and a zero are the same bytes, so this asserts intent rather than encoding
+    -- the OPEN path's "only include a stop when set" idiom must not leak in here."""
+    session = closing_session()
+    run(session, modify(sl=0.0, tp=0.0))
+    assert session.sent[0]["sl"] == 0.0
+    assert session.sent[0]["tp"] == 0.0
+
+
+def test_the_levels_are_floats_even_when_handed_whole_numbers() -> None:
+    """order_send rejects an int where it wants a double and answers None -- which classify()
+    would then report as a lost connection, for a request that never left the process."""
+    session = closing_session()
+    run(session, modify(sl=1, tp=2))
+    assert isinstance(session.sent[0]["sl"], float)
+    assert isinstance(session.sent[0]["tp"], float)
+
+
+def test_modifying_a_position_that_is_gone_is_not_an_error() -> None:
+    """There is nothing left to protect, so nothing left to get wrong. Reporting failure
+    instead would mean one error per distinct stop value for as long as the master holds the
+    trade -- the log rot DISPATCHABLE_KINDS was filtered to avoid."""
+    session = FakeSession()
+    result = run(session, modify())
+    assert result.ok
+    assert session.sent == []
+
+
+def test_an_unreadable_position_is_not_treated_as_a_gone_one() -> None:
+    """ "We could not tell" must not become "already synced": belief would record a stop the
+    slave never got, and the diff never re-reads the slave."""
+    for op, extra in (
+        (ActionKind.MODIFY_SLTP, {}),
+        (ActionKind.CLOSE, {}),
+        (ActionKind.REDUCE, {"close_fraction": 0.5}),
+    ):
+        session = FakeSession(position_unreadable=True)
+        result = run(session, cmd(op=op, slave_ticket=77, **extra))
+        assert not result.ok, op
+        assert result.retryable, "transient, so the next tick should derive it again"
+        assert session.sent == []
+
+
+def test_a_rejected_stop_move_names_the_levels_it_was_refused() -> None:
+    """INVALID_STOPS -- the stop is inside the broker's minimum distance from the market -- is
+    the routine refusal here, and "it was refused" without saying what is not actionable."""
+    session = closing_session()
+    session.results = [FakeResult(retcode=int(Retcode.INVALID_STOPS))]
+    result = run(session, modify(sl=1.08250))
+    assert not result.ok
+    assert not result.retryable, "the broker refused it; sending it again changes nothing"
+    assert "INVALID_STOPS" in (result.error or "")
+    assert "1.0825" in (result.error or "")
+
+
+def test_a_modification_is_never_repriced() -> None:
+    """A requote asks for a fresh market price. These prices are the master's, and there is no
+    price field in an SLTP request at all -- repricing would invent one."""
+    session = closing_session()
+    session.results = [FakeResult(retcode=int(Retcode.REQUOTE))]
+    result = run(session, modify(sl=1.08250))
+    assert not result.ok
+    assert len(session.sent) == 1, "no reprice loop"
+
+
+def test_a_connection_failure_on_a_modify_is_reported_as_transient() -> None:
+    session = closing_session()
+    session.results = [FakeResult(retcode=int(Retcode.CONNECTION))]
+    result = run(session, modify(sl=1.08250))
+    assert not result.ok
+    assert result.retryable
+
+
+def test_no_changes_counts_as_synced() -> None:
+    """What makes a modification safe to retry: a repeat that changes nothing is accepted."""
+    session = closing_session()
+    session.results = [FakeResult(retcode=int(Retcode.NO_CHANGES))]
+    result = run(session, modify(sl=1.08250))
+    assert result.ok
+    assert result.outcome == "already matched"
+
+
+def test_the_server_saying_the_position_closed_is_not_a_failure() -> None:
+    """The race the local read cannot close: it went between our read and our send."""
+    session = closing_session()
+    session.results = [FakeResult(retcode=int(Retcode.POSITION_CLOSED))]
+    assert run(session, modify(sl=1.08250)).ok
+
+
+def test_a_modify_result_reports_no_volume_and_no_new_ticket() -> None:
+    """MT5 creates no order and no deal for a modification, so it answers with zeroes.
+    Reporting those as a fill would read like a trade that went nowhere."""
+    session = closing_session()
+    result = run(session, modify(sl=1.08250))
+    assert result.ok
+    assert "filled" not in result.describe()
+    assert result.describe().startswith("MODIFY_SLTP  #42 EURUSD")
+
+
+# --- modifying a resting order -----------------------------------------------------------------
+
+
+def test_moving_a_resting_order_is_sent_as_a_modify_action() -> None:
+    """The one thing a position cannot do: a resting order's entry price is a parameter."""
+    session = FakeSession(resting_orders={88})
+    run(
+        session,
+        cmd(
+            op=ActionKind.MODIFY_ORDER,
+            order_type=OrderType.BUY_LIMIT,
+            slave_ticket=88,
+            entry=1.07000,
+            sl=1.06500,
+            tp=1.08000,
+        ),
+    )
+    request = session.sent[0]
+    assert request["action"] == 7, "TRADE_ACTION_MODIFY"
+    assert request["order"] == 88
+    assert request["price"] == pytest.approx(1.07000)
+    assert request["sl"] == pytest.approx(1.06500)
+    assert request["tp"] == pytest.approx(1.08000)
+    assert request["type_time"] == 0, "ORDER_TIME_GTC, matching how PLACE rests them"
+    assert "volume" not in request, "MT5 cannot modify a pending order's volume"
+
+
+def test_modifying_an_order_that_is_no_longer_resting_is_not_an_error() -> None:
+    """It filled or it was removed; either way the order diff answers on its next tick."""
+    session = FakeSession(resting_orders=set())
+    result = run(session, cmd(op=ActionKind.MODIFY_ORDER, slave_ticket=88, entry=1.07))
+    assert result.ok
+    assert session.sent == []
+
+
+def test_a_modify_whose_target_was_gone_is_flagged_so_belief_stays_put() -> None:
+    """ok, because there was nothing left to get wrong -- but the levels landed on nothing,
+    and the ledger must not record them as set."""
+    gone_position = run(FakeSession(), modify())
+    assert gone_position.ok and gone_position.target_gone
+
+    gone_order = run(
+        FakeSession(resting_orders=set()),
+        cmd(op=ActionKind.MODIFY_ORDER, slave_ticket=88, entry=1.07),
+    )
+    assert gone_order.ok and gone_order.target_gone
+
+
+def test_a_successful_modify_is_not_flagged_as_gone() -> None:
+    assert not run(closing_session(), modify(sl=1.08250)).target_gone
+
+
+def test_a_rejected_order_move_names_the_entry_as_well_as_the_levels() -> None:
+    session = FakeSession(resting_orders={88})
+    session.results = [FakeResult(retcode=int(Retcode.INVALID_PRICE))]
+    result = run(session, cmd(op=ActionKind.MODIFY_ORDER, slave_ticket=88, entry=1.07, sl=1.065))
+    assert not result.ok
+    assert "1.07" in (result.error or "")
+    assert "INVALID_PRICE" in (result.error or "")
 
 
 # --- the request ----------------------------------------------------------------------------

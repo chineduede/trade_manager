@@ -332,6 +332,34 @@ def test_take_profit_change_is_a_modify() -> None:
     assert actions[0].tp == pytest.approx(1.09500)
 
 
+def test_clearing_the_masters_stop_is_mirrored_and_flagged() -> None:
+    """Mirroring is the contract -- the alternative is a copy that exits where the master
+    does not -- but disarming a protected copy must not be inferable only from `sl 0`."""
+    actions = reconcile_slave([pos(sl=0.0)], [copied(sl=1.08)], slave())
+    assert [a.kind for a in actions] == [ActionKind.MODIFY_SLTP]
+    assert actions[0].sl == 0.0
+    assert actions[0].unprotected
+    assert "UNPROTECTED: removes the slave's stop" in actions[0].describe()
+
+
+def test_an_inverted_slave_is_disarmed_by_the_master_removing_its_target() -> None:
+    """effective_levels swaps the pair, so on a reversed copy it is the take-profit that is
+    the stop. Surprising enough that the flag is the only thing making it visible."""
+    actions = reconcile_slave(
+        [pos(sl=1.08, tp=0.0)], [copied(sl=1.09, tp=1.08)], slave(invert=True)
+    )
+    assert [a.kind for a in actions] == [ActionKind.MODIFY_SLTP]
+    assert actions[0].sl == 0.0, "the master's absent target is the reversed copy's stop"
+    assert actions[0].unprotected
+
+
+def test_a_skipped_stop_removal_is_not_flagged_as_unprotected() -> None:
+    """An action that will not be sent disarms nothing."""
+    actions = reconcile_slave([pos(sl=0.0)], [copied(sl=1.08)], slave(copy_sltp=False))
+    assert actions[0].skip_reason is SkipReason.SLTP_SYNC_DISABLED
+    assert not actions[0].unprotected
+
+
 def test_sltp_sync_can_be_turned_off_per_slave() -> None:
     actions = reconcile_slave([pos(sl=1.09)], [copied(sl=1.08)], slave(copy_sltp=False))
     assert actions[0].skip_reason is SkipReason.SLTP_SYNC_DISABLED
@@ -753,16 +781,52 @@ def test_a_fill_hands_tracking_to_the_position_without_copying_it_twice() -> Non
     watching(ledger, clock, [pending_link()])
     ledger.step([], [pending_link()], master_orders=[order(ticket=50)], now=clock.advance(1.0))
 
-    filled = ledger.step(
-        [pos(ticket=50)], [pending_link()], master_orders=[], now=clock.advance(1.0)
-    )
+    # The position carries the order's own stop, which is what MT5 does on a fill -- the
+    # helpers' defaults differ, and a mismatch here would be a drift to correct, not a
+    # handover to observe. test_a_fill_keeps_the_orders_levels_so_drift_is_corrected covers
+    # that case deliberately.
+    landed = pos(ticket=50, sl=1.07500)
+    filled = ledger.step([landed], [pending_link()], master_orders=[], now=clock.advance(1.0))
     assert [a.kind for a in filled] == [ActionKind.ORDER_FILLED]
     assert ledger.believed_orders() == []
     assert [c.master_ticket for c in ledger.believed()] == [50], "now tracked as a position"
 
-    assert ledger.step([pos(ticket=50)], [pending_link()], now=clock.advance(1.0)) == []
+    assert ledger.step([landed], [pending_link()], now=clock.advance(1.0)) == []
     closed = ledger.step([], [pending_link()], now=clock.advance(1.0))
     assert [a.kind for a in closed] == [ActionKind.CLOSE]
+
+
+def test_a_fill_keeps_the_orders_levels_so_drift_is_corrected() -> None:
+    """Belief must record what the *slave* carries, not what the master holds.
+
+    The slave's order fills with whatever levels it was resting on, which is the order's
+    believed pair -- and if a MODIFY_ORDER was refused before the fill, that is not the
+    master's pair. Adopting the master's here would write the drift away as already fixed,
+    and since the diff compares the master against belief and never against the slave,
+    nothing would look again. Keeping the order's makes the very next tick correct it.
+    """
+    clock = Clock()
+    ledger = CopyLedger()
+    watching(ledger, clock, [pending_link()])
+    ledger.step(
+        [], [pending_link()], master_orders=[order(ticket=50, sl=1.07500)], now=clock.advance(1.0)
+    )
+
+    # Live, so the sync this provokes stays in flight and the handed-over value is still
+    # visible; simulating would apply it in the same tick and hide what was written.
+    filled = ledger.step(
+        [pos(ticket=50, sl=1.08000)],
+        [pending_link()],
+        master_orders=[],
+        now=clock.advance(1.0),
+        simulate=False,
+    )
+    assert ActionKind.ORDER_FILLED in [a.kind for a in filled]
+    assert ledger.believed()[0].synced_sl == pytest.approx(1.07500), "what the slave rests on"
+
+    sync = [a for a in filled if a.kind is ActionKind.MODIFY_SLTP]
+    assert len(sync) == 1, "the gap is noticed rather than written away"
+    assert sync[0].sl == pytest.approx(1.08000)
 
 
 def test_with_pending_copying_off_the_fill_is_still_copied_as_a_position() -> None:
@@ -1258,6 +1322,7 @@ def answer(
     cmd: OrderCommand,
     *,
     ok: bool = True,
+    retryable: bool = False,
     slave_ticket: int = 5001,
     command_id: int | None = None,
 ) -> None:
@@ -1269,6 +1334,7 @@ def answer(
             op=cmd.op,
             master_ticket=cmd.master_ticket,
             ok=ok,
+            retryable=retryable,
             slave_ticket=slave_ticket,
             slave_symbol=cmd.master_symbol,
             requested_volume=0.5,
@@ -1807,32 +1873,197 @@ def test_a_skipped_action_is_never_dispatched(engine: Engine) -> None:
     assert cmd_q.sent == []
 
 
-def test_modify_sltp_is_derived_but_never_sent(
-    engine: Engine, caplog: pytest.LogCaptureFixture
-) -> None:
-    """The executor declines modification until stage 3. Filtering it out of dispatch keeps it
-    out of flight -- but the gap has to announce itself, or a clean log looks like sync
-    working."""
+def test_a_stop_move_is_dispatched_and_belief_follows_the_result(engine: Engine) -> None:
+    """Stage 3. Belief must move when the broker confirms, and not a moment before."""
     go_live(engine)
     wire_slave(engine)
     cmd_q = arm_slave(engine)
     watch(engine)
     engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.08),)))
     answer(engine, cmd_q.sent[0])
-    sent_after_open = len(cmd_q.sent)
 
-    with caplog.at_level("WARNING"):
-        engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0825),)))
-        engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0850),)))
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0825),)))
 
-    kinds = [r.action.kind for r in engine.recent_actions()]
-    assert ActionKind.MODIFY_SLTP in kinds, "still derived and still reported"
-    assert len(cmd_q.sent) == sent_after_open, "and never sent"
-    assert engine._ledger.inflight_count == 0, "nothing waits for an answer that never comes"
-    believed = engine._ledger.believed(TID_SLAVE)[0]
-    assert believed.synced_sl == pytest.approx(1.08), "belief did not move on an unsent sync"
-    warnings = [r for r in caplog.records if "cannot send it" in r.getMessage()]
-    assert len(warnings) == 1, "once per session, not once per stop move"
+    sync = cmd_q.sent[-1]
+    assert isinstance(sync, OrderCommand)
+    assert sync.op is ActionKind.MODIFY_SLTP
+    assert sync.sl == pytest.approx(1.0825)
+    assert sync.slave_ticket == 5001, "it acts on the copy, not on the master's ticket"
+    assert engine._ledger.believed(TID_SLAVE)[0].synced_sl == pytest.approx(1.08), (
+        "still the old stop -- nothing is believed until the broker answers"
+    )
+
+    answer(engine, sync)
+    assert engine._ledger.believed(TID_SLAVE)[0].synced_sl == pytest.approx(1.0825)
+
+
+def test_a_second_stop_move_waits_for_the_first_to_be_answered(engine: Engine) -> None:
+    """One command per key in flight. Two moves in quick succession must not race each other
+    onto the terminal, and the later value must not be lost when the earlier one lands."""
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.08),)))
+    answer(engine, cmd_q.sent[0])
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0825),)))
+    first = cmd_q.sent[-1]
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0850),)))
+    assert cmd_q.sent[-1] is first, "withheld while the first is unanswered"
+
+    answer(engine, first)
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0850),)))
+    assert cmd_q.sent[-1].sl == pytest.approx(1.0850), "the newer value is not dropped"
+
+
+def test_a_refused_stop_move_is_not_sent_again_at_the_same_value(engine: Engine) -> None:
+    """A broker refusal is not retried: the identical request would meet the identical
+    refusal at every poll. It is surfaced once, and a *new* master value re-arms it."""
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.08),)))
+    answer(engine, cmd_q.sent[0])
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0825),)))
+    answer(engine, cmd_q.sent[-1], ok=False)
+    sent = len(cmd_q.sent)
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0825),)))
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0825),)))
+    assert len(cmd_q.sent) == sent, "not re-sent at the value that was refused"
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0860),)))
+    assert len(cmd_q.sent) == sent + 1, "but a new stop is a new decision"
+
+
+def test_a_transient_failure_on_a_stop_move_is_derived_again(engine: Engine) -> None:
+    """A stop should still follow the master a tick later; a target state does not go stale
+    the way an entry does. Without re-arming, the dedup memory suppresses the identical
+    action and the copy silently keeps the old stop for the rest of the session."""
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.08),)))
+    answer(engine, cmd_q.sent[0])
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0825),)))
+    answer(engine, cmd_q.sent[-1], ok=False, retryable=True)
+    sent = len(cmd_q.sent)
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0825),)))
+    assert len(cmd_q.sent) == sent + 1, "the same stop is asked for again"
+    assert cmd_q.sent[-1].sl == pytest.approx(1.0825)
+
+
+def test_a_transient_failure_on_a_partial_close_is_not_derived_again(engine: Engine) -> None:
+    """The exception among the target-state ops, and the dangerous one. A REDUCE closes a
+    *fraction*: if the first one reached the broker and only its answer was lost, deriving it
+    again closes another slice, and over-closing cannot be undone."""
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11, volume=1.0),)))
+    answer(engine, cmd_q.sent[0])
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11, volume=0.5),)))
+    reduce_cmd = cmd_q.sent[-1]
+    assert reduce_cmd.op is ActionKind.REDUCE
+    answer(engine, reduce_cmd, ok=False, retryable=True)
+    sent = len(cmd_q.sent)
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11, volume=0.5),)))
+    assert len(cmd_q.sent) == sent, "left alone rather than reduced twice"
+
+
+def test_a_stop_move_onto_a_vanished_copy_does_not_become_belief(engine: Engine) -> None:
+    """Reported ok because there was nothing left to get wrong, not because the levels
+    landed. Recording them would describe a stop the slave never carried, and the diff
+    compares the master against belief and never against the slave."""
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.08),)))
+    answer(engine, cmd_q.sent[0])
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0825),)))
+    sync = cmd_q.sent[-1]
+    engine._on_result(
+        OrderResult(
+            command_id=sync.command_id,
+            terminal_id=TID_SLAVE,
+            op=sync.op,
+            master_ticket=sync.master_ticket,
+            ok=True,
+            target_gone=True,
+            outcome="the target is gone",
+        )
+    )
+    assert engine._ledger.believed(TID_SLAVE)[0].synced_sl == pytest.approx(1.08)
+
+
+def test_a_transient_failure_on_an_open_is_still_final(engine: Engine) -> None:
+    """The exception to the rule above, and the reason it is a rule about target states: by
+    the time a link comes back, an entry would be filling far from the master's."""
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.08),)))
+    answer(engine, cmd_q.sent[0], ok=False, retryable=True)
+    sent = len(cmd_q.sent)
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.08),)))
+    assert len(cmd_q.sent) == sent, "excluded, not retried"
+
+
+def test_moving_a_resting_order_is_dispatched_and_belief_follows(engine: Engine) -> None:
+    """The order half of Stage 3. Its entry price moves, which a position's cannot."""
+    engine.config.terminals[TID_SLAVE].copy_pending = True
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(), pending_orders=(order(ticket=50, price_open=1.08),)))
+    placed = cmd_q.sent[-1]
+    assert placed.op is ActionKind.PLACE
+    answer(engine, placed)
+
+    engine._reconcile(snap(open_positions=(), pending_orders=(order(ticket=50, price_open=1.079),)))
+    moved = cmd_q.sent[-1]
+    assert moved.op is ActionKind.MODIFY_ORDER
+    assert moved.entry == pytest.approx(1.079)
+    assert moved.slave_ticket == 5001
+    assert engine._ledger.believed_orders(TID_SLAVE)[0].entry == pytest.approx(1.08), (
+        "not believed until the broker answers"
+    )
+
+    answer(engine, moved)
+    assert engine._ledger.believed_orders(TID_SLAVE)[0].entry == pytest.approx(1.079)
+
+
+def test_sltp_sync_off_derives_the_action_and_sends_nothing(engine: Engine) -> None:
+    """copy_sltp is the switch, and a skip is a record rather than an instruction."""
+    engine.config.terminals[TID_SLAVE].copy_sltp = False
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.08),)))
+    answer(engine, cmd_q.sent[0])
+    sent = len(cmd_q.sent)
+
+    engine._reconcile(snap(open_positions=(pos(ticket=11, sl=1.0825),)))
+
+    latest = engine.recent_actions()[-1].action
+    assert latest.kind is ActionKind.MODIFY_SLTP
+    assert latest.skip_reason is SkipReason.SLTP_SYNC_DISABLED
+    assert len(cmd_q.sent) == sent
 
 
 def test_order_filled_is_never_dispatched(engine: Engine) -> None:

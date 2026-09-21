@@ -14,20 +14,30 @@ The order of operations matters and is deliberate:
 4. **Send, classify, retry** -- bounded and fast. A copy still retrying after seconds is no
    longer the trade the master took, so abandoning and surfacing beats persisting into a
    worse fill.
+
+Steps 2 and 3 belong to the operations that *create* something. Closing, cancelling and
+modifying act on a ticket that already exists, so they skip straight from the guard to the
+send -- and they share one further rule: **a target that is already gone counts as success**,
+because each of them describes a state rather than a trade, and that state has been reached
+without us. The rule only holds while "gone" and "we could not read it" stay distinguishable,
+which is what :class:`ReadFailure` is for.
 """
 
 from __future__ import annotations
 
 import time
+from enum import Enum
 from typing import Any, Protocol
 
 from .execution import (
     OrderFilling,
     Outcome,
+    Retcode,
     TradeAction,
     alternative_filling,
     choose_filling,
     classify,
+    is_transient,
 )
 from .execution import describe_retcode as _describe
 from .logging_setup import get_logger
@@ -59,6 +69,27 @@ ACCOUNT_TRADE_MODE_DEMO = 0
 """``ACCOUNT_TRADE_MODE_DEMO``. Contest is 1 and real is 2."""
 
 
+class ReadFailure(Enum):
+    """The one non-answer a terminal read is allowed to give.
+
+    Deliberately distinct from ``None``, which means the terminal answered and the thing is
+    not there. Everything that acts on an existing position or order treats "not there" as the
+    desired state already being true, and reports it as a **success** -- so conflating the two
+    would let a momentary read failure record a close that never happened, or a stop that
+    never moved. That is the same ``None``-means-two-things trap MT5 sets with
+    ``positions_get()``, one level up.
+    """
+
+    UNREADABLE = "unreadable"
+
+
+UNREADABLE = ReadFailure.UNREADABLE
+"""Shorthand for the only member, so call sites read ``if live is UNREADABLE``."""
+
+LivePosition = tuple[str, PositionType, float]
+"""``(symbol, direction, volume)`` for one open position, as the terminal reports it now."""
+
+
 class Session(Protocol):
     """What the executor needs from a terminal. Implemented by the worker's ``_Session``."""
 
@@ -66,7 +97,7 @@ class Session(Protocol):
     def symbol_names(self) -> list[str]: ...
     def symbol_facts(self, name: str) -> SymbolFacts | None: ...
     def tick(self, name: str) -> tuple[float, float] | None: ...
-    def position(self, ticket: int) -> tuple[str, PositionType, float] | None: ...
+    def position(self, ticket: int) -> LivePosition | None | ReadFailure: ...
     def order_exists(self, ticket: int) -> bool: ...
     def loss_per_lot(
         self, direction: PositionType, symbol: str, entry: float, sl: float
@@ -103,11 +134,10 @@ class Executor:
             return self._close_or_reduce(cmd)
         if cmd.op is ActionKind.CANCEL:
             return self._cancel(cmd)
-        if cmd.op in (ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER):
-            # Kept as a backstop, not a normal path: these are absent from
-            # protocol.DISPATCHABLE_KINDS, so the engine does not send them at all. Add them
-            # there when this branch is implemented, or SL/TP sync stays silently off.
-            return self._fail(cmd, error="modification arrives with stage 3")
+        if cmd.op is ActionKind.MODIFY_SLTP:
+            return self._modify_sltp(cmd)
+        if cmd.op is ActionKind.MODIFY_ORDER:
+            return self._modify_order(cmd)
         if cmd.op not in (ActionKind.OPEN, ActionKind.PLACE):
             return self._fail(cmd, error=f"nothing to send for {cmd.op.value}")
 
@@ -177,6 +207,15 @@ class Executor:
             return self._fail(cmd, error="no slave ticket recorded for this copy")
 
         live = self._session.position(cmd.slave_ticket)
+        if live is UNREADABLE:
+            # "We could not tell" is not "it is gone". Saying gone here would report a close
+            # that never happened, and the ledger would drop the row for a position that is
+            # still open. Fail it as transient instead, and the next tick derives it again.
+            return self._fail(
+                cmd,
+                retryable=True,
+                error=f"could not read slave position {cmd.slave_ticket} to close it",
+            )
         if live is None:
             log.info("#%s: slave position %s already gone", cmd.master_ticket, cmd.slave_ticket)
             return self._ok(
@@ -194,7 +233,12 @@ class Executor:
                 return self._fail(cmd, error=f"nonsensical close fraction {fraction!r}")
             facts = self._session.symbol_facts(symbol)
             if facts is None:
-                return self._fail(cmd, slave_symbol=symbol, error=f"no symbol_info for {symbol!r}")
+                return self._fail(
+                    cmd,
+                    slave_symbol=symbol,
+                    retryable=True,
+                    error=f"no symbol_info for {symbol!r}",
+                )
             sized = quantize_volume(open_volume * fraction, facts)
             if not sized.ok or sized.lots is None:
                 # Too small a slice to express. Leaving the position whole is the safe
@@ -208,7 +252,9 @@ class Executor:
         closing_direction = PositionType.SELL if direction is PositionType.BUY else PositionType.BUY
         price = self._market_price(symbol, closing_direction)
         if price is None:
-            return self._fail(cmd, slave_symbol=symbol, error=f"no tick for {symbol!r}")
+            return self._fail(
+                cmd, slave_symbol=symbol, retryable=True, error=f"no tick for {symbol!r}"
+            )
 
         facts = self._session.symbol_facts(symbol)
         mask = facts.filling_mask if facts is not None else 0
@@ -243,13 +289,203 @@ class Executor:
         result = self._session.order_send(request)
         retcode = getattr(result, "retcode", None) if result is not None else None
         outcome = classify(retcode)
-        if outcome is Outcome.SUCCEEDED:
+        if outcome in (Outcome.SUCCEEDED, Outcome.GONE):
+            # GONE means the server says the ticket names nothing -- it filled or went while
+            # the command was in the queue. Not resting is what we asked for.
             return self._ok(cmd, slave_ticket=cmd.slave_ticket, outcome=outcome.value, attempts=1)
         return self._fail(
             cmd,
             retcode=retcode,
             attempts=1,
+            retryable=is_transient(outcome),
             error=f"{_describe(retcode)} cancelling order {cmd.slave_ticket}",
+        )
+
+    # --- modifying ---------------------------------------------------------------------------
+
+    def _modify_sltp(self, cmd: OrderCommand) -> OrderResult:
+        """Move a copied position's stop and target to match the master's.
+
+        ``TRADE_ACTION_SLTP`` takes five fields and ignores the rest, and it **overwrites both
+        levels every time** -- the request is a zero-filled struct, so omitting ``sl`` and
+        sending ``sl=0.0`` are the same bytes and both mean "no stop". There is no way to
+        change one and leave the other. That is exactly what mirroring wants: the master's
+        pair goes on the wire whole, and a master clearing its stop is mirrored by the zero
+        falling out of the same path rather than needing a case of its own.
+
+        The symbol is read from the **terminal**, for the same reason the close volume is: our
+        record is the master's spelling put through a prefix/suffix, while the position knows
+        what it actually is.
+        """
+        if cmd.slave_ticket is None:
+            return self._fail(cmd, error="no slave ticket recorded for this copy")
+
+        live = self._session.position(cmd.slave_ticket)
+        if live is UNREADABLE:
+            return self._fail(
+                cmd,
+                retryable=True,
+                error=f"could not read slave position {cmd.slave_ticket} to modify it",
+            )
+        if live is None:
+            # The copy is gone while the master still holds the trade, so there is nothing
+            # left to protect. Loud, because it is a real divergence: from here the master's
+            # exit will close nothing.
+            log.warning(
+                "#%s: slave position %s is gone, so its stops cannot follow the master",
+                cmd.master_ticket,
+                cmd.slave_ticket,
+            )
+            return self._ok(
+                cmd,
+                slave_ticket=cmd.slave_ticket,
+                outcome=Outcome.GONE.value,
+                target_gone=True,
+                attempts=0,
+            )
+        symbol = live[0]
+
+        request = {
+            "action": int(TradeAction.SLTP),
+            "symbol": symbol,
+            "position": cmd.slave_ticket,
+            # Coerced explicitly: order_send rejects an int where it wants a double and
+            # answers None, which classify() would then report as a lost connection.
+            "sl": float(cmd.sl),
+            "tp": float(cmd.tp),
+        }
+        return self._send_modification(cmd, request, symbol, f"sl {cmd.sl:g} tp {cmd.tp:g}")
+
+    def _modify_order(self, cmd: OrderCommand) -> OrderResult:
+        """Move a copied resting order -- its entry price as well as its stop and target.
+
+        The entry is what makes this a separate operation from :meth:`_modify_sltp`: a
+        position's opening price is history and cannot be changed, a resting order's is a
+        parameter. Volume is deliberately absent, because MT5 cannot modify a pending order's
+        volume at all.
+
+        ``type_time`` is sent rather than left out. Omitting it would not preserve the order's
+        existing expiry -- the zero-filled struct resets it to ``ORDER_TIME_GTC`` -- which
+        happens to be what :meth:`_build_request` placed the order with, so the two agree only
+        by coincidence. Stating it makes that agreement deliberate.
+        """
+        if cmd.slave_ticket is None:
+            return self._fail(cmd, error="no slave ticket recorded for this copy")
+
+        if not self._session.order_exists(cmd.slave_ticket):
+            # Filled or removed. Either way the order diff sees it on its next tick and
+            # answers with ORDER_FILLED or CANCEL; moving it is no longer meaningful.
+            log.info(
+                "#%s: slave order %s is no longer resting", cmd.master_ticket, cmd.slave_ticket
+            )
+            return self._ok(
+                cmd,
+                slave_ticket=cmd.slave_ticket,
+                outcome=Outcome.GONE.value,
+                target_gone=True,
+                attempts=0,
+            )
+
+        # Only so the result line names an instrument -- the request does not need it, and an
+        # unresolvable symbol must not stop a modification whose ticket is already known.
+        resolved = self._symbols.resolve(
+            self._terminal_id,
+            cmd.master_symbol,
+            self._session.symbol_names(),
+            prefix=cmd.symbol_prefix,
+            suffix=cmd.symbol_suffix,
+            label=self._terminal_id[:8],
+        )
+        request = {
+            "action": int(TradeAction.MODIFY),
+            "order": cmd.slave_ticket,
+            "price": float(cmd.entry),
+            "sl": float(cmd.sl),
+            "tp": float(cmd.tp),
+            # ORDER_TIME_GTC, and no expiration to go with it.
+            "type_time": 0,
+            "expiration": 0,
+        }
+        return self._send_modification(
+            cmd,
+            request,
+            resolved.name,
+            f"entry {cmd.entry:g} sl {cmd.sl:g} tp {cmd.tp:g}",
+        )
+
+    def _send_modification(
+        self, cmd: OrderCommand, request: dict[str, Any], symbol: str | None, wanted: str
+    ) -> OrderResult:
+        """Send a modification, with the only retry that makes sense for one.
+
+        Not :meth:`_send`, and not for tidiness: every one of that method's recoveries is a
+        fabrication here. There is no market price to re-read on a requote -- these prices are
+        the master's, and re-pricing a resting order would drag it onto the market -- and there
+        is no filling mode to re-negotiate, because nothing is being filled. Its result
+        handling is wrong too: a modification creates no order and no deal, so MT5 returns
+        zeroes, which :meth:`_send` would report as a fresh ticket and a zero-lot fill.
+
+        What is left is the busy-server case, and retrying that is safe because a modification
+        is idempotent -- a repeat that changes nothing answers ``NO_CHANGES``, which classifies
+        as success.
+
+        ``wanted`` describes the levels asked for, so a refusal names them. ``INVALID_STOPS``
+        (the stop is inside the broker's minimum distance from the market) is the routine
+        rejection here, and "it was refused" without saying what was refused is not enough to
+        act on.
+        """
+        deadline = time.monotonic() + DEADLINE_S
+        attempts = 0
+        last: Any = None
+
+        while attempts < MAX_ATTEMPTS and time.monotonic() < deadline:
+            attempts += 1
+            last = self._session.order_send(request)
+            retcode = getattr(last, "retcode", None) if last is not None else None
+            outcome = classify(retcode)
+
+            if outcome is Outcome.SUCCEEDED:
+                return self._ok(
+                    cmd,
+                    slave_ticket=cmd.slave_ticket,
+                    slave_symbol=symbol,
+                    retcode=retcode,
+                    attempts=attempts,
+                    outcome=(
+                        "already matched"
+                        if retcode == Retcode.NO_CHANGES
+                        else Outcome.SUCCEEDED.value
+                    ),
+                )
+            if outcome is Outcome.GONE:
+                log.warning(
+                    "#%s: %s, so %s was not applied",
+                    cmd.master_ticket,
+                    _describe(retcode),
+                    wanted,
+                )
+                return self._ok(
+                    cmd,
+                    slave_ticket=cmd.slave_ticket,
+                    slave_symbol=symbol,
+                    retcode=retcode,
+                    attempts=attempts,
+                    outcome=Outcome.GONE.value,
+                    target_gone=True,
+                )
+            if outcome is Outcome.BACKOFF:
+                time.sleep(BACKOFF_S)
+                continue
+            break
+
+        retcode = getattr(last, "retcode", None) if last is not None else None
+        return self._fail(
+            cmd,
+            slave_symbol=symbol,
+            retcode=retcode,
+            attempts=attempts,
+            retryable=is_transient(classify(retcode)),
+            error=f"{_describe(retcode)} setting {wanted} on {symbol or 'the slave'}",
         )
 
     # --- sizing ---------------------------------------------------------------------------
@@ -288,7 +524,9 @@ class Executor:
         is_pending = cmd.op is ActionKind.PLACE
         price = cmd.entry if is_pending else self._market_price(symbol, cmd.direction)
         if price is None:
-            return self._fail(cmd, slave_symbol=symbol, error=f"no tick for {symbol!r}")
+            return self._fail(
+                cmd, slave_symbol=symbol, retryable=True, error=f"no tick for {symbol!r}"
+            )
         request = self._build_request(
             cmd,
             symbol,
@@ -356,6 +594,24 @@ class Executor:
                     attempts=attempts,
                 )
 
+            if outcome is Outcome.GONE and cmd.op in (ActionKind.CLOSE, ActionKind.REDUCE):
+                # The position went between our read and our send. Not open is what was
+                # wanted, so this is the desired state reached without us, exactly as an
+                # already-missing position is. Guarded by op rather than assumed: this path is
+                # shared with OPEN and PLACE, and calling a refused entry a success would
+                # record a position that does not exist.
+                log.info("#%s: %s", cmd.master_ticket, _describe(retcode))
+                return self._ok(
+                    cmd,
+                    slave_ticket=cmd.slave_ticket,
+                    slave_symbol=symbol,
+                    retcode=retcode,
+                    outcome=Outcome.GONE.value,
+                    target_gone=True,
+                    filled_volume=0.0,
+                    attempts=attempts,
+                )
+
             if outcome is Outcome.REPRICE and reprice_direction is not None:
                 fresh = self._market_price(symbol, reprice_direction)
                 if fresh is None:
@@ -385,6 +641,9 @@ class Executor:
             retcode=retcode,
             requested_volume=lots,
             attempts=attempts,
+            # Describes the failure, not what to do about it: the ledger decides whether a
+            # transient one is worth deriving again, and never is for an OPEN or a PLACE.
+            retryable=is_transient(classify(retcode)),
             error=f"{_describe(retcode)} after {attempts} attempt(s)",
         )
 

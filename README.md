@@ -156,13 +156,16 @@ partials keep being mirrored, because those are real positions and someone has t
 A slave also has to be *fresh*, not merely last-seen-`CONNECTED`. A worker that has gone quiet
 is not copyable however healthy its last snapshot looked.
 
-What Stage 2a deliberately does *not* do:
+Two things Stage 2a deliberately left to later stages, both of which have since landed —
+**this package can now send orders**, and `dry_run` is what stands between a decision and a
+broker:
 
-- **Send anything.** There is no order code in the package. `dry_run` defaults to true, and if
-  you set it false the engine logs an error and keeps detecting rather than pretending to go
-  live.
-- **Compute lot sizes.** That needs the slave's own terminal (`order_calc_profit`, and the
-  symbol's volume step), so it is Stage 2b. What Stage 2a *does* decide is which basis
+- **Sending.** `executor.py` is the only module that can cause an order to exist, and nothing
+  reaches it while `dry_run` is true — which is the default. Underneath that, the executor
+  refuses any account whose `trade_mode` is not demo unless `allow_live_trading` is set on
+  that terminal specifically.
+- **Lot sizes.** They need the slave's own terminal (`order_calc_profit`, and the symbol's
+  volume step), so they are computed there. What the pure diff *does* decide is which basis
   applies, since that follows from pure data — and the log spells the choice out:
 
   | Master trade | Basis | Default |
@@ -332,7 +335,7 @@ dev tooling (`mypy`, `cython`, `email_validator`), and attribute-style false pos
 ## Development
 
 ```bash
-uv run pytest -q          # 357 tests, no MT5 terminal required
+uv run pytest -q          # 415 tests, no MT5 terminal required
 uv run ruff check .
 uv run ruff format .
 ```
@@ -342,28 +345,31 @@ suite runs without a terminal installed and without connecting to a broker.
 
 ## Roadmap
 
-Stage 1 was the shell; Stage 2a is the diff engine, in dry run. Planned, in order:
+Stage 1 was the shell. Everything below is now written; **none of it has been run against a
+broker**, which is what `ROADMAP.md`'s demo checklists are for and the only thing that turns
+"built" into "works".
 
-1. ~~**Copy engine** — master position polling and master→slave reconciliation.~~ Detection is
-   done (`reconcile.py`); execution is the rest of this list. Full notes in `ROADMAP.md`.
-2. **Filling-mode negotiation** — probe `symbol_info.filling_mode` (`& 1` FOK, `& 2` IOC) per
-   symbol with a cache and a fallback retry. Without this, FOK-only symbols reject every order
-   with `TRADE_RETCODE_INVALID_FILL`. Required before copying is usable across brokers.
-3. **Retcode-aware retry** — handle `REQUOTE`, `PRICE_OFF`, `INVALID_FILL`, `NO_MONEY`,
-   `DONE_PARTIAL`, and a `None` result, with re-pricing rather than one-shot give-up.
-4. **Step-correct volume quantization** — `(v / step).to_integral_value(ROUND_DOWN) * step`.
-5. **Risk-based sizing**: percent of the slave's own balance (default), or a fixed cash amount
-   per trade, both derived from the master's stop distance via `order_calc_profit` and net of
-   commission and slippage. A slave never inherits the master's position size — with one
+1. ~~**Copy engine** — master position polling and master→slave reconciliation.~~ `reconcile.py`.
+2. ~~**Filling-mode negotiation**~~ — probes `symbol_info.filling_mode` (`& 1` FOK, `& 2` IOC)
+   per symbol with a cache and a fallback retry. Without this, FOK-only symbols reject every
+   order with `TRADE_RETCODE_INVALID_FILL`.
+3. ~~**Retcode-aware retry**~~ — `REQUOTE`, `PRICE_OFF`, `INVALID_FILL`, `NO_MONEY`,
+   `DONE_PARTIAL` and a `None` result, with re-pricing rather than one-shot give-up.
+4. ~~**Step-correct volume quantization**~~ — `(v / step).to_integral_value(ROUND_DOWN) * step`.
+5. ~~**Risk-based sizing**~~: percent of the slave's own balance (default), or a fixed cash
+   amount per trade, both derived from the master's stop distance via `order_calc_profit` and
+   net of commission and slippage. A slave never inherits the master's position size — with one
    deliberate exception: a master trade with **no stop** has no risk distance, so
    `no_stop_policy: lot_multiple` sizes it off the master's lots instead. That is off by
    default. See `ROADMAP.md`.
-6. **Symbol mapping** — broker suffix *and* prefix handling, cached per `(terminal, symbol)`.
-7. **SL/TP sync and proportional partial closes.**
-8. **Pending orders** — mirror placement, modification and cancellation, per slave via
-   `copy_pending` (default off). Not observed at all yet: the worker reads `positions_get()`
-   only.
-9. **Reverse and filtered copying** — per-slave inversion, symbol whitelist/blacklist.
+6. ~~**Symbol mapping**~~ — broker suffix *and* prefix handling, cached per `(terminal, symbol)`.
+7. ~~**SL/TP sync and proportional partial closes.**~~ Partials with Stage 2c, the two
+   modifications with Stage 3. A modification does not go through the order-sending path: it
+   has no price to re-quote and no volume to fill, and MT5 answers it with zeroes.
+8. ~~**Pending orders**~~ — placement, modification and cancellation, per slave via
+   `copy_pending` (default off).
+9. ~~**Reverse and filtered copying**~~ — per-slave inversion, symbol whitelist/blacklist.
+   Inversion swaps stop and target rather than flipping them; see `ROADMAP.md` for why.
 
 Panic semantics are fixed now and will not change: it halts copying and never closes or modifies
 a position.

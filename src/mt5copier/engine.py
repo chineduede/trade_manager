@@ -476,8 +476,8 @@ class Engine:
             return
         self._warned_undispatchable.add(kind)
         log.warning(
-            "%s is being derived but this build cannot send it (executor: stage 3); "
-            "slave stops and targets will not follow the master",
+            "%s is being derived but is not in DISPATCHABLE_KINDS, so nothing will be sent "
+            "for it and whatever it mirrors will not follow the master",
             kind,
         )
 
@@ -556,6 +556,11 @@ class Engine:
         went quiet. For an OPEN or a PLACE this is a *permanent* exclusion of that ticket,
         which is the honest reading of "we could not get the order out in time": by the time
         anything changed, the slave would be filling far from the master's entry.
+
+        It is reported as transient all the same, because that describes what happened -- a
+        worker that is missing now will be respawned. The ledger applies the policy, and for
+        an open or a place the exclusion wins regardless; for a close or a modify, whose
+        target state does not expire, the next tick derives it again.
         """
         log.error(
             "could not send %s for #%s to %s: %s",
@@ -570,6 +575,7 @@ class Engine:
             op=cmd.op,
             master_ticket=cmd.master_ticket,
             ok=False,
+            retryable=True,
             error=error,
         )
         self._record_result(result)

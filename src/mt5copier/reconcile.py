@@ -129,8 +129,10 @@ class Action:
 
     skip_reason: SkipReason | None = None
     unprotected: bool = False
-    """True when this would open a position with no stop loss on the slave. Copying an
-    unstopped master trade sizes it but does not protect it, and that has to be visible."""
+    """True when this would leave the slave holding a position with no stop loss -- either by
+    opening one that way, or by taking the stop off one that had it. Copying an unstopped
+    master trade sizes it but does not protect it, and mirroring a cleared stop disarms a copy
+    that was protected a moment ago; neither should have to be inferred."""
 
     @property
     def executable(self) -> bool:
@@ -161,7 +163,11 @@ class Action:
         elif self.kind is ActionKind.MODIFY_SLTP:
             bits.append(f"sl {self.sl:g} tp {self.tp:g}")
         if self.unprotected:
-            bits.append("[UNPROTECTED: opens with no stop]")
+            bits.append(
+                "[UNPROTECTED: removes the slave's stop]"
+                if self.kind is ActionKind.MODIFY_SLTP
+                else "[UNPROTECTED: opens with no stop]"
+            )
         if self.skip_reason is not None:
             bits.append(f"-- SKIPPED: {self.skip_reason.value}")
         return "  ".join(bits)
@@ -540,6 +546,14 @@ def reconcile_slave(
                     tp=slave_tp,
                     slave_ticket=c.slave_ticket,
                     skip_reason=None if cfg.copy_sltp else SkipReason.SLTP_SYNC_DISABLED,
+                    # Mirroring is mirroring: a master that clears its stop leaves the copy
+                    # unprotected too, because the alternative is a copy that exits where the
+                    # master does not. But it has to be *seen*, and it is easy to miss -- on
+                    # a reversed slave it is the master removing its **target** that disarms
+                    # the copy, since effective_levels has swapped the pair. Gated on the
+                    # skip the same way the OPEN and PLACE branches are: an action that will
+                    # not be sent disarms nothing.
+                    unprotected=slave_sl == 0.0 and cfg.copy_sltp,
                 )
             )
 
@@ -669,6 +683,21 @@ def reconcile_slave_orders(
 
 DEFAULT_GRACE_SECONDS = 5.0
 """Longest lapse in observation that still counts as continuous. See :meth:`CopyLedger.step`."""
+
+RE_ARMABLE_KINDS = frozenset(
+    {ActionKind.CLOSE, ActionKind.CANCEL, ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER}
+)
+"""Ops whose decision may safely be derived again after a transient failure.
+
+Every one of them is idempotent against the terminal: closing a closed position, cancelling an
+order that is already gone, and re-sending levels that already match are all no-ops the broker
+reports as success. So asking twice costs nothing and asking once too few strands a copy.
+
+Two kinds are deliberately absent. ``REDUCE`` closes a *fraction*, so if the first one did
+reach the broker and only its answer was lost, deriving it again closes another slice -- and
+over-closing cannot be undone. ``OPEN`` and ``PLACE`` are absent for a different reason: an
+entry goes stale, and by the time a link returns the copy would be a late join.
+"""
 
 INFLIGHT_TIMEOUT_S = 30.0
 """How long to wait for a command's result before giving up on it. Generous, because the
@@ -1046,8 +1075,9 @@ class CopyLedger:
                 continue
             if dispatchable is not None and action.kind not in dispatchable:
                 # Reported, but nothing can send it, so it must not become belief either. The
-                # check precedes the simulate branch deliberately: a dry run that believed
-                # SL/TP had synced while live could not would stop being a rehearsal of live.
+                # check precedes the simulate branch deliberately: a dry run that believed an
+                # action had taken effect while live could not send it at all would stop being
+                # a rehearsal of live, which is the only thing a dry run is for.
                 continue
             if simulate:
                 self.apply_result(_simulated_result(action), simulated=True)
@@ -1073,10 +1103,17 @@ class CopyLedger:
         )
         if position is None or order is None:
             return
-        slave_sl, slave_tp = effective_levels(position.sl, position.tp, cfg)
         # The slave's order became the slave's position, keeping its ticket -- the same MT5
         # behaviour the fill was detected by. So the row changes kind in place rather than
         # being deleted and reinserted under a new identity.
+        #
+        # The levels carried over are the *order's*, not the master position's. They are the
+        # same whenever the order's own sync kept up, and when it did not -- a MODIFY_ORDER
+        # the broker refused -- they are the only record of what the slave actually rests on.
+        # Adopting the master's here would write the drift away as already fixed, and since
+        # the diff compares the master against belief and never against the slave, nothing
+        # would ever look again. Keeping the truth makes the next tick derive a MODIFY_SLTP
+        # and correct it.
         self._store.remember_position(
             terminal_id=action.terminal_id,
             master_ticket=action.master_ticket,
@@ -1085,8 +1122,8 @@ class CopyLedger:
             master_volume=position.volume,
             slave_ticket=order.slave_ticket,
             slave_volume=order.volume,
-            synced_sl=slave_sl,
-            synced_tp=slave_tp,
+            synced_sl=order.synced_sl,
+            synced_tp=order.synced_tp,
         )
 
     def _warn_on_growth(self, terminal_id: str, master_positions: Sequence[Position]) -> None:
@@ -1160,12 +1197,28 @@ class CopyLedger:
         splitting this from :meth:`step`: an OPEN we sent and an OPEN that filled are different
         facts, and only the second one means a position exists.
 
-        A failure is **final**, and the ticket is excluded. The alternative -- leaving it open to
-        retry -- means a copy that failed for a permanent reason (no money, invalid stops) gets
-        re-attempted every time the master nudges its stop, and a copy that failed for a
-        transient one gets re-attempted long after the price has moved. Either way the trade
-        being placed is no longer the trade the master took. Failures are surfaced loudly
-        instead, which is the only honest answer.
+        **A failed OPEN or PLACE is final**, and the ticket is excluded. The alternative --
+        leaving it open to retry -- means a copy that failed for a permanent reason (no money,
+        invalid stops) gets re-attempted every time the master nudges its stop, and a copy that
+        failed for a transient one gets re-attempted long after the price has moved. Either way
+        the trade being placed is no longer the trade the master took.
+
+        **Everything else describes a target state rather than an entry**, and a target state
+        does not go stale: a close is more urgent for being late, not less, and a stop should
+        still follow the master an hour from now. So a *transient* failure on one of those --
+        the link was down, the queue would not take it -- drops the de-duplication entry, and
+        the next tick derives the decision again. A *refusal* is left to stand: re-deriving it
+        would send the identical request into the identical refusal at every poll, which is
+        the log rot ``DISPATCHABLE_KINDS`` exists to avoid. It stays surfaced loudly, once.
+
+        **The limit of that, stated plainly:** a refusal is final for *that exact action*, not
+        just for now. ``_emit`` de-duplicates on value equality, so if the master later comes
+        back to a level pair the broker already refused -- a stop moved to breakeven, refused
+        as too close, moved away, then moved to breakeven again -- the second attempt is
+        dropped silently, even though the market may have moved enough for it to succeed. Any
+        *other* level is sent normally. Fixing it properly means a per-key retry budget with
+        backoff rather than a boolean, which is deliberately not in this stage; until then the
+        one ERROR is the only notice, and ROADMAP.md lists it under Stage 3's known gaps.
         """
         key = (result.terminal_id, result.master_ticket, result.op)
         self._inflight.pop(key, None)
@@ -1174,11 +1227,15 @@ class CopyLedger:
             if result.op in (ActionKind.OPEN, ActionKind.PLACE):
                 bucket = self._excluded if result.op is ActionKind.OPEN else self._excluded_orders
                 bucket.setdefault(result.terminal_id, set()).add(result.master_ticket)
+            again = result.retryable and result.op in RE_ARMABLE_KINDS
+            if again:
+                self._last.pop(key, None)
             log.error(
-                "%s for #%s on %s failed and will not be retried: %s",
+                "%s for #%s on %s failed, %s: %s",
                 result.op.value,
                 result.master_ticket,
                 result.terminal_id[:8],
+                "and will be derived again" if again else "and will not be retried",
                 result.error or result.outcome,
             )
             return
@@ -1188,14 +1245,24 @@ class CopyLedger:
             self._store.forget(result.terminal_id, result.master_ticket)
             return
         if last is None:
-            # The action that produced this is gone from memory (a restart between sending and
-            # the answer). Belief cannot be reconstructed from the result alone, and inventing
-            # it would be worse than leaving it to startup reconciliation, which will see the
-            # position and report it as an orphan.
+            # The action that produced this is gone from memory -- a restart between sending
+            # and the answer, or an expiry that re-armed it. Belief cannot be reconstructed
+            # from the result alone and inventing it would be worse than leaving it.
+            #
+            # What happens next differs by kind, so the message must not promise one of them
+            # for the other: an OPEN or a PLACE created something nobody is tracking, which is
+            # what startup reconciliation reports as an orphan, while a modification created
+            # nothing and simply leaves belief where it was, so the diff derives it again.
+            recovery = (
+                "leaving it to startup reconciliation"
+                if result.op in (ActionKind.OPEN, ActionKind.PLACE)
+                else "belief is unchanged, so it will be derived again"
+            )
             log.warning(
-                "no pending action for %s #%s; leaving it to startup reconciliation",
+                "no pending action for %s #%s; %s",
                 result.op.value,
                 result.master_ticket,
+                recovery,
             )
             return
 
@@ -1244,18 +1311,33 @@ class CopyLedger:
                 master_volume=last.master_volume,
                 slave_volume=remaining,
             )
-        elif result.op is ActionKind.MODIFY_SLTP:
-            self._store.update(
-                last.terminal_id, last.master_ticket, synced_sl=last.sl, synced_tp=last.tp
-            )
-        elif result.op is ActionKind.MODIFY_ORDER:
-            self._store.update(
-                last.terminal_id,
-                last.master_ticket,
-                entry=last.entry,
-                synced_sl=last.sl,
-                synced_tp=last.tp,
-            )
+        elif result.op in (ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER):
+            if result.target_gone:
+                # Reported ok because there was nothing left to get wrong, not because the
+                # levels landed -- there was nothing to land them on. Writing them would
+                # record a stop the slave never carried, and the diff never re-reads the
+                # slave, so nothing would ever notice.
+                return
+            changes: dict[str, Any] = {"synced_sl": last.sl, "synced_tp": last.tp}
+            if result.op is ActionKind.MODIFY_ORDER:
+                if not self._is_order(last.terminal_id, last.master_ticket):
+                    # It filled while the modify was in flight, and ``_on_fill`` has already
+                    # converted the row, keeping the levels the slave's order really rested
+                    # on. Both stores key on (terminal, master ticket) alone and would happily
+                    # write an order's levels onto the position -- undoing that handover and
+                    # recording levels the broker never applied to anything.
+                    log.info(
+                        "#%s filled while its move was in flight; leaving the position's "
+                        "levels to the position diff",
+                        last.master_ticket,
+                    )
+                    return
+                changes["entry"] = last.entry
+            self._store.update(last.terminal_id, last.master_ticket, **changes)
+
+    def _is_order(self, terminal_id: str, master_ticket: int) -> bool:
+        """Whether that row is still a resting order rather than the position it became."""
+        return any(c.master_ticket == master_ticket for c in self._store.orders(terminal_id))
 
     def expire_inflight(self, *, timeout_s: float = INFLIGHT_TIMEOUT_S) -> list[tuple[str, int]]:
         """Give up on commands that were never answered, and say which.
@@ -1278,15 +1360,36 @@ class CopyLedger:
             lost.append((tid, ticket))
             if op is ActionKind.OPEN:
                 self._excluded.setdefault(tid, set()).add(ticket)
+                consequence = (
+                    "if it reached the broker it will appear as an orphan on the next "
+                    "startup reconciliation"
+                )
             elif op is ActionKind.PLACE:
                 self._excluded_orders.setdefault(tid, set()).add(ticket)
+                consequence = (
+                    "if it reached the broker it will appear as an orphan on the next "
+                    "startup reconciliation"
+                )
+            elif op in RE_ARMABLE_KINDS:
+                # Nothing was created, so there is no orphan to find and the promise the
+                # other branch makes would be a lie. What there is instead is a target state
+                # that is still wanted, so re-arm it and let the next tick derive it again.
+                self._last.pop(key, None)
+                consequence = "it will be derived again on the next tick"
+            else:
+                # A REDUCE, which is the one op that is neither re-armable nor orphan-making:
+                # it may have closed a slice already, and closing another cannot be undone.
+                consequence = (
+                    "the copy may already be smaller than our record; it is left alone "
+                    "rather than reduced twice"
+                )
             log.error(
-                "%s for #%s on %s was never answered after %.0fs; giving up. If it reached the "
-                "broker it will appear as an orphan on the next startup reconciliation",
+                "%s for #%s on %s was never answered after %.0fs; giving up -- %s",
                 op.value,
                 ticket,
                 tid[:8],
                 timeout_s,
+                consequence,
             )
         return lost
 

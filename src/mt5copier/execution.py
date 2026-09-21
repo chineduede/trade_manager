@@ -131,6 +131,14 @@ class Retcode(IntEnum):
     INVALID_FILL = 10030
     CONNECTION = 10031
     LIMIT_VOLUME = 10034
+    INVALID_ORDER = 10035
+    """"Incorrect or prohibited order type" -- a rejection of the request's ``type`` field,
+    **not** the server saying a ticket names nothing. Easy to misread from the name alone, and
+    expensive to: only requests that carry a type (DEAL, PENDING) can provoke it, so reading it
+    as "already gone" would turn a refused open or close into a recorded success."""
+    POSITION_CLOSED = 10036
+    """"Position with the specified POSITION_IDENTIFIER has already been closed." This one
+    genuinely does mean gone."""
 
 
 class Outcome(StrEnum):
@@ -141,6 +149,13 @@ class Outcome(StrEnum):
     SUCCEEDED = "succeeded"
     PARTIAL = "partially filled"
     """Record the volume **actually** filled, never the volume requested."""
+    GONE = "the target is gone"
+    """The order or position being acted on does not exist any more.
+
+    Not a failure. Closing, cancelling and modifying all describe a *target state*, and for a
+    close or a cancel that state has been reached without us. For a modify there is nothing
+    left to protect, so there is nothing left to get wrong either -- but it is a real
+    divergence from the master, so the caller says so at WARNING rather than in passing."""
     REPRICE = "retry with a fresh price"
     REFILL = "retry with the alternative filling mode"
     BACKOFF = "server is busy; retry after a pause"
@@ -159,7 +174,10 @@ _OUTCOMES: dict[int, Outcome] = {
     Retcode.TOO_MANY_REQUESTS: Outcome.BACKOFF,
     Retcode.CONNECTION: Outcome.CONNECTION,
     Retcode.TIMEOUT: Outcome.CONNECTION,
+    # Gone: we asked about something that is no longer there. Exactly one code means this.
+    Retcode.POSITION_CLOSED: Outcome.GONE,
     # Fatal: the request is wrong, or the account cannot take it. Retrying changes nothing.
+    Retcode.INVALID_ORDER: Outcome.FATAL,
     Retcode.NO_MONEY: Outcome.FATAL,
     Retcode.INVALID_VOLUME: Outcome.FATAL,
     Retcode.INVALID_PRICE: Outcome.FATAL,
@@ -173,8 +191,15 @@ _OUTCOMES: dict[int, Outcome] = {
     Retcode.REJECT: Outcome.FATAL,
     Retcode.INVALID: Outcome.FATAL,
     Retcode.ERROR: Outcome.FATAL,
+    # ORDER_CHANGED reads like a success and is not one: the order moved on between our read
+    # and our send, so the request was refused. Belief is written from the command rather than
+    # read back from the terminal, so calling this a success would record a level the broker
+    # never set, and the diff -- which compares the master against belief, never against the
+    # slave -- would never look again. Silent divergence is the one failure with no recovery.
+    Retcode.ORDER_CHANGED: Outcome.FATAL,
+    # NO_CHANGES genuinely is one: the request was accepted and the levels already matched.
+    # It is what makes a modification safe to retry.
     Retcode.NO_CHANGES: Outcome.SUCCEEDED,
-    Retcode.ORDER_CHANGED: Outcome.SUCCEEDED,
 }
 
 
@@ -195,6 +220,24 @@ def classify(retcode: int | None) -> Outcome:
         log.warning("unrecognised trade retcode %r; treating as fatal", retcode)
         return Outcome.FATAL
     return outcome
+
+
+_TRANSIENT = frozenset({Outcome.CONNECTION, Outcome.BACKOFF, Outcome.REPRICE})
+"""Outcomes that mean "the world was busy", as opposed to "the request was wrong".
+
+``REFILL`` is deliberately absent: exhausting it means the symbol permits no filling mode we
+have left to try, which does not improve by waiting.
+"""
+
+
+def is_transient(outcome: Outcome) -> bool:
+    """Whether a failure with this outcome is worth deriving again later.
+
+    Only the caller knows whether deriving it again is *safe* -- an entry goes stale, a partial
+    close cannot be undone -- so this answers the narrower question of whether the failure was
+    about the moment or about the request.
+    """
+    return outcome in _TRANSIENT
 
 
 def describe_retcode(retcode: int | None) -> str:

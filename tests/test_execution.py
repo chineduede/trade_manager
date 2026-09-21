@@ -15,6 +15,7 @@ from mt5copier.execution import (
     choose_filling,
     classify,
     describe_retcode,
+    is_transient,
 )
 
 FOK_ONLY = SymbolFilling.FOK
@@ -74,6 +75,41 @@ def test_no_alternative_is_offered_that_the_mask_forbids() -> None:
 def test_success_codes() -> None:
     assert classify(Retcode.DONE) is Outcome.SUCCEEDED
     assert classify(Retcode.PLACED) is Outcome.SUCCEEDED, "pending orders report PLACED"
+    assert classify(Retcode.NO_CHANGES) is Outcome.SUCCEEDED, "what makes a modify retryable"
+
+
+def test_order_changed_is_a_rejection_however_it_reads() -> None:
+    """The order moved on between our read and our send, so the request did NOT apply.
+
+    Calling it a success is the expensive mistake: belief is written from the command rather
+    than read back from the terminal, and the diff compares the master against belief and
+    never against the slave -- so a level the broker refused would be recorded as set and
+    nothing would ever look again.
+    """
+    assert classify(Retcode.ORDER_CHANGED) is Outcome.FATAL
+
+
+def test_a_vanished_target_is_its_own_outcome_not_a_failure() -> None:
+    """Closing, cancelling and modifying describe a target state. If the thing is already
+    gone, there is no state left to get wrong."""
+    assert classify(Retcode.POSITION_CLOSED) is Outcome.GONE
+
+
+def test_invalid_order_is_a_rejection_not_a_vanished_target() -> None:
+    """The name invites the wrong reading. TRADE_RETCODE_INVALID_ORDER is "incorrect or
+    prohibited **order type**" -- a refusal of the request's type field -- and only requests
+    that carry a type (a deal, a pending order) can provoke it. Treating it as "already gone"
+    would report a refused open or a refused close as a success and drop the belief row."""
+    assert classify(Retcode.INVALID_ORDER) is Outcome.FATAL
+
+
+def test_transient_failures_are_the_ones_worth_asking_again() -> None:
+    """What separates "the world was busy" from "the request was wrong"."""
+    assert is_transient(Outcome.CONNECTION)
+    assert is_transient(Outcome.BACKOFF)
+    assert is_transient(Outcome.REPRICE)
+    assert not is_transient(Outcome.FATAL)
+    assert not is_transient(Outcome.REFILL), "no filling mode left to try does not improve"
 
 
 def test_a_partial_fill_is_its_own_outcome() -> None:

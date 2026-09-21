@@ -182,17 +182,21 @@ DISPATCHABLE_KINDS = frozenset(
         ActionKind.PLACE,
         ActionKind.CLOSE,
         ActionKind.REDUCE,
+        ActionKind.MODIFY_SLTP,
+        ActionKind.MODIFY_ORDER,
         ActionKind.CANCEL,
     }
 )
 """Which actions this build can actually send, as opposed to merely derive.
 
-``MODIFY_SLTP`` and ``MODIFY_ORDER`` are absent because the executor declines them until
-Stage 3, and ``ORDER_FILLED`` because it is a report about the slave's own fill and must never
-be sent at all. Derivation is unaffected: an undispatchable action is still recorded, logged
-and shown, it just never goes in flight waiting for an answer nothing will give.
+Every kind the executor implements, which since Stage 3 is all of them but ``ORDER_FILLED`` --
+and that one is not a gap. It is a report about the slave's own fill, whose whole effect is to
+hand tracking from an order to the position it became; there is nothing to send anywhere.
 
-Widen this when Stage 3 lands, or SL/TP sync stays silently off.
+The set is still threaded through ``CopyLedger.step`` rather than assumed, because it is what
+keeps an unsendable kind out of ``_inflight``: an action left waiting for an answer nothing
+will give freezes that ticket until the in-flight timeout. Narrowing it again is therefore
+safe -- but it must not be silent, which is what ``Engine._warn_undispatchable`` is for.
 """
 
 
@@ -311,15 +315,39 @@ class OrderResult:
     attempts: int = 0
     error: str | None = None
 
+    target_gone: bool = False
+    """The position or order this acted on does not exist any more.
+
+    Reported with ``ok`` true, because closing and cancelling describe a state that has now
+    been reached without us. For a **modification** it means the opposite of a success: the
+    levels were not applied to anything, so belief must not record them. Without this the
+    ledger would write a stop the slave never carried -- and since the diff compares the
+    master against belief and never against the slave, nothing would look again."""
+
+    retryable: bool = False
+    """Whether a failure was transient -- a link that was down, a queue that would not take
+    the command -- rather than the broker refusing the request.
+
+    Only meaningful when ``ok`` is false, and it describes the failure rather than deciding
+    what to do about it. The ledger owns that decision: a transient failure is re-derived on
+    the next tick, a refusal is left to stand so the identical request is not sent into the
+    identical refusal forever. An OPEN or a PLACE is never re-derived either way -- by the
+    time a link comes back, the copy would be filling far from the master's entry."""
+
     def describe(self) -> str:
         head = f"{self.op.value.upper():<12} #{self.master_ticket}"
-        if self.ok:
-            vol = f"{self.filled_volume:g}" if self.filled_volume is not None else "?"
-            where = f" {self.slave_symbol}" if self.slave_symbol else ""
-            price = f" @{self.price:g}" if self.price else ""
-            tries = f" ({self.attempts} attempts)" if self.attempts > 1 else ""
-            return f"{head}{where} filled {vol}{price}{tries}"
-        return f"{head} FAILED: {self.error or self.outcome}"
+        if not self.ok:
+            return f"{head} FAILED: {self.error or self.outcome}"
+        where = f" {self.slave_symbol}" if self.slave_symbol else ""
+        tries = f" ({self.attempts} attempts)" if self.attempts > 1 else ""
+        if self.op in (ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER):
+            # A modification fills nothing and creates no ticket, so MT5 answers with zeroes.
+            # Reporting those as "filled 0 @0" would read like a trade that went nowhere
+            # instead of a stop that moved.
+            return f"{head}{where} {self.outcome}{tries}"
+        vol = f"{self.filled_volume:g}" if self.filled_volume is not None else "?"
+        price = f" @{self.price:g}" if self.price else ""
+        return f"{head}{where} filled {vol}{price}{tries}"
 
 
 @dataclass(frozen=True, slots=True)

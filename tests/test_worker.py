@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from mt5copier.executor import UNREADABLE
 from mt5copier.protocol import (
     Command,
     CommandKind,
@@ -125,15 +126,19 @@ class FakeMT5:
             raise RuntimeError("boom")
         return self._terminal
 
-    def positions_get(self) -> tuple[FakePosition, ...] | None:
+    def positions_get(self, ticket: int | None = None) -> tuple[FakePosition, ...] | None:
         if self.positions is None:
             return None
-        return self.positions
+        if ticket is None:
+            return self.positions
+        return tuple(p for p in self.positions if p.ticket == ticket)
 
-    def orders_get(self) -> tuple[FakeOrder, ...] | None:
+    def orders_get(self, ticket: int | None = None) -> tuple[FakeOrder, ...] | None:
         if self.orders is None:
             return None
-        return self.orders
+        if ticket is None:
+            return self.orders
+        return tuple(o for o in self.orders if o.ticket == ticket)
 
     # MT5 returns None from the *_get calls both for "nothing found" and for a failure, so the
     # session cross-checks these counts to tell the two apart. The overrides let a test say
@@ -479,3 +484,65 @@ def test_worker_clamps_poll_interval(tmp_path: Path, poll_ms: int) -> None:
     """A tiny poll interval must not become a busy-spin against the terminal's IPC."""
     snaps = run_until_stopped(FakeMT5(), tmp_path, poll_ms=poll_ms)
     assert any(s.state is WorkerState.CONNECTED for s in snaps)
+
+
+# --- the reads the executor acts on -----------------------------------------------------------
+#
+# These three answers decide whether a copy gets closed, cancelled or left alone, and two of
+# them are reported to the engine as *successes*. They had no coverage before Stage 3.
+
+
+def test_position_reads_back_the_symbol_direction_and_volume() -> None:
+    mt5 = FakeMT5(positions=(FakePosition(ticket=100, symbol="EURUSD", type=1, volume=0.25),))
+    assert _Session(mt5, Path("x.exe")).position(100) == ("EURUSD", PositionType.SELL, 0.25)
+
+
+def test_a_position_the_terminal_says_is_not_there_reads_as_gone() -> None:
+    """An empty sequence is MT5's unambiguous "nothing matched"."""
+    assert _Session(FakeMT5(positions=()), Path("x.exe")).position(999) is None
+
+
+def test_a_position_read_that_fails_is_unreadable_not_gone() -> None:
+    """The distinction the whole three-state answer exists for: "gone" is reported as a
+    success, so a failed read must never look like one."""
+    mt5 = FakeMT5()
+    mt5.positions = None  # the constructor reads None as "use the default three"
+    assert _Session(mt5, Path("x.exe")).position(100) is UNREADABLE
+
+
+def test_a_raising_position_read_is_unreadable_too() -> None:
+    class Exploding(FakeMT5):
+        def positions_get(self, ticket: int | None = None):
+            raise RuntimeError("boom")
+
+    assert _Session(Exploding(), Path("x.exe")).position(100) is UNREADABLE
+
+
+def test_an_unparseable_position_is_unreadable_rather_than_absent() -> None:
+    """Dropping it would be indistinguishable from the position having closed."""
+    mt5 = FakeMT5(positions=(FakePosition(ticket=100, type=99),))
+    assert _Session(mt5, Path("x.exe")).position(100) is UNREADABLE
+
+
+def test_a_resting_order_is_reported_as_resting() -> None:
+    mt5 = FakeMT5(orders=(FakeOrder(ticket=200),))
+    assert _Session(mt5, Path("x.exe")).order_exists(200) is True
+
+
+def test_an_order_the_terminal_says_is_not_there_reads_as_gone() -> None:
+    assert _Session(FakeMT5(orders=()), Path("x.exe")).order_exists(999) is False
+
+
+def test_an_order_read_that_fails_answers_still_resting() -> None:
+    """MT5 overloads None for "call failed" and "nothing matched", and bool(None) picks the
+    wrong one. Answering False would drop a live order from belief and leave it untracked;
+    answering True at worst sends a cancel or a modify that is a no-op."""
+    assert _Session(FakeMT5(orders=None), Path("x.exe")).order_exists(200) is True
+
+
+def test_a_raising_order_read_answers_still_resting() -> None:
+    class Exploding(FakeMT5):
+        def orders_get(self, ticket: int | None = None):
+            raise RuntimeError("boom")
+
+    assert _Session(Exploding(), Path("x.exe")).order_exists(200) is True

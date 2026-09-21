@@ -3,15 +3,18 @@
 Stage 1 (discovery, designation, supervision) is complete and user-accepted. It contains no
 trading logic. This document is the plan for everything that does.
 
-## Where the project is — 2026-09-19
+## Where the project is — 2026-09-21
 
-**An order can now leave this machine.** The engine builds `OrderCommand`s and consumes
-`OrderResult`s; `dry_run` is the only thing standing between a decision and a broker, and it
-still defaults to true. The executor's demo-only guard is still in place underneath.
+**An order can now leave this machine, and so can a change to one.** The engine builds
+`OrderCommand`s and consumes `OrderResult`s; `dry_run` is the only thing standing between a
+decision and a broker, and it still defaults to true. The executor's demo-only guard is still
+in place underneath.
 
 **Nothing here has been validated against a broker yet.** Every claim below is backed by tests
 and by the Stage 2a dry run, not by an order that actually filled. **The one-slave demo run in
-"Verifying the wiring" is the next thing to do, before this is pointed at anything else.**
+"Verifying the wiring" is still the next thing to do, before this is pointed at anything
+else** — Stage 3 landed before it because it was cheap to build and changes what that run
+should check, not because the run stopped mattering.
 
 | Stage | State |
 |---|---|
@@ -19,17 +22,14 @@ and by the Stage 2a dry run, not by an order that actually filled. **The one-sla
 | 2a — the diff engine, dry run | **validated on a demo master 2026-09-17** |
 | 2b — execution primitives | complete (`sizing`, `symbols`, `execution`, `executor`) |
 | 2c — live copying | **wired, awaiting its demo run** |
-| 3 — SL/TP sync, partial closes | executor declines MODIFY_SLTP / MODIFY_ORDER; excluded from `DISPATCHABLE_KINDS` |
-| 4 — pending orders | detection validated; PLACE/CANCEL now dispatch, untested live |
+| 3 — SL/TP sync, partial closes | **built 2026-09-21, awaiting its demo run** |
+| 4 — pending orders | detection validated; PLACE / MODIFY_ORDER / CANCEL dispatch, untested live |
 | 5 — reverse and filtered copying | inversion implemented, never live-tested |
 
 **The next step: verify it on one demo slave.** See "Verifying the wiring" under Stage 2c for
-the ordered checklist. Do not widen past one slave until the demo-only refusal has been seen
-working with its own eyes — it is the guard that stands between a bug here and a prop account.
-
-After that, Stage 3 (SL/TP sync and partial closes) is the next feature, and the first thing it
-must do is add `MODIFY_SLTP` / `MODIFY_ORDER` to `protocol.DISPATCHABLE_KINDS`. Until it does,
-stops are derived, reported, and deliberately not sent.
+the ordered checklist, then "Verifying the sync" under Stage 3. Do not widen past one slave
+until the demo-only refusal has been seen working with its own eyes — it is the guard that
+stands between a bug here and a prop account.
 
 Everything in "Safety rails" under Stage 2c is now built — the demo-only guard landed with
 Stage 2b deliberately, in the same commit as the first code able to send.
@@ -227,6 +227,35 @@ which implies it can be changed there, and it cannot.
 This is a gap rather than a deferral — it was never planned, and it should have been. It is
 also the thing most likely to be wanted daily, since `risk_percent` is the setting a user
 actually reaches for.
+
+### It has now cost a test cycle — 2026-09-21
+
+The first live attempt failed with `symbol 'EURGBP' not found on this slave`, and the reason
+was a single unset character: **BlackBull Markets decorates every one of its 1978 symbols with
+a lowercase `p`** (`EURGBPp`, `EURAUDp`, `XAUUSDp`; its indices are undecorated, so `US30` and
+`NAS100` match exactly). `symbol_suffix` was `""`, so exact match missed, there was no
+configured decoration to try, and the base-name scan missed too — `p` is not in
+`symbols._COMMON_SUFFIXES`, so `base_name("EURGBPp")` is `"EURGBPP"`, which does not equal
+`"EURGBP"`. Refusing was correct; an unresolved symbol must never become a guess.
+
+Three things follow, in order of how much they would have helped:
+
+- **Setting `symbol_suffix` needed the app closed and the JSON hand-edited**, which is exactly
+  the friction above. Two settings were changed by hand that evening (`dry_run` and this one)
+  and one of them was the bug.
+- **Diagnosing it needed a separate script that connected to the terminal and listed
+  symbols.** The editor's symbol-mapping section should be able to *test* a mapping against
+  the live symbol list and show what it resolves to and how (`EXACT` / `CONFIGURED` / `SCAN`),
+  because that turns a failed trade into a pre-flight check. This is probably the single
+  highest-value part of the editor, and it is not obvious from the settings list alone.
+- **Adding `p` to `_COMMON_SUFFIXES` was considered and rejected.** The configured suffix is
+  the mechanism built for this, it is per-slave so it cannot misfire on another broker, and it
+  resolves at `CONFIGURED` rather than the less trustworthy `SCAN`. Widening a heuristic that
+  runs for *every* broker to fix one broker is the wrong trade, and the scan is already the
+  part of that module most likely to be subtly wrong.
+
+Also worth recording because it was the thing actually verified: the failure came *after* the
+demo-only guard, which is how we know BlackBull's `trade_mode` reads 0. The guard order held.
 
 Shape: a modal editor on the selected terminal (`e`), grouped as role/enabled, sizing,
 no-stop policy, copy behaviour, symbol mapping and filters. Build the edited values into a
@@ -452,13 +481,16 @@ Four conditions, all of which must hold: **not** a dry run, the action is `execu
 (a skip is a record, never an instruction), its kind is in `protocol.DISPATCHABLE_KINDS`, and
 the slave still has a worker and a snapshot.
 
-`DISPATCHABLE_KINDS` omits `MODIFY_SLTP`, `MODIFY_ORDER` and `ORDER_FILLED`. The first two
-because the executor declines them until Stage 3; the last because it is a report about the
-slave's *own* fill and must never be sent at all. `step()` takes the set so that undispatchable
-kinds are never put **in flight** either — the alternative (send it, let the executor decline)
+Since Stage 3, `DISPATCHABLE_KINDS` omits only `ORDER_FILLED` — and that is not a gap but a
+report about the slave's *own* fill, whose whole effect is to hand tracking from an order to
+the position it became. There is nothing to send anywhere.
+
+`step()` still takes the set rather than assuming it, because that is what keeps an unsendable
+kind out of **flight**: an action left waiting for an answer nothing will give freezes that
+ticket until the 30s in-flight timeout. The alternative — send it, let the executor decline —
 produces one ERROR per distinct stop value, forever, for a gap we already know about, and a log
-that trains its reader to ignore ERROR is worse than no log. The cost of filtering is that the
-gap goes quiet, so the engine warns once per session per kind instead.
+that trains its reader to ignore ERROR is worse than no log. Narrowing the set again is
+therefore safe, but it must not be silent, so the engine warns once per session per kind.
 
 ### Correlating results: why `command_id` is checked in the engine
 
@@ -494,7 +526,9 @@ Nothing below has been done yet. One slave, on a demo account, `max_lot` small.
    visible in the slave terminal's Trade tab.
 4. Master closes. Confirm CLOSE dispatched, result ok, row gone.
 5. Master takes a partial. Confirm REDUCE with the right fraction.
-6. Move the master's stop. Confirm the once-per-session warning and that **nothing is sent**.
+6. Move the master's stop. With `copy_sltp = False` still set from step 3, confirm the action
+   is derived and reported as `SKIPPED: copy_sltp is off for this slave`, and that **nothing
+   is sent**. Turning it back on is "Verifying the sync" under Stage 3.
 7. Kill the slave's worker mid-OPEN. Confirm `expire_inflight` fires at 30s with its
    "will appear as an orphan" error, then restart and confirm the orphan hold engages and `o`
    clears it. This is the loop that startup reconciliation exists to close.
@@ -526,12 +560,152 @@ Orphans (ours by magic, absent from the table) must be surfaced, not silently ad
 - A visible kill switch — `F9` already halts copying without touching positions, and that
   meaning is fixed.
 
-## Stage 3 — SL/TP sync and partial closes
+## Stage 3 — SL/TP sync and partial closes — **built 2026-09-21, awaiting its demo run**
 
 Mirror stop-loss and take-profit changes after entry, and mirror partial closes
-proportionally. This is where most copier edge cases live: a partial close changes the volume
-ratio that every later action depends on, so the mapping table must store the master volume the
-slave position was sized against, not just the tickets.
+proportionally. Partial closes landed with Stage 2c (`REDUCE`, measured against the master
+volume the copy was *sized against*, which is why the mapping table stores it rather than the
+tickets alone). This stage is the other half: the two modifications.
+
+| Built | Where |
+|---|---|
+| `MODIFY_SLTP` — a position's stop and target, `TRADE_ACTION_SLTP` | `executor._modify_sltp` |
+| `MODIFY_ORDER` — a resting order's entry price as well, `TRADE_ACTION_MODIFY` | `executor._modify_order` |
+| Both kinds added to `protocol.DISPATCHABLE_KINDS` | `protocol.py` |
+
+### What the wire actually requires, and the traps in it
+
+- **`TRADE_ACTION_SLTP` takes five fields** — `action`, `symbol`, `position`, `sl`, `tp` — and
+  ignores the rest. Sending `volume` or `type_filling` is not an error, but it is noise, and a
+  *recognised* key with the wrong Python type is rejected client-side even when the action
+  ignores it.
+- **It overwrites both levels every time.** The request is a zero-filled struct, so omitting
+  `sl` and sending `sl = 0.0` are the same bytes, and both mean *no stop*. There is no
+  "leave unchanged". That is what makes mirroring a master **clearing** its stop fall out of
+  the normal path — but it also means the OPEN path's `if cmd.sl:` idiom must never be reused
+  here, because it would turn a cleared stop into a no-op.
+- **`order_send` rejects an int where it wants a double** and returns `None` *before* it
+  contacts the terminal, which `classify()` would then report as a lost connection for a
+  request that never left the process. Every level is coerced with `float()`.
+- **`TRADE_ACTION_MODIFY` takes seven** — `action`, `order`, `price`, `sl`, `tp`, `type_time`,
+  `expiration`. A pending order's **volume cannot be modified at all**, and its type cannot
+  either. Omitting `type_time` does *not* preserve the order's expiry: the zero-filled struct
+  resets it to `ORDER_TIME_GTC`, which is what `PLACE` used, so the two agree only by
+  coincidence. It is sent explicitly so the agreement is deliberate.
+- **A modification is idempotent**: a repeat that changes nothing answers `NO_CHANGES`, which
+  classifies as success. That is what makes retrying safe.
+- The symbol for an SLTP is read from the **terminal**, not from our record, for the same
+  reason the close volume is: our record is the master's spelling put through a
+  prefix/suffix, while the position knows what it actually is.
+
+### Why the modifications do not reuse `_send`
+
+Every recovery in `Executor._send` is a fabrication for a modification. There is no market
+price to re-read on a requote — these prices are the master's, and repricing a resting order
+would drag it onto the market — and no filling mode to re-negotiate, because nothing is being
+filled. Its *result* handling is wrong too: a modification creates no order and no deal, so
+MT5 answers with zeroes, which `_send` would report as a fresh slave ticket and a zero-lot
+fill. `_send_modification` keeps the demo guard, the attempt budget and the busy-server
+backoff, and drops the rest.
+
+### Three bugs this stage had to fix before it could be correct
+
+These were all live before Stage 3 and all made worse by it, because a modification is the
+first operation whose belief is a *write* rather than a delete.
+
+- **`ORDER_CHANGED` (10023) was classified as success.** It is a rejection — the order moved
+  on between our read and our send. Belief is written from the command rather than read back
+  from the terminal, and the diff compares the master against belief and never against the
+  slave, so recording a refused level as set means nothing ever looks again. Silent divergence
+  is the one failure this design has no recovery for. It is `FATAL` now.
+- **`_Session.position()` conflated "gone" with "could not read".** Gone is reported as
+  *success* by close, cancel and modify, so a momentary read failure recorded a close that
+  never happened. There are three answers now, and `ReadFailure.UNREADABLE` is the third.
+- **A failed close or modify was never derived again.** `apply_result` excludes only
+  OPEN/PLACE on failure, but `_last` had already recorded the action, so the identical
+  decision was suppressed for the rest of the session — a copy stranded with the wrong stop,
+  or worse, a close that never happened. `OrderResult.retryable` now distinguishes a
+  transient failure (re-derive next tick) from a refusal (stands, loudly, once).
+
+The asymmetry behind that last one is worth keeping: **an OPEN is an entry and goes stale, but
+a close or a modify is a target state and does not.** A close is more urgent for being late,
+not less. So OPEN and PLACE are still excluded permanently on any failure, and nothing else is.
+
+### Two policy questions this stage deliberately did not answer
+
+Both are trading decisions rather than implementation ones, and both should be settled the way
+`no_stop_policy` was — explicitly, per slave, before they can bite.
+
+1. **A stop the slave's broker will not accept.** Brokers declare a minimum distance from the
+   market (`SYMBOL_TRADE_STOPS_LEVEL`) and a band inside which levels cannot be touched at all
+   (`SYMBOL_TRADE_FREEZE_LEVEL`). A master moving its stop to breakeven while price is a pip
+   away is refused with `INVALID_STOPS`, and the copy keeps its old stop. The options are:
+   leave it (what happens today — the refusal is surfaced naming the symbol and both levels,
+   and any *different* later stop is sent normally); *widen* the stop to the broker's minimum, which
+   silently puts more at risk than the trade was sized for; or refuse the whole copy. Widening
+   is what MQL5's own sample does, and it is exactly the kind of silent adjustment the
+   volume rule ("below the minimum is a refusal, never a round-up") already rejects — so it
+   should not be added without being asked for. **Nothing pre-checks the level**, deliberately:
+   a second source of truth that can disagree with the server is its own failure mode.
+2. **A master that clears its stop.** Today it is mirrored, and the action carries
+   `[UNPROTECTED: removes the slave's stop]`. Mirroring is the contract, and the alternative
+   leaves the copy exiting where the master does not — but it does mean a slave set to
+   `no_stop_policy: SKIP`, which refuses to *open* an unstopped copy, will still have one
+   *disarmed*. On a reversed slave it is stranger still: `effective_levels` swaps the pair, so
+   it is the master removing its **take-profit** that disarms the copy.
+
+### Known and accepted, for now
+
+- **A refused level pair is refused for the life of that position, not just for now.** `_emit`
+  de-duplicates actions by value, so an action the broker rejected stays in `_last` and an
+  identical one later is dropped silently. Concretely: the master moves its stop to breakeven,
+  the broker refuses it as too close, the master moves the stop away and then back to that
+  same breakeven price — the second attempt never leaves the machine, even though the market
+  may since have moved far enough for it to be accepted. Any *other* level is sent normally,
+  and the one ERROR at the time of the refusal is the only notice. Fixing it properly means a
+  per-key retry budget with backoff rather than the current boolean, which is a bigger change
+  than Stage 3 should carry.
+- **A copy that is gone while the master still holds it.** The executor reports the
+  modification as a success with `the target is gone`, at WARNING, and belief converges — the
+  alternative is one ERROR per distinct stop value for as long as the master keeps trailing.
+  The row is cleared by the master's eventual CLOSE, which finds the position already gone and
+  reports that as a success too. The cost is that belief briefly describes a position that does
+  not exist.
+- **Commands execute inline on the worker's poll thread** (`worker.py`'s `while running`
+  loop), so a fast-trailing master delays that slave's snapshots by up to `DEADLINE_S` per
+  command. Bounded in practice, because only one command per `(slave, ticket, op)` is in
+  flight at a time — but a slave whose snapshots go quiet for `heartbeat_timeout_s` (15s) is
+  held and then re-baselined, so this is the thing to watch first if a trailing master ever
+  causes trouble.
+
+### Verifying the sync — the demo run, in this order
+
+Continues from "Verifying the wiring", same one demo slave, `max_lot` small. Set
+`copy_sltp = True` (the default) for this run.
+
+1. Master opens with a stop. Confirm the copy opens and `mapping.db` records `synced_sl`.
+2. **Move the master's stop.** Confirm, in order: the intent line carrying the new level, the
+   `-> MODIFY_SLTP ... (cmd N)` dispatch, a result line reading `MODIFY_SLTP #… <symbol>
+   succeeded` — *not* `filled 0` — the new stop visible on the slave's position in the
+   terminal, and `synced_sl` updated in `mapping.db`.
+3. Move it twice in quick succession. Confirm only one command goes out until the first is
+   answered, and that the **second** value is the one that ends up on the slave.
+4. Move the master's take-profit. Same, and confirm the stop is not disturbed.
+5. **Set the master's stop to something inside the broker's minimum distance** (a few points
+   from the market). Confirm one `INVALID_STOPS` failure naming the symbol and both levels,
+   that it is not retried at that value, and that a *different* stop afterwards is sent
+   normally.
+6. **Clear the master's stop entirely.** Confirm the action carries `[UNPROTECTED: removes the
+   slave's stop]` and that the slave's stop is actually removed. Decide, seeing it, whether
+   that is the behaviour you want — see the policy question above.
+7. Close the slave's copy by hand while the master still holds it, then move the master's
+   stop. Confirm one WARNING that the slave position is gone, a result that is *not* an error,
+   and that the master's eventual close tidies the row away.
+8. With `copy_pending = True`: place a limit on the master, then **move its entry price**.
+   Confirm `MODIFY_ORDER` goes out with the new price, that the resting order moves on the
+   slave, and that `type_time` left the order GTC rather than giving it an expiry.
+9. Set `copy_sltp = False` and move the master's stop. Confirm the action is derived and
+   reported as skipped, and that nothing is sent.
 
 ## Stage 4 — pending orders — **detection done and validated, execution pending**
 
@@ -548,9 +722,11 @@ ways to be wrong than positions do. Built:
 - ✅ The continuity rule, via a second exclusion set.
 - ✅ Sizing: unchanged, since an order has an entry and usually a stop.
 
-Still to write in 2b/2c: the `order_send` calls themselves. Note `zele-mt5` has no
+The `order_send` calls are written now: `PLACE` and `CANCEL` with Stage 2c, `MODIFY_ORDER`
+with Stage 3. None of the three has been run against a broker. Note `zele-mt5` had no
 `TRADE_ACTION_MODIFY` path at all — it can modify a position's SL/TP but not a pending order's
-entry price, so that is fresh work.
+entry price — so that half had no prior art to copy and was written fresh against the MQL5
+field list.
 
 ### Fill versus cancellation — **confirmed on a demo, 2026-09-17**
 
