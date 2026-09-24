@@ -172,6 +172,8 @@ def test_merge_preserves_user_settings(tmp_path: Path) -> None:
                 sizing_mode=SizingMode.FIXED_CASH_RISK,
                 invert=True,
                 symbol_blacklist=["XAUUSD"],
+                symbol_suffix="p",
+                symbol_map={"XAUUSD": "XAUUSD.s"},
             )
         }
     )
@@ -184,6 +186,8 @@ def test_merge_preserves_user_settings(tmp_path: Path) -> None:
     assert t.sizing_mode is SizingMode.FIXED_CASH_RISK
     assert t.invert is True
     assert t.symbol_blacklist == ["XAUUSD"]
+    assert t.symbol_suffix == "p"
+    assert t.symbol_map == {"XAUUSD": "XAUUSD.s"}
 
 
 def test_merge_keeps_vanished_terminals(tmp_path: Path) -> None:
@@ -301,3 +305,73 @@ def test_saved_json_is_human_readable(tmp_path: Path) -> None:
     save(AppConfig(), path)
     text = path.read_text(encoding="utf-8")
     assert text.startswith("{\n  ") and text.endswith("\n")
+
+
+# --- symbol mapping -------------------------------------------------------------------------
+
+
+def test_a_config_written_before_symbol_map_existed_still_loads(tmp_path: Path) -> None:
+    """``extra="forbid"`` rejects unknown keys, never absent ones -- so an additive field with
+    a default needs no migration. Getting this wrong costs the user every terminal's settings,
+    because load() treats a validation failure as corruption."""
+    path = tmp_path / "config.json"
+    tid = "A" * 32
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "terminals": {
+                    tid: {
+                        "terminal_id": tid,
+                        "label": "Alpha",
+                        "role": "slave",
+                        "risk_percent": 2.5,
+                        "symbol_suffix": "p",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load(path)
+    assert path.exists(), "a loadable config must not be quarantined"
+    assert cfg.terminals[tid].symbol_map == {}
+    assert cfg.terminals[tid].symbol_suffix == "p", "and nothing else is disturbed"
+    assert cfg.terminals[tid].risk_percent == 2.5
+
+
+def test_symbol_map_keys_are_normalised_to_upper_case() -> None:
+    """Folded once here rather than at each of the three places that resolve a symbol -- a
+    fold repeated three times is one that eventually disagrees with itself."""
+    t = TerminalConfig(terminal_id="A" * 32, symbol_map={" eurgbp ": "EURGBPp"})
+    assert t.symbol_map == {"EURGBP": "EURGBPp"}
+
+
+def test_symbol_map_values_keep_the_brokers_own_casing() -> None:
+    t = TerminalConfig(terminal_id="A" * 32, symbol_map={"EURGBP": "EURGBPp"})
+    assert t.symbol_map["EURGBP"] == "EURGBPp"
+
+
+def test_two_mapping_keys_differing_only_in_case_are_refused() -> None:
+    """Choosing between them would be a guess about which instrument the user meant, which is
+    the one thing symbol resolution must never do. Only reachable by hand-editing the file
+    into a contradiction; the editor rejects it at entry."""
+    with pytest.raises(ValidationError, match="disagree"):
+        TerminalConfig(terminal_id="A" * 32, symbol_map={"eurgbp": "EURGBPp", "EURGBP": "EURGBP.r"})
+
+
+def test_a_mapping_repeated_in_two_cases_but_agreeing_is_fine() -> None:
+    t = TerminalConfig(terminal_id="A" * 32, symbol_map={"eurgbp": "EURGBPp", "EURGBP": "EURGBPp"})
+    assert t.symbol_map == {"EURGBP": "EURGBPp"}
+
+
+def test_symbol_map_is_saved_beside_the_other_symbol_fields(tmp_path: Path) -> None:
+    """save() writes in field-declaration order, so this pins where it lands in the file."""
+    path = tmp_path / "config.json"
+    cfg = AppConfig(
+        terminals={"A" * 32: TerminalConfig(terminal_id="A" * 32, symbol_map={"EURGBP": "EURGBPp"})}
+    )
+    save(cfg, path)
+    keys = list(json.loads(path.read_text(encoding="utf-8"))["terminals"]["A" * 32])
+    assert keys.index("symbol_suffix") < keys.index("symbol_map") < keys.index("symbol_whitelist")

@@ -523,6 +523,10 @@ class Engine:
             slave_ticket=action.slave_ticket,
             symbol_prefix=cfg.symbol_prefix,
             symbol_suffix=cfg.symbol_suffix,
+            # Sorted so an unchanged map produces an identical command. The worker reads no
+            # config at all, so a mapping not copied here has no effect on what is placed --
+            # only on what the log calls it.
+            symbol_map=tuple(sorted(cfg.symbol_map.items())),
             magic=COPIER_MAGIC,
             # Short on purpose: MT5 truncates comments, and the mapping table is the authority
             # on ownership. This is a hint for a human reading the terminal.

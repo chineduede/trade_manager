@@ -250,6 +250,27 @@ def test_prefix_and_suffix_are_applied_to_the_symbol() -> None:
     assert a.slave_symbol == "mEURUSD.r"
 
 
+def test_an_explicit_mapping_overrides_the_decoration_in_the_logged_symbol() -> None:
+    """The log and the executor must not disagree about which instrument a copy is on, so
+    map_symbol shares its precedence with the real resolver rather than re-implementing it."""
+    cfg = slave(symbol_suffix="p", symbol_map={"XAUUSD": "XAUUSD.s"})
+    assert map_symbol("XAUUSD", cfg) == "XAUUSD.s"
+    assert map_symbol("EURGBP", cfg) == "EURGBPp", "unmapped symbols still take the suffix"
+    a = reconcile_slave([pos(symbol="XAUUSD")], [], cfg)[0]
+    assert a.slave_symbol == "XAUUSD.s"
+
+
+def test_a_dry_run_believes_the_mapped_name() -> None:
+    """_simulated_result turns slave_symbol into durable belief, so an approximation that
+    ignored the map would make the dry run rehearse the wrong instrument."""
+    clock = Clock()
+    ledger = CopyLedger()
+    mapped = link(symbol_suffix="p", symbol_map={"XAUUSD": "XAUUSD.s"})
+    watching(ledger, clock, [mapped])
+    ledger.step([pos(ticket=7, symbol="XAUUSD")], [mapped], now=clock.advance(1.0))
+    assert ledger.believed()[0].slave_symbol == "XAUUSD.s"
+
+
 # --- closes and changes ---------------------------------------------------------------------
 
 
@@ -1816,6 +1837,7 @@ def test_an_executable_action_becomes_an_order_command(engine: Engine) -> None:
     per-slave setting the sizing needs has to be carried in the command itself."""
     cfg = engine.config.terminals[TID_SLAVE]
     cfg.symbol_prefix = "x"
+    cfg.symbol_map = {"EURUSD": "EURUSD.s"}
     cfg.max_lot = 0.02
     cfg.commission_per_lot_round_turn = 7.0
     cfg.slippage_buffer_points = 3
@@ -1835,6 +1857,9 @@ def test_an_executable_action_becomes_an_order_command(engine: Engine) -> None:
     assert cmd.risk_amount == pytest.approx(100.0), "1% of a 10,000 balance"
     assert cmd.allow_live is False, "the demo-only guard is not bypassed by default"
     assert cmd.symbol_prefix == "x"
+    assert cmd.symbol_map == (("EURUSD", "EURUSD.s"),), (
+        "sorted pairs, not a dict -- OrderCommand is frozen, and the worker reads no config"
+    )
     assert cmd.max_lot == pytest.approx(0.02)
     assert cmd.commission_per_lot == pytest.approx(7.0)
     assert cmd.slippage_points == 3

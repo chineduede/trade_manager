@@ -20,9 +20,10 @@ answer and so belong to Stage 2b:
   decide is :class:`SizingBasis` -- whether the trade is sized from the slave's risk over the
   master's stop distance, sized as a multiple of the master's lots because there is no stop,
   or not copied at all. That choice depends only on pure data, so it is made here.
-* **Symbol resolution.** :func:`map_symbol` applies the configured prefix/suffix and nothing
-  else. The real resolver also falls back to a ``symbols_get()`` scan, which needs a
-  connection.
+* **Symbol resolution.** :func:`map_symbol` honours an explicit ``symbol_map`` entry and the
+  configured prefix/suffix, sharing that precedence with the real resolver. What it cannot do
+  is the exact match or the base-name scan, both of which need the broker's own symbol list --
+  so its answer is a best guess everywhere except the symbols the user mapped by hand.
 
 :class:`CopyLedger` is the stateful half, kept here rather than in the engine so it is testable
 in the same breath. It holds what we believe each slave has, behind a :class:`BeliefStore` --
@@ -55,6 +56,7 @@ from .protocol import (
     PositionType,
     SizingBasis,
 )
+from .symbols import configured_name
 
 log = get_logger(__name__)
 
@@ -282,13 +284,21 @@ class CopiedOrder:
 
 
 def map_symbol(master_symbol: str, cfg: TerminalConfig) -> str:
-    """Apply this slave's configured prefix/suffix to a master symbol.
+    """This slave's best-guess name for a master symbol, with no connection to check against.
 
-    Stage 2a only. Full resolution -- exact match, then prefix/suffix combinations, then a
-    ``symbols_get()`` base-name scan, then fail -- needs a live connection and lands in
-    Stage 2b, cached on ``(terminal_id, master_symbol)`` rather than on the symbol alone.
+    An explicit ``symbol_map`` entry if there is one, else the configured prefix/suffix.
+    Shares :func:`mt5copier.symbols.configured_name` with the executor rather than
+    re-implementing the precedence, because two copies of that rule would eventually disagree
+    and the disagreement would be a log naming one instrument while the order went to another.
+
+    Still only an approximation: full resolution also has an exact match and a base-name scan,
+    both of which need the broker's symbol list, so this cannot be right for a symbol the user
+    has not mapped by hand. What it feeds is :attr:`Action.slave_symbol` -- the name in the log
+    and the UI. Live, the ledger prefers the executor's answer once one arrives
+    (``result.slave_symbol or last.slave_symbol``), so the guess is only durable in a **dry
+    run**, whose beliefs live in their own store and are discarded on a mode change.
     """
-    return f"{cfg.symbol_prefix}{master_symbol}{cfg.symbol_suffix}"
+    return configured_name(master_symbol, cfg.symbol_prefix, cfg.symbol_suffix, cfg.symbol_map)
 
 
 def invert_type(ptype: PositionType) -> PositionType:

@@ -29,7 +29,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .discovery import DiscoveredTerminal
 from .logging_setup import get_logger
@@ -186,8 +186,56 @@ class TerminalConfig(BaseModel):
 
     symbol_prefix: str = ""
     symbol_suffix: str = ""
+    symbol_map: dict[str, str] = Field(default_factory=dict)
+    """Exact per-symbol overrides: the master's name to *this slave's* name.
+
+    For the exceptions a single decoration cannot express. Brokers decorate by asset class --
+    BlackBull suffixes 1978 symbols with ``p`` but leaves ``US30`` and ``NAS100`` bare -- so
+    the prefix/suffix above covers the bulk and this covers the rest. Only symbols that are
+    genuinely exceptional need an entry; anything the decoration already resolves should be
+    left out rather than restated.
+
+    Keys are normalised to upper case on load, so they match the master's name however it was
+    typed. Values keep the broker's own casing, because that is what ``symbol_info`` wants --
+    though resolution folds case against the real symbol list, so a mistyped value still
+    resolves if the instrument exists.
+
+    An entry naming a symbol the slave does not list is a **refusal**, not a fallback: the
+    entry is a human assertion that these two names are the same instrument, and if it is
+    wrong then falling through would place the trade on something the user never named while
+    the log reported a match. See :mod:`mt5copier.symbols`.
+    """
     symbol_whitelist: list[str] = Field(default_factory=list)
     symbol_blacklist: list[str] = Field(default_factory=list)
+
+    @field_validator("symbol_map", mode="before")
+    @classmethod
+    def _normalise_symbol_map(cls, value: object) -> object:
+        """Upper-case the keys once, here, rather than folding at every lookup.
+
+        Three places resolve a symbol -- the executor, the log's approximation in
+        :func:`mt5copier.reconcile.map_symbol`, and the UI's mapping tester -- and a fold
+        repeated in three places is a fold that eventually disagrees with itself.
+
+        Two keys that differ only in case but name *different* targets are refused rather
+        than resolved by dict order. Picking one would be a guess about which instrument the
+        user meant, which is the single thing symbol resolution must never do. It is only
+        reachable by hand-editing the file into a contradiction; the editor rejects it at
+        entry.
+        """
+        if not isinstance(value, dict):
+            return value
+        out: dict[str, str] = {}
+        for raw_key, raw_target in value.items():
+            key = str(raw_key).strip().upper()
+            target = str(raw_target).strip()
+            if key in out and out[key] != target:
+                raise ValueError(
+                    f"symbol_map has two entries for {key!r} that disagree: "
+                    f"{out[key]!r} and {target!r}"
+                )
+            out[key] = target
+        return out
 
     # --- Last known passive discovery data, for display before connecting ------------------
     last_login: int | None = None

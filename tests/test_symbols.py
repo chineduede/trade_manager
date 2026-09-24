@@ -7,7 +7,13 @@ instrument and says nothing. So the interesting cases here are the refusals.
 from __future__ import annotations
 
 from mt5copier.config import TerminalConfig
-from mt5copier.symbols import Resolution, SymbolCache, base_name, resolve
+from mt5copier.symbols import (
+    Resolution,
+    SymbolCache,
+    base_name,
+    configured_name,
+    resolve,
+)
 
 TID_A = "A" * 32
 TID_B = "B" * 32
@@ -30,7 +36,7 @@ def test_matching_is_case_insensitive_but_returns_the_brokers_spelling() -> None
     assert got.name == "EURUSD"
 
 
-def test_the_configured_suffix_is_tried_next() -> None:
+def test_the_configured_suffix_resolves_a_decorated_broker() -> None:
     got = resolve("EURUSD", ["EURUSD.r", "GBPUSD.r"], suffix=".r")
     assert got.name == "EURUSD.r"
     assert got.how is Resolution.CONFIGURED
@@ -91,6 +97,90 @@ def test_the_configured_mapping_beats_a_scan() -> None:
     assert got.how is Resolution.CONFIGURED
 
 
+# --- explicit overrides ---------------------------------------------------------------------
+
+
+def test_an_explicit_mapping_beats_a_configured_suffix() -> None:
+    got = resolve("XAUUSD", ["XAUUSDp", "XAUUSD.s"], suffix="p", symbol_map={"XAUUSD": "XAUUSD.s"})
+    assert got.name == "XAUUSD.s"
+    assert got.how is Resolution.MAPPED
+
+
+def test_an_explicit_mapping_beats_an_exact_match_too() -> None:
+    """The point of an override is to disambiguate; one that loses to a coincidence of naming
+    could not do that."""
+    got = resolve("GOLD", ["GOLD", "XAUUSD"], symbol_map={"GOLD": "XAUUSD"})
+    assert got.name == "XAUUSD"
+    assert got.how is Resolution.MAPPED
+
+
+def test_a_mapping_key_is_matched_case_insensitively() -> None:
+    got = resolve("eurgbp", ["EURGBPp"], symbol_map={"EURGBP": "EURGBPp"})
+    assert got.name == "EURGBPp"
+
+
+def test_a_mapping_returns_the_brokers_spelling_not_the_users() -> None:
+    """Folding the value against the real list means a mistyped case still resolves, and what
+    goes into the request is what ``symbol_info`` will accept."""
+    got = resolve("EURGBP", ["EURGBPp"], symbol_map={"EURGBP": "eurgbpp"})
+    assert got.name == "EURGBPp"
+
+
+def test_a_mapping_onto_a_name_the_broker_does_not_list_is_refused_not_guessed() -> None:
+    """The entry asserts these two names are the same instrument. If the named one is absent
+    the assertion is false, and falling through would place the trade on a name the user never
+    wrote while the log reported a match -- this module's cardinal sin."""
+    got = resolve("EURGBP", ["EURGBPp", "EURGBP.r"], symbol_map={"EURGBP": "NOPE"})
+    assert not got.ok
+    assert got.how is Resolution.MAPPED_MISSING, "and distinctly, so the tester can say why"
+
+
+def test_an_unmapped_symbol_is_unaffected_by_other_peoples_overrides() -> None:
+    got = resolve("EURUSD", ["EURUSDp"], suffix="p", symbol_map={"XAUUSD": "XAUUSD.s"})
+    assert got.name == "EURUSDp"
+    assert got.how is Resolution.CONFIGURED
+
+
+# --- the decoration now outranks an exact match ----------------------------------------------
+
+
+def test_a_configured_suffix_outranks_a_bare_exact_match() -> None:
+    """BlackBull lists EURGBPp. A bare EURGBP beside it is more likely a different product --
+    a standard account's symbol next to a raw one -- than the same instrument, and the user
+    setting a suffix is what says so."""
+    got = resolve("EURGBP", ["EURGBP", "EURGBPp"], suffix="p")
+    assert got.name == "EURGBPp"
+    assert got.how is Resolution.CONFIGURED
+
+
+def test_a_configured_suffix_that_misses_still_falls_back_to_an_exact_match() -> None:
+    """BlackBull suffixes 1978 symbols with p and leaves US30 and NAS100 bare. If a miss were
+    fatal, every undecorated index would need an override that says nothing."""
+    got = resolve("US30", ["US30", "EURGBPp"], suffix="p")
+    assert got.name == "US30"
+    assert got.how is Resolution.EXACT
+
+
+def test_the_reorder_changes_nothing_when_no_decoration_is_configured() -> None:
+    """candidates()[1:] is empty without a prefix or suffix, so a terminal that has not opted
+    in behaves exactly as it did before."""
+    got = resolve("EURUSD", ["EURUSD", "EURUSDm"])
+    assert got.name == "EURUSD"
+    assert got.how is Resolution.EXACT
+
+
+# --- the connectionless approximation --------------------------------------------------------
+
+
+def test_configured_name_prefers_an_override() -> None:
+    assert configured_name("XAUUSD", "", "p", {"XAUUSD": "XAUUSD.s"}) == "XAUUSD.s"
+
+
+def test_configured_name_falls_back_to_the_decoration() -> None:
+    assert configured_name("EURGBP", "", "p") == "EURGBPp"
+    assert configured_name("EURUSD", "m", ".r") == "mEURUSD.r"
+
+
 # --- the cache ------------------------------------------------------------------------------
 
 
@@ -118,6 +208,46 @@ def test_failures_are_cached_too() -> None:
     cache = SymbolCache()
     assert not cache.resolve(TID_A, "NOPE", ["EURUSD"]).ok
     assert cache.get(TID_A, "NOPE") is not None
+
+
+def test_a_changed_suffix_is_not_answered_from_the_cache() -> None:
+    """The 2026-09-21 failure. The suffix was corrected and the worker went on refusing,
+    because the answer was served from the key alone and the new decoration never reached
+    resolve(). It needed a worker restart, which the editor cannot ask a user to do."""
+    cache = SymbolCache()
+    assert not cache.resolve(TID_A, "EURGBP", ["EURGBPp"]).ok, "no suffix yet"
+
+    got = cache.resolve(TID_A, "EURGBP", ["EURGBPp"], suffix="p")
+    assert got.name == "EURGBPp"
+    assert got.how is Resolution.CONFIGURED
+
+
+def test_a_changed_override_is_not_answered_from_the_cache_either() -> None:
+    cache = SymbolCache()
+    assert cache.resolve(TID_A, "GOLD", ["GOLD", "XAUUSD"]).name == "GOLD"
+    got = cache.resolve(TID_A, "GOLD", ["GOLD", "XAUUSD"], symbol_map={"GOLD": "XAUUSD"})
+    assert got.name == "XAUUSD"
+
+
+def test_changing_one_override_leaves_the_other_answers_alone() -> None:
+    """The entry remembers the mapping for *its own* symbol, not a fingerprint of the whole
+    map, so correcting one override does not throw away every scan already paid for."""
+    cache = SymbolCache()
+    cache.resolve(TID_A, "EURUSD", ["EURUSD.pro"])
+    cache.resolve(TID_A, "GBPUSD", ["GBPUSD.pro"])
+
+    # A map that says nothing about EURUSD or GBPUSD.
+    assert cache.resolve(TID_A, "EURUSD", [], symbol_map={"XAUUSD": "XAUUSD.s"}).name == (
+        "EURUSD.pro"
+    ), "served from cache despite an empty symbol list"
+    assert cache.resolve(TID_A, "GBPUSD", [], symbol_map={"XAUUSD": "XAUUSD.s"}).ok
+
+
+def test_identical_settings_still_hit_the_cache_without_rescanning() -> None:
+    cache = SymbolCache()
+    assert cache.resolve(TID_A, "EURGBP", ["EURGBPp"], suffix="p").name == "EURGBPp"
+    # An empty list would fail to resolve, so answering proves nothing was re-scanned.
+    assert cache.resolve(TID_A, "EURGBP", [], suffix="p").name == "EURGBPp"
 
 
 def test_forgetting_one_terminal_leaves_the_others() -> None:

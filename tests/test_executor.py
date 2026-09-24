@@ -650,3 +650,64 @@ def test_the_symbol_resolution_is_cached_across_commands() -> None:
 
     session.symbols = ()
     assert executor.execute(cmd(command_id=2)).slave_symbol == "EURUSD.r"
+
+
+# --- symbol mapping ---------------------------------------------------------------------------
+
+
+def test_an_explicit_mapping_places_the_order_on_the_mapped_symbol() -> None:
+    session = FakeSession(symbols=("XAUUSDp", "XAUUSD.s"))
+    result = run(
+        session,
+        cmd(master_symbol="XAUUSD", symbol_suffix="p", symbol_map=(("XAUUSD", "XAUUSD.s"),)),
+    )
+    assert result.ok
+    assert result.slave_symbol == "XAUUSD.s"
+    assert session.sent[0]["symbol"] == "XAUUSD.s"
+
+
+def test_a_mapping_naming_a_symbol_the_broker_lacks_refuses_and_sends_nothing() -> None:
+    """Falling through would place the trade on a name the user never wrote."""
+    session = FakeSession(symbols=("EURGBPp",))
+    result = run(session, cmd(master_symbol="EURGBP", symbol_map=(("EURGBP", "NOPE"),)))
+    assert not result.ok
+    assert session.sent == []
+
+
+def test_the_configured_suffix_is_what_fixed_blackbull() -> None:
+    session = FakeSession(symbols=("EURGBPp", "US30"))
+    assert run(session, cmd(master_symbol="EURGBP", symbol_suffix="p")).slave_symbol == "EURGBPp"
+
+    fresh = FakeSession(symbols=("EURGBPp", "US30"))
+    assert run(fresh, cmd(master_symbol="US30", symbol_suffix="p")).slave_symbol == "US30", (
+        "an undecorated index still resolves, so it needs no override"
+    )
+
+
+def test_a_new_suffix_is_honoured_without_restarting_the_worker() -> None:
+    """One Executor, hence one symbol cache, per worker process -- and it used to answer from
+    the key alone, so a corrected suffix was ignored until the process was restarted. That is
+    the 2026-09-21 failure, and it is what makes an in-app editor worth having."""
+    session = FakeSession(symbols=("EURGBPp",))
+    executor = Executor(TID, session)
+
+    refused = executor.execute(cmd(master_symbol="EURGBP"))
+    assert not refused.ok, "no suffix configured yet"
+
+    fixed = executor.execute(cmd(command_id=2, master_symbol="EURGBP", symbol_suffix="p"))
+    assert fixed.ok
+    assert fixed.slave_symbol == "EURGBPp"
+
+
+def test_forgetting_the_cached_symbols_makes_the_next_command_re_read_them() -> None:
+    """What a reconnect does, for the one input a cached answer cannot notice changing: the
+    broker's own symbol list."""
+    session = FakeSession(symbols=())
+    executor = Executor(TID, session)
+    assert not executor.execute(cmd()).ok
+
+    session.symbols = ("EURUSD",)
+    assert not executor.execute(cmd(command_id=2)).ok, "still the cached refusal"
+
+    executor.forget_symbols()
+    assert executor.execute(cmd(command_id=3)).ok

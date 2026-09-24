@@ -283,6 +283,14 @@ class OrderCommand:
     """This slave's configured symbol decoration, carried rather than looked up for the same
     reason as everything else here."""
 
+    symbol_map: tuple[tuple[str, str], ...] = ()
+    """This slave's explicit per-symbol overrides, as sorted ``(master, slave)`` pairs.
+
+    A tuple of pairs rather than a dict because this dataclass is frozen: a mutable field would
+    make it unhashable and quietly break the promise the decorator advertises. The engine sorts
+    them so two otherwise-identical commands compare equal, and the executor rebuilds the dict
+    on the far side."""
+
     magic: int = 0
     comment: str = ""
     allow_live: bool = False

@@ -9,6 +9,22 @@ Brokers name the same instrument every way imaginable: ``EURUSD``, ``EURUSD.r``,
 by copying the trade onto a *different instrument*, so an unresolved symbol must be a refusal
 rather than a guess.
 
+**Order of preference, most trusted first:** an explicit ``symbol_map`` entry, then the
+configured prefix/suffix, then an exact name match, then a base-name scan.
+
+The configured decoration sitting *above* the exact match is deliberate and was not the
+original order. Setting a suffix is an assertion that this broker decorates its names, so a
+bare ``EURGBP`` listed alongside ``EURGBPp`` is more likely a different product -- a standard
+account's symbol beside a raw one -- than the same instrument. When no decoration is
+configured the rung is empty and the order is unchanged, so this affects only terminals that
+have opted in. A configured decoration that *misses* still falls through, because a suffix is
+a claim about the broker's naming in general and not about any one symbol: BlackBull's indices
+are undecorated while everything else takes ``p``.
+
+An explicit mapping is the same kind of assertion, only stronger and about one symbol, which is
+why it outranks everything and why a mapping onto a name the broker does not list is refused
+outright instead of falling through.
+
 The cache key is ``(terminal_id, master_symbol)`` and never the symbol alone. Caching on the
 symbol is the bug in ``zele-mt5``'s ``SymbolMapper``: two sources mapping ``GOLD`` differently
 collide, and the second broker silently gets the first broker's answer. That mapper also has
@@ -17,7 +33,7 @@ no prefix support at all.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -34,9 +50,14 @@ class Resolution(StrEnum):
     """How a name was arrived at. Worth recording: an EXACT match and a SCAN match deserve
     different levels of trust, and the log should say which one a copy was placed on."""
 
+    MAPPED = "explicit per-symbol mapping"
     EXACT = "exact name match"
     CONFIGURED = "configured prefix/suffix"
     SCAN = "base-name scan of the slave's symbol list"
+    MAPPED_MISSING = "mapped to a name this broker does not list"
+    """Distinct from UNRESOLVED on purpose. Both are refusals, but this one means the user's
+    own mapping is wrong -- a typo, or a symbol the broker has retired -- which is a different
+    thing to fix and is what the editor's mapping tester exists to catch before a trade does."""
     UNRESOLVED = "no match on the slave"
 
 
@@ -78,29 +99,76 @@ def candidates(master_symbol: str, prefix: str = "", suffix: str = "") -> list[s
     return list(dict.fromkeys(out))
 
 
+def mapped_target(master_symbol: str, symbol_map: Mapping[str, str] | None) -> str | None:
+    """The explicit override for this symbol, or None.
+
+    Keys are compared upper-cased. :class:`~mt5copier.config.TerminalConfig` normalises them on
+    load, so this fold is for callers holding a map that has not been through pydantic -- an
+    unsaved editor form, most obviously.
+    """
+    if not symbol_map:
+        return None
+    return symbol_map.get(master_symbol.upper())
+
+
+def configured_name(
+    master_symbol: str,
+    prefix: str = "",
+    suffix: str = "",
+    symbol_map: Mapping[str, str] | None = None,
+) -> str:
+    """The single best guess at the slave's name, without a symbol list to check against.
+
+    For callers that have no connection and must still print *something*: the log's
+    approximation in :func:`mt5copier.reconcile.map_symbol`, and the editor before a terminal
+    has connected. It cannot do an exact match or a scan, both of which need the broker's list,
+    so it is only ever exactly right for a symbol the user mapped by hand -- which is also the
+    case where being wrong is most visible.
+    """
+    return mapped_target(master_symbol, symbol_map) or f"{prefix}{master_symbol}{suffix}"
+
+
 def resolve(
     master_symbol: str,
     available: Collection[str],
     prefix: str = "",
     suffix: str = "",
     label: str = "",
+    symbol_map: Mapping[str, str] | None = None,
 ) -> ResolvedSymbol:
     """Resolve to a name that actually exists on this slave, or refuse.
 
-    Exact match, then the configured prefix/suffix, then a base-name scan of the slave's own
-    list, then fail. ``available`` is that slave's ``symbols_get()`` output.
+    An explicit mapping, then the configured prefix/suffix, then an exact match, then a
+    base-name scan, then fail. ``available`` is that slave's ``symbols_get()`` output. See the
+    module docstring for why the decoration outranks the exact match.
 
-    Returning UNRESOLVED is a real answer, not an error path to paper over: a trade whose
+    Returning a refusal is a real answer, not an error path to paper over: a trade whose
     instrument cannot be identified must not be placed on a guess.
     """
     by_upper = {name.upper(): name for name in available}
 
-    if master_symbol.upper() in by_upper:
-        return ResolvedSymbol(by_upper[master_symbol.upper()], Resolution.EXACT)
+    target = mapped_target(master_symbol, symbol_map)
+    if target is not None:
+        hit = by_upper.get(target.upper())
+        if hit is not None:
+            return ResolvedSymbol(hit, Resolution.MAPPED)
+        # No fall-through. The mapping says these two names are the same instrument; if the
+        # named one is absent the assertion is false, and resolving to something else would
+        # place the trade on a name the user never wrote while the log claimed a match.
+        log.error(
+            "%s maps %r to %r, which this broker does not list; refusing to resolve it another way",
+            label or "this slave",
+            master_symbol,
+            target,
+        )
+        return ResolvedSymbol(None, Resolution.MAPPED_MISSING)
 
     for candidate in candidates(master_symbol, prefix, suffix)[1:]:
         if candidate.upper() in by_upper:
             return ResolvedSymbol(by_upper[candidate.upper()], Resolution.CONFIGURED)
+
+    if master_symbol.upper() in by_upper:
+        return ResolvedSymbol(by_upper[master_symbol.upper()], Resolution.EXACT)
 
     wanted = base_name(master_symbol)
     matches = sorted({name for name in available if base_name(name) == wanted})
@@ -120,22 +188,47 @@ def resolve(
     return ResolvedSymbol(None, Resolution.UNRESOLVED)
 
 
+_Inputs = tuple[str, str, str | None]
+"""What an answer was computed from: ``(prefix, suffix, mapped target for this symbol)``."""
+
+
 @dataclass
 class SymbolCache:
     """Per-terminal resolution cache, keyed by ``(terminal_id, master_symbol)``.
 
     Not keyed on the symbol alone -- see the module docstring. Small enough to keep for the
-    life of the process; symbol lists do not change under a running terminal often enough to
-    be worth invalidating on a timer, and :meth:`forget` covers the case where they do.
+    life of the process; a broker's symbol list does not change under a running terminal often
+    enough to be worth invalidating on a timer, and :meth:`forget` covers the case where it
+    does (the worker calls it on a reconnect).
+
+    **Each entry remembers the settings that produced it, and a change is a miss.** Without
+    that, editing a slave's suffix changed nothing until its worker was restarted: the answer
+    -- including a *failure*, which is cached just as readily -- was served from the key alone
+    and the new decoration never reached :func:`resolve`. That cost a live test cycle on
+    2026-09-21. The remembered inputs are per symbol, not a fingerprint of the whole map, so
+    correcting one override does not discard every other answer.
     """
 
-    _entries: dict[tuple[str, str], ResolvedSymbol] = field(default_factory=dict)
+    _entries: dict[tuple[str, str], tuple[ResolvedSymbol, _Inputs]] = field(default_factory=dict)
 
     def get(self, terminal_id: str, master_symbol: str) -> ResolvedSymbol | None:
-        return self._entries.get((terminal_id, master_symbol))
+        """What we last concluded about this symbol, whatever it was concluded from.
 
-    def put(self, terminal_id: str, master_symbol: str, resolved: ResolvedSymbol) -> None:
-        self._entries[(terminal_id, master_symbol)] = resolved
+        Deliberately *not* input-aware: this answers "have we looked at this before", which is
+        what the tests and any future introspection want. Whether the answer is still valid is
+        :meth:`resolve`'s separate question.
+        """
+        entry = self._entries.get((terminal_id, master_symbol))
+        return None if entry is None else entry[0]
+
+    def put(
+        self,
+        terminal_id: str,
+        master_symbol: str,
+        resolved: ResolvedSymbol,
+        inputs: _Inputs = ("", "", None),
+    ) -> None:
+        self._entries[(terminal_id, master_symbol)] = (resolved, inputs)
 
     def resolve(
         self,
@@ -145,14 +238,26 @@ class SymbolCache:
         prefix: str = "",
         suffix: str = "",
         label: str = "",
+        symbol_map: Mapping[str, str] | None = None,
     ) -> ResolvedSymbol:
-        """Cached :func:`resolve`. Failures are cached too -- a symbol this broker does not
-        list will not start existing, and re-scanning the whole list per tick is wasteful."""
-        hit = self.get(terminal_id, master_symbol)
-        if hit is not None:
-            return hit
-        resolved = resolve(master_symbol, list(available), prefix, suffix, label)
-        self.put(terminal_id, master_symbol, resolved)
+        """Cached :func:`resolve`, reused only while the settings behind it are unchanged.
+
+        Failures are cached alongside successes -- a symbol this broker does not list will not
+        start existing, and re-scanning a 2000-name list every tick is wasteful. What does
+        change is the user's configuration, so that is what the entry is checked against.
+        """
+        inputs: _Inputs = (prefix, suffix, mapped_target(master_symbol, symbol_map))
+        entry = self._entries.get((terminal_id, master_symbol))
+        if entry is not None and entry[1] == inputs:
+            return entry[0]
+        if entry is not None:
+            log.info(
+                "symbol settings for %r changed on %s; resolving it again",
+                master_symbol,
+                label or terminal_id[:8],
+            )
+        resolved = resolve(master_symbol, list(available), prefix, suffix, label, symbol_map)
+        self.put(terminal_id, master_symbol, resolved, inputs)
         return resolved
 
     def forget(self, terminal_id: str | None = None) -> None:

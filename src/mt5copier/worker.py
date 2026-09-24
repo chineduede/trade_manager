@@ -529,6 +529,9 @@ def run_worker(
                 if isinstance(cmd, Command) and cmd.kind is CommandKind.RECONNECT:
                     wlog.info("reconnect requested")
                     session.disconnect()
+                    # The broker's symbol list is the one input a cached resolution cannot
+                    # notice changing, so a reconnect is the deliberate moment to re-read it.
+                    executor.forget_symbols()
                     attempts = 0
                     next_retry_at = 0.0
             if not running:

@@ -115,6 +115,16 @@ class Executor:
         """Resolution is cached per (terminal, master symbol); the scan is the expensive part
         and a broker's symbol list does not change under a running terminal."""
 
+    def forget_symbols(self) -> None:
+        """Drop every cached symbol resolution for this terminal.
+
+        The cached answers already re-resolve when a *setting* changes, but not when the
+        *broker's* list does -- a symbol added, renamed or retired under a running terminal.
+        Nothing can detect that from here, so the worker calls this on a reconnect and ``c``
+        in the UI becomes a deliberate "re-read this broker".
+        """
+        self._symbols.forget(self._terminal_id)
+
     # --- the entry point ------------------------------------------------------------------
 
     def execute(self, cmd: OrderCommand) -> OrderResult:
@@ -148,6 +158,7 @@ class Executor:
             prefix=cmd.symbol_prefix,
             suffix=cmd.symbol_suffix,
             label=self._terminal_id[:8],
+            symbol_map=dict(cmd.symbol_map),
         )
         if not resolved.ok or resolved.name is None:
             return self._fail(cmd, error=f"symbol {cmd.master_symbol!r} not found on this slave")
@@ -395,6 +406,7 @@ class Executor:
             prefix=cmd.symbol_prefix,
             suffix=cmd.symbol_suffix,
             label=self._terminal_id[:8],
+            symbol_map=dict(cmd.symbol_map),
         )
         request = {
             "action": int(TradeAction.MODIFY),
