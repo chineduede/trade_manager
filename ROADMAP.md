@@ -217,29 +217,60 @@ sizing path (`LOT_MULTIPLE`, off by default) rather than being unsizeable.
 **Polling rate** is still untuned: detection runs on the master's own snapshot tick, so it
 inherits `poll_interval_ms` (250ms). See the performance note at the bottom before changing it.
 
-## Per-terminal settings editor — **half built, 2026-09-24**
+## Per-terminal settings editor — **built, 2026-09-24**
 
-**Built — press `e` on a terminal.** A modal covering sizing (`sizing_mode`, `risk_percent`,
-`risk_cash`, `max_lot`, commission, slippage, max deviation), the no-stop policy and its
-multiple, and the three copy flags. A blank `max_lot` means no ceiling. Ctrl+S or Enter saves,
-Esc cancels. The pure half is `settings_edit.py`; the form is `tui/settings_screen.py`.
+**Press `e` on a terminal.** A modal covering every per-slave setting except the three below:
+sizing (`sizing_mode`, `risk_percent`, `risk_cash`, `max_lot`, commission, slippage, max
+deviation), the no-stop policy and its multiple, `enabled`, `invert` (guarded), the three copy
+flags, and the symbol section (`symbol_prefix`, `symbol_suffix`, `symbol_map`, the whitelist and
+the blacklist). A blank `max_lot` means no ceiling. Ctrl+S or Enter saves, Esc cancels. The pure
+half is `settings_edit.py`; the form is `tui/settings_screen.py`; the guarded swap is
+`Engine.apply_settings`.
 
-**Still to build, in this order:**
+**Not editable, on purpose:** `allow_live_trading`, `label`, `role`, and the discovery fields.
+A test (`test_every_setting_is_either_editable_or_deliberately_not`) makes a setting added to
+the model without a decision about the form fail, so the list cannot drift.
 
-1. **The symbol section, with the live mapping tester.** `symbol_prefix`, `symbol_suffix` and
-   `symbol_map` are all still hand edits. The tester has a real design question in it: the UI
-   process holds no MT5 connection (each worker owns its own), and `CommandKind` is only
-   `STOP` / `RECONNECT` / `PING`, so testing a mapping against a broker's symbol list needs a
-   new worker command and a reply. It is not form work.
-2. **The `invert` guard** — see the table below. Until it exists, `invert` is shown read-only.
-3. **Filters** (`symbol_whitelist`, `symbol_blacklist`), `label`, `enabled`.
+**Dropped by the user, 2026-09-24: the live mapping tester.** It was planned as the most valuable
+part of the symbol section, and it would have needed the worker to send its symbol list to the
+UI. The symbol fields are plain text and a wrong mapping shows itself as a refusal at trade time.
+If that ever costs a trade again, the cheap design is for the worker to push its list once per
+connection and for the UI to run the pure `symbols.resolve()` against it, not a command and a
+reply. It works only for a connected slave.
 
 **Decisions taken building it, none of them obvious from the code:**
 
-- **`invert` and `allow_live_trading` are deliberately not editable.** The first needs the
-  guard below. The second is the demo-only guard's override, and a guard that a stray keypress
-  can lift is not a guard; it stays a hand edit with the app closed. Both are shown read-only
-  in the form.
+- **`allow_live_trading` is not editable.** It is the demo-only guard's override, and a guard
+  that a stray keypress can lift is not a guard; it stays a hand edit with the app closed. The
+  form says so.
+- **`label` is not editable because discovery owns it.** `merge_discovery` sets it on every
+  rescan and at every start, so an edit would silently revert the next time the app ran.
+- **`invert` is editable, and a flip is REFUSED while the slave has any copy open or opening.**
+  Refused, not resolved by clearing the ledger: a clear would orphan live positions. The count
+  is positions plus resting orders plus commands still in flight (belief follows outcomes, so
+  an open in flight is in no store yet), and it is read from the **persisted store**, not the
+  ledger's memory. The store opens lazily -- on the first reconcile, which needs detection on
+  and a connected master -- so a count from the ledger would say zero, right after launch, about
+  a slave whose `mapping.db` rows are alive. An unreadable store counts as *not zero*, the same
+  rule as the demo-only guard. The form checks first to show the reason beside the field;
+  `Engine.apply_settings` checks again and swaps under the lock the drain thread dispatches
+  under, because counting and then swapping would leave a gap for an open to slip into.
+- **`enabled` off is allowed and warned about, not refused.** Belief is deliberately never pruned
+  for a slave that stops being managed (see `CopyLedger._prune`), so its rows survive and are
+  matched back up on re-enable. What is lost while it is off is management: no closes and no
+  stop or target moves. That is the same as unassigning with `u`, so it warns rather than
+  refuses. It also drops the connection to that terminal.
+- **Symbol settings only steer copies opened from now on.** A modification resolves the symbol
+  "only so the result line names an instrument" (`executor.py`), so changing a suffix cannot
+  redirect a stop move on a copy that already exists.
+- **The symbol map is one `MASTER=BROKER` pair per line**, separated by lines, commas or spaces,
+  with spaces around the `=` forgiven. Two entries for one symbol that disagree are refused at
+  entry -- the model refuses them on load, and the form is where the user can fix it. The
+  filters are lists of master names, matched case-insensitively and exactly, with no wildcards
+  (`reconcile._filter_reason`); the help text says adding one does not copy a trade that was
+  already declined.
+- **Errors sit under their field, not beside it,** so a wide field leaves no room to squeeze a
+  message, and they take no space until there is one to show.
 - **Validation is pydantic's, not the form's.** The bounds live on `TerminalConfig`, so the
   form cannot accept what `load()` would reject — which would read as a corrupt config and
   reset the user's settings. The form adds only blank-means-`None` for `max_lot` and a refusal
@@ -255,15 +286,16 @@ Esc cancels. The pure half is `settings_edit.py`; the form is `tui/settings_scre
   Half an edit would leave the user believing all of it went in.
 - **F9 works inside the form.** A modal hides the app's own keys, and copying can be live
   while it is open, so the form binds panic itself. It closes the form and drops unsaved edits.
-- **Two saves earn a warning**, because they were a deliberate hand edit and are now one
-  keypress: enabling `LOT_MULTIPLE` (the copy opens unprotected) and removing a `max_lot`.
+- **Three saves earn a warning**, because they were a deliberate hand edit and are now one
+  keypress: enabling `LOT_MULTIPLE` (the copy opens unprotected), removing a `max_lot`, and
+  disabling a slave that has copies open.
 - **Every saved change is logged** (`settings changed for <label>: risk_percent 1 -> 0.5`).
 
 The engine needed no change: it reads a slave's settings from the shared `AppConfig` on every
 tick, and workers are handed none at spawn, so an edit reaches the next copied trade and
 nothing already open. That is the "Safe" behaviour the table below asks for.
 
-The rest of this section is the original write-up, kept because steps 1–3 still follow it.
+The rest of this section is the original write-up, kept for the reasoning behind it.
 
 `TerminalConfig` carries sixteen per-slave settings and, before this, the UI could edit none of
 them. Role assignment was the only thing the keyboard changed; everything else meant quitting
@@ -290,10 +322,10 @@ Three things follow, in order of how much they would have helped:
   the friction above. Two settings were changed by hand that evening (`dry_run` and this one)
   and one of them was the bug.
 - **Diagnosing it needed a separate script that connected to the terminal and listed
-  symbols.** The editor's symbol-mapping section should be able to *test* a mapping against
-  the live symbol list and show what it resolves to and how (`EXACT` / `CONFIGURED` / `SCAN`),
-  because that turns a failed trade into a pre-flight check. This is probably the single
-  highest-value part of the editor, and it is not obvious from the settings list alone.
+  symbols.** The plan was for the symbol section to *test* a mapping against the live symbol
+  list and show what it resolves to and how (`EXACT` / `CONFIGURED` / `SCAN`), turning a failed
+  trade into a pre-flight check. **The user dropped that on 2026-09-24**; see the editor section
+  above for what was decided instead.
 - **Adding `p` to `_COMMON_SUFFIXES` was considered and rejected.** The configured suffix is
   the mechanism built for this, it is per-slave so it cannot misfire on another broker, and it
   resolves at `CONFIGURED` rather than the less trustworthy `SCAN`. Widening a heuristic that
@@ -318,8 +350,9 @@ things about that slave:
 | `risk_percent`, `risk_cash`, commission, slippage, `max_lot` | Safe. Sizing applies to future opens only; existing copies keep the volume they were sized at. |
 | `copy_sltp`, `copy_partials`, `copy_pending` | Safe. They gate future actions, and a decline already taken stays taken. |
 | Symbol filters | Safe but asymmetric — widening a whitelist does **not** adopt trades already declined, by the "a decline is final" rule. The form should say so. |
-| `invert` | **Refuse, or force a ledger clear for that slave.** A believed copy records the direction it was opened in; flipping the flag does not flip a position that already exists, so the ledger would describe the opposite of reality and every later close would be wrong. |
-| `enabled` off | Safe: the ledger prunes that slave's state, and re-enabling re-baselines — so anything open at that moment becomes permanently uncopyable for it, which is correct but worth saying in the UI. |
+| `invert` | **Refused while the slave has any copy open or opening** (built; refuse, not clear the ledger, which would orphan live positions). A believed copy records the direction it was opened in; flipping the flag does not flip a position that already exists, so the ledger would describe the opposite of reality and every later close would be wrong. |
+| `enabled` off | Allowed, with a warning if copies are open. Their rows survive (belief is never pruned) and are matched back up on re-enable, but nothing manages them while it is off, and whatever the master opens in the meantime is never copied. |
+| Symbol prefix, suffix, map | Safe. They steer copies opened from now on; a modification does not resolve the symbol to act. |
 
 Sequencing is open: it is not on the path to execution, but Stage 2b testing means flipping
 sizing settings repeatedly, so doing it first may well pay for itself.

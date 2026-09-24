@@ -38,6 +38,7 @@ from .protocol import (
     WorkerState,
 )
 from .reconcile import Action, CopyLedger, SlaveLink
+from .settings_edit import invert_refusal
 from .sizing import risk_budget
 from .store import MappingStore, Orphan, find_missing, find_missing_orders, find_orphans
 from .worker import run_worker
@@ -897,6 +898,59 @@ class Engine:
     def believed_copies(self) -> int:
         with self._lock:
             return len(self._ledger.believed())
+
+    def copies_open_on(self, terminal_id: str) -> int | None:
+        """Copies on one slave that exist or are being made, or None if that cannot be read."""
+        with self._lock:
+            return self._open_copies(terminal_id)
+
+    def _open_copies(self, terminal_id: str) -> int | None:
+        """Positions and resting orders we believe are on a slave, plus commands still in flight.
+
+        Counted from the store rather than the ledger's memory, and that is the whole point. The
+        store is opened lazily -- on the first reconcile, which needs detection on and a connected
+        master -- so until then the ledger is an empty in-memory one, and a count taken from it
+        would say zero about a slave whose ``mapping.db`` rows are very much alive. Asking for the
+        store here opens it a little early, which is harmless: it is the same store the first
+        reconcile would open.
+
+        ``None`` means "could not tell", and callers must treat it as *not zero*.
+
+        Caller must hold the lock.
+        """
+        try:
+            store = self._ensure_store()
+            return (
+                len(store.positions(terminal_id))
+                + len(store.orders(terminal_id))
+                + self._ledger.inflight_on(terminal_id)
+            )
+        except Exception:
+            log.exception("could not count the copies open on %s", terminal_id[:8])
+            return None
+
+    def apply_settings(self, new: TerminalConfig) -> str | None:
+        """Swap in an edited terminal, or return why it was refused. None means it went in.
+
+        Every edit is one atomic swap, so the drain thread never sees half of one. The one edit
+        that is *checked* is a change to ``invert``, because a believed copy records the direction
+        it was opened in: flipping the flag under it leaves the ledger describing the opposite
+        of what is on the slave, and every later close would be wrong. Refuse rather than clear
+        the ledger, which would orphan live positions.
+
+        The count and the swap happen under one hold of the lock, and the drain thread dispatches
+        under the same lock. Counting first and swapping afterwards would leave a gap for an open
+        to slip into. The editor checks earlier too, to show the reason in the form; this is the
+        check that cannot be raced.
+        """
+        with self._lock:
+            old = self._cfg.terminals[new.terminal_id]
+            if new.invert != old.invert:
+                open_copies = self._open_copies(new.terminal_id)
+                if open_copies is None or open_copies > 0:
+                    return f"invert: {invert_refusal(open_copies)}"
+            self._cfg.replace_terminal(new)
+        return None
 
     def clear_detection_state(self) -> None:
         """Forget every believed copy and the action history.

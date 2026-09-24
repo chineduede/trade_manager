@@ -1407,6 +1407,15 @@ class CopyLedger:
     def inflight_count(self) -> int:
         return len(self._inflight)
 
+    def inflight_on(self, terminal_id: str) -> int:
+        """Commands sent to one slave and not yet answered.
+
+        Belief follows outcomes, so a copy that is being opened is in no store yet. Anything that
+        has to know whether a slave has copies -- the guard on flipping ``invert`` -- must count
+        these too, or it would wave through a change that an open in flight is about to contradict.
+        """
+        return sum(1 for tid, _, _ in self._inflight if tid == terminal_id)
+
     def _prune(self, slave_ids: set[str], master_tickets: set[int]) -> None:
         """Drop session state for slaves that no longer have a role, and de-duplication memory
         for master tickets that are gone, so nothing grows without bound.

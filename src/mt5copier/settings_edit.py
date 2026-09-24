@@ -8,23 +8,30 @@ field saying why not.
 **Validation is pydantic's, not ours.** The bounds on ``risk_percent`` and the rest live on the
 model, so the form cannot drift out of step with what ``load()`` will accept -- a value the form
 lets through and the schema rejects on the next start would be read as a corrupt config and
-wipe the user's settings. All this module adds is the step pydantic cannot do for a text box:
-turning ``""`` into "no ceiling" for ``max_lot``, and refusing ``inf`` and ``nan``, which parse
-as floats and, for a field with only a lower bound, pass its check.
+wipe the user's settings. What this module adds is the step pydantic cannot do for a text box:
+turning ``""`` into "no ceiling" for ``max_lot``, refusing ``inf`` and ``nan`` (which parse as
+floats and, for a field with only a lower bound, pass its check), and reading a symbol list or
+a ``MASTER=BROKER`` map out of free text.
 
 **Only the fields listed here can be edited.** What is missing is deliberate:
 
-* ``invert`` flips a copy's direction, and a believed copy records the direction it was opened
-  in, so flipping it under live copies makes the ledger describe the opposite of reality. It
-  needs a guard before it can be edited (ROADMAP.md, "Changing a setting mid-run").
 * ``allow_live_trading`` is the demo-only guard's override. A guard that a stray keypress can
   lift is not a guard, so it stays a hand edit with the app closed.
-* Role and ``enabled`` already have their own keys, and the symbol settings are a later step.
+* ``label`` is owned by discovery, which overwrites it on every rescan and at every start. An
+  edit would revert silently the next time the app ran.
+* ``role`` has its own keys, and ``terminal_id`` and ``exe_path`` are not the user's to set.
+
+``invert`` *is* editable, behind a guard: a believed copy records the direction it was opened
+in, so flipping the flag under one leaves the ledger describing the opposite of what is on the
+slave. The change is refused while the slave has any copy open or opening, and refused when that
+cannot be determined -- "we could not tell" is not a reason to flip it. Refused, not resolved by
+clearing the ledger, because clearing would orphan live positions.
 """
 
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum, StrEnum
@@ -43,6 +50,15 @@ class Kind(StrEnum):
     CHOICE = "choice"
     FLAG = "flag"
 
+    TEXT = "text"
+    """One line of text with no spaces in it, and blank is a real answer -- a symbol prefix."""
+
+    SYMBOLS = "symbols"
+    """Symbol names separated by commas, spaces or new lines."""
+
+    SYMBOL_MAP = "symbol_map"
+    """``MASTER=BROKER`` pairs, separated the same way."""
+
 
 @dataclass(frozen=True)
 class EditableField:
@@ -54,6 +70,9 @@ class EditableField:
     help: str
     choices: tuple[tuple[str, str], ...] = ()
     """``(label, value)`` pairs, for :attr:`Kind.CHOICE` only."""
+
+    placeholder: str = ""
+    """What an empty box says it is for."""
 
 
 @dataclass(frozen=True)
@@ -93,6 +112,7 @@ SECTIONS: tuple[Section, ...] = (
                 "Max lot",
                 Kind.OPTIONAL_FLOAT,
                 "Hard ceiling on lots per copy. Blank means no ceiling.",
+                placeholder="no ceiling",
             ),
             EditableField(
                 "commission_per_lot_round_turn",
@@ -138,6 +158,21 @@ SECTIONS: tuple[Section, ...] = (
     Section(
         "Copy behaviour",
         (
+            EditableField(
+                "enabled",
+                "Enabled",
+                Kind.FLAG,
+                "Off drops the connection to this terminal. Copies already open on it are left "
+                "unmanaged until it is turned back on.",
+            ),
+            EditableField(
+                "invert",
+                "Reverse trades (invert)",
+                Kind.FLAG,
+                "Buy becomes sell. Stop and target swap places, so the copy is sized from the "
+                "master's TAKE-PROFIT and a trade with no target copies with no stop. Refused "
+                "while this slave has copies open.",
+            ),
             EditableField("copy_sltp", "Copy stop / target moves", Kind.FLAG, ""),
             EditableField("copy_partials", "Copy partial closes", Kind.FLAG, ""),
             EditableField(
@@ -145,6 +180,49 @@ SECTIONS: tuple[Section, ...] = (
                 "Copy pending orders",
                 Kind.FLAG,
                 "Mirror the master's resting orders as well as its open positions.",
+            ),
+        ),
+    ),
+    Section(
+        "Symbols",
+        (
+            EditableField(
+                "symbol_prefix",
+                "Symbol prefix",
+                Kind.TEXT,
+                "What this broker puts before every symbol name. Blank if nothing. Applies to "
+                "copies opened from now on.",
+            ),
+            EditableField(
+                "symbol_suffix",
+                "Symbol suffix",
+                Kind.TEXT,
+                "What this broker puts after every symbol name, such as p. Blank if nothing. "
+                "Applies to copies opened from now on.",
+            ),
+            EditableField(
+                "symbol_map",
+                "Symbol map",
+                Kind.SYMBOL_MAP,
+                "One MASTER=BROKER pair per line, for symbols the prefix and suffix cannot "
+                "express. A name the broker does not list is refused, not guessed at.",
+                placeholder="US30=US30.cash",
+            ),
+            EditableField(
+                "symbol_whitelist",
+                "Only copy these",
+                Kind.SYMBOLS,
+                "Master symbol names, separated by commas or spaces. Blank means all. Adding one "
+                "does not copy a trade that was already declined.",
+                placeholder="all symbols",
+            ),
+            EditableField(
+                "symbol_blacklist",
+                "Never copy these",
+                Kind.SYMBOLS,
+                "Master symbol names, separated by commas or spaces. Removing one does not copy "
+                "a trade that was already declined.",
+                placeholder="none",
             ),
         ),
     ),
@@ -170,6 +248,12 @@ def initial_text(cfg: TerminalConfig, spec: EditableField) -> str | bool:
         return "" if value is None else _number(value)
     if spec.kind is Kind.INT:
         return str(value)
+    if spec.kind is Kind.TEXT:
+        return str(value)
+    if spec.kind is Kind.SYMBOLS:
+        return ", ".join(value)
+    if spec.kind is Kind.SYMBOL_MAP:
+        return "\n".join(f"{key}={target}" for key, target in sorted(value.items()))
     return _number(value)
 
 
@@ -226,6 +310,44 @@ def _message(err: Mapping[str, object]) -> str:
     return str(err["msg"])
 
 
+_SEPARATORS = re.compile(r"[\s,;]+")
+_AROUND_EQUALS = re.compile(r"\s*=\s*")
+
+
+def _tokens(text: str) -> list[str]:
+    return [token for token in _SEPARATORS.split(text.strip()) if token]
+
+
+def _parse_symbols(text: str) -> list[str]:
+    """Names in the order given, each once. Matching is case-insensitive, so ``eurusd`` and
+    ``EURUSD`` are one entry, and the first spelling is the one kept."""
+    seen: dict[str, str] = {}
+    for token in _tokens(text):
+        if "=" in token:
+            raise _EntryError(f"{token!r} has an '=' in it; a mapping belongs in the symbol map")
+        seen.setdefault(token.upper(), token)
+    return list(seen.values())
+
+
+def _parse_symbol_map(text: str) -> dict[str, str]:
+    """``MASTER=BROKER`` pairs. Spaces around the ``=`` are forgiven.
+
+    Keys come back upper-cased, which is what the model does to them anyway. Two keys that differ
+    only in case and agree on the target are one entry; two that disagree are refused, because
+    choosing between them would be a guess about which instrument was meant.
+    """
+    pairs: dict[str, str] = {}
+    for token in _tokens(_AROUND_EQUALS.sub("=", text)):
+        key, sep, target = token.partition("=")
+        if not sep or not key or not target or "=" in target:
+            raise _EntryError(f"{token!r} is not a MASTER=BROKER pair")
+        folded = key.upper()
+        if folded in pairs and pairs[folded] != target:
+            raise _EntryError(f"{key} is mapped to both {pairs[folded]} and {target}")
+        pairs[folded] = target
+    return pairs
+
+
 def _parse(spec: EditableField, raw: str | bool) -> object:
     """Text to a value, or :class:`_EntryError`. Range checks are left to the model."""
     if spec.kind is Kind.FLAG:
@@ -237,6 +359,14 @@ def _parse(spec: EditableField, raw: str | bool) -> object:
     text = raw.strip()
     if spec.kind is Kind.CHOICE:
         return text
+    if spec.kind is Kind.TEXT:
+        if any(ch.isspace() for ch in text):
+            raise _EntryError("no spaces allowed")
+        return text
+    if spec.kind is Kind.SYMBOLS:
+        return _parse_symbols(text)
+    if spec.kind is Kind.SYMBOL_MAP:
+        return _parse_symbol_map(text)
     if text == "":
         if spec.kind is Kind.OPTIONAL_FLOAT:
             return None
@@ -256,7 +386,23 @@ def _parse(spec: EditableField, raw: str | bool) -> object:
     return number
 
 
-def apply_edits(current: TerminalConfig, raw: Mapping[str, str | bool]) -> EditOutcome:
+def _copies_word(count: int) -> str:
+    return f"{count} open {'copy' if count == 1 else 'copies'}"
+
+
+def invert_refusal(open_copies: int | None) -> str:
+    """Why ``invert`` cannot change now. ``None`` is a count that could not be read."""
+    if open_copies is None:
+        return "can't change: this slave's open copies could not be counted"
+    return f"can't change while this slave has {_copies_word(open_copies)}. Wait for them to close"
+
+
+def apply_edits(
+    current: TerminalConfig,
+    raw: Mapping[str, str | bool],
+    *,
+    open_copies: int | None = None,
+) -> EditOutcome:
     """Apply what the form holds to ``current``, or say what is wrong with it.
 
     ``raw`` may hold any subset of the editable fields. A field whose text is exactly what the
@@ -266,6 +412,10 @@ def apply_edits(current: TerminalConfig, raw: Mapping[str, str | bool]) -> EditO
     ``current`` should be the terminal's *live* settings at the moment of saving, not a copy
     taken when the form opened: everything not edited here is carried over from it, so a role
     change or a rescan that happened while the form was open is not overwritten.
+
+    ``open_copies`` is how many copies this slave has open or opening, and it is what guards
+    ``invert``. Its default is ``None`` -- "not counted" -- and that refuses the change: a guard
+    that quietly passes when the caller forgets to count is not one.
 
     Naming a field that is not editable raises. That is a bug in the caller, and quietly
     ignoring it would mean a setting the user thinks they changed was not.
@@ -284,6 +434,11 @@ def apply_edits(current: TerminalConfig, raw: Mapping[str, str | bool]) -> EditO
             updates[name] = _parse(spec, value)
         except _EntryError as exc:
             errors[name] = str(exc)
+
+    # ``updates`` only holds a field whose text differs, so this is "invert is being changed".
+    if "invert" in updates and updates["invert"] != current.invert:
+        if open_copies is None or open_copies > 0:
+            errors["invert"] = invert_refusal(open_copies)
 
     # Validate whatever parsed even if something else did not, so one round trip shows every
     # problem instead of revealing them one at a time. A field that failed to parse is absent
@@ -316,19 +471,32 @@ def _show(value: object) -> str:
         return "on" if value else "off"
     if isinstance(value, float):
         return _number(value)
+    if isinstance(value, dict):
+        return ", ".join(f"{k}={v}" for k, v in value.items()) or "none"
+    if isinstance(value, list):
+        return ", ".join(value) or "none"
+    if isinstance(value, str):
+        return repr(value)
     return str(value)
 
 
-def describe_changes(changes: tuple[Change, ...]) -> str:
-    """One line for the log and the notification: ``risk_percent 1 -> 0.5, copy_pending off -> on``."""
-    return ", ".join(f"{c.name} {_show(c.old)} -> {_show(c.new)}" for c in changes)
+def describe_changes(changes: tuple[Change, ...], limit: int | None = None) -> str:
+    """One line for the log and the notification: ``risk_percent 1 -> 0.5, copy_pending off -> on``.
+
+    The log gets it whole; a notification passes ``limit`` so a long symbol map cannot fill the
+    screen. The audit trail is the one that must not be abbreviated.
+    """
+    text = ", ".join(f"{c.name} {_show(c.old)} -> {_show(c.new)}" for c in changes)
+    if limit is not None and len(text) > limit:
+        return text[: limit - 3] + "..."
+    return text
 
 
-def advisories(outcome: EditOutcome) -> list[str]:
-    """Warnings for an edit that is allowed but widens what a slave can lose.
+def advisories(outcome: EditOutcome, open_copies: int | None = None) -> list[str]:
+    """Warnings for an edit that is allowed but widens what a slave can lose or leaves it exposed.
 
-    Neither is a reason to refuse. Both are things the editor makes one keypress away that were
-    a deliberate hand edit before, so the moment they happen is the moment to say so.
+    None is a reason to refuse. Each is something the editor makes one keypress away that was a
+    deliberate hand edit before, so the moment it happens is the moment to say so.
     """
     if outcome.config is None:
         return []
@@ -346,4 +514,10 @@ def advisories(outcome: EditOutcome) -> list[str]:
     cap = changed.get("max_lot")
     if cap is not None and cap.old is not None and cap.new is None:
         out.append("max lot removed: copy size is now limited only by the risk setting.")
+    if "enabled" in changed and not cfg.enabled and open_copies:
+        out.append(
+            f"{_copies_word(open_copies)} on {cfg.label or 'this terminal'} will be left "
+            "unmanaged while it is disabled: no closes and no stop or target moves. "
+            "Turn it back on to resume."
+        )
     return out

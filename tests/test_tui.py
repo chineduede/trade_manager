@@ -11,10 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from textual.widgets import Checkbox, Input, Select, Static
+from textual.widgets import Checkbox, Input, Select, Static, TextArea
 
 from mt5copier.config import AppConfig, NoStopPolicy, Role, SizingMode, TerminalConfig
 from mt5copier.engine import RecordedAction, RecordedResult, TerminalView
+from mt5copier.settings_edit import invert_refusal
 from mt5copier.store import Orphan
 from mt5copier.tui.app import CopierApp
 from mt5copier.tui.settings_screen import SettingsScreen
@@ -39,6 +40,8 @@ class StubEngine:
         self.found_orphans: dict[str, list[Orphan]] = {}
         self.acknowledged: list[str] = []
         self.results: list[RecordedResult] = []
+        self.open_copies: dict[str, int | None] = {}
+        """What the stub says each slave has open. ``None`` is a count that could not be read."""
 
     def start(self) -> None:
         self.started = True
@@ -106,6 +109,21 @@ class StubEngine:
     @property
     def failed_total(self) -> int:
         return sum(1 for r in self.results if not r.result.ok)
+
+    # --- the settings editor ----------------------------------------------------------------
+
+    def copies_open_on(self, terminal_id: str) -> int | None:
+        return self.open_copies.get(terminal_id, 0)
+
+    def apply_settings(self, new: TerminalConfig) -> str | None:
+        """The real engine's contract: refuse a flip of ``invert`` under copies, else swap."""
+        old = self._cfg.terminals[new.terminal_id]
+        if new.invert != old.invert:
+            count = self.copies_open_on(new.terminal_id)
+            if count is None or count > 0:
+                return f"invert: {invert_refusal(count)}"
+        self._cfg.replace_terminal(new)
+        return None
 
 
 @pytest.fixture
@@ -710,24 +728,263 @@ async def test_the_form_says_whether_it_is_live(app: CopierApp, cfg: AppConfig) 
 # --- what the form must not offer ----------------------------------------------------------
 
 
-async def test_the_form_has_no_field_for_invert_or_the_live_trading_override(
+async def test_the_form_has_no_field_for_the_live_trading_override_the_name_or_the_role(
     app: CopierApp,
 ) -> None:
+    """The override is the demo-only guard's; the name is discovery's, which would overwrite an
+    edit on the next rescan; the role has its own keys."""
     async with app.run_test() as pilot:
         screen = await _open_editor(app, pilot)
-        for name in ("invert", "allow_live_trading", "role", "enabled"):
+        for name in ("allow_live_trading", "label", "role", "terminal_id", "exe_path"):
             assert not screen.query(f"#f-{name}"), name
 
 
-async def test_the_form_shows_the_guarded_settings_read_only(
-    app: CopierApp, cfg: AppConfig
-) -> None:
-    cfg.terminals[TID_SLAVE].invert = True
+async def test_the_form_says_what_it_leaves_out(app: CopierApp, cfg: AppConfig) -> None:
+    cfg.terminals[TID_SLAVE].allow_live_trading = True
     async with app.run_test() as pilot:
         screen = await _open_editor(app, pilot)
         note = str(screen.query_one("#readonly", Static).render())
-        assert "invert (on)" in note
         assert "live trading" in note
+        assert "(on)" in note
+        assert "discovery" in note
+
+
+# --- the symbol section ----------------------------------------------------------------------
+
+
+async def test_the_symbol_fields_start_at_the_terminals_values(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    slave = cfg.terminals[TID_SLAVE]
+    slave.symbol_prefix = "m."
+    slave.symbol_suffix = "p"
+    slave.symbol_map = {"US30": "US30.cash", "GOLD": "XAUUSDp"}
+    slave.symbol_whitelist = ["EURUSD", "GBPUSD"]
+    slave.symbol_blacklist = ["XAUUSD"]
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        assert screen.query_one("#f-symbol_prefix", Input).value == "m."
+        assert screen.query_one("#f-symbol_suffix", Input).value == "p"
+        assert screen.query_one("#f-symbol_map", TextArea).text == "GOLD=XAUUSDp\nUS30=US30.cash"
+        assert screen.query_one("#f-symbol_whitelist", Input).value == "EURUSD, GBPUSD"
+        assert screen.query_one("#f-symbol_blacklist", Input).value == "XAUUSD"
+
+
+async def test_the_symbol_settings_are_saved(app: CopierApp, cfg: AppConfig) -> None:
+    from mt5copier import config as config_mod
+
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#f-symbol_suffix", Input).value = "p"
+        screen.query_one("#f-symbol_map", TextArea).text = "us30 = US30.cash\nnas100=USTEC"
+        screen.query_one("#f-symbol_whitelist", Input).value = "EURUSD, XAUUSD"
+        screen.query_one("#f-symbol_blacklist", Input).value = "GBPJPY"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        slave = cfg.terminals[TID_SLAVE]
+        assert slave.symbol_suffix == "p"
+        assert slave.symbol_map == {"US30": "US30.cash", "NAS100": "USTEC"}
+        assert slave.symbol_whitelist == ["EURUSD", "XAUUSD"]
+        assert slave.symbol_blacklist == ["GBPJPY"]
+
+        reloaded = config_mod.load(app._saved_to).terminals[TID_SLAVE]  # type: ignore[attr-defined]
+        assert reloaded.symbol_map == {"US30": "US30.cash", "NAS100": "USTEC"}
+
+
+async def test_a_bad_map_entry_is_refused_under_the_map(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#f-symbol_map", TextArea).text = "GOLD"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert isinstance(app.screen, SettingsScreen)
+        assert "MASTER=BROKER" in str(screen.query_one("#e-symbol_map", Static).render())
+        assert cfg.terminals[TID_SLAVE].symbol_map == {}
+
+
+async def test_ctrl_s_saves_from_inside_the_map(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        area = screen.query_one("#f-symbol_map", TextArea)
+        area.focus()
+        area.text = "GOLD=XAUUSDp"
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].symbol_map == {"GOLD": "XAUUSDp"}
+
+
+async def test_enter_in_the_map_starts_a_new_line_and_does_not_save(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        area = screen.query_one("#f-symbol_map", TextArea)
+        area.focus()
+        area.text = "GOLD=XAUUSDp"
+        area.cursor_location = area.document.end
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, SettingsScreen), "Enter in a multi-line box is a new line"
+        assert area.text.count("\n") == 1
+        assert cfg.terminals[TID_SLAVE].symbol_map == {}
+
+
+async def test_tab_leaves_the_map_instead_of_typing_a_tab(app: CopierApp) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        area = screen.query_one("#f-symbol_map", TextArea)
+        area.focus()
+        await pilot.pause()
+        await pilot.press("tab")
+        await pilot.pause()
+        assert app.focused is screen.query_one("#f-symbol_whitelist", Input)
+        assert "\t" not in area.text
+
+
+async def test_escape_closes_the_form_from_inside_the_map(app: CopierApp) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#f-symbol_map", TextArea).focus()
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, SettingsScreen)
+
+
+# --- errors sit under their field -------------------------------------------------------------
+
+
+async def test_a_clean_form_reserves_no_room_for_messages(app: CopierApp) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        for name in ("risk_percent", "symbol_map", "invert"):
+            assert screen.query_one(f"#e-{name}", Static).display is False, name
+        assert screen.query_one("#general-error", Static).display is False
+
+
+async def test_a_message_appears_under_its_field_and_goes_when_fixed(app: CopierApp) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        box = screen.query_one("#f-risk_percent", Input)
+        box.value = "0"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        message = screen.query_one("#e-risk_percent", Static)
+        assert message.display is True
+        assert message.region.y > box.region.y, "the message is under the field, not beside it"
+
+        box.value = "0.5"
+        screen._show_errors({})
+        assert message.display is False
+
+
+# --- invert and the guard ---------------------------------------------------------------------
+
+
+async def test_invert_is_saved_on_a_slave_with_no_copies(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#f-invert", Checkbox).value = True
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].invert is True
+        assert not isinstance(app.screen, SettingsScreen)
+
+
+async def test_invert_is_refused_while_the_slave_has_copies(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        app._engine.open_copies[TID_SLAVE] = 2  # type: ignore[attr-defined]
+        on_disk = app._saved_to.read_bytes()  # type: ignore[attr-defined]
+        screen.query_one("#f-invert", Checkbox).value = True
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert isinstance(app.screen, SettingsScreen), "a refused form stays open"
+        message = screen.query_one("#e-invert", Static)
+        assert message.display is True
+        assert "2 open copies" in str(message.render())
+        assert cfg.terminals[TID_SLAVE].invert is False
+        assert app._saved_to.read_bytes() == on_disk  # type: ignore[attr-defined]
+
+
+async def test_invert_is_refused_when_the_copies_could_not_be_counted(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        app._engine.open_copies[TID_SLAVE] = None  # type: ignore[attr-defined]
+        screen.query_one("#f-invert", Checkbox).value = True
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].invert is False
+        assert "could not be counted" in str(screen.query_one("#e-invert", Static).render())
+
+
+async def test_the_engines_own_refusal_keeps_the_form_open_and_says_why(
+    app: CopierApp, cfg: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The form checks first, to show the reason beside the field. The engine checks again under
+    its own lock, and can refuse something the form let through a moment earlier -- an open that
+    slipped in between. That refusal has to reach the user, not vanish."""
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        monkeypatch.setattr(
+            app._engine,
+            "apply_settings",
+            lambda new: "invert: a copy opened a moment ago",
+        )
+        screen.query_one("#f-invert", Checkbox).value = True
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert isinstance(app.screen, SettingsScreen)
+        general = screen.query_one("#general-error", Static)
+        assert general.display is True
+        assert "a copy opened a moment ago" in str(general.render())
+        assert cfg.terminals[TID_SLAVE].invert is False
+
+
+async def test_a_change_to_something_else_is_not_held_up_by_open_copies(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        app._engine.open_copies[TID_SLAVE] = 5  # type: ignore[attr-defined]
+        screen.query_one("#f-risk_percent", Input).value = "0.3"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].risk_percent == 0.3
+
+
+# --- enabled ------------------------------------------------------------------------------------
+
+
+async def test_disabling_a_slave_with_open_copies_is_allowed_but_warned(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        app._engine.open_copies[TID_SLAVE] = 2  # type: ignore[attr-defined]
+        screen.query_one("#f-enabled", Checkbox).value = False
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].enabled is False
+        assert any("unmanaged" in t and "2 open copies" in t for t in _toasts(app))
+
+
+async def test_disabling_a_slave_with_nothing_open_is_quiet(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#f-enabled", Checkbox).value = False
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].enabled is False
+        assert not any("unmanaged" in t for t in _toasts(app))
 
 
 # --- warnings and the record ---------------------------------------------------------------

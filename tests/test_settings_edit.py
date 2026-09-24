@@ -44,24 +44,30 @@ def test_a_choice_offers_every_member_of_its_enum_and_nothing_else() -> None:
             assert {v for _, v in spec.choices} == {m.value for m in expected[spec.name]}
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "invert",  # flipping it under live copies makes the ledger describe the opposite of reality
-        "allow_live_trading",  # the demo-only guard's override; must not be one keypress away
-        "role",
-        "enabled",
-        "terminal_id",
-        "exe_path",
-        "symbol_prefix",
-        "symbol_suffix",
-        "symbol_map",
-    ],
-)
+NOT_EDITABLE = {
+    "allow_live_trading",  # the demo-only guard's override; must not be one keypress away
+    "label",  # discovery overwrites it on every rescan, so an edit would silently revert
+    "role",  # has its own keys, and set_role is where the one-master rule lives
+    "terminal_id",
+    "exe_path",
+    "last_login",
+    "last_server",
+}
+
+
+@pytest.mark.parametrize("name", sorted(NOT_EDITABLE))
 def test_the_fields_that_must_not_be_edited_here_are_not(name: str) -> None:
     assert name not in {f.name for f in EDITABLE}
     with pytest.raises(ValueError, match="not editable"):
         apply_edits(make(), {name: "x"})
+
+
+def test_every_setting_is_either_editable_or_deliberately_not() -> None:
+    """A field added to the model must force a decision about the form, not be forgotten by it.
+    If this fails, either put the new field in a section or in NOT_EDITABLE with the reason."""
+    editable = {f.name for f in EDITABLE}
+    assert editable.isdisjoint(NOT_EDITABLE)
+    assert editable | NOT_EDITABLE == set(TerminalConfig.model_fields)
 
 
 # --- an untouched form changes nothing ------------------------------------------------------
@@ -271,3 +277,217 @@ def test_setting_or_leaving_the_cap_does_not_warn() -> None:
 
 def test_a_refused_edit_has_nothing_to_warn_about() -> None:
     assert advisories(apply_edits(make(), {"risk_percent": "0"})) == []
+
+
+# --- the invert guard -------------------------------------------------------------------------
+
+
+def test_invert_can_be_flipped_on_a_slave_with_no_copies() -> None:
+    outcome = apply_edits(make(), {"invert": True}, open_copies=0)
+    assert outcome.config is not None
+    assert outcome.config.invert is True
+    assert describe_changes(outcome.changes) == "invert off -> on"
+
+
+def test_invert_is_refused_while_the_slave_has_copies() -> None:
+    """A believed copy records the direction it opened in; flipping the flag under it leaves the
+    ledger describing the opposite of what is on the slave."""
+    outcome = apply_edits(make(), {"invert": True}, open_copies=2)
+    assert not outcome.ok
+    assert "2 open copies" in outcome.errors["invert"]
+
+
+def test_one_copy_is_singular() -> None:
+    assert "1 open copy." in apply_edits(make(), {"invert": True}, open_copies=1).errors["invert"]
+
+
+def test_invert_is_refused_when_the_copies_could_not_be_counted() -> None:
+    """The same rule as the demo-only guard: 'we could not tell' is not a reason to proceed."""
+    outcome = apply_edits(make(), {"invert": True}, open_copies=None)
+    assert not outcome.ok
+    assert "could not be counted" in outcome.errors["invert"]
+
+
+def test_forgetting_to_count_refuses_rather_than_passes() -> None:
+    """The default is 'not counted'. A guard that quietly passes when the caller forgets is not one."""
+    assert not apply_edits(make(), {"invert": True}).ok
+
+
+def test_the_guard_covers_turning_invert_off_as_well() -> None:
+    assert not apply_edits(make(invert=True), {"invert": False}, open_copies=1).ok
+    assert apply_edits(make(invert=True), {"invert": False}, open_copies=0).ok
+
+
+def test_leaving_invert_alone_is_not_blocked_by_open_copies() -> None:
+    """Copies being open is only a problem for the change of direction, not for the slave."""
+    outcome = apply_edits(make(invert=True), {"invert": True, "copy_pending": True}, open_copies=3)
+    assert outcome.ok
+    assert [c.name for c in outcome.changes] == ["copy_pending"]
+
+
+def test_a_refused_invert_takes_the_other_edits_with_it() -> None:
+    outcome = apply_edits(make(), {"invert": True, "copy_pending": True}, open_copies=1)
+    assert outcome.config is None
+    assert set(outcome.errors) == {"invert"}
+
+
+# --- enabled ----------------------------------------------------------------------------------
+
+
+def test_disabling_a_slave_with_open_copies_warns_that_they_go_unmanaged() -> None:
+    outcome = apply_edits(make(), {"enabled": False})
+    (warning,) = advisories(outcome, open_copies=2)
+    assert "2 open copies" in warning
+    assert "unmanaged" in warning
+
+
+def test_disabling_a_slave_with_nothing_open_is_quiet() -> None:
+    assert advisories(apply_edits(make(), {"enabled": False}), open_copies=0) == []
+    assert advisories(apply_edits(make(), {"enabled": False})) == []
+
+
+def test_enabling_a_slave_does_not_warn_about_copies() -> None:
+    assert advisories(apply_edits(make(enabled=False), {"enabled": True}), open_copies=2) == []
+
+
+# --- symbol prefix and suffix -------------------------------------------------------------------
+
+
+def test_a_suffix_is_set() -> None:
+    outcome = apply_edits(make(), {"symbol_suffix": "p"})
+    assert outcome.config is not None
+    assert outcome.config.symbol_suffix == "p"
+    assert describe_changes(outcome.changes) == "symbol_suffix '' -> 'p'"
+
+
+def test_a_suffix_can_be_cleared() -> None:
+    outcome = apply_edits(make(symbol_suffix="p"), {"symbol_suffix": ""})
+    assert outcome.config is not None
+    assert outcome.config.symbol_suffix == ""
+
+
+def test_surrounding_whitespace_on_a_suffix_is_dropped_but_inner_is_refused() -> None:
+    """A stray space at the end of a pasted suffix would make every name miss, and the miss would
+    only show as a refusal at trade time."""
+    assert apply_edits(make(), {"symbol_suffix": " p "}).config.symbol_suffix == "p"  # type: ignore[union-attr]
+    assert "spaces" in apply_edits(make(), {"symbol_prefix": "a b"}).errors["symbol_prefix"]
+
+
+def test_the_suffix_keeps_the_brokers_own_casing() -> None:
+    assert apply_edits(make(), {"symbol_suffix": ".Pro"}).config.symbol_suffix == ".Pro"  # type: ignore[union-attr]
+
+
+# --- the symbol map -------------------------------------------------------------------------------
+
+
+def test_a_map_is_read_one_pair_per_line() -> None:
+    outcome = apply_edits(make(), {"symbol_map": "US30=US30.cash\nnas100=USTEC"})
+    assert outcome.config is not None
+    assert outcome.config.symbol_map == {"US30": "US30.cash", "NAS100": "USTEC"}
+
+
+def test_a_map_also_takes_commas_and_spaces_around_the_equals() -> None:
+    outcome = apply_edits(
+        make(), {"symbol_map": "US30 = US30.cash,  GOLD =XAUUSDp ; NAS100= USTEC"}
+    )
+    assert outcome.config is not None
+    assert outcome.config.symbol_map == {
+        "US30": "US30.cash",
+        "GOLD": "XAUUSDp",
+        "NAS100": "USTEC",
+    }
+
+
+def test_the_target_keeps_its_casing_and_the_key_is_folded() -> None:
+    outcome = apply_edits(make(), {"symbol_map": "gold=XAUUSDp"})
+    assert outcome.config is not None
+    assert outcome.config.symbol_map == {"GOLD": "XAUUSDp"}
+
+
+@pytest.mark.parametrize("text", ["GOLD", "GOLD=", "=XAUUSDp", "GOLD=X=Y", "GOLD XAUUSDp"])
+def test_an_entry_that_is_not_a_pair_is_refused(text: str) -> None:
+    outcome = apply_edits(make(), {"symbol_map": text})
+    assert not outcome.ok
+    assert "MASTER=BROKER" in outcome.errors["symbol_map"]
+
+
+def test_two_entries_for_one_symbol_that_disagree_are_refused() -> None:
+    """Choosing between them would be a guess about which instrument was meant, the one thing
+    symbol resolution must never do. The model refuses it on load; the form refuses it at entry."""
+    outcome = apply_edits(make(), {"symbol_map": "GOLD=XAUUSDp\ngold=GOLD.a"})
+    assert not outcome.ok
+    assert "both" in outcome.errors["symbol_map"]
+
+
+def test_two_entries_for_one_symbol_that_agree_are_one() -> None:
+    outcome = apply_edits(make(), {"symbol_map": "GOLD=XAUUSDp\ngold=XAUUSDp"})
+    assert outcome.config is not None
+    assert outcome.config.symbol_map == {"GOLD": "XAUUSDp"}
+
+
+def test_clearing_the_map_empties_it() -> None:
+    outcome = apply_edits(make(symbol_map={"GOLD": "XAUUSDp"}), {"symbol_map": ""})
+    assert outcome.config is not None
+    assert outcome.config.symbol_map == {}
+
+
+def test_reformatting_a_map_is_not_a_change() -> None:
+    """Same pairs, written differently. Nothing should be saved or logged for it."""
+    cfg = make(symbol_map={"GOLD": "XAUUSDp", "US30": "US30.cash"})
+    outcome = apply_edits(cfg, {"symbol_map": "US30 = US30.cash, gold=XAUUSDp"})
+    assert outcome.ok
+    assert outcome.changes == ()
+
+
+def test_the_map_starts_sorted_and_round_trips() -> None:
+    cfg = make(symbol_map={"US30": "US30.cash", "GOLD": "XAUUSDp"})
+    assert initial_values(cfg)["symbol_map"] == "GOLD=XAUUSDp\nUS30=US30.cash"
+    outcome = apply_edits(cfg, initial_values(cfg))
+    assert outcome.ok
+    assert outcome.changes == ()
+
+
+# --- the symbol filters ---------------------------------------------------------------------------
+
+
+def test_a_whitelist_is_read_from_commas_spaces_or_lines() -> None:
+    outcome = apply_edits(make(), {"symbol_whitelist": "EURUSD, XAUUSD  GBPUSD\nUS30"})
+    assert outcome.config is not None
+    assert outcome.config.symbol_whitelist == ["EURUSD", "XAUUSD", "GBPUSD", "US30"]
+
+
+def test_a_filter_drops_repeats_ignoring_case_and_keeps_the_first_spelling() -> None:
+    outcome = apply_edits(make(), {"symbol_blacklist": "EURUSD, eurusd, XAUUSD"})
+    assert outcome.config is not None
+    assert outcome.config.symbol_blacklist == ["EURUSD", "XAUUSD"]
+
+
+def test_clearing_a_filter_empties_it() -> None:
+    outcome = apply_edits(make(symbol_whitelist=["EURUSD"]), {"symbol_whitelist": ""})
+    assert outcome.config is not None
+    assert outcome.config.symbol_whitelist == []
+    assert describe_changes(outcome.changes) == "symbol_whitelist EURUSD -> none"
+
+
+def test_a_mapping_pasted_into_a_filter_is_refused() -> None:
+    outcome = apply_edits(make(), {"symbol_whitelist": "GOLD=XAUUSDp"})
+    assert "symbol map" in outcome.errors["symbol_whitelist"]
+
+
+def test_a_filter_starts_as_a_comma_list_and_round_trips() -> None:
+    cfg = make(symbol_blacklist=["EURUSD", "XAUUSD"])
+    assert initial_values(cfg)["symbol_blacklist"] == "EURUSD, XAUUSD"
+    assert apply_edits(cfg, initial_values(cfg)).changes == ()
+
+
+# --- describing a change ----------------------------------------------------------------------------
+
+
+def test_a_long_description_is_cut_for_a_notification_but_not_for_the_log() -> None:
+    pairs = "\n".join(f"SYM{i}=BROKER{i}" for i in range(30))
+    outcome = apply_edits(make(), {"symbol_map": pairs})
+    full = describe_changes(outcome.changes)
+    short = describe_changes(outcome.changes, limit=80)
+    assert "SYM29=BROKER29" in full
+    assert len(short) == 80
+    assert short.endswith("...")

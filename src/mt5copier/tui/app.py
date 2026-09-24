@@ -403,31 +403,43 @@ class CopierApp(App[None]):
                 # The live object, looked up when asked: an edit is built on what is true at the
                 # moment of saving, not on what was true when the form opened.
                 current=lambda: self._cfg.terminals[tid],
+                copies=lambda: self._engine.copies_open_on(tid),
                 apply=self._apply_settings,
                 halt=self.action_panic,
                 live=not self._cfg.dry_run,
             )
         )
 
-    def _apply_settings(self, outcome: EditOutcome) -> None:
+    def _apply_settings(self, outcome: EditOutcome) -> str | None:
         """Take a validated edit: swap it in, record it, save it, and say what changed.
 
-        The change goes in the log as well as on screen. A risk setting altered while copying is
-        live is the kind of thing that has to be findable afterwards.
+        Returns why the engine refused it, or None if it went in. The engine is the one that
+        swaps, because it can check and swap under the lock the drain thread dispatches under.
+
+        The change goes in the log in full as well as on screen. A risk setting altered while
+        copying is live is the kind of thing that has to be findable afterwards.
         """
         new = outcome.config
         if new is None:
-            return
+            return None
         if not outcome.changes:
             self.notify(f"{new.label}: no changes")
-            return
-        summary = describe_changes(outcome.changes)
-        self._cfg.replace_terminal(new)
-        log.info("settings changed for %s (%s): %s", new.label, new.terminal_id[:8], summary)
+            return None
+        refusal = self._engine.apply_settings(new)
+        if refusal is not None:
+            return refusal
+        log.info(
+            "settings changed for %s (%s): %s",
+            new.label,
+            new.terminal_id[:8],
+            describe_changes(outcome.changes),
+        )
+        open_copies = self._engine.copies_open_on(new.terminal_id)
         self._persist_and_sync()
-        self.notify(f"{new.label}: {summary}")
-        for warning in advisories(outcome):
+        self.notify(f"{new.label}: {describe_changes(outcome.changes, limit=160)}")
+        for warning in advisories(outcome, open_copies):
             self.notify(warning, severity="warning", timeout=12)
+        return None
 
     def action_reconnect(self) -> None:
         tid = self._selected_id()

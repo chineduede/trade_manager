@@ -12,7 +12,9 @@ all.
 from __future__ import annotations
 
 import queue
+import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -2211,3 +2213,183 @@ def test_a_held_slave_is_never_dispatched_to(engine: Engine) -> None:
 
     assert cmd_q.sent == []
     assert set(engine.holds()) == {TID_SLAVE}
+
+
+# --- what a settings edit may do while copies exist -------------------------------------------
+#
+# Every edit goes in as one atomic swap. The one that is *checked* is a flip of ``invert``: a
+# believed copy records the direction it opened in, so flipping the flag under one leaves the
+# ledger describing the opposite of what is on the slave, and every later close would be wrong.
+
+TID_OTHER = "C" * 32
+
+
+def edited(eng: Engine, **changes: object) -> TerminalConfig:
+    return eng.config.terminals[TID_SLAVE].model_copy(update=changes)
+
+
+def order_row(**changes: object) -> Copy:
+    return replace(
+        stale_row(master_ticket=12, slave_ticket=901),
+        kind=CopyKind.ORDER,
+        order_type=OrderType.SELL_STOP,
+        entry=1.07,
+        **changes,  # type: ignore[arg-type]
+    )
+
+
+def test_copies_are_counted_from_the_store_before_detection_has_started(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    """The store opens lazily, on the first reconcile, so until then the ledger is an empty
+    in-memory one. A count taken from it would say zero about a slave whose rows are alive, and
+    the guard would wave through exactly the change it exists to stop."""
+    seed_live_store(tmp_path, stale_row())
+    eng = live_engine(engine_cfg, tmp_path)
+    assert eng.believed_copies() == 0, "the ledger has not looked at the store yet"
+    assert eng.copies_open_on(TID_SLAVE) == 1
+
+
+def test_copies_are_counted_per_slave(engine_cfg: AppConfig, tmp_path: Path) -> None:
+    seed_live_store(tmp_path, stale_row())
+    seed_live_store(
+        tmp_path, replace(stale_row(master_ticket=12, slave_ticket=901), terminal_id=TID_OTHER)
+    )
+    eng = live_engine(engine_cfg, tmp_path)
+    assert eng.copies_open_on(TID_SLAVE) == 1
+    assert eng.copies_open_on(TID_OTHER) == 1
+    assert eng.copies_open_on("D" * 32) == 0
+
+
+def test_a_resting_order_is_a_copy_too(engine_cfg: AppConfig, tmp_path: Path) -> None:
+    """A reversed resting order was placed the other way up as well: BUY_LIMIT becomes SELL_STOP."""
+    seed_live_store(tmp_path, stale_row())
+    seed_live_store(tmp_path, order_row())
+    eng = live_engine(engine_cfg, tmp_path)
+    assert eng.copies_open_on(TID_SLAVE) == 2
+
+
+def test_a_command_still_in_flight_counts_as_a_copy_being_made(engine: Engine) -> None:
+    """Belief follows outcomes, so an open that has been sent and not answered is in no store."""
+    go_live(engine)
+    wire_slave(engine)
+    cmd_q = arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+
+    assert len(cmd_q.sent) == 1
+    assert engine.believed_copies() == 0, "nothing is believed until the broker answers"
+    assert engine.copies_open_on(TID_SLAVE) == 1
+
+    answer(engine, cmd_q.sent[0])
+    assert engine.copies_open_on(TID_SLAVE) == 1, "and once answered it is counted from belief"
+
+
+def test_an_unreadable_store_is_not_a_count_of_zero(
+    engine_cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    eng = live_engine(engine_cfg, tmp_path)
+
+    def unreadable() -> object:
+        raise OSError("database is locked")
+
+    monkeypatch.setattr(eng, "_ensure_store", unreadable)
+    assert eng.copies_open_on(TID_SLAVE) is None
+
+
+def test_an_edit_goes_in_whole(engine: Engine) -> None:
+    new = edited(engine, risk_percent=0.5, copy_pending=True)
+    assert engine.apply_settings(new) is None
+    assert engine.config.terminals[TID_SLAVE] is new
+
+
+def test_invert_can_be_flipped_when_the_slave_has_no_copies(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    eng = live_engine(engine_cfg, tmp_path)
+    assert eng.apply_settings(edited(eng, invert=True)) is None
+    assert eng.config.terminals[TID_SLAVE].invert is True
+
+
+def test_invert_is_refused_while_the_slave_has_a_copy(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    seed_live_store(tmp_path, stale_row())
+    eng = live_engine(engine_cfg, tmp_path)
+    before = eng.config.terminals[TID_SLAVE]
+
+    refusal = eng.apply_settings(edited(eng, invert=True))
+
+    assert refusal is not None
+    assert "invert" in refusal
+    assert "1 open copy" in refusal
+    assert eng.config.terminals[TID_SLAVE] is before, "a refusal must leave the slave untouched"
+
+
+def test_invert_is_refused_while_only_an_order_rests(engine_cfg: AppConfig, tmp_path: Path) -> None:
+    seed_live_store(tmp_path, order_row())
+    eng = live_engine(engine_cfg, tmp_path)
+    assert eng.apply_settings(edited(eng, invert=True)) is not None
+
+
+def test_invert_is_refused_while_an_open_is_in_flight(engine: Engine) -> None:
+    go_live(engine)
+    wire_slave(engine)
+    arm_slave(engine)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+    assert engine.believed_copies() == 0
+
+    assert engine.apply_settings(edited(engine, invert=True)) is not None
+    assert engine.config.terminals[TID_SLAVE].invert is False
+
+
+def test_invert_is_refused_when_the_copies_cannot_be_counted(
+    engine_cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The demo-only guard's rule, applied here: 'we could not tell' is not a reason to flip it."""
+    eng = live_engine(engine_cfg, tmp_path)
+    monkeypatch.setattr(eng, "_ensure_store", lambda: (_ for _ in ()).throw(OSError("locked")))
+    refusal = eng.apply_settings(edited(eng, invert=True))
+    assert refusal is not None
+    assert "could not be counted" in refusal
+
+
+def test_every_other_edit_goes_in_however_many_copies_exist(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    """Sizing applies to future opens only and existing copies keep the volume they opened at."""
+    seed_live_store(tmp_path, stale_row())
+    eng = live_engine(engine_cfg, tmp_path)
+    assert eng.apply_settings(edited(eng, risk_percent=0.25, symbol_suffix="p")) is None
+    assert eng.config.terminals[TID_SLAVE].risk_percent == 0.25
+
+
+def test_leaving_invert_alone_is_not_counted_at_all(
+    engine_cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable store must not stop an edit that has nothing to do with direction."""
+    eng = live_engine(engine_cfg, tmp_path)
+    monkeypatch.setattr(eng, "_ensure_store", lambda: (_ for _ in ()).throw(OSError("locked")))
+    assert eng.apply_settings(edited(eng, copy_pending=True)) is None
+
+
+def test_the_check_and_the_swap_happen_under_the_drain_threads_lock(engine: Engine) -> None:
+    """The drain thread dispatches under this lock. Counting first and swapping afterwards would
+    leave a gap for an open to slip into, so the swap has to wait its turn."""
+    started, done = threading.Event(), threading.Event()
+
+    def edit() -> None:
+        started.set()
+        engine.apply_settings(edited(engine, risk_percent=0.5))
+        done.set()
+
+    worker = threading.Thread(target=edit)
+    with engine._lock:
+        worker.start()
+        assert started.wait(2)
+        assert not done.wait(0.3), "the edit must not proceed while the lock is held elsewhere"
+        assert engine.config.terminals[TID_SLAVE].risk_percent == 1.0
+    assert done.wait(2)
+    worker.join()
+    assert engine.config.terminals[TID_SLAVE].risk_percent == 0.5
