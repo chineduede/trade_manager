@@ -17,10 +17,11 @@ import time
 
 from rich.markup import escape
 from textual import on, work
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.coordinate import Coordinate
+from textual.css.query import NoMatches
 from textual.widgets import DataTable, Footer, Header, Static
 
 from .. import config as config_mod
@@ -29,6 +30,8 @@ from ..discovery import discover_terminals
 from ..engine import Engine, TerminalView
 from ..logging_setup import get_logger
 from ..paths import config_path
+from ..settings_edit import EditOutcome, advisories, describe_changes
+from .settings_screen import SettingsScreen
 
 log = get_logger(__name__)
 
@@ -82,6 +85,7 @@ class CopierApp(App[None]):
         Binding("m", "set_master", "Master"),
         Binding("s", "toggle_slave", "Slave"),
         Binding("u", "unassign", "Unassign"),
+        Binding("e", "edit_settings", "Settings"),
         Binding("r", "rescan", "Rescan"),
         Binding("c", "reconnect", "Reconnect"),
         Binding("d", "toggle_detection", "Detect"),
@@ -116,7 +120,7 @@ class CopierApp(App[None]):
             table.add_column(label, key=key, width=width)
         self._engine.start()
         self._rebuild_rows()
-        self.set_interval(0.5, self._refresh)
+        self.set_interval(0.5, self._on_timer)
         self._refresh()
 
     def on_unmount(self) -> None:
@@ -173,6 +177,19 @@ class CopierApp(App[None]):
             cfg.risk_label(),
             status_cell,
         )
+
+    def _on_timer(self) -> None:
+        """The periodic redraw, which has to survive the app being torn down beneath it.
+
+        On the way out Textual removes the screens' widgets before it stops the timers, and a
+        tick that lands in that gap finds nothing to draw into. Left alone the query raises
+        inside the timer and takes the exit with it. Only this path is forgiving: every direct
+        call of :meth:`_refresh` still fails loudly, so a mistyped widget id cannot hide here.
+        """
+        try:
+            self._refresh()
+        except (NoMatches, ScreenStackError):
+            log.debug("refresh tick landed during teardown; skipped")
 
     def _refresh(self) -> None:
         views = self._views()
@@ -375,6 +392,42 @@ class CopierApp(App[None]):
             return
         self._cfg.set_role(tid, Role.UNASSIGNED)
         self._persist_and_sync()
+
+    def action_edit_settings(self) -> None:
+        """Open the settings form for the selected terminal."""
+        tid = self._selected_id()
+        if tid is None:
+            return
+        self.push_screen(
+            SettingsScreen(
+                # The live object, looked up when asked: an edit is built on what is true at the
+                # moment of saving, not on what was true when the form opened.
+                current=lambda: self._cfg.terminals[tid],
+                apply=self._apply_settings,
+                halt=self.action_panic,
+                live=not self._cfg.dry_run,
+            )
+        )
+
+    def _apply_settings(self, outcome: EditOutcome) -> None:
+        """Take a validated edit: swap it in, record it, save it, and say what changed.
+
+        The change goes in the log as well as on screen. A risk setting altered while copying is
+        live is the kind of thing that has to be findable afterwards.
+        """
+        new = outcome.config
+        if new is None:
+            return
+        if not outcome.changes:
+            self.notify(f"{new.label}: no changes")
+            return
+        summary = describe_changes(outcome.changes)
+        self._cfg.replace_terminal(new)
+        log.info("settings changed for %s (%s): %s", new.label, new.terminal_id[:8], summary)
+        self._persist_and_sync()
+        self.notify(f"{new.label}: {summary}")
+        for warning in advisories(outcome):
+            self.notify(warning, severity="warning", timeout=12)
 
     def action_reconnect(self) -> None:
         tid = self._selected_id()

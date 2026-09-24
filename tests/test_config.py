@@ -84,6 +84,53 @@ def test_set_role_demotes_previous_master() -> None:
     assert cfg.master is not None and cfg.master.terminal_id == TID_B
 
 
+def test_replace_terminal_swaps_in_the_whole_object() -> None:
+    """A reader on another thread must see the old settings or the new, never half of each --
+    which only holds if the terminal is replaced, not patched a field at a time."""
+    cfg = AppConfig(terminals={TID_A: TerminalConfig(terminal_id=TID_A, role=Role.SLAVE)})
+    old = cfg.terminals[TID_A]
+    cfg.replace_terminal(old.model_copy(update={"risk_percent": 0.5}))
+    assert cfg.terminals[TID_A] is not old
+    assert cfg.terminals[TID_A].risk_percent == 0.5
+    assert old.risk_percent == 1.0, "the object a reader already holds is left as it was"
+
+
+def test_replace_terminal_does_not_move_the_terminal_in_the_dict() -> None:
+    """Assigning to an existing key keeps the dict's size, so another thread iterating it
+    (the engine walks it every tick) is not disturbed."""
+    cfg = AppConfig(
+        terminals={
+            TID_A: TerminalConfig(terminal_id=TID_A),
+            TID_B: TerminalConfig(terminal_id=TID_B),
+        }
+    )
+    cfg.replace_terminal(cfg.terminals[TID_B].model_copy(update={"copy_pending": True}))
+    assert list(cfg.terminals) == [TID_A, TID_B]
+
+
+def test_replace_terminal_refuses_a_change_of_role() -> None:
+    """set_role is the only place the one-master rule is kept, so it is the only way to move a
+    role; a settings edit that carried one across would bypass it."""
+    cfg = AppConfig(
+        terminals={
+            TID_A: TerminalConfig(terminal_id=TID_A, role=Role.MASTER),
+            TID_B: TerminalConfig(terminal_id=TID_B, role=Role.SLAVE),
+        }
+    )
+    with pytest.raises(ValueError, match="role"):
+        cfg.replace_terminal(cfg.terminals[TID_B].model_copy(update={"role": Role.MASTER}))
+    assert cfg.terminals[TID_A].role is Role.MASTER
+    assert cfg.terminals[TID_B].role is Role.SLAVE
+
+
+def test_replace_terminal_refuses_a_terminal_it_does_not_know() -> None:
+    """Adding a terminal is discovery's job. A stray edit must not create one."""
+    cfg = AppConfig(terminals={TID_A: TerminalConfig(terminal_id=TID_A)})
+    with pytest.raises(KeyError):
+        cfg.replace_terminal(TerminalConfig(terminal_id=TID_B))
+    assert list(cfg.terminals) == [TID_A]
+
+
 def test_assigned_excludes_unassigned_and_disabled() -> None:
     cfg = AppConfig(
         terminals={

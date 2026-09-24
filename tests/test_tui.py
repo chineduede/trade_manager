@@ -11,11 +11,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from textual.widgets import Checkbox, Input, Select, Static
 
-from mt5copier.config import AppConfig, Role, TerminalConfig
+from mt5copier.config import AppConfig, NoStopPolicy, Role, SizingMode, TerminalConfig
 from mt5copier.engine import RecordedAction, RecordedResult, TerminalView
 from mt5copier.store import Orphan
 from mt5copier.tui.app import CopierApp
+from mt5copier.tui.settings_screen import SettingsScreen
 
 TID_MASTER = "A" * 32
 TID_SLAVE = "B" * 32
@@ -394,3 +396,381 @@ async def test_engine_stopped_on_exit(app: CopierApp) -> None:
     async with app.run_test():
         pass
     assert app._engine.stopped is True  # type: ignore[attr-defined]
+
+
+async def test_a_refresh_tick_during_teardown_is_harmless(app: CopierApp) -> None:
+    """Textual removes the widgets before it stops the timers, so a tick can land with nothing to
+    draw into. That used to surface as an intermittent NoMatches out of the exit of a test, and
+    would have been a traceback on quitting the real app."""
+    from textual.css.query import NoMatches
+
+    async with app.run_test():
+        await app.screen_stack[0].remove_children()
+        with pytest.raises(NoMatches):
+            app._refresh()  # a direct call still fails loudly, so a bad widget id cannot hide
+        app._on_timer()  # the timer's own path shrugs it off
+
+
+# --- the settings editor ---------------------------------------------------------------------
+#
+# What is worth testing here is not that a text box takes text but that the form is safe to have
+# open while copying is live: it must not leak keystrokes into role assignment, it must not
+# disable the panic key, a refused entry must change nothing, and an accepted one must reach the
+# config, the disk and the log.
+
+
+async def _open_editor(
+    app: CopierApp, pilot: object, terminal_id: str = TID_SLAVE
+) -> SettingsScreen:
+    """Make ``terminal_id`` a slave, select it, and open its settings."""
+    app.query_one("#terminals").move_cursor(row=row_of(app, terminal_id))
+    await pilot.press("s")  # type: ignore[attr-defined]
+    await pilot.press("e")  # type: ignore[attr-defined]
+    await pilot.pause()  # type: ignore[attr-defined]
+    screen = app.screen
+    assert isinstance(screen, SettingsScreen)
+    return screen
+
+
+def _toasts(app: CopierApp) -> list[str]:
+    return [n.message for n in app._notifications]
+
+
+async def test_e_opens_the_editor_for_the_selected_terminal(app: CopierApp) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        title = str(screen.query_one("#title", Static).render())
+        assert "Beta Broker" in title
+        assert "slave" in title
+
+
+async def test_the_form_starts_at_the_terminals_current_values(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    cfg.terminals[TID_SLAVE].risk_percent = 0.35
+    cfg.terminals[TID_SLAVE].max_lot = 4.0
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        assert screen.query_one("#f-risk_percent", Input).value == "0.35"
+        assert screen.query_one("#f-max_lot", Input).value == "4"
+        assert screen.query_one("#f-sizing_mode", Select).value == "percent_of_balance"
+        assert screen.query_one("#f-copy_sltp", Checkbox).value is True
+        assert screen.query_one("#f-copy_pending", Checkbox).value is False
+
+
+async def test_saving_an_edit_reaches_the_config_the_disk_and_the_engine(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    from mt5copier import config as config_mod
+
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        before = cfg.terminals[TID_SLAVE]
+        syncs = app._engine.sync_calls  # type: ignore[attr-defined]
+
+        screen.query_one("#f-risk_percent", Input).value = "0.4"
+        screen.query_one("#f-copy_pending", Checkbox).value = True
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        live = cfg.terminals[TID_SLAVE]
+        assert live.risk_percent == 0.4
+        assert live.copy_pending is True
+        assert live is not before, "an edit is swapped in whole, never patched field by field"
+        assert live.role is Role.SLAVE, "editing settings must not touch the role"
+        assert not isinstance(app.screen, SettingsScreen), "a saved form closes"
+        assert app._engine.sync_calls > syncs  # type: ignore[attr-defined]
+
+        reloaded = config_mod.load(app._saved_to)  # type: ignore[attr-defined]
+        assert reloaded.terminals[TID_SLAVE].risk_percent == 0.4
+        assert reloaded.terminals[TID_SLAVE].copy_pending is True
+
+
+async def test_the_save_button_does_the_same_as_the_key(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test(size=(120, 45)) as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#f-max_deviation_points", Input).value = "55"
+        await pilot.click("#save")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].max_deviation_points == 55
+
+
+async def test_enter_in_a_text_box_saves(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        box = screen.query_one("#f-risk_cash", Input)
+        box.value = "250"
+        box.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].risk_cash == 250
+
+
+async def test_a_choice_is_saved(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#f-sizing_mode", Select).value = "fixed_cash_risk"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].sizing_mode is SizingMode.FIXED_CASH_RISK
+
+
+async def test_the_risk_column_follows_an_edit(app: CopierApp) -> None:
+    """The table displays RISK and used to be unable to change it; it should now follow."""
+    from textual.widgets import DataTable
+
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#f-risk_percent", Input).value = "2.5"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        table = app.query_one("#terminals", DataTable)
+        assert "2.5%" in str(table.get_cell(TID_SLAVE, "risk"))
+
+
+# --- a refused entry changes nothing -------------------------------------------------------
+
+
+async def test_a_bad_entry_keeps_the_form_open_and_says_why(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        # Opening the editor made the terminal a slave, which saved; what matters is that the
+        # refused edit adds nothing to that.
+        on_disk = app._saved_to.read_bytes()  # type: ignore[attr-defined]
+        screen.query_one("#f-risk_percent", Input).value = "0"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert isinstance(app.screen, SettingsScreen), "a refused form stays open to be fixed"
+        assert "greater than" in str(screen.query_one("#e-risk_percent", Static).render())
+        assert cfg.terminals[TID_SLAVE].risk_percent == 1.0
+        assert app._saved_to.read_bytes() == on_disk, "nothing was written"  # type: ignore[attr-defined]
+
+
+async def test_one_bad_entry_blocks_the_good_ones_beside_it(app: CopierApp, cfg: AppConfig) -> None:
+    """Half an edit is the worst outcome: a form that saved what it liked and dropped the rest
+    would leave the user believing the whole thing went in."""
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#f-copy_pending", Checkbox).value = True
+        screen.query_one("#f-risk_percent", Input).value = "abc"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].copy_pending is False
+
+
+async def test_an_error_message_is_not_clipped_on_an_80_column_terminal(app: CopierApp) -> None:
+    """The number in "must be at most 100" is the part that says what to type instead, and it
+    is the part a fixed-height row cuts off. Read what was actually drawn, not what was set."""
+    import html
+
+    async with app.run_test(size=(80, 44)) as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#f-risk_percent", Input).value = "150"
+        screen.query_one("#f-risk_cash", Input).value = "0,5"
+        await pilot.press("ctrl+s")
+        await pilot.pause(0.3)
+        drawn = html.unescape(app.export_screenshot()).replace("\xa0", " ")
+        assert "must be at most 100" in drawn
+        assert "decimals" in drawn, "a long message wraps onto a second line instead of clipping"
+
+
+async def test_every_bad_entry_is_flagged_at_once(app: CopierApp) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#f-risk_percent", Input).value = "abc"
+        screen.query_one("#f-max_deviation_points", Input).value = "-1"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert str(screen.query_one("#e-risk_percent", Static).render()).strip()
+        assert str(screen.query_one("#e-max_deviation_points", Static).render()).strip()
+
+
+async def test_the_first_bad_field_takes_focus(app: CopierApp) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#f-max_lot", Input).value = "-3"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert app.focused is screen.query_one("#f-max_lot", Input)
+
+
+async def test_fixing_a_bad_entry_lets_the_save_through(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        box = screen.query_one("#f-risk_percent", Input)
+        box.value = "0"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        box.value = "0.6"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].risk_percent == 0.6
+        assert not isinstance(app.screen, SettingsScreen)
+
+
+async def test_escape_discards_the_form(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        on_disk = app._saved_to.read_bytes()  # type: ignore[attr-defined]
+        screen.query_one("#f-risk_percent", Input).value = "9"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, SettingsScreen)
+        assert cfg.terminals[TID_SLAVE].risk_percent == 1.0
+        assert app._saved_to.read_bytes() == on_disk  # type: ignore[attr-defined]
+
+
+async def test_saving_without_changing_anything_writes_nothing(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    async with app.run_test() as pilot:
+        await _open_editor(app, pilot)
+        before = cfg.terminals[TID_SLAVE]
+        syncs = app._engine.sync_calls  # type: ignore[attr-defined]
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE] is before
+        assert app._engine.sync_calls == syncs  # type: ignore[attr-defined]
+        assert any("no changes" in t for t in _toasts(app))
+
+
+# --- safe to have open while copying is live -----------------------------------------------
+
+
+async def test_keys_typed_in_the_form_do_not_reach_role_assignment(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    """m, s and u assign roles on the selected terminal, which is the very terminal whose form
+    is open. With a checkbox focused there is no text box to absorb them."""
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#f-copy_pending", Checkbox).focus()
+        await pilot.pause()
+        roles = {t: c.role for t, c in cfg.terminals.items()}
+        for key in ("m", "s", "u", "d", "c"):
+            await pilot.press(key)
+        assert {t: c.role for t, c in cfg.terminals.items()} == roles
+        assert cfg.copying_enabled is False
+        assert app._engine.reconnected == []  # type: ignore[attr-defined]
+        assert isinstance(app.screen, SettingsScreen)
+
+
+async def test_the_panic_key_still_works_with_the_form_open(app: CopierApp, cfg: AppConfig) -> None:
+    """Copying can be live while the form is open, and a modal hides the app's own keys."""
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        cfg.copying_enabled = True
+        screen.query_one("#f-risk_percent", Input).value = "3"
+        await pilot.press("f9")
+        await pilot.pause()
+        assert cfg.copying_enabled is False
+        assert not isinstance(app.screen, SettingsScreen), "the form closes after a panic"
+        assert cfg.terminals[TID_SLAVE].risk_percent == 1.0, "and its unsaved edit is dropped"
+
+
+async def test_tabbing_never_stops_on_the_dialog_frame(app: CopierApp) -> None:
+    """A scroll container is focusable by default, which would put the frame in the tab order."""
+    async with app.run_test() as pilot:
+        await _open_editor(app, pilot)
+        seen = set()
+        for _ in range(20):
+            await pilot.press("tab")
+            seen.add(app.focused.id if app.focused else None)
+        assert "dialog" not in seen
+        assert {"save", "cancel", "f-risk_percent", "f-copy_pending"} <= seen
+
+
+async def test_save_is_reachable_on_a_small_terminal(app: CopierApp) -> None:
+    """At 80x24 the form is taller than the screen; the buttons must scroll into view rather than
+    sit clipped off the bottom."""
+    async with app.run_test(size=(80, 24)) as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#save").focus()
+        await pilot.pause(0.3)
+        region = screen.query_one("#save").region
+        assert region.y >= 0
+        assert region.y + region.height <= 24
+
+
+async def test_the_form_says_whether_it_is_live(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test() as pilot:
+        cfg.dry_run = True
+        screen = await _open_editor(app, pilot)
+        assert "dry run" in str(screen.query_one("#mode", Static).render())
+        await pilot.press("escape")
+        await pilot.pause()
+
+        cfg.dry_run = False
+        await pilot.press("e")
+        await pilot.pause()
+        assert "LIVE" in str(app.screen.query_one("#mode", Static).render())
+
+
+# --- what the form must not offer ----------------------------------------------------------
+
+
+async def test_the_form_has_no_field_for_invert_or_the_live_trading_override(
+    app: CopierApp,
+) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        for name in ("invert", "allow_live_trading", "role", "enabled"):
+            assert not screen.query(f"#f-{name}"), name
+
+
+async def test_the_form_shows_the_guarded_settings_read_only(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    cfg.terminals[TID_SLAVE].invert = True
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        note = str(screen.query_one("#readonly", Static).render())
+        assert "invert (on)" in note
+        assert "live trading" in note
+
+
+# --- warnings and the record ---------------------------------------------------------------
+
+
+async def test_enabling_no_stop_copying_is_flagged(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#f-no_stop_policy", Select).value = "lot_multiple"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].no_stop_policy is NoStopPolicy.LOT_MULTIPLE
+        assert any("UNPROTECTED" in t for t in _toasts(app))
+
+
+async def test_an_edit_is_written_to_the_log(
+    app: CopierApp, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A risk setting changed while copying is live has to be findable afterwards."""
+    import logging
+
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        screen.query_one("#f-risk_percent", Input).value = "0.2"
+        with caplog.at_level(logging.INFO):
+            await pilot.press("ctrl+s")
+            await pilot.pause()
+    messages = [r.getMessage() for r in caplog.records]
+    assert any(
+        "settings changed for Beta Broker" in m and "risk_percent 1 -> 0.2" in m for m in messages
+    )
+
+
+async def test_an_edit_reads_the_live_terminal_at_the_moment_of_saving(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    """A rescan can change discovery fields while the form is open. The edit is built on what is
+    true when it is saved, so it must not put the old values back."""
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        cfg.terminals[TID_SLAVE].last_login = 999_999
+        screen.query_one("#f-copy_pending", Checkbox).value = True
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].last_login == 999_999
+        assert cfg.terminals[TID_SLAVE].copy_pending is True

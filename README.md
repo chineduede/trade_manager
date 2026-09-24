@@ -49,6 +49,7 @@ dist/mt5copier.exe
 | `m` | Make the selected terminal the Master (exclusive — demotes any previous master) |
 | `s` | Toggle the selected terminal as a Slave |
 | `u` | Unassign |
+| `e` | Edit the selected terminal's settings: sizing, the no-stop policy, the copy flags. In the form `ctrl+s` saves, `esc` cancels, and `F9` still halts copying |
 | `r` | Rescan for terminals |
 | `c` | Ask the worker to drop and re-establish its MT5 session |
 | `d` | Start/stop detection — the dry-run diff. Needs a master and at least one slave. |

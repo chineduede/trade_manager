@@ -217,14 +217,60 @@ sizing path (`LOT_MULTIPLE`, off by default) rather than being unsizeable.
 **Polling rate** is still untuned: detection runs on the master's own snapshot tick, so it
 inherits `poll_interval_ms` (250ms). See the performance note at the bottom before changing it.
 
-## Per-terminal settings editor — not yet built
+## Per-terminal settings editor — **half built, 2026-09-24**
 
-`TerminalConfig` carries sixteen per-slave settings and the UI can edit none of them. Role
-assignment is the only thing the keyboard changes; everything else means quitting and editing
-`%APPDATA%\MT5Copier\config.json` by hand. The terminal table even *displays* a RISK column,
-which implies it can be changed there, and it cannot.
+**Built — press `e` on a terminal.** A modal covering sizing (`sizing_mode`, `risk_percent`,
+`risk_cash`, `max_lot`, commission, slippage, max deviation), the no-stop policy and its
+multiple, and the three copy flags. A blank `max_lot` means no ceiling. Ctrl+S or Enter saves,
+Esc cancels. The pure half is `settings_edit.py`; the form is `tui/settings_screen.py`.
 
-This is a gap rather than a deferral — it was never planned, and it should have been. It is
+**Still to build, in this order:**
+
+1. **The symbol section, with the live mapping tester.** `symbol_prefix`, `symbol_suffix` and
+   `symbol_map` are all still hand edits. The tester has a real design question in it: the UI
+   process holds no MT5 connection (each worker owns its own), and `CommandKind` is only
+   `STOP` / `RECONNECT` / `PING`, so testing a mapping against a broker's symbol list needs a
+   new worker command and a reply. It is not form work.
+2. **The `invert` guard** — see the table below. Until it exists, `invert` is shown read-only.
+3. **Filters** (`symbol_whitelist`, `symbol_blacklist`), `label`, `enabled`.
+
+**Decisions taken building it, none of them obvious from the code:**
+
+- **`invert` and `allow_live_trading` are deliberately not editable.** The first needs the
+  guard below. The second is the demo-only guard's override, and a guard that a stray keypress
+  can lift is not a guard; it stays a hand edit with the app closed. Both are shown read-only
+  in the form.
+- **Validation is pydantic's, not the form's.** The bounds live on `TerminalConfig`, so the
+  form cannot accept what `load()` would reject — which would read as a corrupt config and
+  reset the user's settings. The form adds only blank-means-`None` for `max_lot` and a refusal
+  of `inf` / `nan`, because `risk_cash` has only a lower bound and `inf` would pass it.
+- **An edit is built on the terminal's *live* settings at the moment of saving, then swapped
+  in whole** (`AppConfig.replace_terminal`, one dict assignment). The engine's drain thread
+  reads a slave's settings every tick and takes no lock against the UI thread, so patching
+  fields one at a time could size an order from half an edit. The swap refuses a change of
+  role; `set_role` is the only place the one-master rule is kept.
+- **A field whose text is unchanged is skipped, not re-parsed.** One third does not survive a
+  trip through a text box, and editing an unrelated field must never nudge a risk setting.
+- **A refused form changes nothing** — including the fields beside the bad one that were fine.
+  Half an edit would leave the user believing all of it went in.
+- **F9 works inside the form.** A modal hides the app's own keys, and copying can be live
+  while it is open, so the form binds panic itself. It closes the form and drops unsaved edits.
+- **Two saves earn a warning**, because they were a deliberate hand edit and are now one
+  keypress: enabling `LOT_MULTIPLE` (the copy opens unprotected) and removing a `max_lot`.
+- **Every saved change is logged** (`settings changed for <label>: risk_percent 1 -> 0.5`).
+
+The engine needed no change: it reads a slave's settings from the shared `AppConfig` on every
+tick, and workers are handed none at spawn, so an edit reaches the next copied trade and
+nothing already open. That is the "Safe" behaviour the table below asks for.
+
+The rest of this section is the original write-up, kept because steps 1–3 still follow it.
+
+`TerminalConfig` carries sixteen per-slave settings and, before this, the UI could edit none of
+them. Role assignment was the only thing the keyboard changed; everything else meant quitting
+and editing `%APPDATA%\MT5Copier\config.json` by hand. The terminal table even *displays* a
+RISK column, which implied it could be changed there, and it could not.
+
+This was a gap rather than a deferral — it was never planned, and it should have been. It is
 also the thing most likely to be wanted daily, since `risk_percent` is the setting a user
 actually reaches for.
 

@@ -332,6 +332,26 @@ class AppConfig(BaseModel):
                     tcfg.role = Role.UNASSIGNED
         self.terminals[terminal_id].role = role
 
+    def replace_terminal(self, new: TerminalConfig) -> None:
+        """Swap in an edited copy of one terminal's settings, as a single assignment.
+
+        The engine's drain thread reads a slave's settings on every tick while the UI thread is
+        the one writing them, and neither holds a lock the other respects. Setting fields one at
+        a time would let an order be sized from half of an edit -- percent mode beside a cash
+        amount that was meant for the other mode, say. One dict assignment is atomic, so a
+        reader sees the settings from before the edit or after it and never a mixture.
+
+        A change of role is refused rather than carried across. :meth:`set_role` owns role
+        changes because it is the only place the one-master rule is kept, and an edit that
+        slipped a second master in through here would bypass it.
+        """
+        old = self.terminals.get(new.terminal_id)
+        if old is None:
+            raise KeyError(new.terminal_id)
+        if new.role is not old.role:
+            raise ValueError("a settings edit cannot change a terminal's role; use set_role")
+        self.terminals[new.terminal_id] = new
+
 
 def _migrate(raw: dict[str, object]) -> dict[str, object]:
     """Bring an older config document up to the current schema, in place.
