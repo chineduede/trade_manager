@@ -19,18 +19,6 @@ def is_frozen() -> bool:
     return getattr(sys, "frozen", False)
 
 
-def bundle_dir() -> Path:
-    """Directory holding read-only bundled assets (CSS, stubs).
-
-    Under PyInstaller one-file this is the temporary extraction dir (``sys._MEIPASS``);
-    from source it is the package directory.
-    """
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        return Path(meipass)
-    return Path(__file__).resolve().parent
-
-
 def exe_dir() -> Path:
     """Directory containing the running exe (frozen) or the project root (source)."""
     if is_frozen():

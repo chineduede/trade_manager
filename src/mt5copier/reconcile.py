@@ -200,35 +200,6 @@ class CopiedPosition:
     slave_ticket: int | None = None
     volume: float | None = None
 
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "terminal_id": self.terminal_id,
-            "master_ticket": self.master_ticket,
-            "slave_symbol": self.slave_symbol,
-            "type": int(self.type),
-            "master_volume": self.master_volume,
-            "synced_sl": self.synced_sl,
-            "synced_tp": self.synced_tp,
-            "slave_ticket": self.slave_ticket,
-            "volume": self.volume,
-        }
-
-    @classmethod
-    def from_json(cls, raw: dict[str, Any]) -> CopiedPosition:
-        return cls(
-            terminal_id=str(raw["terminal_id"]),
-            master_ticket=int(raw["master_ticket"]),
-            slave_symbol=str(raw["slave_symbol"]),
-            type=PositionType(int(raw["type"])),
-            master_volume=float(raw["master_volume"]),
-            # master_sl/master_tp are the pre-rename spelling: read them so an existing
-            # dry-run state file does not produce one phantom MODIFY per tracked position.
-            synced_sl=float(raw.get("synced_sl") or raw.get("master_sl") or 0.0),
-            synced_tp=float(raw.get("synced_tp") or raw.get("master_tp") or 0.0),
-            slave_ticket=(None if raw.get("slave_ticket") is None else int(raw["slave_ticket"])),
-            volume=(None if raw.get("volume") is None else float(raw["volume"])),
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class CopiedOrder:
@@ -249,35 +220,6 @@ class CopiedOrder:
     synced_tp: float = 0.0
     slave_ticket: int | None = None
     volume: float | None = None
-
-    def to_json(self) -> dict[str, Any]:
-        return {
-            "terminal_id": self.terminal_id,
-            "master_ticket": self.master_ticket,
-            "slave_symbol": self.slave_symbol,
-            "order_type": int(self.order_type),
-            "master_volume": self.master_volume,
-            "entry": self.entry,
-            "synced_sl": self.synced_sl,
-            "synced_tp": self.synced_tp,
-            "slave_ticket": self.slave_ticket,
-            "volume": self.volume,
-        }
-
-    @classmethod
-    def from_json(cls, raw: dict[str, Any]) -> CopiedOrder:
-        return cls(
-            terminal_id=str(raw["terminal_id"]),
-            master_ticket=int(raw["master_ticket"]),
-            slave_symbol=str(raw["slave_symbol"]),
-            order_type=OrderType(int(raw["order_type"])),
-            master_volume=float(raw["master_volume"]),
-            entry=float(raw.get("entry") or 0.0),
-            synced_sl=float(raw.get("synced_sl") or 0.0),
-            synced_tp=float(raw.get("synced_tp") or 0.0),
-            slave_ticket=(None if raw.get("slave_ticket") is None else int(raw["slave_ticket"])),
-            volume=(None if raw.get("volume") is None else float(raw["volume"])),
-        )
 
 
 # --- pure helpers ---------------------------------------------------------------------------
