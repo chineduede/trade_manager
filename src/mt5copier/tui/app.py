@@ -13,7 +13,9 @@ freeze the event loop.
 
 from __future__ import annotations
 
+import logging
 import time
+from collections.abc import Callable, Sequence
 
 from rich.markup import escape
 from textual import on, work
@@ -25,12 +27,15 @@ from textual.css.query import NoMatches
 from textual.widgets import DataTable, Footer, Header, Static
 
 from .. import config as config_mod
-from ..config import AppConfig, Role
+from ..config import AppConfig, Role, TerminalConfig
 from ..discovery import discover_terminals
 from ..engine import Engine, TerminalView
 from ..logging_setup import get_logger
 from ..paths import config_path
-from ..settings_edit import EditOutcome, advisories, describe_changes
+from ..reconcile import OpenCopy
+from ..settings_edit import LIVE_OVERRIDE, EditOutcome, advisories, copies_word, describe_changes
+from .live_override_screen import LiveOverrideScreen
+from .orphan_screen import OrphanConfirmScreen
 from .settings_screen import SettingsScreen
 
 log = get_logger(__name__)
@@ -86,6 +91,7 @@ class CopierApp(App[None]):
         Binding("s", "toggle_slave", "Slave"),
         Binding("u", "unassign", "Unassign"),
         Binding("e", "edit_settings", "Settings"),
+        Binding("l", "live_override", "Live override"),
         Binding("r", "rescan", "Rescan"),
         Binding("c", "reconnect", "Reconnect"),
         Binding("d", "toggle_detection", "Detect"),
@@ -274,9 +280,18 @@ class CopierApp(App[None]):
             copy_state = "detection off"
             bar.set_classes("halted" if master else "")
 
+        # Said in the bar, not only in the dialog: a terminal with the guard lifted is the one
+        # that can trade a funded account, and it stays lifted across a role change.
+        lifted = [
+            t.label or t.terminal_id[:8]
+            for t in self._cfg.terminals.values()
+            if t.allow_live_trading
+        ]
         failed = self._engine.failed_total
         bar.update(
-            f" {copy_state}  |  master: {master.label if master else '(none)'}"
+            f" {copy_state}"
+            + (f"  |  [bold red]NON-DEMO ALLOWED: {escape(', '.join(lifted))}[/]" if lifted else "")
+            + f"  |  master: {master.label if master else '(none)'}"
             f"  |  slaves: {len(self._cfg.slaves)}"
             f"  |  live {h['live']}/{h['supervised']}"
             + (f"  |  STALE {h['stale']}" if h["stale"] else "")
@@ -403,41 +418,107 @@ class CopierApp(App[None]):
                 # The live object, looked up when asked: an edit is built on what is true at the
                 # moment of saving, not on what was true when the form opened.
                 current=lambda: self._cfg.terminals[tid],
-                copies=lambda: self._engine.copies_open_on(tid),
                 apply=self._apply_settings,
                 halt=self.action_panic,
                 live=not self._cfg.dry_run,
             )
         )
 
-    def _apply_settings(self, outcome: EditOutcome) -> str | None:
-        """Take a validated edit: swap it in, record it, save it, and say what changed.
+    def action_live_override(self) -> None:
+        """Open the demo-only guard's override for the selected terminal."""
+        tid = self._selected_id()
+        if tid is None:
+            return
+        self.push_screen(
+            LiveOverrideScreen(
+                current=lambda: self._cfg.terminals[tid],
+                apply=self._apply_settings,
+                halt=self.action_panic,
+            )
+        )
 
-        Returns why the engine refused it, or None if it went in. The engine is the one that
-        swaps, because it can check and swap under the lock the drain thread dispatches under.
+    def _apply_settings(self, outcome: EditOutcome, done: Callable[[str | None], None]) -> None:
+        """Take a validated edit -- asking first if it would give up open copies -- and apply it.
 
-        The change goes in the log in full as well as on screen. A risk setting altered while
-        copying is live is the kind of thing that has to be findable afterwards.
+        ``done`` is told how it ended: None if the edit went in (or there was nothing to do),
+        otherwise why it was refused. It is *not* called when the person declines to give the
+        copies up: the form is still open and nothing has happened, so there is nothing to say.
+
+        The question exists for every setting alike. What each one does to a copy that is already
+        open is not something a person should have to know, and not something this has to decide.
         """
         new = outcome.config
         if new is None:
-            return None
+            done(None)
+            return
         if not outcome.changes:
             self.notify(f"{new.label}: no changes")
-            return None
-        refusal = self._engine.apply_settings(new)
+            done(None)
+            return
+
+        # An unreadable store reads as "nothing to ask about" here, and that is safe: the engine
+        # reads it again under its lock and refuses an edit it cannot account for. What is asked
+        # about is only ever a courtesy; the engine is the one that cannot be raced.
+        copies = self._engine.open_copies(new.terminal_id) or []
+        if not copies:
+            done(self._commit_settings(new, outcome, ()))
+            return
+
+        def decided(agreed: bool | None) -> None:
+            if agreed:
+                done(self._commit_settings(new, outcome, copies))
+
+        self.push_screen(
+            OrphanConfirmScreen(
+                label=new.label or new.terminal_id[:8],
+                copies=copies,
+                changes=describe_changes(outcome.changes, limit=160),
+                live=not self._cfg.dry_run,
+                halt=self.action_panic,
+            ),
+            decided,
+        )
+
+    def _commit_settings(
+        self, new: TerminalConfig, outcome: EditOutcome, given_up: Sequence[OpenCopy]
+    ) -> str | None:
+        """Swap the edit in, record it, save it, and say what changed and what was given up.
+
+        Returns why the engine refused it, or None if it went in. The engine is the one that
+        swaps, because it can check and swap under the lock the drain thread dispatches under,
+        and ``given_up`` is what it checks the person agreed to against what is held now.
+
+        The change goes in the log in full as well as on screen. A risk setting altered while
+        copying is live is the kind of thing that has to be findable afterwards -- and a change
+        to the demo-only guard's override is logged as a warning, so it stands out from one.
+        """
+        refusal = self._engine.apply_settings(
+            new, orphan=[c.master_ticket for c in given_up] if given_up else None
+        )
         if refusal is not None:
             return refusal
-        log.info(
+        guard_moved = any(c.name == LIVE_OVERRIDE for c in outcome.changes)
+        log.log(
+            logging.WARNING if guard_moved else logging.INFO,
             "settings changed for %s (%s): %s",
             new.label,
             new.terminal_id[:8],
             describe_changes(outcome.changes),
         )
-        open_copies = self._engine.copies_open_on(new.terminal_id)
         self._persist_and_sync()
         self.notify(f"{new.label}: {describe_changes(outcome.changes, limit=160)}")
-        for warning in advisories(outcome, open_copies):
+        if given_up:
+            if self._cfg.dry_run:
+                said = f"{len(given_up)} simulated copies let go; they are no longer managed."
+            else:
+                tickets = [f"#{c.slave_ticket}" for c in given_up if c.slave_ticket is not None]
+                named = f" ({', '.join(tickets[:5])}{', ...' if len(tickets) > 5 else ''})"
+                said = (
+                    f"{copies_word(len(given_up))} orphaned{named if tickets else ''}. "
+                    "They stay open and are no longer managed: close them by hand."
+                )
+            self.notify(f"{new.label}: {said}", severity="warning", timeout=20)
+        for warning in advisories(outcome):
             self.notify(warning, severity="warning", timeout=12)
         return None
 

@@ -16,16 +16,18 @@ a ``MASTER=BROKER`` map out of free text.
 **Only the fields listed here can be edited.** What is missing is deliberate:
 
 * ``allow_live_trading`` is the demo-only guard's override. A guard that a stray keypress can
-  lift is not a guard, so it stays a hand edit with the app closed.
+  lift is not a guard, so it is not a row in this form, where ``ctrl+s`` or a stray space would
+  reach it. It has its own key and its own dialog, and turning it *on* takes the terminal's name
+  typed out in full: see :func:`set_live_override`.
 * ``label`` is owned by discovery, which overwrites it on every rescan and at every start. An
   edit would revert silently the next time the app ran.
 * ``role`` has its own keys, and ``terminal_id`` and ``exe_path`` are not the user's to set.
 
-``invert`` *is* editable, behind a guard: a believed copy records the direction it was opened
-in, so flipping the flag under one leaves the ledger describing the opposite of what is on the
-slave. The change is refused while the slave has any copy open or opening, and refused when that
-cannot be determined -- "we could not tell" is not a reason to flip it. Refused, not resolved by
-clearing the ledger, because clearing would orphan live positions.
+**Nothing here knows which edits are safe under an open copy, and nothing needs to.** An edit to
+a terminal that holds copies is not judged setting by setting: the copies are given up (see
+``Engine.apply_settings``), after the person has been shown them and agreed. That is what
+``invert`` needed -- a believed copy records the direction it opened in -- and it is what
+``enabled`` and the sizing settings need too, and it is one rule instead of a list.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ from enum import Enum, StrEnum
 
 from pydantic import ValidationError
 
-from .config import NoStopPolicy, SizingMode, TerminalConfig
+from .config import NoStopPolicy, Role, SizingMode, TerminalConfig
 
 
 class Kind(StrEnum):
@@ -162,16 +164,14 @@ SECTIONS: tuple[Section, ...] = (
                 "enabled",
                 "Enabled",
                 Kind.FLAG,
-                "Off drops the connection to this terminal. Copies already open on it are left "
-                "unmanaged until it is turned back on.",
+                "Off drops the connection to this terminal.",
             ),
             EditableField(
                 "invert",
                 "Reverse trades (invert)",
                 Kind.FLAG,
                 "Buy becomes sell. Stop and target swap places, so the copy is sized from the "
-                "master's TAKE-PROFIT and a trade with no target copies with no stop. Refused "
-                "while this slave has copies open.",
+                "master's TAKE-PROFIT and a trade with no target copies with no stop.",
             ),
             EditableField("copy_sltp", "Copy stop / target moves", Kind.FLAG, ""),
             EditableField("copy_partials", "Copy partial closes", Kind.FLAG, ""),
@@ -386,23 +386,11 @@ def _parse(spec: EditableField, raw: str | bool) -> object:
     return number
 
 
-def _copies_word(count: int) -> str:
+def copies_word(count: int) -> str:
     return f"{count} open {'copy' if count == 1 else 'copies'}"
 
 
-def invert_refusal(open_copies: int | None) -> str:
-    """Why ``invert`` cannot change now. ``None`` is a count that could not be read."""
-    if open_copies is None:
-        return "can't change: this slave's open copies could not be counted"
-    return f"can't change while this slave has {_copies_word(open_copies)}. Wait for them to close"
-
-
-def apply_edits(
-    current: TerminalConfig,
-    raw: Mapping[str, str | bool],
-    *,
-    open_copies: int | None = None,
-) -> EditOutcome:
+def apply_edits(current: TerminalConfig, raw: Mapping[str, str | bool]) -> EditOutcome:
     """Apply what the form holds to ``current``, or say what is wrong with it.
 
     ``raw`` may hold any subset of the editable fields. A field whose text is exactly what the
@@ -412,10 +400,6 @@ def apply_edits(
     ``current`` should be the terminal's *live* settings at the moment of saving, not a copy
     taken when the form opened: everything not edited here is carried over from it, so a role
     change or a rescan that happened while the form was open is not overwritten.
-
-    ``open_copies`` is how many copies this slave has open or opening, and it is what guards
-    ``invert``. Its default is ``None`` -- "not counted" -- and that refuses the change: a guard
-    that quietly passes when the caller forgets to count is not one.
 
     Naming a field that is not editable raises. That is a bug in the caller, and quietly
     ignoring it would mean a setting the user thinks they changed was not.
@@ -434,11 +418,6 @@ def apply_edits(
             updates[name] = _parse(spec, value)
         except _EntryError as exc:
             errors[name] = str(exc)
-
-    # ``updates`` only holds a field whose text differs, so this is "invert is being changed".
-    if "invert" in updates and updates["invert"] != current.invert:
-        if open_copies is None or open_copies > 0:
-            errors["invert"] = invert_refusal(open_copies)
 
     # Validate whatever parsed even if something else did not, so one round trip shows every
     # problem instead of revealing them one at a time. A field that failed to parse is absent
@@ -460,6 +439,62 @@ def apply_edits(
         if getattr(current, name) != getattr(new, name)
     )
     return EditOutcome(config=new, errors={}, changes=changes)
+
+
+LIVE_OVERRIDE = "allow_live_trading"
+
+
+def live_override_phrase(cfg: TerminalConfig) -> str:
+    """What has to be typed to turn the override on: the terminal's own name.
+
+    The name and not a fixed word, because the mistake this guards against is the *wrong
+    terminal* -- a role is a keypress from landing on a funded account -- and a fixed word can be
+    typed without looking at which terminal is selected. The name cannot. It falls back to the
+    first eight characters of the id, which is what the log calls a terminal, when discovery gave
+    it no label.
+    """
+    return cfg.label.strip() or cfg.terminal_id[:8]
+
+
+def set_live_override(
+    current: TerminalConfig, enabled: bool, *, typed: str | None = None
+) -> EditOutcome:
+    """Turn the demo-only guard's override on or off, or say why not.
+
+    Not through :func:`apply_edits`, which refuses this field by name: the form is saved with one
+    keypress and this must not be. Off is the safe direction and needs nothing. On needs both of:
+
+    * **The terminal is a slave.** The guard only ever stands between a *slave* and a broker.
+      ``set_role`` does not touch this flag, so one turned on for a terminal that is not a slave
+      would ride along, unseen, on the day the terminal is made one.
+    * **``typed`` is the terminal's name** (:func:`live_override_phrase`), compared without regard
+      to case or surrounding space. Its default is ``None`` -- "nothing typed" -- and that refuses:
+      a guard that quietly passes when the caller forgets to ask is not one.
+    """
+    if enabled == current.allow_live_trading:
+        return EditOutcome(config=current, errors={}, changes=())
+
+    if enabled:
+        phrase = live_override_phrase(current)
+        if current.role is not Role.SLAVE:
+            return EditOutcome(
+                config=None,
+                errors={LIVE_OVERRIDE: "only a slave is ever traded: make it a slave first"},
+                changes=(),
+            )
+        if typed is None or typed.strip().casefold() != phrase.casefold():
+            return EditOutcome(
+                config=None,
+                errors={LIVE_OVERRIDE: f"that is not the name: type {phrase} to confirm"},
+                changes=(),
+            )
+
+    new = TerminalConfig.model_validate({**current.model_dump(), LIVE_OVERRIDE: enabled})
+    return EditOutcome(
+        config=new,
+        errors={},
+        changes=(Change(LIVE_OVERRIDE, current.allow_live_trading, enabled),),
+    )
 
 
 def _show(value: object) -> str:
@@ -492,11 +527,13 @@ def describe_changes(changes: tuple[Change, ...], limit: int | None = None) -> s
     return text
 
 
-def advisories(outcome: EditOutcome, open_copies: int | None = None) -> list[str]:
+def advisories(outcome: EditOutcome) -> list[str]:
     """Warnings for an edit that is allowed but widens what a slave can lose or leaves it exposed.
 
     None is a reason to refuse. Each is something the editor makes one keypress away that was a
-    deliberate hand edit before, so the moment it happens is the moment to say so.
+    deliberate hand edit before, so the moment it happens is the moment to say so. What an edit
+    does to copies that are already open is not here: that is asked about beforehand, for every
+    setting alike.
     """
     if outcome.config is None:
         return []
@@ -514,10 +551,10 @@ def advisories(outcome: EditOutcome, open_copies: int | None = None) -> list[str
     cap = changed.get("max_lot")
     if cap is not None and cap.old is not None and cap.new is None:
         out.append("max lot removed: copy size is now limited only by the risk setting.")
-    if "enabled" in changed and not cfg.enabled and open_copies:
+    live = changed.get(LIVE_OVERRIDE)
+    if live is not None and cfg.allow_live_trading:
         out.append(
-            f"{_copies_word(open_copies)} on {cfg.label or 'this terminal'} will be left "
-            "unmanaged while it is disabled: no closes and no stop or target moves. "
-            "Turn it back on to resume."
+            f"{cfg.label or 'this terminal'} will now be traded whatever its account is, a real "
+            "or prop-firm account included. It stays that way until the override is turned off."
         )
     return out

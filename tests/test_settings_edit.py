@@ -16,8 +16,11 @@ from mt5copier.settings_edit import (
     Kind,
     advisories,
     apply_edits,
+    copies_word,
     describe_changes,
     initial_values,
+    live_override_phrase,
+    set_live_override,
 )
 
 TID = "A" * 32
@@ -45,7 +48,7 @@ def test_a_choice_offers_every_member_of_its_enum_and_nothing_else() -> None:
 
 
 NOT_EDITABLE = {
-    "allow_live_trading",  # the demo-only guard's override; must not be one keypress away
+    "allow_live_trading",  # the demo-only guard's override: own key, typed confirmation
     "label",  # discovery overwrites it on every rescan, so an edit would silently revert
     "role",  # has its own keys, and set_role is where the one-master rule lives
     "terminal_id",
@@ -279,75 +282,44 @@ def test_a_refused_edit_has_nothing_to_warn_about() -> None:
     assert advisories(apply_edits(make(), {"risk_percent": "0"})) == []
 
 
-# --- the invert guard -------------------------------------------------------------------------
+# --- what an edit does to open copies is not decided here ----------------------------------------
+#
+# ``invert`` used to be refused under an open copy and ``enabled`` used to warn about one. Neither
+# is judged in this module any more: an edit to a terminal that holds copies gives them up, for
+# every setting alike, after the person has been asked (Engine.apply_settings and the UI).
 
 
-def test_invert_can_be_flipped_on_a_slave_with_no_copies() -> None:
-    outcome = apply_edits(make(), {"invert": True}, open_copies=0)
+def test_invert_is_an_ordinary_edit() -> None:
+    outcome = apply_edits(make(), {"invert": True})
     assert outcome.config is not None
     assert outcome.config.invert is True
     assert describe_changes(outcome.changes) == "invert off -> on"
 
 
-def test_invert_is_refused_while_the_slave_has_copies() -> None:
-    """A believed copy records the direction it opened in; flipping the flag under it leaves the
-    ledger describing the opposite of what is on the slave."""
-    outcome = apply_edits(make(), {"invert": True}, open_copies=2)
-    assert not outcome.ok
-    assert "2 open copies" in outcome.errors["invert"]
-
-
-def test_one_copy_is_singular() -> None:
-    assert "1 open copy." in apply_edits(make(), {"invert": True}, open_copies=1).errors["invert"]
-
-
-def test_invert_is_refused_when_the_copies_could_not_be_counted() -> None:
-    """The same rule as the demo-only guard: 'we could not tell' is not a reason to proceed."""
-    outcome = apply_edits(make(), {"invert": True}, open_copies=None)
-    assert not outcome.ok
-    assert "could not be counted" in outcome.errors["invert"]
-
-
-def test_forgetting_to_count_refuses_rather_than_passes() -> None:
-    """The default is 'not counted'. A guard that quietly passes when the caller forgets is not one."""
-    assert not apply_edits(make(), {"invert": True}).ok
-
-
-def test_the_guard_covers_turning_invert_off_as_well() -> None:
-    assert not apply_edits(make(invert=True), {"invert": False}, open_copies=1).ok
-    assert apply_edits(make(invert=True), {"invert": False}, open_copies=0).ok
-
-
-def test_leaving_invert_alone_is_not_blocked_by_open_copies() -> None:
-    """Copies being open is only a problem for the change of direction, not for the slave."""
-    outcome = apply_edits(make(invert=True), {"invert": True, "copy_pending": True}, open_copies=3)
+def test_turning_invert_off_is_an_ordinary_edit_too() -> None:
+    outcome = apply_edits(make(invert=True), {"invert": False})
     assert outcome.ok
-    assert [c.name for c in outcome.changes] == ["copy_pending"]
+    assert describe_changes(outcome.changes) == "invert on -> off"
 
 
-def test_a_refused_invert_takes_the_other_edits_with_it() -> None:
-    outcome = apply_edits(make(), {"invert": True, "copy_pending": True}, open_copies=1)
-    assert outcome.config is None
-    assert set(outcome.errors) == {"invert"}
-
-
-# --- enabled ----------------------------------------------------------------------------------
-
-
-def test_disabling_a_slave_with_open_copies_warns_that_they_go_unmanaged() -> None:
+def test_disabling_a_slave_is_an_ordinary_edit_with_nothing_to_warn_about() -> None:
     outcome = apply_edits(make(), {"enabled": False})
-    (warning,) = advisories(outcome, open_copies=2)
-    assert "2 open copies" in warning
-    assert "unmanaged" in warning
+    assert outcome.ok
+    assert advisories(outcome) == []
 
 
-def test_disabling_a_slave_with_nothing_open_is_quiet() -> None:
-    assert advisories(apply_edits(make(), {"enabled": False}), open_copies=0) == []
-    assert advisories(apply_edits(make(), {"enabled": False})) == []
+@pytest.mark.parametrize(("count", "text"), [(1, "1 open copy"), (2, "2 open copies")])
+def test_copies_are_counted_in_the_singular_and_the_plural(count: int, text: str) -> None:
+    assert copies_word(count) == text
 
 
-def test_enabling_a_slave_does_not_warn_about_copies() -> None:
-    assert advisories(apply_edits(make(enabled=False), {"enabled": True}), open_copies=2) == []
+def test_no_help_text_still_promises_a_refusal_or_a_resume() -> None:
+    """Both were true once. ``invert`` was refused under a copy, and a disabled slave's copies were
+    picked back up on re-enable; now the copies are given up, and the help must not say otherwise."""
+    helps = {f.name: f.help.lower() for f in EDITABLE}
+    assert "refused" not in helps["invert"]
+    assert "unmanaged" not in helps["enabled"]
+    assert "turned back on" not in helps["enabled"]
 
 
 # --- symbol prefix and suffix -------------------------------------------------------------------
@@ -491,3 +463,109 @@ def test_a_long_description_is_cut_for_a_notification_but_not_for_the_log() -> N
     assert "SYM29=BROKER29" in full
     assert len(short) == 80
     assert short.endswith("...")
+
+
+# --- the demo-only guard's override ---------------------------------------------------------------
+#
+# Off is the safe direction and takes nothing. On has to be asked for by name, on a slave, and a
+# caller that forgets to ask must be refused rather than waved through.
+
+
+def test_the_phrase_is_the_terminals_name() -> None:
+    assert live_override_phrase(make()) == "Slave"
+
+
+@pytest.mark.parametrize("label", ["", "   "])
+def test_a_terminal_with_no_name_is_confirmed_by_the_first_eight_characters_of_its_id(
+    label: str,
+) -> None:
+    cfg = TerminalConfig(terminal_id=TID, label=label, role=Role.SLAVE)
+    assert live_override_phrase(cfg) == "AAAAAAAA"
+
+
+def test_the_override_is_turned_on_by_typing_the_name() -> None:
+    cfg = make(risk_percent=0.4, copy_pending=True)
+    outcome = set_live_override(cfg, True, typed="Slave")
+    assert outcome.ok
+    assert outcome.config is not None
+    assert outcome.config.allow_live_trading is True
+    assert [(c.name, c.old, c.new) for c in outcome.changes] == [
+        ("allow_live_trading", False, True)
+    ]
+    assert outcome.config.model_dump() == {**cfg.model_dump(), "allow_live_trading": True}, (
+        "nothing else about the terminal is touched"
+    )
+    assert cfg.allow_live_trading is False, "the live object is not edited in place"
+
+
+@pytest.mark.parametrize("typed", ["slave", "  Slave  ", "SLAVE"])
+def test_case_and_surrounding_space_do_not_matter(typed: str) -> None:
+    assert set_live_override(make(), True, typed=typed).ok
+
+
+@pytest.mark.parametrize("typed", [None, "", "   ", "Slav", "Slave2", "yes", "LIVE", "Slave Slave"])
+def test_anything_but_the_name_refuses_and_changes_nothing(typed: str | None) -> None:
+    """``None`` is "the caller did not ask". A guard that passes when nobody asked is not one."""
+    outcome = set_live_override(make(), True, typed=typed)
+    assert not outcome.ok
+    assert outcome.config is None
+    assert outcome.changes == ()
+    assert "Slave" in outcome.errors["allow_live_trading"], "it says what to type"
+
+
+def test_forgetting_to_ask_at_all_refuses() -> None:
+    assert not set_live_override(make(), True).ok
+
+
+@pytest.mark.parametrize("role", [Role.MASTER, Role.UNASSIGNED])
+def test_only_a_slave_can_have_the_guard_lifted(role: Role) -> None:
+    """``set_role`` leaves the flag alone, so one lifted on a terminal that is not a slave would
+    ride along, unseen, on the day it is made one -- even with the right name typed."""
+    cfg = TerminalConfig(terminal_id=TID, label="Slave", role=role)
+    outcome = set_live_override(cfg, True, typed="Slave")
+    assert not outcome.ok
+    assert "slave" in outcome.errors["allow_live_trading"]
+
+
+@pytest.mark.parametrize("role", [Role.SLAVE, Role.MASTER, Role.UNASSIGNED])
+def test_turning_it_off_takes_nothing_and_works_whatever_the_role(role: Role) -> None:
+    """The safe direction. A terminal whose role changed with the guard still lifted must be
+    able to have it put back."""
+    cfg = TerminalConfig(terminal_id=TID, label="Slave", role=role, allow_live_trading=True)
+    outcome = set_live_override(cfg, False)
+    assert outcome.ok
+    assert outcome.config is not None
+    assert outcome.config.allow_live_trading is False
+    assert [(c.name, c.old, c.new) for c in outcome.changes] == [
+        ("allow_live_trading", True, False)
+    ]
+
+
+def test_asking_for_the_state_it_already_has_is_not_a_change() -> None:
+    lifted = make(allow_live_trading=True)
+    again = set_live_override(lifted, True)
+    assert again.ok and again.changes == (), "already on: nothing to confirm, nothing to record"
+    already_off = set_live_override(make(), False)
+    assert already_off.ok and already_off.changes == ()
+
+
+def test_the_change_reads_as_one_line_for_the_log() -> None:
+    outcome = set_live_override(make(), True, typed="Slave")
+    assert describe_changes(outcome.changes) == "allow_live_trading off -> on"
+
+
+def test_lifting_the_guard_is_flagged() -> None:
+    outcome = set_live_override(make(), True, typed="Slave")
+    (warning,) = advisories(outcome)
+    assert "Slave" in warning and "prop" in warning
+
+
+def test_putting_the_guard_back_needs_no_warning_of_its_own() -> None:
+    """What it does to copies already open is asked about beforehand, like any other edit."""
+    outcome = set_live_override(make(allow_live_trading=True), False)
+    assert advisories(outcome) == []
+
+
+def test_an_unrelated_edit_says_nothing_about_the_guard() -> None:
+    outcome = apply_edits(make(allow_live_trading=True), {"risk_percent": "0.5"})
+    assert advisories(outcome) == []

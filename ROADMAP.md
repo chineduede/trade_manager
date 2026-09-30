@@ -221,15 +221,16 @@ inherits `poll_interval_ms` (250ms). See the performance note at the bottom befo
 
 **Press `e` on a terminal.** A modal covering every per-slave setting except the three below:
 sizing (`sizing_mode`, `risk_percent`, `risk_cash`, `max_lot`, commission, slippage, max
-deviation), the no-stop policy and its multiple, `enabled`, `invert` (guarded), the three copy
+deviation), the no-stop policy and its multiple, `enabled`, `invert`, the three copy
 flags, and the symbol section (`symbol_prefix`, `symbol_suffix`, `symbol_map`, the whitelist and
 the blacklist). A blank `max_lot` means no ceiling. Ctrl+S or Enter saves, Esc cancels. The pure
 half is `settings_edit.py`; the form is `tui/settings_screen.py`; the guarded swap is
 `Engine.apply_settings`.
 
-**Not editable, on purpose:** `allow_live_trading`, `label`, `role`, and the discovery fields.
-A test (`test_every_setting_is_either_editable_or_deliberately_not`) makes a setting added to
-the model without a decision about the form fail, so the list cannot drift.
+**Not editable in this form, on purpose:** `allow_live_trading` (it has its own key and dialog,
+below), `label`, `role`, and the discovery fields. A test
+(`test_every_setting_is_either_editable_or_deliberately_not`) makes a setting added to the model
+without a decision about the form fail, so the list cannot drift.
 
 **Dropped by the user, 2026-09-24: the live mapping tester.** It was planned as the most valuable
 part of the symbol section, and it would have needed the worker to send its symbol list to the
@@ -240,26 +241,70 @@ reply. It works only for a connected slave.
 
 **Decisions taken building it, none of them obvious from the code:**
 
-- **`allow_live_trading` is not editable.** It is the demo-only guard's override, and a guard
-  that a stray keypress can lift is not a guard; it stays a hand edit with the app closed. The
-  form says so.
+- **`allow_live_trading` is not a row in the form** — it is the demo-only guard's override, and a
+  guard that a stray keypress can lift is not a guard. Until 2026-09-24 it was a hand edit with
+  the app closed; the user then asked for it in the TUI, which reversed that. What was kept is
+  the property that mattered: the form is saved with `ctrl+s` or Enter, so the override is **its
+  own key (`l`) and its own dialog** (`tui/live_override_screen.py`), where nothing can lift it
+  by accident. The decisions in it are below.
+- **The override's two directions are deliberately unequal** (`settings_edit.set_live_override`).
+  **On** needs the terminal's *name* typed out in full — the name and not a fixed word, because
+  the mistake being guarded against is the wrong terminal, and a fixed word can be typed without
+  looking at which one is selected. Case and surrounding space are forgiven; nothing else is,
+  and a caller that passes nothing is refused rather than waved through. **Off** takes one
+  press, because it is the safe direction and the one someone reaches for in a hurry.
+- **Only a slave can have the guard lifted.** The guard only ever stands between a slave and a
+  broker, and `AppConfig.set_role` leaves `allow_live_trading` alone, so one lifted on a
+  terminal that is not a slave would ride along, unseen, on the day it is made one. Turning it
+  *off* works on any role, for the same reason: a terminal whose role changed with the guard
+  still lifted must be able to have it put back.
+- **The guard also blocks closes and stop moves,** not only opens (`Executor._execute` checks it
+  before every op). So putting it back while copies are open on a non-demo account would leave
+  them unmanaged — which is what any settings change now does to them anyway, so it goes through
+  the same question as every other edit (below). Turning it on later does not retroactively copy
+  a trade declined while it was off: a decline is final.
+- **A lifted guard is visible.** The change is logged at WARNING rather than INFO, and the status
+  bar says `NON-DEMO ALLOWED: <names>` while any terminal has it on — early in the line, where
+  an 80-column terminal does not cut it off, and for a terminal that is no longer a slave too.
+- **Not done: clearing the flag when a terminal stops being a slave.** It would close the
+  leftover-flag hole at the source, but it changes `set_role`, which was not asked for. The
+  status bar marker is what makes the leftover visible instead.
 - **`label` is not editable because discovery owns it.** `merge_discovery` sets it on every
   rescan and at every start, so an edit would silently revert the next time the app ran.
-- **`invert` is editable, and a flip is REFUSED while the slave has any copy open or opening.**
-  Refused, not resolved by clearing the ledger: a clear would orphan live positions. The count
-  is positions plus resting orders plus commands still in flight (belief follows outcomes, so
-  an open in flight is in no store yet), and it is read from the **persisted store**, not the
-  ledger's memory. The store opens lazily -- on the first reconcile, which needs detection on
-  and a connected master -- so a count from the ledger would say zero, right after launch, about
-  a slave whose `mapping.db` rows are alive. An unreadable store counts as *not zero*, the same
-  rule as the demo-only guard. The form checks first to show the reason beside the field;
-  `Engine.apply_settings` checks again and swaps under the lock the drain thread dispatches
-  under, because counting and then swapping would leave a gap for an open to slip into.
-- **`enabled` off is allowed and warned about, not refused.** Belief is deliberately never pruned
-  for a slave that stops being managed (see `CopyLedger._prune`), so its rows survive and are
-  matched back up on re-enable. What is lost while it is off is management: no closes and no
-  stop or target moves. That is the same as unassigning with `u`, so it warns rather than
-  refuses. It also drops the connection to that terminal.
+- **An edit to a terminal that holds copies gives them up, after being asked — for every setting
+  alike (2026-09-24, the user's design).** It replaced a rule per setting: `invert` used to be
+  refused under an open copy, `enabled` off used to be warned about, and every other setting
+  was assumed safe. Now `OrphanConfirmScreen` comes first whenever the terminal has a believed
+  position or resting order. It lists the copies, says they stay open and will no longer be
+  closed, moved or partially mirrored, and **rests on Cancel**. Declining changes nothing and
+  leaves the form open with the edit still typed. Agreeing calls
+  `Engine.apply_settings(new, orphan=<the master tickets that were shown>)`, which — under the
+  lock the drain thread dispatches under, so nothing can slip in between — refuses if the store
+  is unreadable ("we could not tell" is not empty), refuses if what is held *now* is not exactly
+  what was agreed to (a copy that opened while the person was deciding is one they were not
+  told about), refuses while a command to that slave is in flight (a result would find no row to
+  update), and only then gives the copies up and swaps. The override dialog goes through the
+  same path. The list is read from the **persisted store**, not the ledger's memory: the store
+  opens lazily, so until the first reconcile the ledger would say "nothing" about a slave whose
+  `mapping.db` rows are alive.
+- **What "orphaned" means, mechanically** (`CopyLedger.abandon`, `Engine._give_up_copies`). The
+  rows are forgotten and **each master ticket is excluded, permanently**. Forgetting alone is a
+  trap: the master still holds the trade, so a row-less, unexcluded ticket reads as one that has
+  just appeared and would be copied a second time. (The ledger's de-duplication hides this only
+  while the re-derived action is identical — the moment the master moves a stop, the duplicate
+  goes out; the tests are written to expose that.) A resting order is excluded as an order **and
+  as a position**, because its fill takes the order's own ticket. Nothing is sent to the broker.
+  Each copy is registered as an orphan that is **already acknowledged** — the person agreed
+  in advance — so it shows in the panel like a startup orphan (open, unmanaged, not closed by the
+  master) but the slave is *not* held and carries on under the new settings. After a restart
+  startup reconciliation finds them by the usual route and holds until they are acknowledged
+  again with `o`. A dry run does the same to its simulated copies, worded as such, and reports no
+  orphans, since their tickets are not real.
+- **Accepted cost: even a trivial edit orphans every open copy.** That is the price of one rule
+  instead of a list, and it was chosen with the cost in view. If it bites, the narrowing is to
+  skip the question for settings that only govern *new* trades (sizing, symbols, filters) — not
+  done, because that is the list again. `enabled` off is no longer resumable either: its copies
+  are orphaned, so turning it back on does not pick them up.
 - **Symbol settings only steer copies opened from now on.** A modification resolves the symbol
   "only so the result line names an instrument" (`executor.py`), so changing a suffix cannot
   redirect a stop move on a copy that already exists.
@@ -350,9 +395,12 @@ things about that slave:
 | `risk_percent`, `risk_cash`, commission, slippage, `max_lot` | Safe. Sizing applies to future opens only; existing copies keep the volume they were sized at. |
 | `copy_sltp`, `copy_partials`, `copy_pending` | Safe. They gate future actions, and a decline already taken stays taken. |
 | Symbol filters | Safe but asymmetric — widening a whitelist does **not** adopt trades already declined, by the "a decline is final" rule. The form should say so. |
-| `invert` | **Refused while the slave has any copy open or opening** (built; refuse, not clear the ledger, which would orphan live positions). A believed copy records the direction it was opened in; flipping the flag does not flip a position that already exists, so the ledger would describe the opposite of reality and every later close would be wrong. |
-| `enabled` off | Allowed, with a warning if copies are open. Their rows survive (belief is never pruned) and are matched back up on re-enable, but nothing manages them while it is off, and whatever the master opens in the meantime is never copied. |
+| `invert` | Was refused under a copy (a believed copy records the direction it opened in, so flipping the flag would leave the ledger describing the opposite of reality). **Superseded 2026-09-24:** every edit under a copy now asks, then gives the copies up — see the settings-editor decisions above. |
+| `enabled` off | **Superseded the same way.** It used to keep the rows and match them back up on re-enable; now the copies are orphaned and are not picked up again. |
 | Symbol prefix, suffix, map | Safe. They steer copies opened from now on; a modification does not resolve the symbol to act. |
+
+*The "Safe" rows above describe what each setting does to a copy that stays tracked. Since
+2026-09-24 nothing stays tracked across an edit, so they are now about what applies to new trades.*
 
 Sequencing is open: it is not on the path to execution, but Stage 2b testing means flipping
 sizing settings repeatedly, so doing it first may well pay for itself.
@@ -710,10 +758,10 @@ The asymmetry behind that last one is worth keeping: **an OPEN is an entry and g
 a close or a modify is a target state and does not.** A close is more urgent for being late,
 not less. So OPEN and PLACE are still excluded permanently on any failure, and nothing else is.
 
-### Two policy questions this stage deliberately did not answer
+### Two policy questions this stage deliberately did not answer (both now settled)
 
-Both are trading decisions rather than implementation ones, and both should be settled the way
-`no_stop_policy` was — explicitly, per slave, before they can bite.
+Both are trading decisions rather than implementation ones, and both were settled the way
+`no_stop_policy` was — explicitly, before they could bite.
 
 1. **A stop the slave's broker will not accept.** Brokers declare a minimum distance from the
    market (`SYMBOL_TRADE_STOPS_LEVEL`) and a band inside which levels cannot be touched at all
@@ -726,12 +774,23 @@ Both are trading decisions rather than implementation ones, and both should be s
    volume rule ("below the minimum is a refusal, never a round-up") already rejects — so it
    should not be added without being asked for. **Nothing pre-checks the level**, deliberately:
    a second source of truth that can disagree with the server is its own failure mode.
-2. **A master that clears its stop.** Today it is mirrored, and the action carries
+
+   **Settled 2026-09-24, by the user: reject and log.** A stop the broker refuses is a refusal
+   of that order, reported at ERROR naming the symbol and the levels — never widened, never
+   sent without its stop, never retried at the same value. For an OPEN or a PLACE that means
+   no copy at all; for a modification of an open copy it means the copy keeps the stop it has.
+   Closing an open copy because a later stop was refused was not asked for and is not done.
+2. **A master that clears its stop.** Mirrored, and the action carries
    `[UNPROTECTED: removes the slave's stop]`. Mirroring is the contract, and the alternative
    leaves the copy exiting where the master does not — but it does mean a slave set to
    `no_stop_policy: SKIP`, which refuses to *open* an unstopped copy, will still have one
    *disarmed*. On a reversed slave it is stranger still: `effective_levels` swaps the pair, so
    it is the master removing its **take-profit** that disarms the copy.
+
+   **Settled 2026-09-27, by the user: keep mirroring it, unprotected flag and all.** The
+   disarm-instead-of-mirror alternative was considered and explicitly declined — an already-open
+   copy is never left holding a stop the master no longer has, at the cost of the `SKIP` and
+   reversed-slave oddities above, which are accepted rather than solved.
 
 ### Known and accepted, for now
 

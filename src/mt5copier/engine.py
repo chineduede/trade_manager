@@ -20,6 +20,7 @@ import queue
 import threading
 import time
 from collections import deque
+from collections.abc import Collection
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -37,8 +38,8 @@ from .protocol import (
     Snapshot,
     WorkerState,
 )
-from .reconcile import Action, CopyLedger, SlaveLink
-from .settings_edit import invert_refusal
+from .reconcile import Action, CopyLedger, OpenCopy, SlaveLink
+from .settings_edit import copies_word
 from .sizing import risk_budget
 from .store import MappingStore, Orphan, find_missing, find_missing_orders, find_orphans
 from .worker import run_worker
@@ -899,58 +900,120 @@ class Engine:
         with self._lock:
             return len(self._ledger.believed())
 
-    def copies_open_on(self, terminal_id: str) -> int | None:
-        """Copies on one slave that exist or are being made, or None if that cannot be read."""
+    def open_copies(self, terminal_id: str) -> list[OpenCopy] | None:
+        """The positions and resting orders we believe one slave holds, or None if that cannot
+        be read. ``None`` means "could not tell", and callers must treat it as *not empty*."""
         with self._lock:
             return self._open_copies(terminal_id)
 
-    def _open_copies(self, terminal_id: str) -> int | None:
-        """Positions and resting orders we believe are on a slave, plus commands still in flight.
+    def _open_copies(self, terminal_id: str) -> list[OpenCopy] | None:
+        """Read from the store rather than the ledger's memory, and that is the whole point.
 
-        Counted from the store rather than the ledger's memory, and that is the whole point. The
-        store is opened lazily -- on the first reconcile, which needs detection on and a connected
-        master -- so until then the ledger is an empty in-memory one, and a count taken from it
-        would say zero about a slave whose ``mapping.db`` rows are very much alive. Asking for the
-        store here opens it a little early, which is harmless: it is the same store the first
-        reconcile would open.
-
-        ``None`` means "could not tell", and callers must treat it as *not zero*.
+        The store is opened lazily -- on the first reconcile, which needs detection on and a
+        connected master -- so until then the ledger is an empty in-memory one, and reading it
+        would say "nothing" about a slave whose ``mapping.db`` rows are very much alive. Asking
+        for the store here opens it a little early, which is harmless: it is the same store the
+        first reconcile would open, and it replaces the ledger with one that reads it.
 
         Caller must hold the lock.
         """
         try:
-            store = self._ensure_store()
-            return (
-                len(store.positions(terminal_id))
-                + len(store.orders(terminal_id))
-                + self._ledger.inflight_on(terminal_id)
-            )
+            self._ensure_store()
+            return self._ledger.open_copies(terminal_id)
         except Exception:
-            log.exception("could not count the copies open on %s", terminal_id[:8])
+            log.exception("could not read the copies open on %s", terminal_id[:8])
             return None
 
-    def apply_settings(self, new: TerminalConfig) -> str | None:
+    def apply_settings(
+        self, new: TerminalConfig, *, orphan: Collection[int] | None = None
+    ) -> str | None:
         """Swap in an edited terminal, or return why it was refused. None means it went in.
 
-        Every edit is one atomic swap, so the drain thread never sees half of one. The one edit
-        that is *checked* is a change to ``invert``, because a believed copy records the direction
-        it was opened in: flipping the flag under it leaves the ledger describing the opposite
-        of what is on the slave, and every later close would be wrong. Refuse rather than clear
-        the ledger, which would orphan live positions.
+        Every edit is one atomic swap, so the drain thread never sees half of one.
 
-        The count and the swap happen under one hold of the lock, and the drain thread dispatches
-        under the same lock. Counting first and swapping afterwards would leave a gap for an open
-        to slip into. The editor checks earlier too, to show the reason in the form; this is the
-        check that cannot be raced.
+        **A terminal that holds copies is only changed by giving them up.** The copier stops
+        managing them: nothing closes them when the master does, moves their stops, or mirrors a
+        partial close, and they stay open on the slave. That replaces a rule per setting -- which
+        ones were safe to change under an open copy, which had to be refused -- with one rule
+        that does not depend on knowing the answer.
+
+        ``orphan`` is the master tickets of the copies the person was shown and agreed to give
+        up. It has to match what is held *now*, exactly: a copy that opened while they were
+        deciding is one they were not told about, and giving it up unasked is not what they
+        confirmed. The refusal names which of the ways it went wrong.
+
+        The check, the giving up and the swap happen under one hold of the lock, and the drain
+        thread dispatches under the same lock. Doing them in turn would leave a gap for an open
+        to slip into. The UI asks earlier too, to have something to show; this is the check
+        that cannot be raced.
         """
         with self._lock:
-            old = self._cfg.terminals[new.terminal_id]
-            if new.invert != old.invert:
-                open_copies = self._open_copies(new.terminal_id)
-                if open_copies is None or open_copies > 0:
-                    return f"invert: {invert_refusal(open_copies)}"
+            tid = new.terminal_id
+            old = self._cfg.terminals[tid]
+            if new == old:
+                return None
+            if new.role is not old.role:
+                # replace_terminal refuses this too, but only after the copies had been given
+                # up, and a caller bug must not cost a person their tracking for nothing.
+                raise ValueError("a settings edit cannot change a terminal's role; use set_role")
+            held = self._open_copies(tid)
+            if held is None:
+                return "its open copies could not be read, so they cannot be given up safely"
+            if held:
+                if orphan is None:
+                    return f"{copies_word(len(held))} would be orphaned; that has to be confirmed"
+                if set(orphan) != {c.master_ticket for c in held}:
+                    return "its open copies changed while you were deciding; try again"
+                if self._ledger.inflight_on(tid):
+                    return "commands to this slave are still in flight; try again in a moment"
+                try:
+                    self._give_up_copies(tid)
+                except Exception:
+                    log.exception("giving up the open copies on %s failed", tid[:8])
+                    return (
+                        "giving up its open copies failed part-way; nothing was applied (see log)"
+                    )
             self._cfg.replace_terminal(new)
         return None
+
+    def _give_up_copies(self, terminal_id: str) -> None:
+        """Give up every copy on one slave, and say so where a person will see it.
+
+        Registered as orphans that are already acknowledged: the person was told, in advance,
+        and agreed. That puts them in the same list, and on the same panel, as an orphan found at
+        startup -- open, unmanaged, not closed by the master -- without holding the slave, so
+        it goes on copying under its new settings. A restart finds them again by the usual
+        route, and holds until they are acknowledged again.
+
+        A dry run has nothing real to report: its copies are simulated and its slave tickets are
+        not tickets. The ledger still lets them go and excludes them, so the rehearsal does what
+        live would.
+
+        Caller must hold the lock and has ruled out anything in flight.
+        """
+        let_go = self._ledger.abandon(terminal_id)
+        label = self._cfg.terminals[terminal_id].label or terminal_id[:8]
+        if self._cfg.dry_run:
+            log.warning("dry run: %d simulated copies on %s let go", len(let_go), label)
+            return
+        orphans = self._orphans.setdefault(terminal_id, [])
+        acknowledged = self._orphan_ack.setdefault(terminal_id, set())
+        for copy in let_go:
+            log.warning(
+                "orphaned on %s: %s #%s %s %s lots (master #%s); settings changed, so it is no "
+                "longer copied, closed or moved, and stays open",
+                label,
+                "order" if copy.resting else "position",
+                copy.slave_ticket,
+                copy.symbol,
+                copy.volume,
+                copy.master_ticket,
+            )
+            if copy.slave_ticket is not None:
+                orphans.append(
+                    Orphan(terminal_id, copy.slave_ticket, copy.symbol, copy.volume or 0.0)
+                )
+                acknowledged.add(copy.slave_ticket)
 
     def clear_detection_state(self) -> None:
         """Forget every believed copy and the action history.

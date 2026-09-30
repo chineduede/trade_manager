@@ -11,7 +11,7 @@ wouldn't be, sending nothing. Set it to false and those same decisions are dispa
 slaves.
 
 Two guards sit underneath, and neither is optional: a slave is refused unless its account is a
-**demo** (per-slave `allow_live_trading` overrides it), and a slave is not copied to until it
+**demo** (per-slave `allow_live_trading` overrides it; `l` in the UI), and a slave is not copied to until it
 has been **reconciled** against the mapping table with no unexplained positions of ours on it.
 
 **No order placed by this copier has been verified against a broker yet** — the wiring is
@@ -49,7 +49,8 @@ dist/mt5copier.exe
 | `m` | Make the selected terminal the Master (exclusive — demotes any previous master) |
 | `s` | Toggle the selected terminal as a Slave |
 | `u` | Unassign |
-| `e` | Edit the selected terminal's settings: sizing, the no-stop policy, the copy flags, `invert` (refused while the slave has copies open), and its symbol prefix, suffix, map and filters. In the form `ctrl+s` saves, `esc` cancels, and `F9` still halts copying |
+| `e` | Edit the selected terminal's settings: sizing, the no-stop policy, the copy flags, `invert`, and its symbol prefix, suffix, map and filters. **Saving any change to a slave that has open copies first asks, and if you agree those copies are orphaned:** they stay open on the slave, but the copier stops managing them (no closes, stop moves or partials), and the master's trades for them are not copied again. In the form `ctrl+s` saves, `esc` cancels, and `F9` still halts copying |
+| `l` | Turn the selected slave's live-trading override on or off — the demo-only guard's override. **On** needs the terminal's name typed out in full; off takes one press. While any terminal has it on, the status bar says `NON-DEMO ALLOWED` |
 | `r` | Rescan for terminals |
 | `c` | Ask the worker to drop and re-establish its MT5 session |
 | `d` | Start/stop detection — the dry-run diff. Needs a master and at least one slave. |

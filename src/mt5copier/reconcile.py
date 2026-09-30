@@ -820,6 +820,23 @@ class SlaveLink:
     connected: bool = True
 
 
+@dataclass(frozen=True, slots=True)
+class OpenCopy:
+    """One copy a slave holds -- a position or a resting order -- described for a person.
+
+    What the settings editor shows when a change would give the copies up, and what it checks
+    again at the moment of giving them up: the master ticket is the key, because it is what
+    belief is filed under.
+    """
+
+    master_ticket: int
+    slave_ticket: int | None
+    symbol: str
+    volume: float | None
+    resting: bool
+    """A pending order rather than an open position."""
+
+
 class CopyLedger:
     """Holds what we believe each slave has, and reports only decisions that are new.
 
@@ -875,6 +892,50 @@ class CopyLedger:
 
     def believed_orders(self, terminal_id: str | None = None) -> list[CopiedOrder]:
         return self._store.orders(terminal_id)
+
+    def open_copies(self, terminal_id: str) -> list[OpenCopy]:
+        """Every position and resting order believed to be on one slave, oldest master ticket
+        first. Belief only: a command still in flight has no row yet."""
+        copies = [
+            OpenCopy(p.master_ticket, p.slave_ticket, p.slave_symbol, p.volume, resting=False)
+            for p in self._store.positions(terminal_id)
+        ]
+        copies += [
+            OpenCopy(o.master_ticket, o.slave_ticket, o.slave_symbol, o.volume, resting=True)
+            for o in self._store.orders(terminal_id)
+        ]
+        return sorted(copies, key=lambda c: c.master_ticket)
+
+    def abandon(self, terminal_id: str) -> list[OpenCopy]:
+        """Stop tracking every copy on one slave, for good, and return what was let go.
+
+        The copies stay open on the slave. What changes is that nothing here will close them,
+        move their stops or mirror a partial close, so this is deliberate and the caller is
+        expected to have said so first. Nothing is sent.
+
+        **Forgetting the rows is not enough, and this is the part that is easy to get wrong.**
+        The master still holds every trade it was copied from, and a master trade with no row
+        and no exclusion reads as one that has just appeared -- so the next tick would copy it
+        a second time, on top of the copy that was just let go. Each master ticket is therefore
+        excluded, permanently, exactly as a declined trade is.
+
+        A resting order is excluded twice, as an order and as a position. The slave's own order
+        fills by itself, and MT5 gives the position it becomes the *order's* ticket, so when the
+        master's order fills it would otherwise read as a brand-new position to copy -- doubling
+        the exposure the orphaned order is about to create.
+
+        In-flight commands are the caller's to rule out: a result that arrives for a copy that
+        has already been let go would find no row to update.
+        """
+        let_go = self.open_copies(terminal_id)
+        excluded = self._excluded.setdefault(terminal_id, set())
+        excluded_orders = self._excluded_orders.setdefault(terminal_id, set())
+        for copy in let_go:
+            self._store.forget(terminal_id, copy.master_ticket)
+            excluded.add(copy.master_ticket)
+            if copy.resting:
+                excluded_orders.add(copy.master_ticket)
+        return let_go
 
     def reset_session_state(self) -> None:
         """Forget everything that is *not* belief: in-flight commands, de-duplication memory,
@@ -1352,9 +1413,9 @@ class CopyLedger:
     def inflight_on(self, terminal_id: str) -> int:
         """Commands sent to one slave and not yet answered.
 
-        Belief follows outcomes, so a copy that is being opened is in no store yet. Anything that
-        has to know whether a slave has copies -- the guard on flipping ``invert`` -- must count
-        these too, or it would wave through a change that an open in flight is about to contradict.
+        Belief follows outcomes, so a copy that is being opened is in no store yet, and a result
+        that arrives for one already let go would find no row to update. Anything that gives a
+        slave's copies up has to rule these out first.
         """
         return sum(1 for tid, _, _ in self._inflight if tid == terminal_id)
 
