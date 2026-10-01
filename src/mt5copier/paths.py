@@ -47,6 +47,11 @@ def log_dir() -> Path:
     return user_data_dir() / "logs"
 
 
+def lock_path() -> Path:
+    """The single-instance lock file -- see :mod:`mt5copier.single_instance`."""
+    return user_data_dir() / "mt5copier.lock"
+
+
 def mapping_db_path() -> Path:
     """SQLite store of which slave position belongs to which master position.
 

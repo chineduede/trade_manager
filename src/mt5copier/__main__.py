@@ -16,7 +16,8 @@ import sys
 
 from . import __version__
 from .logging_setup import configure
-from .paths import config_path, ensure_dirs, is_frozen, log_dir, user_data_dir
+from .paths import config_path, ensure_dirs, is_frozen, lock_path, log_dir, user_data_dir
+from .single_instance import AlreadyRunningError, SingleInstanceLock
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -94,12 +95,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.list:
         return _cmd_list()
 
+    lock = SingleInstanceLock(lock_path())
+    try:
+        lock.acquire()
+    except AlreadyRunningError as exc:
+        print(f"mt5copier is already running: {exc}")
+        return 1
+
     from .tui import run
 
     try:
         run()
     except KeyboardInterrupt:
         return 130
+    finally:
+        lock.release()
     return 0
 
 

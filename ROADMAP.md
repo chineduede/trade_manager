@@ -999,6 +999,30 @@ policy-then-build-then-demo-verify pass, the same as every stage above, before i
 Their UI, if any, lands in the web UI only, per `WEBUI_PLAN.md`'s sequencing decision — the TUI
 does not gain them.
 
+**Ordered deliberately, not just listed: multi-master support goes first if any of this is built
+at all.** It's the only one of the four that changes the data model everything else would build
+on top of — the ledger's belief keys, per-master attribution, and halt/notify scope are all
+currently implicit ("the one master"). Building breakeven, prop-firm guards, or Telegram
+notifications first means redoing their master-attribution logic when multi-master lands later;
+building multi-master first means the other three are written against the right shape from the
+start. This is a sequencing note for *if/when* multi-master is picked up, not a statement that it
+outranks the others in importance — that's still the user's call each time this list is revisited.
+
+- **Multi-master support.** Today `AppConfig` hard-enforces exactly one master
+  (`config.py:301-309` raises on a second one; `set_role()` demotes any existing master rather
+  than allow two) and `Engine._reconcile()` is keyed off the single `self._cfg.master` property
+  (`engine.py:411-413`) — slaves aren't linked to *a* master, they're all implicitly reconciled
+  against *the* master. Real support needs: a `master_id` on each slave (or a master-group
+  concept), `_reconcile` dispatching per-master instead of reading one singleton, and
+  `BeliefStore`/`CopyLedger` keys disambiguated by master — right now `(terminal_id,
+  master_ticket)` assumes tickets from *the* master are unambiguous, and two masters can easily
+  collide on ticket numbers for the same slave. **Running two separate `mt5copier` processes
+  was never a substitute** for this — `config.json`, `mapping.db`, and `copier.log` are all
+  fixed, un-overridable paths (`paths.py:42-57`), so two instances would have raced on
+  `config.json` (silent last-writer-wins) and `copier.log`'s rotation could throw
+  `PermissionError` on Windows once two processes held the same rotating file open. Moot now
+  anyway: `single_instance.py` (2026-10-01) refuses a second full run outright via an OS-held
+  file lock, so that path is no longer even reachable by accident.
 - **Breakeven.** Move a copy's stop to entry (± buffer) once price has moved some distance.
   Reuses the already-built `MODIFY_SLTP` dispatch path; the new part is the trigger logic.
 - **Prop-firm guards.** Daily loss limit, max drawdown, consistency-rule-style caps that halt
