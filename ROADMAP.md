@@ -991,6 +991,30 @@ Two consequences:
 
 ---
 
+## Future features — not yet scoped
+
+Ideas parked for after the live verification backlog and the web UI's first stages are done
+(sequencing in `WEBUI_PLAN.md`). None of these has a design yet — each needs its own
+policy-then-build-then-demo-verify pass, the same as every stage above, before it is built.
+Their UI, if any, lands in the web UI only, per `WEBUI_PLAN.md`'s sequencing decision — the TUI
+does not gain them.
+
+- **Breakeven.** Move a copy's stop to entry (± buffer) once price has moved some distance.
+  Reuses the already-built `MODIFY_SLTP` dispatch path; the new part is the trigger logic.
+- **Prop-firm guards.** Daily loss limit, max drawdown, consistency-rule-style caps that halt
+  copying account-wide rather than acting on one position. Needs its own semantics settled
+  (per-slave? what each trigger actually does — pause new copies, or close everything) before
+  anything is built.
+- **Post trades to Telegram.** Notify a channel/bot when a copy opens, closes, or modifies.
+  Read-only with respect to trading — it must never become a control surface, nothing it does
+  can feed back into a trading decision — so it's lower-risk than the two above, but still needs
+  its own pass on: which events to post, what the message contains (symbol, lots, price — is
+  any of that meant to stay private), what happens to the copy loop if the Telegram API call is
+  slow or fails (never blocks or delays a copy), and where the bot token lives (not plaintext in
+  `config.json` if avoidable).
+
+---
+
 ## Performance note
 
 Master position polling wants to be faster than the current 250ms account-snapshot interval —
