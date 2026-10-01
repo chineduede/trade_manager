@@ -27,9 +27,10 @@ points into still live in "Verifying the wiring" (Stage 2c) and "Verifying the s
 | 4 — pending orders | detection validated; PLACE / MODIFY_ORDER / CANCEL dispatch, untested live |
 | 5 — reverse and filtered copying | inversion implemented, never live-tested |
 
-**The next step: the demo-only refusal** — first item in the backlog below. It is the guard
-that stands between a bug here and a prop account, and it has never actually been made to fire.
-Do not widen past one slave until it has.
+**The demo-only refusal is confirmed** (2026-10-01, against a real live account — see the
+backlog below). **The next step** is the rest of "Verifying the wiring": the `dry_run` sanity
+check, a partial close, the `copy_sltp = False` skip, and the mid-OPEN worker-kill/orphan-hold
+recovery. Still one demo slave only (BlackBull) until those are seen working too.
 
 Everything in "Safety rails" under Stage 2c is now built — the demo-only guard landed with
 Stage 2b deliberately, in the same commit as the first code able to send.
@@ -43,9 +44,16 @@ items assume earlier ones hold. Where a procedure is already written out step-by
 in this file, it's linked by name instead of repeated here.
 
 **Safety guard, before anything else**
-- [ ] **Demo-only refusal.** Point the slave at a non-demo terminal with `allow_live_trading =
-  False` and confirm the order is refused (`ok=False, "account is not a demo"`) and the OPEN
-  permanently excluded. Step 2 of "Verifying the wiring".
+- [x] **Demo-only refusal — confirmed 2026-10-01, against a real live account.** Eightcap
+  Global (a genuine live account, `trade_mode=2`) was temporarily assigned as a second slave
+  alongside BlackBull, `allow_live_trading` left at its default `False`. The master's next OPEN
+  dispatched to both: BlackBull filled normally, Eightcap was refused at the guard —
+  `OPEN #1980488017 FAILED: account is not a demo (trade_mode=2); refused`, followed by
+  `open for #1980488017 on 492CD019 failed, and will not be retried` (the decline-is-final
+  behaviour, confirmed too). `mapping.db` afterward held exactly one row (BlackBull's copy) and
+  zero for Eightcap — nothing was recorded, nothing was sent. Eightcap's own Trade tab was
+  checked by hand and showed nothing. Eightcap was unassigned again afterward, back to the one
+  proven demo slave.
 
 **Stage 2c — "Verifying the wiring"**
 - [x] OPEN with a stop dispatches, fills, and is recorded — demo OPEN filled 2026-09-21.
