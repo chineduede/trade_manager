@@ -3,38 +3,110 @@
 Stage 1 (discovery, designation, supervision) is complete and user-accepted. It contains no
 trading logic. This document is the plan for everything that does.
 
-## Where the project is — 2026-09-21
+## Where the project is — 2026-10-01
 
-**An order can now leave this machine, and so can a change to one.** The engine builds
-`OrderCommand`s and consumes `OrderResult`s; `dry_run` is the only thing standing between a
-decision and a broker, and it still defaults to true. The executor's demo-only guard is still
-in place underneath.
+**An order has left this machine, for real.** On 2026-09-21 a demo OPEN (EURGBPp, 13.77 lots)
+and its CLOSE both filled on a real demo account (IC Markets Global master → BlackBull Markets
+slave). `dry_run` is **false** in the live config; the executor's demo-only guard sits
+underneath every send. Since then the per-terminal settings editor, the `l` live-override
+dialog, the orphan-on-settings-edit rule, and closing a terminal the copier itself launched (on
+`stop()`/unassign) have all landed and are committed (`master`, HEAD `dcd4e60`, 706 tests).
 
-**Nothing here has been validated against a broker yet.** Every claim below is backed by tests
-and by the Stage 2a dry run, not by an order that actually filled. **The one-slave demo run in
-"Verifying the wiring" is still the next thing to do, before this is pointed at anything
-else** — Stage 3 landed before it because it was cheap to build and changes what that run
-should check, not because the run stopped mattering.
+**Most of the trading logic beyond that first OPEN/CLOSE pair is still unverified against a
+broker** — built and unit-tested, not yet seen filling or refusing for real. "Live verification
+backlog" below is the single trackable list of what's left; the step-by-step procedures it
+points into still live in "Verifying the wiring" (Stage 2c) and "Verifying the sync" (Stage 3).
 
 | Stage | State |
 |---|---|
 | 1 — discovery, designation, supervision | accepted |
 | 2a — the diff engine, dry run | **validated on a demo master 2026-09-17** |
 | 2b — execution primitives | complete (`sizing`, `symbols`, `execution`, `executor`) |
-| 2c — live copying | **wired, awaiting its demo run** |
-| 3 — SL/TP sync, partial closes | **built 2026-09-21, awaiting its demo run** |
+| 2c — live copying | **one demo OPEN + CLOSE filled 2026-09-21**; rest of its checklist open |
+| 3 — SL/TP sync, partial closes | built 2026-09-21, **no demo run yet** |
 | 4 — pending orders | detection validated; PLACE / MODIFY_ORDER / CANCEL dispatch, untested live |
 | 5 — reverse and filtered copying | inversion implemented, never live-tested |
 
-**The next step: verify it on one demo slave.** See "Verifying the wiring" under Stage 2c for
-the ordered checklist, then "Verifying the sync" under Stage 3. Do not widen past one slave
-until the demo-only refusal has been seen working with its own eyes — it is the guard that
-stands between a bug here and a prop account.
+**The next step: the demo-only refusal** — first item in the backlog below. It is the guard
+that stands between a bug here and a prop account, and it has never actually been made to fire.
+Do not widen past one slave until it has.
 
 Everything in "Safety rails" under Stage 2c is now built — the demo-only guard landed with
 Stage 2b deliberately, in the same commit as the first code able to send.
 
 Read `README.md` first for the architecture and the constraints it follows from.
+
+## Live verification backlog — 2026-10-01
+
+Nothing here has a broker result yet except the items marked done. Work top to bottom — later
+items assume earlier ones hold. Where a procedure is already written out step-by-step elsewhere
+in this file, it's linked by name instead of repeated here.
+
+**Safety guard, before anything else**
+- [ ] **Demo-only refusal.** Point the slave at a non-demo terminal with `allow_live_trading =
+  False` and confirm the order is refused (`ok=False, "account is not a demo"`) and the OPEN
+  permanently excluded. Step 2 of "Verifying the wiring".
+
+**Stage 2c — "Verifying the wiring"**
+- [x] OPEN with a stop dispatches, fills, and is recorded — demo OPEN filled 2026-09-21.
+- [x] CLOSE dispatches and the row is removed — demo CLOSE filled 2026-09-21.
+- [ ] `dry_run = True` sanity check (log says `[dry-run]`, empty command queue) — not separately
+  logged from the 2026-09-21 session; worth a standalone confirm.
+- [ ] Partial close (`REDUCE`) with the right fraction.
+- [ ] Moving the master's stop with `copy_sltp = False` is derived, reported `SKIPPED`, and
+  sends nothing.
+- [ ] Kill the slave worker mid-OPEN: `expire_inflight` fires at 30s, restart engages the
+  orphan hold, `o` clears it.
+- [ ] Open on a symbol with a non-default lot step (0.1, or a whole-lot 1.0 symbol such as an
+  index or futures-style CFD), not just a 0.01-step forex pair. `quantize_volume()` reads
+  `volume_min`/`volume_step` live per symbol and is unit-tested for both cases (2026-10-01,
+  `tests/test_sizing.py`), but has never actually sized a real order against a broker's own
+  0.1 or 1.0 step — only the arithmetic has been proven, not the live `symbol_info` reading it.
+
+**Stage 3 — "Verifying the sync"**
+- [ ] `MODIFY_SLTP` on a stop move: dispatch, non-"filled 0" success, new stop visible on the
+  slave, `synced_sl` updated.
+- [ ] Two rapid stop moves: only one in flight, the second value wins.
+- [ ] Take-profit move leaves the stop untouched.
+- [ ] A stop inside the broker's minimum distance: one `INVALID_STOPS`, not retried at that
+  value, a different value afterwards sent normally.
+- [ ] Clearing the master's stop entirely: `[UNPROTECTED: removes the slave's stop]`, and
+  decide — watching it happen — whether that's the wanted behaviour (open policy question,
+  Stage 3).
+- [ ] Slave copy closed by hand mid-session: one WARNING, not an error, row tidied away on the
+  master's eventual close.
+- [ ] `copy_sltp = False` mid-stream: action derived, reported skipped, nothing sent.
+
+**Stage 4 — pending orders (dispatch untested; detection already validated 2026-09-17)**
+- [ ] `PLACE`: master places a limit with `copy_pending = True`, resting order appears on the
+  slave.
+- [ ] `MODIFY_ORDER`: master moves the resting order's entry price, slave order moves,
+  `type_time` stays GTC. Step 8 of "Verifying the sync".
+- [ ] `CANCEL`: master cancels the resting order, slave order is removed.
+- [ ] A pending order fills on the master: logs `ORDER_FILLED` (not `CANCEL`), hands off to
+  position tracking without a duplicate copy. (Confirmed once already, 2026-09-17, for
+  detection only — re-check now that dispatch is live.)
+
+**Stage 5 — inversion (no demo procedure written yet — write one before running it)**
+- [ ] A reversed copy sizes off the master's take-profit and opens with the swapped levels.
+- [ ] A reversed resting order flips kind as well as direction (BUY_LIMIT ↔ SELL_STOP).
+
+**TUI, run against a real terminal, not headless**
+- [ ] The settings editor (`e`): every field saves correctly, and the orphan-confirmation flow
+  actually blocks and resumes as designed.
+- [ ] The live-override dialog (`l`): typing the terminal's full name arms it, OFF disarms in
+  one press, and the status bar shows `NON-DEMO ALLOWED: <names>`.
+
+**Landed 2026-10-01, only unit-tested so far**
+- [ ] Closing a terminal the copier launched, on `stop()` and on unassign: confirm the right
+  process actually closes, a terminal the user already had open is left alone, and a restart
+  mid-run still leaves things sane. Unit-tested against a faked `psutil.Process` only — see
+  commit `dcd4e60`.
+
+**Known gap, not yet even a plan**
+- [ ] What disabling the **master** does to its slaves' open copies — the orphan rule only
+  fires on the terminal being edited, and a master holds no copies, so today nothing asks and
+  nothing is known to happen. Needs a decision before it needs a test.
 
 ---
 

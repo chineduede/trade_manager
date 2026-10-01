@@ -109,6 +109,31 @@ def test_exactly_the_minimum_is_allowed() -> None:
     assert quantize_volume(0.01, facts()).lots == pytest.approx(0.01)
 
 
+def test_a_tenth_lot_step_floors_cleanly() -> None:
+    """Some brokers set min/step to 0.1 (indices, metals). Decimal(str(...)) is what keeps
+    this off the usual binary-float trap -- 0.23 % 0.1 in raw floats is not a clean 0.03."""
+    tenth = facts(volume_min=0.1, volume_step=0.1)
+    assert quantize_volume(0.23, tenth).lots == pytest.approx(0.2)
+    assert quantize_volume(0.3, tenth).lots == pytest.approx(0.3)
+    assert quantize_volume(1.27, tenth).lots == pytest.approx(1.2)
+
+    result = quantize_volume(0.09, tenth)
+    assert not result.ok
+    assert result.failure is SizingFailure.BELOW_MINIMUM
+
+
+def test_a_whole_lot_symbol_floors_to_integers() -> None:
+    """Some symbols (certain indices, futures-style CFDs) trade in whole units: min and step
+    both 1. A fractional raw size must floor to the lot below, never round to the nearest."""
+    whole = facts(volume_min=1.0, volume_step=1.0)
+    assert quantize_volume(2.9, whole).lots == pytest.approx(2.0)
+    assert quantize_volume(3.0, whole).lots == pytest.approx(3.0)
+
+    result = quantize_volume(0.9, whole)
+    assert not result.ok
+    assert result.failure is SizingFailure.BELOW_MINIMUM
+
+
 def test_max_lot_caps_after_quantization() -> None:
     result = quantize_volume(5.0, facts(), max_lot=2.0)
     assert result.lots == pytest.approx(2.0)
