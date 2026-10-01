@@ -22,15 +22,52 @@ points into still live in "Verifying the wiring" (Stage 2c) and "Verifying the s
 | 1 — discovery, designation, supervision | accepted |
 | 2a — the diff engine, dry run | **validated on a demo master 2026-09-17** |
 | 2b — execution primitives | complete (`sizing`, `symbols`, `execution`, `executor`) |
-| 2c — live copying | **one demo OPEN + CLOSE filled 2026-09-21**; rest of its checklist open |
-| 3 — SL/TP sync, partial closes | built 2026-09-21, **no demo run yet** |
-| 4 — pending orders | detection validated; PLACE / MODIFY_ORDER / CANCEL dispatch, untested live |
-| 5 — reverse and filtered copying | inversion implemented, never live-tested |
+| 2c — live copying | **"Verifying the wiring" checklist closed 2026-10-01** — OPEN, CLOSE, dry-run check, partial close, `copy_sltp` skip, non-default lot-step symbol, and `expire_inflight` all confirmed; the orphan-hold/`o`-ack path specifically rests on unit coverage, not a forced live race |
+| 3 — SL/TP sync, partial closes | **"Verifying the sync" closed 2026-10-01**, including the unprotected-stop policy decision |
+| 4 — pending orders | **closed 2026-10-01** — PLACE, MODIFY_ORDER, CANCEL, and a live fill-into-position handoff all confirmed |
+| 5 — reverse and filtered copying | **inversion closed 2026-10-01** — swapped SL/TP sizing and resting-order kind flip both confirmed live |
 
-**The demo-only refusal is confirmed** (2026-10-01, against a real live account — see the
-backlog below). **The next step** is the rest of "Verifying the wiring": the `dry_run` sanity
-check, a partial close, the `copy_sltp = False` skip, and the mid-OPEN worker-kill/orphan-hold
-recovery. Still one demo slave only (BlackBull) until those are seen working too.
+**"Verifying the wiring" (Stage 2c's demo-run checklist) is closed as of 2026-10-01.** The
+demo-only refusal is confirmed against a real live account (see the backlog below), and so are
+the `dry_run` sanity check, a partial close (`REDUCE`), the `copy_sltp = False` skip, a
+non-default lot-step symbol (US30), and the mid-OPEN worker-kill via `expire_inflight` (30s
+timeout, correct exclusion) — the orphan-hold/`o`-ack half of that last one rests on unit
+coverage rather than a forced live race, which proved impractical to hit by hand.
+
+**"Verifying the sync" (Stage 3) is closed as of 2026-10-01**, also on BlackBull:
+`MODIFY_SLTP` dispatch with `synced_sl`/`synced_tp` actually updated, a take-profit move
+leaving the stop untouched, a slave copy closed by hand mid-session (one WARNING, row tidied
+away on the master's eventual close), the settings-edit-gives-up-held-copies rule (a correction
+to how this item was originally phrased — see the backlog), two rapid stop moves and
+`INVALID_STOPS` (both accepted on unit coverage / code reasoning rather than a forced live
+hit), and clearing the master's stop entirely — confirmed mirroring onto the slave unprotected,
+**and decided that is the wanted behaviour**, no change needed.
+
+**Stage 4 (pending orders) is also closed as of 2026-10-01**, all on BlackBull/EURUSDp: `PLACE`,
+`MODIFY_ORDER`, `CANCEL` all dispatch correctly, and — the one item that needed a genuinely
+live re-check, since it was previously only proven in dry-run — a pending order filling on the
+master logs `ORDER_FILLED` and hands off to position tracking with no duplicate copy.
+
+**Stage 5 (inversion) is also closed as of 2026-10-01** — `invert` turned on for BlackBull
+mid-session, with no copies held at the time so the settings-edit give-up rule didn't trigger.
+Both a reversed copy's swapped SL/TP sizing and a reversed resting order's kind flip
+(`BUY_LIMIT → SELL_STOP`) confirmed live.
+
+**The TUI backlog is also closed as of 2026-10-01**: the settings editor's orphan-confirmation
+flow (confirmed as a side effect of the "copy_sltp mid-stream" test) and the live-override
+dialog (refusal on a wrong name, correct arm, status bar, one-press disarm, all logged at
+WARNING) both run correctly against a real terminal.
+
+**Closing a terminal the copier launched is confirmed live too**, previously only unit-tested:
+a terminal already running at connect time is correctly never claimed or closed (ownership is
+re-derived fresh every `connect()`, not carried over from an earlier worker instance), and a
+freshly-launched one closes correctly on unassign, twice, across several back-to-back restart
+cycles with no pid confusion between them.
+
+**The only thing left in the whole live-verification backlog** is the known, still-unplanned
+gap: what disabling the **master** does to its slaves' open copies. The orphan rule only fires
+on the terminal being edited, and a master holds no copies of its own, so today nothing asks
+and nothing is known to happen — this needs a design decision before it needs a test.
 
 Everything in "Safety rails" under Stage 2c is now built — the demo-only guard landed with
 Stage 2b deliberately, in the same commit as the first code able to send.
@@ -58,58 +95,146 @@ in this file, it's linked by name instead of repeated here.
 **Stage 2c — "Verifying the wiring"**
 - [x] OPEN with a stop dispatches, fills, and is recorded — demo OPEN filled 2026-09-21.
 - [x] CLOSE dispatches and the row is removed — demo CLOSE filled 2026-09-21.
-- [ ] `dry_run = True` sanity check (log says `[dry-run]`, empty command queue) — not separately
-  logged from the 2026-09-21 session; worth a standalone confirm.
-- [ ] Partial close (`REDUCE`) with the right fraction.
-- [ ] Moving the master's stop with `copy_sltp = False` is derived, reported `SKIPPED`, and
-  sends nothing.
-- [ ] Kill the slave worker mid-OPEN: `expire_inflight` fires at 30s, restart engages the
-  orphan hold, `o` clears it.
-- [ ] Open on a symbol with a non-default lot step (0.1, or a whole-lot 1.0 symbol such as an
-  index or futures-style CFD), not just a 0.01-step forex pair. `quantize_volume()` reads
-  `volume_min`/`volume_step` live per symbol and is unit-tested for both cases (2026-10-01,
-  `tests/test_sizing.py`), but has never actually sized a real order against a broker's own
-  0.1 or 1.0 step — only the arithmetic has been proven, not the live `symbol_info` reading it.
+- [x] `dry_run = True` sanity check — confirmed 2026-10-01: log tagged `[dry-run]`, command
+  queue stayed empty, nothing dispatched.
+- [x] Partial close (`REDUCE`) with the right fraction — confirmed 2026-10-01, BlackBull: the
+  reduce dispatched and filled accurately against the master's partial.
+- [x] Moving the master's stop with `copy_sltp = False` is derived, reported `SKIPPED`, and
+  sends nothing — confirmed 2026-10-01, BlackBull: log showed
+  `-- SKIPPED: copy_sltp is off for this slave`, slave stop untouched.
+- [x] Kill the slave worker mid-OPEN — partially confirmed 2026-10-01, BlackBull.
+  `expire_inflight` fires exactly at 30s with `OPEN for #<ticket> on 16D9C170 was never
+  answered after 30s; giving up -- if it reached the broker it will appear as an orphan on the
+  next startup reconciliation`, and the ticket is excluded as designed. The orphan-hold/`o`-ack
+  half needs the kill to land in the gap between the broker accepting the order and the result
+  reaching the engine — too narrow to hit by hand with Task Manager; tried a few times, always
+  landed before the send instead (`0 tracked, 0 orphans, 0 stale`). Left to unit coverage
+  (`test_reconcile.py`, `test_store.py`, `test_tui.py`) rather than forced live.
+- [x] Open on a symbol with a non-default lot step — confirmed 2026-10-01, BlackBull, US30
+  (0.1 step): `#1980728322 on US30: 37.4 lots (raw 37.4813)`, filled at `37.4`. `quantize_volume()`
+  correctly floored to one decimal against BlackBull's real `symbol_info`, not a 0.01 grid.
+  Getting here first surfaced and fixed two real bugs on the way (hunting for a symbol to test
+  with, on EURUSDp/EURAUDp): `symbol_facts()` trusted a non-`None` `symbol_info` even when
+  `.visible` was false (some brokers zero out fields like the filling mask on a hidden symbol
+  rather than answering `None` — now checked and reselected per the same pattern another app
+  uses), and a freshly-selected symbol's first `symbol_info_tick()` could come back empty for
+  anywhere from seconds to 30+ minutes even while the terminal's own Market Watch showed it
+  ticking live — fatal before, since a failed OPEN is permanently excluded. `_first_tick()` in
+  `executor.py` now retries once after a 2s wait before giving up.
 
 **Stage 3 — "Verifying the sync"**
-- [ ] `MODIFY_SLTP` on a stop move: dispatch, non-"filled 0" success, new stop visible on the
-  slave, `synced_sl` updated.
-- [ ] Two rapid stop moves: only one in flight, the second value wins.
-- [ ] Take-profit move leaves the stop untouched.
-- [ ] A stop inside the broker's minimum distance: one `INVALID_STOPS`, not retried at that
-  value, a different value afterwards sent normally.
-- [ ] Clearing the master's stop entirely: `[UNPROTECTED: removes the slave's stop]`, and
-  decide — watching it happen — whether that's the wanted behaviour (open policy question,
-  Stage 3).
-- [ ] Slave copy closed by hand mid-session: one WARNING, not an error, row tidied away on the
-  master's eventual close.
-- [ ] `copy_sltp = False` mid-stream: action derived, reported skipped, nothing sent.
+- [x] `MODIFY_SLTP` on a stop move — confirmed 2026-10-01, BlackBull, US30 (`#1980780681`):
+  dispatched, logged `MODIFY_SLTP #1980780681 US30 succeeded` (not a misleading "filled 0"),
+  and `mapping.db` shows `synced_sl`/`synced_tp` updated (`updated_at` ~11.7s past
+  `opened_at`, matching the OPEN-to-modify gap in the log).
+- [x] Two rapid stop moves: only one in flight, the second value wins — attempted live
+  2026-10-01 on `#1980780681` (US30), but each move fully resolved (sub-second round trip)
+  before the next was made, so no genuine overlap was ever created; forcing two modifications
+  to actually race through MT5's own Modify dialog is impractical by hand, the same problem as
+  #6's orphan timing. Accepted on unit coverage instead:
+  `test_a_changed_decision_is_still_withheld_while_in_flight` (`test_reconcile.py:973`) proves
+  the dedup-while-in-flight logic directly.
+- [x] Take-profit move leaves the stop untouched — confirmed 2026-10-01, BlackBull, US30
+  (`#1980780681`): `sl 50655.9 tp 51375.2` → `sl 50655.9 tp 51249.4`, stop identical across
+  both moves, only the target changed, both succeeded.
+- [x] A stop inside the broker's minimum distance: one `INVALID_STOPS`, not retried at that
+  value, a different value afterwards sent normally. Attempted live 2026-10-01 but never
+  actually triggered — no `INVALID_STOPS` anywhere in `copier.log`, because the "p"-suffixed
+  symbols used so far run `SYMBOL_TRADE_STOPS_LEVEL = 0` (no distance is ever rejected) and a
+  symbol with a genuine non-zero stop level wasn't hunted down. Accepted without forcing it:
+  `Retcode.INVALID_STOPS` (10016) is classified `Outcome.FATAL` (`execution.py:184`), which
+  `_send_modification` breaks on immediately rather than retrying (`executor.py:488-491`, only
+  `BACKOFF` loops), and the belief is left untouched since `apply_result` only writes
+  `synced_sl`/`synced_tp` on success — so "not retried at that value" and "a different value
+  sent normally afterwards" both follow directly from logic already exercised by the other
+  MODIFY_SLTP tests above, not from anything specific to this one retcode.
+- [x] Clearing the master's stop entirely — confirmed 2026-10-01, BlackBull, US30
+  (`#1980787161`): `MODIFY_SLTP #1980787161 US30p buy sl 0 tp 51215.2
+  [UNPROTECTED: removes the slave's stop]`, dispatched and succeeded. **Policy question
+  decided 2026-10-01**: mirroring the master's cleared stop onto the slave, unprotected, is the
+  wanted behaviour — no change needed. The `[UNPROTECTED: ...]` tag stays purely informational.
+- [x] Slave copy closed by hand mid-session — confirmed 2026-10-01, BlackBull (`#1980813755`):
+  moving the master's stop against a hand-closed slave position logged a WARNING (not an
+  error) — `slave position 217399440 is gone, so its stops cannot follow the master` — and the
+  row survived until the master's own eventual CLOSE, at which point `store.forget()` removed
+  it (`already gone` / `filled 0`).
+- [x] Settings edit on a terminal holding an open copy — confirmed 2026-10-01, BlackBull
+  (`#1980814744`), rewritten from how this item was originally phrased. Toggling `copy_sltp`
+  while a copy is open does not narrowly skip future SL/TP sync on that one ticket — per
+  `engine.py`'s `apply_settings`, *any* settings edit on a terminal holding open copies gives
+  up **all** of them: `orphaned on BlackBull Markets: position #217399610 US30 28.3 lots
+  (master #1980814744); settings changed, so it is no longer copied, closed or moved, and
+  stays open`. Deliberate and blanket, not `copy_sltp`-specific — a single rule instead of
+  reasoning per-field about what's safe to change live. The narrower "just this one action is
+  skipped, tracking otherwise continues" behavior this item originally described is not
+  reachable through the settings editor at all; this is what actually happens instead.
 
-**Stage 4 — pending orders (dispatch untested; detection already validated 2026-09-17)**
-- [ ] `PLACE`: master places a limit with `copy_pending = True`, resting order appears on the
-  slave.
-- [ ] `MODIFY_ORDER`: master moves the resting order's entry price, slave order moves,
-  `type_time` stays GTC. Step 8 of "Verifying the sync".
-- [ ] `CANCEL`: master cancels the resting order, slave order is removed.
-- [ ] A pending order fills on the master: logs `ORDER_FILLED` (not `CANCEL`), hands off to
-  position tracking without a duplicate copy. (Confirmed once already, 2026-09-17, for
-  detection only — re-check now that dispatch is live.)
+**Stage 4 — pending orders — closed 2026-10-01**
+- [x] `PLACE`: master places a limit with `copy_pending = True`, resting order appears on the
+  slave — confirmed, BlackBull, EURUSDp (`#1980838270`): dispatched, resting.
+- [x] `MODIFY_ORDER`: master moves the resting order's entry price, slave order moves —
+  confirmed, BlackBull, EURUSDp (`#1980827726`): entry held, `sl` moved, dispatched,
+  `MODIFY_ORDER #1980827726 EURUSDp succeeded`. `type_time` staying GTC rests on the code
+  (`executor.py`'s `_modify_order` sends `type_time=0` explicitly) rather than a manual check
+  of the order's expiry in the terminal.
+- [x] `CANCEL`: master cancels the resting order, slave order is removed — confirmed, several
+  times (`#1980827726`, `#1980829575`, `#1980830508`): dispatched, removed each time.
+- [x] A pending order fills on the master: logs `ORDER_FILLED` (not `CANCEL`), hands off to
+  position tracking without a duplicate copy — confirmed live 2026-10-01 (previously only
+  dry-run, 2026-09-17), BlackBull, EURUSDp (`#1980838270`):
+  ```
+  PLACE        #1980838270 ... filled 35.27 @1.12416   (resting)
+  ORDER_FILLED #1980838270 EURUSDp buy_limit  -- SKIPPED: the slave's own order fills by itself
+  CLOSE        #1980838270 EURUSDp buy
+  ```
+  The next action derived for that ticket was a CLOSE, not a second OPEN — the row correctly
+  flipped from order-tracking to position-tracking internally, no duplicate copy dispatched.
 
-**Stage 5 — inversion (no demo procedure written yet — write one before running it)**
-- [ ] A reversed copy sizes off the master's take-profit and opens with the swapped levels.
-- [ ] A reversed resting order flips kind as well as direction (BUY_LIMIT ↔ SELL_STOP).
+**Stage 5 — inversion — closed 2026-10-01**, BlackBull/EURUSDp, `invert` turned on mid-session
+(no copies were held at the time, so no give-up was triggered).
+- [x] A reversed copy sizes off the master's take-profit and opens with the swapped levels —
+  confirmed. `effective_levels()` (`reconcile.py:271`) is unconditional (`return (tp, sl) if
+  cfg.invert else (sl, tp)`), so this follows mechanically once `invert=True`; cross-checked
+  directly against the master's own Trade tab — its SL became the slave's TP and vice versa, as
+  watched live, e.g. `OPEN #1980847893 EURUSDp buy @1.12418 sl 1.11684 tp 1.13128`.
+- [x] A reversed resting order flips kind as well as direction — confirmed. The master placed
+  its usual limit orders throughout (`buy_limit`/`sell_limit`, same as every earlier
+  non-inverted test), but BlackBull received **stop** orders instead once inverted:
+  `PLACE #1980852545 EURUSDp sell_stop`, `#1980854633 sell_stop`, `#1980854854 sell_stop`
+  (dispatched, filled/resting, cancelled cleanly) — matching `_INVERTED_ORDER_TYPE`
+  (`reconcile.py:250`): `BUY_LIMIT → SELL_STOP`, preserving which side of the market the order
+  rests on rather than producing a price the broker would reject.
 
 **TUI, run against a real terminal, not headless**
-- [ ] The settings editor (`e`): every field saves correctly, and the orphan-confirmation flow
-  actually blocks and resumes as designed.
-- [ ] The live-override dialog (`l`): typing the terminal's full name arms it, OFF disarms in
-  one press, and the status bar shows `NON-DEMO ALLOWED: <names>`.
+- [x] The settings editor (`e`): every field saves correctly, and the orphan-confirmation flow
+  actually blocks and resumes as designed — confirmed 2026-10-01, BlackBull, as a side effect
+  of the "copy_sltp mid-stream" test above. `apply_settings()` refuses outright
+  (`"<N> copies would be orphaned; that has to be confirmed"`, `engine.py:981`) unless
+  resubmitted with the exact held tickets as `orphan`; the log shows both the give-up
+  (`orphaned on BlackBull Markets: ...`) and the save completing
+  (`settings changed for BlackBull Markets (16D9C170): copy_sltp on -> off`), which only
+  happens if the editor caught the refusal, showed the held copy, and resubmitted correctly —
+  not a silent bypass.
+- [x] The live-override dialog (`l`) — confirmed 2026-10-01, BlackBull. Typing the name wrong
+  on purpose was refused correctly (`that is not the name: type BlackBull Markets to confirm`,
+  nothing changed); typing it correctly armed it, the status bar showed
+  `NON-DEMO ALLOWED: BlackBull Markets`; OFF disarmed in one press, no typing needed, segment
+  disappeared. Logged at WARNING both ways: `settings changed for BlackBull Markets
+  (16D9C170): allow_live_trading off -> on` / `... on -> off`.
 
-**Landed 2026-10-01, only unit-tested so far**
-- [ ] Closing a terminal the copier launched, on `stop()` and on unassign: confirm the right
-  process actually closes, a terminal the user already had open is left alone, and a restart
-  mid-run still leaves things sane. Unit-tested against a faked `psutil.Process` only — see
-  commit `dcd4e60`.
+**Landed 2026-10-01, confirmed live the same day**
+- [x] Closing a terminal the copier launched, on `stop()` and on unassign — confirmed,
+  BlackBull. Unassigning while its terminal was already running (left over from an earlier
+  restart) correctly closed nothing: `_launched_pid` is re-derived fresh on every `connect()`
+  (`worker.py:69-74`), so a terminal already alive at connect time is never claimed, matching
+  "a terminal the user already had open is left alone" even though it got there via a prior
+  restart rather than the user opening it by hand. With the terminal fully closed first, then
+  reassigned (fresh launch) and unassigned again, the close fired correctly, twice:
+  `closed terminal pid=78224 (we launched it)` and `closed terminal pid=45028 (we launched
+  it)` — each a fresh, correctly-tracked pid, no confusion across the several back-to-back
+  spawn/stop/respawn cycles run in the process, which also covers "a restart mid-run still
+  leaves things sane." Previously unit-tested only, against a faked `psutil.Process`
+  (commit `dcd4e60`).
 
 **Known gap, not yet even a plan**
 - [ ] What disabling the **master** does to its slaves' open copies — the orphan rule only
@@ -623,7 +748,7 @@ Classify rather than treating every non-`DONE` as fatal:
 Retries must be bounded and fast. A copy that has been retrying for seconds is no longer the
 trade the master took — better to abandon it and surface the failure prominently.
 
-## Stage 2c — live open/close on demo — **half done**
+## Stage 2c — live open/close on demo — **built, demo-run checklist closed 2026-10-01**
 
 Built (`store.py`, and the close/reduce/cancel paths in `executor.py`):
 
