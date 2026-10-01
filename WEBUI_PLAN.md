@@ -120,6 +120,71 @@ rule. Stages A–C only move *where* the controls live; they do not let D skip v
 Both decisions are now locked into the Stage A scope below; re-open only by asking first, same
 rule as the sequencing decision above.
 
+## UI feel — decided 2026-10-02: trading-terminal style
+
+Chosen over "terminal-kin" (a CLI-aesthetic dark theme matching the Textual TUI) and a light,
+card-based SaaS-admin look: dark, dense, ticker-like — ticket data (lots, SL/TP, P&L) read as
+market data, not as log lines. Colors and ink come from the data-viz skill's validated reference
+palette (`references/palette.md`), not ad hoc hex — this page is a status dashboard, so only its
+**status** and **chrome/ink** tokens apply; there is no multi-series chart here needing the
+categorical eight.
+
+```css
+:root {
+  color-scheme: dark;
+  --surface:         #1a1a19;   /* panel/row background */
+  --page:            #0d0d0d;   /* page background */
+  --ink-primary:     #ffffff;
+  --ink-secondary:   #c3c2b7;
+  --ink-muted:       #898781;   /* unassigned / stopped — nothing to alarm about */
+  --hairline:        #2c2c2a;   /* row dividers */
+  --status-good:     #0ca30c;   /* connected; P&L positive */
+  --status-warning:  #fab219;   /* starting / connecting / stopping; a held slave */
+  --status-serious:  #ec835a;   /* stale; disconnected */
+  --status-critical: #d03b3b;   /* worker dead / failed; detection blocked; P&L negative */
+}
+```
+
+All four status steps clear the skill's >=3:1 mark-contrast floor on this exact dark surface
+(`#1a1a19`): good 5.19, warning 9.49, serious 6.60, critical 3.62 — no re-validation needed since
+these are the documented instance's own dark-surface numbers, not new hues.
+
+**Status tier maps onto this project's own existing vocabulary** (`TerminalView.status()`,
+`protocol.WorkerState`, `engine.holds()`, `engine.blocked_reason`) rather than inventing a
+parallel one:
+
+| Engine state | Tier |
+|---|---|
+| `WorkerState.CONNECTED` | good |
+| `STARTING` / `CONNECTING` / `STOPPING` | warning |
+| held (`engine.holds()` has an entry for this terminal) | warning |
+| `stale` (worker alive, gone quiet) / `DISCONNECTED` | serious |
+| `worker dead` / `FAILED` | critical |
+| detection blocked (`engine.blocked_reason` is set) | critical |
+| `-` / `not connected` / `STOPPED` | muted ink, no status color |
+
+**P&L reuses `--status-good`/`--status-critical` directly** rather than a separate green/red
+pair — this is exactly the skill's collision rule ("when a series means good/bad, it wears
+status tokens"), not a second invented color pair to keep in sync with the first.
+
+**Role (MASTER/SLAVE) is never color-coded.** It's identity, not state — plain text/icon badge
+in `--ink-secondary`. There's no categorical palette in play here at all for Stage A (no
+multi-series chart), so there's nothing to assign a hue to in the first place.
+
+**Typography:** system sans everywhere (`system-ui, -apple-system, "Segoe UI", sans-serif`,
+the skill's default — no separate monospace stack). `font-variant-numeric: tabular-nums` on the
+lot/price/P&L columns only, since those are exactly "columns that must align vertically" per the
+skill's rule — gets the dense ticker look the chosen preview showed without a second type family.
+
+**Status color never appears without an icon + label**, matching the skill's own mitigation
+rule for its sub-3:1 light-surface steps — moot on a dark-only surface today, but keeping the
+discipline now means a light variant later (if ever wanted) doesn't need an accessibility
+redesign on top of a cosmetic one.
+
+**Dark-only for v1, by decision, not an oversight.** A trading-terminal look reads as inherently
+dark (this is the same register as a broker platform's own dark chart, not a document that gets
+a light/dark toggle); add a light variant later only if asked.
+
 ## Web Stage A — detailed scope (decided 2026-10-01, not yet built)
 
 Read-only: terminal/worker status, live snapshot data, and a log tail, over one websocket per
