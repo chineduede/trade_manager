@@ -108,16 +108,100 @@ questions settled first, in writing, the same way Stage 3's policy questions wer
 `ROADMAP.md` — then their engine-side logic is built and demo-verified like every other trading
 rule. Stages A–C only move *where* the controls live; they do not let D skip verification.
 
-## Open decisions — your call, not defaulted
+## Decided 2026-10-01 — the two open calls from the first draft
 
-- **Forms (htmx) vs. a full SPA (React/Vue).** Recommending htmx for the no-build-step
-  packaging win above. Say so if the richer client-side feel of a SPA is worth taking on a JS
-  build step and a second packaging path for.
-- **Token delivery: a URL-token printed fresh each run (Jupyter-style) vs. a password set once
-  on first run.** The URL-token is less code and fits "full control, same machine, just you (or
-  whoever you hand this to) for now." A one-time password feels more like a normal app login
-  and doesn't change on every restart, at the cost of a setup step and somewhere to store/reset
-  it.
+- **Frontend: htmx, not a full SPA.** Confirmed. No Node/build step, no second packaging path
+  — templates and a vendored (not CDN-loaded, so the frozen exe works offline) `htmx.js` ship as
+  `datas` in `copier.spec` alongside the existing PyInstaller build.
+- **Auth: a fresh URL-token per run, Jupyter-style.** Confirmed over a one-time password. No
+  setup step, no "where did I put that password" — fits "full control, same machine, just
+  whoever's at the keyboard."
+
+Both decisions are now locked into the Stage A scope below; re-open only by asking first, same
+rule as the sequencing decision above.
+
+## Web Stage A — detailed scope (decided 2026-10-01, not yet built)
+
+Read-only: terminal/worker status, live snapshot data, and a log tail, over one websocket per
+client. No POST route exists anywhere in this stage — nothing here can touch a position, so
+Stage A's CSRF story is simply "there is no write path to protect yet"; the custom-header
+defense described under Security applies starting Stage B, when the first POST appears.
+
+### Push model: server-rendered fragments over one websocket, not a JSON API
+
+`WEBUI_PLAN.md`'s architecture note said "FastAPI's websocket support gives the live snapshot
+stream for free" — made concrete, that means **htmx's websocket extension** (`htmx-ext-ws`,
+vendored alongside `htmx.js`), not a hand-rolled JS client parsing JSON. The server pushes
+pre-rendered HTML fragments down the socket; htmx swaps each into the DOM out-of-band by id.
+This keeps Stage A's only JS to "load htmx + its ws extension" — no bespoke client-side
+rendering logic to keep in sync with the Jinja2 templates.
+
+- `index.html` — the dashboard shell: a health/blocked-reason banner (`#health-bar`), the
+  terminal table (`#terminal-table-body`), a log tail panel (`#log-tail`). Opens the websocket
+  on load via `hx-ext="ws"` / `ws-connect="/ws/state?token=..."`.
+- Per tick (0.5s, matching the TUI's own `_on_timer` cadence — no reason to push faster than the
+  UI it's modeled on), the server renders and sends:
+  - `#health-bar` — from `engine.health()` plus `engine.blocked_reason` and `engine.holds()`.
+  - One fragment **per terminal row** (`row-<terminal_id>`), not the whole table — mirrors
+    `tui/app.py`'s own "only rebuild rows when the set of terminals changes, else update rows in
+    place" discipline (`_rebuild_rows` vs. per-tick updates), so a 10-terminal dashboard doesn't
+    re-render 9 unchanged rows every half second.
+  - `#log-tail` — only the lines appended since that connection's last push (track a byte offset
+    per websocket connection), not the whole tail re-sent every tick.
+- `engine.views()` already returns copies made under `self._lock` specifically so a caller can
+  hold them across its own event loop without racing the drain thread (its own docstring says
+  so) — this is exactly that caller.
+
+### New module: `src/mt5copier/web/`
+
+- `app.py` — `create_app(engine: Engine, token: str) -> FastAPI`. Lifespan handler calls
+  `engine.start()` on startup / `engine.stop()` on shutdown — the same two calls
+  `TUICopierApp.on_mount` / `on_unmount` already make, just moved behind FastAPI's lifespan
+  instead of Textual's mount hooks.
+- `auth.py` — token check via `secrets.compare_digest`, never `==` (timing). The initial page
+  load takes the token as `?token=` (a browser's first `GET /` has no header yet); from there,
+  every subsequent fetch/websocket-connect carries it explicitly. Browsers cannot set a custom
+  header on a WebSocket handshake, so `/ws/state` takes the token as a query param too — this is
+  Stage A-only and does not set precedent for Stage B/C's POST routes, which still get the
+  custom-header defense as planned.
+- `routes.py` — `GET /` (the shell, token-gated), `WS /ws/state` (the push loop above). Nothing
+  else; a `GET /api/...` JSON API is deliberately not added since nothing in this stage needs
+  one.
+- `templates/` + `static/htmx.min.js` + `static/htmx-ws.min.js` — vendored, not CDN-fetched.
+
+### Server lifecycle (`mt5copier --web`, new flag in `__main__.py`)
+
+Same shape as today's `--list`/`--check`: acquires the existing `SingleInstanceLock(lock_path())`
+before doing anything else — a web run is still only one `Engine`, same as a TUI run, not a
+second kind of instance to race `config.json`. Generates `secrets.token_urlsafe(32)`, prints
+`http://127.0.0.1:<port>/?token=...` once, then `uvicorn.run(app, host="127.0.0.1", port=port)`
+— `127.0.0.1` is written directly into this call, not read from a config field, so there is no
+path to `0.0.0.0` short of editing source.
+
+### Testing — no broker needed, same as the other 723
+
+- `test_web_auth.py` — missing/wrong token refused (page load and websocket handshake both);
+  correct token admitted.
+- `test_web_routes.py` — FastAPI's `TestClient` against `create_app()` wired to a fake `Engine`
+  (same fakery pattern `test_tui.py` already uses) — dashboard reflects known terminals and
+  `engine.health()`'s counts.
+- `test_web_push.py` — a websocket test client: connect, assert the expected fragments arrive
+  on a tick; two concurrent connections each get their own log-tail offset and neither starves
+  the other.
+
+### Packaging
+
+`copier.spec` gains `templates/` and `static/` as `datas`. `fastapi`, `uvicorn`, `jinja2` join
+`pyproject.toml`'s `dependencies`. Flag, not a known issue yet: uvicorn's import-time plugin
+discovery has tripped up PyInstaller's static analysis on other projects before — worth a
+`--check`-style smoke import test once this is built, the same reasoning `_cmd_check()` already
+applies to the `MetaTrader5` extension.
+
+### Explicitly out of scope for Stage A
+
+Every write path — settings editor, live-override, panic, orphan-confirm — stays Stage B/C
+exactly as `WEBUI_PLAN.md` already sequenced. Stage A proves the plumbing (auth, websocket push,
+packaging) before anything reachable over HTTP can move money.
 
 ## What this plan deliberately does not cover
 
