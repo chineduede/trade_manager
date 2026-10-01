@@ -40,6 +40,8 @@ dist/mt5copier.exe
 | `--list` | Print discovered terminals and exit. Launches nothing, connects to nothing. |
 | `--check` | Verify the MetaTrader5 extension imports. The main smoke test for a frozen build. |
 | `--paths` | Print resolved config and log locations. |
+| `--web` | Serve the read-only web dashboard instead of the TUI (Stage A — see below). |
+| `--port` | Port for `--web` (default `8765`); always binds `127.0.0.1` only. |
 | `--version` | Version. |
 
 ### Keys
@@ -60,6 +62,35 @@ dist/mt5copier.exe
 | `q` | Quit |
 
 Clicking the `M` or `S` column of a row assigns that role directly.
+
+## Web dashboard (Stage A: read-only)
+
+```bash
+uv run python -m mt5copier --web            # http://127.0.0.1:8765
+uv run python -m mt5copier --web --port 9000
+```
+
+Prints a one-time URL (`http://127.0.0.1:<port>/?token=...`) and serves a read-only dashboard
+from inside the **same process** as the engine — the same `Engine`, the same
+`SingleInstanceLock`, just a second way to look at it alongside the TUI. **Nothing reachable here
+can place, modify or close an order**: the page and the websocket that pushes it live are the
+only two routes that exist.
+
+- **Auth** is a random token generated fresh every run (Jupyter-notebook style), required on the
+  page load and on the websocket handshake. Nothing to set up, nothing persisted.
+- **Always binds `127.0.0.1`** — written directly into the `uvicorn.run()` call, not read from a
+  config field, so there is no path to `0.0.0.0` short of editing source.
+- Shows per-terminal status (mapped onto a dark good/warning/serious/critical scale), balance,
+  equity, account-level floating P&L (`equity − balance`; not per-position — `Position` carries
+  no live `profit` field by design, see `protocol.py`), and a live tail of `copier.log`.
+- Built with FastAPI + Jinja2 + htmx's websocket extension: the server pushes rendered HTML
+  fragments over one websocket per client (out-of-band swaps by element id), not a JSON API
+  driving a hand-rolled JS client.
+
+Stage A of four. Settings/roles, the live-override dialog and panic, and new trading features
+(breakeven, prop-firm guards, …) are later stages that land in the web UI only — the TUI stays
+the frozen, proven baseline once they arrive. Full design, the decisions behind it, and the
+staged build order are in `WEBUI_PLAN.md`.
 
 ## How it works
 
@@ -281,6 +312,7 @@ src/mt5copier/
   store.py           SQLite ownership: which slave position is whose copy
   engine.py          supervisor: spawn, aggregate, diff, reconcile, dispatch
   tui/app.py         Textual UI
+  web/               FastAPI dashboard (Stage A, read-only) -- see WEBUI_PLAN.md
 launcher.py          frozen entry point (see note below)
 copier.spec          PyInstaller spec
 ```
@@ -337,7 +369,7 @@ dev tooling (`mypy`, `cython`, `email_validator`), and attribute-style false pos
 ## Development
 
 ```bash
-uv run pytest -q          # 415 tests, no MT5 terminal required
+uv run pytest -q          # 748 tests, no MT5 terminal required
 uv run ruff check .
 uv run ruff format .
 ```
