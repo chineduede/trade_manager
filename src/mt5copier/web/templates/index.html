@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MT5 Copier</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js"></script>
+  <script src="/static/htmx-ws.js"></script>
+</head>
+<body hx-ext="ws" ws-connect="/ws/state?token={{ token }}&log_offset={{ log_offset }}">
+  {% include "_health.html" %}
+
+  <table>
+    <thead>
+      <tr>
+        <th>Terminal</th>
+        <th>Role</th>
+        <th>Status</th>
+        <th></th>
+        <th>Balance</th>
+        <th>Equity</th>
+        <th>Floating P/L</th>
+      </tr>
+    </thead>
+    <tbody id="terminal-table-body">
+      {% for row in rows %}{% include "_row.html" %}{% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Log</h2>
+  <div id="log-tail" class="log-tail">{{ log_text }}</div>
+</body>
+</html>

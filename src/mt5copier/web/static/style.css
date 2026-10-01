@@ -1,0 +1,116 @@
+/* Trading-terminal style, decided 2026-10-02 -- see WEBUI_PLAN.md's "UI feel" section.
+   Tokens are the data-viz skill's validated reference palette (dark surface + status scale),
+   not eyeballed hex -- this is a status dashboard, not a chart, so only those slots apply. */
+:root {
+  color-scheme: dark;
+  --surface:         #1a1a19;
+  --page:            #0d0d0d;
+  --ink-primary:     #ffffff;
+  --ink-secondary:   #c3c2b7;
+  --ink-muted:        #898781;
+  --hairline:         #2c2c2a;
+  --status-good:      #0ca30c;
+  --status-warning:   #fab219;
+  --status-serious:   #ec835a;
+  --status-critical:  #d03b3b;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 16px;
+  background: var(--page);
+  color: var(--ink-primary);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-size: 14px;
+}
+
+h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-muted);
+  margin: 20px 0 8px;
+}
+
+.health-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  padding: 10px 14px;
+}
+.health-bar strong { letter-spacing: 0.06em; }
+.health-bar span { color: var(--ink-secondary); }
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  overflow: hidden;
+  margin-top: 16px;
+}
+th, td {
+  padding: 8px 12px;
+  text-align: left;
+  border-bottom: 1px solid var(--hairline);
+}
+tr:last-child td { border-bottom: none; }
+th {
+  color: var(--ink-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+}
+td.num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-right: 6px;
+}
+.dot-good { background: var(--status-good); }
+.dot-warning { background: var(--status-warning); }
+.dot-serious { background: var(--status-serious); }
+.dot-critical { background: var(--status-critical); }
+.dot-muted { background: var(--ink-muted); }
+
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+.badge-warning { background: var(--status-warning); color: #1a1a19; }
+.badge-critical { background: var(--status-critical); color: #ffffff; }
+
+.pl-good { color: var(--status-good); }
+.pl-critical { color: var(--status-critical); }
+
+.log-tail {
+  margin-top: 8px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: 4px;
+  padding: 12px;
+  max-height: 320px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-secondary);
+}

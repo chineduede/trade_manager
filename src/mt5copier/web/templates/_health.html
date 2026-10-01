@@ -1,0 +1,10 @@
+<div id="health-bar" hx-swap-oob="true"
+     class="health-bar {{ 'tier-critical' if blocked_reason else 'tier-good' }}">
+  <strong>MT5 COPIER</strong>
+  <span>{{ health.supervised }}/{{ health.total }} supervised</span>
+  <span>{{ health.live }} live</span>
+  <span>{{ health.stale }} stale</span>
+  {% if blocked_reason %}
+    <span class="badge badge-critical">DETECTION PAUSED: {{ blocked_reason }}</span>
+  {% endif %}
+</div>

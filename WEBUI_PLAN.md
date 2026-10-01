@@ -268,6 +268,41 @@ Every write path — settings editor, live-override, panic, orphan-confirm — s
 exactly as `WEBUI_PLAN.md` already sequenced. Stage A proves the plumbing (auth, websocket push,
 packaging) before anything reachable over HTTP can move money.
 
+## Web Stage A — built and verified 2026-10-02
+
+Built as scoped above, under `src/mt5copier/web/` (`auth.py`, `presentation.py` — the pure view
+model, `routes.py`, `app.py`, `server.py`, `templates/`, `static/`), wired in via `mt5copier --web
+[--port N]` (default port `8765`) in `__main__.py`. 25 new tests (`tests/test_web_*.py`), 748
+total, `ruff`/`ruff format`/`mypy` all clean.
+
+**The uvicorn/PyInstaller packaging risk flagged above did not materialize.**
+`pyinstaller-hooks-contrib` (already a transitive dependency of the project's `pyinstaller`) ships
+`hook-uvicorn.py`, `hook-websockets.py`, `hook-anyio.py`, `hook-pydantic.py` and `hook-jinja2.py`
+out of the box — a real `uv run pyinstaller copier.spec --noconfirm` build picked up uvicorn's
+dynamic loop/protocol selection without the explicit `hiddenimports` added for it being
+load-bearing (kept anyway, as defensive documentation of what uvicorn does at import time, not
+because the build needs them). `warn-copier.txt`'s long "missing module" list is the expected
+cross-platform noise (POSIX-only modules, optional `uvloop`/`trio`/`gunicorn` fallbacks neither
+installed nor needed on Windows) — read in full per the spec file's own instruction, nothing in
+it is a real gap.
+
+**Verified against the actual frozen exe, not just the source tree:** `mt5copier.exe --web
+--port 8798` against an isolated `%APPDATA%`, then `curl` against `/` (401 without a token, as
+designed), `/static/htmx.min.js`, `/static/htmx-ws.js`, and `/static/style.css` (all 200) —
+confirms the vendored JS/CSS and Jinja2 templates actually resolve at runtime inside the bundle,
+not just on disk during development. Also re-ran the unfrozen dev server end to end: real config
+load, real (empty) discovery sweep, the printed `http://127.0.0.1:<port>/?token=...` URL, and the
+rendered dashboard showing the real `copier.log` tail.
+
+**One real decision made during the build, not pre-specified:** floating P&L is shown at the
+*account* level (`snapshot.equity - snapshot.balance`), not per position. `protocol.Position` was
+deliberately built without a live `profit` field — its own docstring says keeping it to the
+stable subset `positions_get()` returns is what lets two snapshots compare equal when a position
+is unchanged "instead of differing because the floating P/L moved." Per-position P&L would mean
+either reopening that decision or fetching it out-of-band from the reconcile path, neither scoped
+here — account-level equity-vs-balance uses data already on `Snapshot` and still gives the
+good/critical P&L coloring the UI feel calls for.
+
 ## What this plan deliberately does not cover
 
 Hosting this for anyone not on the same machine, multi-user accounts/roles within the web UI,
