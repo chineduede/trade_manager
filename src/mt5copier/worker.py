@@ -190,16 +190,29 @@ class _Session:
         return [str(s.name) for s in symbols if getattr(s, "name", None)]
 
     def symbol_facts(self, name: str) -> SymbolFacts | None:
-        """``symbol_info``, selecting the symbol first if the terminal has it hidden.
+        """``symbol_info``, selecting the symbol into Market Watch if it isn't already visible.
 
-        An unselected symbol returns nothing useful -- including a filling mask of zero -- so
-        the select is not optional housekeeping.
+        ``.visible`` rather than "was ``symbol_info`` ``None``" is the right check -- an
+        unselected symbol does not reliably answer with ``None``, some brokers hand back a
+        non-None struct with zeroed fields instead, a filling mask of zero being the most
+        dangerous one. Re-reading after a *successful* select is for the same reason: the
+        struct read before selecting can still be the stale, zeroed one.
+
+        If the select call itself reports failure, one retry after a short wait follows rather
+        than failing outright -- a terminal that just can't act on it instantly is not the same
+        as a symbol that does not exist.
         """
         try:
             info = self._mt5.symbol_info(name)
             if info is None:
-                self._mt5.symbol_select(name, True)
-                info = self._mt5.symbol_info(name)
+                return None
+            if not info.visible:
+                if self._mt5.symbol_select(name, True):
+                    info = self._mt5.symbol_info(name)
+                else:
+                    log.warning("symbol_select(%r) failed; retrying after a short wait", name)
+                    time.sleep(2.0)
+                    info = self._mt5.symbol_info(name)
         except Exception as exc:
             log.debug("symbol_info(%r) raised: %r", name, exc)
             return None

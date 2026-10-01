@@ -82,6 +82,20 @@ def fake_positions(count: int = 3) -> tuple[FakePosition, ...]:
     return tuple(FakePosition(ticket=100 + i) for i in range(count))
 
 
+@dataclass
+class FakeSymbolInfo:
+    """Shaped like what ``symbol_info()`` returns for a symbol the broker actually lists."""
+
+    name: str = "EURUSD"
+    volume_min: float = 0.01
+    volume_max: float = 100.0
+    volume_step: float = 0.01
+    point: float = 0.0001
+    digits: int = 5
+    filling_mode: int = 1
+    visible: bool = True
+
+
 class FakeMT5:
     """Stand-in for the MetaTrader5 extension module."""
 
@@ -94,6 +108,8 @@ class FakeMT5:
         raise_on_read: bool = False,
         positions: tuple[FakePosition, ...] | None = None,
         orders: tuple[FakeOrder, ...] = (),
+        symbol_info_data: dict[str, FakeSymbolInfo] | None = None,
+        select_fails_for: frozenset[str] = frozenset(),
     ) -> None:
         self.init_ok = init_ok
         self._account = account if account is not None else FakeAccount()
@@ -105,6 +121,12 @@ class FakeMT5:
         self.orders_total_value: int | None = None
         self.init_calls: list[str] = []
         self.shutdown_calls = 0
+        self._symbol_info = symbol_info_data or {}
+        # Names on which symbol_select() itself reports failure, the way a terminal does when
+        # it cannot act on the request immediately rather than the symbol not existing.
+        self._select_fails_for = select_fails_for
+        self.symbol_select_calls: list[str] = []
+        self.symbol_info_calls: list[str] = []
 
     def initialize(self, path: str, timeout: int = 0, **kw: object) -> bool:
         self.init_calls.append(path)
@@ -152,6 +174,18 @@ class FakeMT5:
         if self.orders_total_value is not None:
             return self.orders_total_value
         return len(self.orders or ())
+
+    def symbol_select(self, name: str, enable: bool = True) -> bool:
+        self.symbol_select_calls.append(name)
+        info = self._symbol_info.get(name)
+        if info is None or name in self._select_fails_for:
+            return False
+        info.visible = enable
+        return True
+
+    def symbol_info(self, name: str) -> FakeSymbolInfo | None:
+        self.symbol_info_calls.append(name)
+        return self._symbol_info.get(name)
 
 
 # --- backoff -------------------------------------------------------------------------------
@@ -695,3 +729,69 @@ def test_a_raising_order_read_answers_still_resting() -> None:
             raise RuntimeError("boom")
 
     assert _Session(Exploding(), Path("x.exe")).order_exists(200) is True
+
+
+# --- symbol facts ----------------------------------------------------------------------------
+#
+# ``.visible`` is the signal, not "was symbol_info() None" -- an unselected symbol does not
+# reliably answer with None, some brokers hand back a non-None struct with zeroed fields
+# instead. Select only when hidden, re-read afterward rather than trusting the stale pre-select
+# struct, and if the select call itself fails, one retry after a short wait follows.
+
+
+def test_symbol_facts_does_not_reselect_an_already_visible_symbol() -> None:
+    mt5 = FakeMT5(
+        symbol_info_data={"EURUSD": FakeSymbolInfo(name="EURUSD", filling_mode=2, visible=True)}
+    )
+    facts = _Session(mt5, Path("x.exe")).symbol_facts("EURUSD")
+    assert mt5.symbol_select_calls == [], "already visible, so selecting again would be pointless"
+    assert mt5.symbol_info_calls == ["EURUSD"]
+    assert facts is not None and facts.filling_mask == 2
+
+
+def test_symbol_facts_selects_and_rereads_a_hidden_symbol() -> None:
+    """The struct read before selecting can be the stale, zeroed one -- the fix is reading
+    again afterward, not trusting that the first read already reflects the new state."""
+    mt5 = FakeMT5(
+        symbol_info_data={"XAUUSD": FakeSymbolInfo(name="XAUUSD", filling_mode=4, visible=False)}
+    )
+    facts = _Session(mt5, Path("x.exe")).symbol_facts("XAUUSD")
+    assert mt5.symbol_select_calls == ["XAUUSD"]
+    assert mt5.symbol_info_calls == ["XAUUSD", "XAUUSD"], "must re-read after selecting"
+    assert facts is not None and facts.filling_mask == 4
+
+
+def test_symbol_facts_never_selects_a_symbol_the_broker_does_not_list() -> None:
+    """Mirrors the reference this was modelled on: a missing symbol_info() answer is checked
+    before visibility is even asked about, so a name the broker does not have is never selected."""
+    mt5 = FakeMT5(symbol_info_data={})
+    facts = _Session(mt5, Path("x.exe")).symbol_facts("NOSUCHSYMBOL")
+    assert mt5.symbol_select_calls == []
+    assert facts is None
+
+
+def test_symbol_facts_retries_after_a_sleep_when_select_itself_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal that cannot act on the select instantly is not the same as the symbol not
+    existing -- one retry follows a short wait rather than failing outright."""
+    sleeps: list[float] = []
+    monkeypatch.setattr("mt5copier.worker.time.sleep", sleeps.append)
+    mt5 = FakeMT5(
+        symbol_info_data={"EURUSD": FakeSymbolInfo(name="EURUSD", visible=False)},
+        select_fails_for=frozenset({"EURUSD"}),
+    )
+    facts = _Session(mt5, Path("x.exe")).symbol_facts("EURUSD")
+    assert mt5.symbol_select_calls == ["EURUSD"]
+    assert sleeps == [2.0]
+    assert mt5.symbol_info_calls == ["EURUSD", "EURUSD"], "one retried read after the sleep"
+    assert facts is not None, "a select failure is not the same as the symbol not existing"
+
+
+def test_a_raising_symbol_select_leaves_facts_unreadable() -> None:
+    class Exploding(FakeMT5):
+        def symbol_select(self, name: str, enable: bool = True) -> bool:
+            raise RuntimeError("boom")
+
+    mt5 = Exploding(symbol_info_data={"EURUSD": FakeSymbolInfo(name="EURUSD", visible=False)})
+    assert _Session(mt5, Path("x.exe")).symbol_facts("EURUSD") is None

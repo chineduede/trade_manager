@@ -534,7 +534,7 @@ class Executor:
         self, cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float
     ) -> OrderResult:
         is_pending = cmd.op is ActionKind.PLACE
-        price = cmd.entry if is_pending else self._market_price(symbol, cmd.direction)
+        price = cmd.entry if is_pending else self._first_tick(symbol, cmd.direction)
         if price is None:
             return self._fail(
                 cmd, slave_symbol=symbol, retryable=True, error=f"no tick for {symbol!r}"
@@ -702,6 +702,27 @@ class Executor:
         bid, ask = quote
         price = ask if direction is PositionType.BUY else bid
         return price if price > 0 else None
+
+    def _first_tick(self, symbol: str, direction: PositionType) -> float | None:
+        """:meth:`_market_price`, tolerant of a symbol whose quote has not started yet.
+
+        A symbol can be selected and visible in the terminal's own Market Watch -- confirmed
+        live in its UI -- while ``symbol_info_tick`` still answers nothing for a stretch
+        afterward. A failed OPEN is final (``reconcile.py``'s ``apply_result``), so one unlucky
+        read here is not a retry later, it is the trade gone; one retry after a short wait is
+        cheap insurance against exactly the gap :meth:`symbol_facts` already treats the same
+        way for a select that cannot be acted on instantly.
+
+        Only called for the first price read of a fresh OPEN. Repricing mid-retry in
+        :meth:`_send` stays on the bare :meth:`_market_price` -- that path already has its own
+        attempt budget (``MAX_ATTEMPTS``, ``DEADLINE_S``), and a symbol already mid-flight has
+        necessarily ticked at least once already.
+        """
+        price = self._market_price(symbol, direction)
+        if price is not None:
+            return price
+        time.sleep(2.0)
+        return self._market_price(symbol, direction)
 
     # --- helpers --------------------------------------------------------------------------
 

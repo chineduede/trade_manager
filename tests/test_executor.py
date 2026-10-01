@@ -37,6 +37,9 @@ class FakeSession:
     facts: SymbolFacts | None = None
     loss: float | None = 500.0
     quote: tuple[float, float] | None = (1.08500, 1.08510)
+    quote_sequence: list[tuple[float, float] | None] | None = None
+    """Scripted per-call ticks, for the just-selected-symbol retry; falls back to `quote`."""
+    tick_calls: list[str] = field(default_factory=list)
     results: list[Any] = field(default_factory=list)
     """Scripted, one per attempt. The last one repeats once exhausted."""
     sent: list[dict[str, Any]] = field(default_factory=list)
@@ -64,6 +67,10 @@ class FakeSession:
         )
 
     def tick(self, name: str) -> tuple[float, float] | None:
+        self.tick_calls.append(name)
+        if self.quote_sequence is not None:
+            index = min(len(self.tick_calls) - 1, len(self.quote_sequence) - 1)
+            return self.quote_sequence[index]
         return self.quote
 
     def position(self, ticket: int) -> tuple[str, PositionType, float] | None | ReadFailure:
@@ -178,6 +185,47 @@ def test_an_operation_with_no_recorded_slave_ticket_is_declined() -> None:
         result = run(session, cmd(op=op, slave_ticket=None))
         assert not result.ok
         assert session.sent == []
+
+
+# --- the first tick on a freshly selected symbol ---------------------------------------------
+#
+# symbol_facts() can succeed -- the symbol is selected and visible -- while symbol_info_tick()
+# still has nothing for a stretch afterward. A failed OPEN is final, so one unlucky read here
+# is not "retried later", it is the trade gone; one retry after a short wait covers the gap.
+
+
+def test_a_permanently_missing_tick_is_refused_after_one_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr("mt5copier.executor.time.sleep", sleeps.append)
+    session = FakeSession(quote=None)
+    result = run(session)
+    assert not result.ok
+    assert "no tick" in (result.error or "")
+    assert session.sent == [], "must never reach order_send without a price"
+    assert sleeps == [2.0], "exactly one retry, not a loop"
+    assert session.tick_calls == ["EURUSD", "EURUSD"]
+
+
+def test_a_tick_that_arrives_on_the_retry_still_opens(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The exact gap this was written for: selected and visible, but no price on the very first
+    read -- recovering a moment later must not already have given up."""
+    sleeps: list[float] = []
+    monkeypatch.setattr("mt5copier.executor.time.sleep", sleeps.append)
+    session = FakeSession(quote_sequence=[None, (1.08500, 1.08510)])
+    result = run(session)
+    assert result.ok
+    assert sleeps == [2.0]
+    assert session.sent and session.sent[0]["price"] == 1.08510
+
+
+def test_an_immediately_available_tick_never_sleeps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The common path must not pay for a gap it does not have."""
+    sleeps: list[float] = []
+    monkeypatch.setattr("mt5copier.executor.time.sleep", sleeps.append)
+    assert run(FakeSession()).ok
+    assert sleeps == []
 
 
 # --- closing --------------------------------------------------------------------------------
