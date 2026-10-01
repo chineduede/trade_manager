@@ -247,6 +247,17 @@ def _running_terminals() -> dict[str, tuple[int, Path]]:
     return running
 
 
+def find_terminal_pid(exe_path: Path) -> int | None:
+    """The pid of the terminal currently running from this exe, or None if none is.
+
+    A narrow wrapper over :func:`_running_terminals` for a caller that wants one answer rather
+    than the whole map -- the worker, deciding whether it is the one that launched the terminal
+    it just connected to, so that only it may later close it.
+    """
+    match = _running_terminals().get(str(exe_path).lower())
+    return match[0] if match else None
+
+
 def discover_terminals(terminal_root: Path | None = None) -> list[DiscoveredTerminal]:
     """Enumerate every MT5 terminal on this machine without launching or connecting to any.
 

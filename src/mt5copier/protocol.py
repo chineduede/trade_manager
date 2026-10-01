@@ -228,6 +228,13 @@ class Command:
 
     kind: CommandKind
     seq: int = 0
+    close_terminal: bool = False
+    """STOP only: also close the terminal process, not just the MT5 session.
+
+    Only ever true when the supervisor is done with this terminal for good (the whole app is
+    stopping, or the terminal was unassigned) -- never for a restart, which wants the same
+    terminal back a moment later. The worker only acts on this if it is also the one that
+    launched the terminal in the first place; see :mod:`mt5copier.worker`."""
 
 
 @dataclass(frozen=True, slots=True)

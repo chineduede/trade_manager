@@ -253,7 +253,7 @@ class SettingsScreen(ModalScreen[bool]):
     # --- help follows focus, so the form stays one row per field ----------------------------
 
     @on(events.DescendantFocus)
-    def _on_focus(self, event: events.DescendantFocus) -> None:
+    def _on_descendant_focus(self, event: events.DescendantFocus) -> None:
         widget_id = event.widget.id or ""
         if not widget_id.startswith(_FIELD_PREFIX):
             return

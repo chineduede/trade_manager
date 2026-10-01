@@ -195,11 +195,15 @@ class Engine:
         self.sync()
 
     def stop(self) -> None:
-        """Stop every worker and the drain thread. Safe to call more than once."""
+        """Stop every worker and the drain thread. Safe to call more than once.
+
+        Closes every terminal this engine launched, symmetrically with how starting a worker
+        can launch one: nothing should be left behind that only exists because we opened it.
+        """
         with self._lock:
             terminal_ids = list(self._workers)
         for tid in terminal_ids:
-            self._stop_worker(tid)
+            self._stop_worker(tid, close_terminal=True)
         self._stop_drain.set()
         thread = self._drain_thread
         if thread is not None:
@@ -236,7 +240,9 @@ class Engine:
 
             for tid in list(self._workers):
                 if tid not in wanted:
-                    self._stop_worker(tid)
+                    # Unassigned (or newly unusable) for good, not a transient restart -- so if
+                    # this terminal is one we launched, we are done with it.
+                    self._stop_worker(tid, close_terminal=True)
 
             for tid, tcfg in wanted.items():
                 existing = self._workers.get(tid)
@@ -248,7 +254,11 @@ class Engine:
                 self._spawn_worker(tcfg)
 
     def restart(self, terminal_id: str) -> None:
-        """Force a full worker restart (as opposed to an in-worker reconnect)."""
+        """Force a full worker restart (as opposed to an in-worker reconnect).
+
+        Never closes the terminal, even one we launched: a restart wants the same terminal
+        back a moment later, not a bounced window.
+        """
         with self._lock:
             tcfg = self._cfg.terminals.get(terminal_id)
             self._stop_worker(terminal_id)
@@ -289,20 +299,28 @@ class Engine:
         self._received_at[tcfg.terminal_id] = time.monotonic()
         log.info("spawned worker pid=%s for %s", process.pid, tcfg.label)
 
-    def _stop_worker(self, terminal_id: str) -> None:
+    def _stop_worker(self, terminal_id: str, *, close_terminal: bool = False) -> None:
         """Graceful stop, escalating to terminate.
 
         Mirrors the shutdown protocol from ``zele-mt5``'s PluginManager: send a stop command,
         join with a timeout, then terminate. The join matters because the worker needs a moment
         to call ``mt5.shutdown()``; killing it outright can leave the terminal's IPC endpoint
-        briefly unusable for the next connection.
+        briefly unusable for the next connection -- and, with ``close_terminal`` set, skips the
+        worker's own chance to close the terminal it launched, which only runs on a graceful
+        exit. That is an accepted gap, not a new one: a forced kill already skips the clean
+        ``mt5.shutdown()`` the same way.
+
+        ``close_terminal`` asks the worker to also close the terminal process, if and only if
+        it was the one that launched it (see :mod:`mt5copier.worker`). True only when we are
+        done with this terminal for good -- stopping the app, or the terminal being
+        unassigned -- never for a restart, which wants it straight back.
         """
         worker = self._workers.get(terminal_id)
         if worker is None:
             return
-        log.info("stopping worker for %s", terminal_id[:8])
+        log.info("stopping worker for %s (close_terminal=%s)", terminal_id[:8], close_terminal)
         try:
-            worker.cmd_q.put_nowait(Command(kind=CommandKind.STOP))
+            worker.cmd_q.put_nowait(Command(kind=CommandKind.STOP, close_terminal=close_terminal))
         except Exception:
             pass
         worker.process.join(timeout=_STOP_JOIN_TIMEOUT_S)

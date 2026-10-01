@@ -185,6 +185,31 @@ def test_sync_respawns_a_dead_worker(engine: Engine) -> None:
     assert engine.spawned.count(TID_A) == 2  # type: ignore[attr-defined]
 
 
+def test_stop_closes_terminals_it_launched(engine: Engine) -> None:
+    """Quitting the app is symmetric with starting it: anything we opened, we close."""
+    engine.sync()
+    worker = engine._workers[TID_A]
+    engine.stop()
+    assert worker.cmd_q.sent[-1].close_terminal is True  # type: ignore[attr-defined]
+
+
+def test_sync_closes_the_terminal_when_a_role_is_removed(engine: Engine, cfg: AppConfig) -> None:
+    """Unassigned for good, not a transient restart -- so done with it if we launched it."""
+    engine.sync()
+    worker = engine._workers[TID_B]
+    cfg.set_role(TID_B, Role.UNASSIGNED)
+    engine.sync()
+    assert worker.cmd_q.sent[-1].close_terminal is True  # type: ignore[attr-defined]
+
+
+def test_restart_never_asks_to_close_the_terminal(engine: Engine) -> None:
+    """A restart wants the same terminal straight back, not a bounced window."""
+    engine.sync()
+    worker = engine._workers[TID_A]
+    engine.restart(TID_A)
+    assert worker.cmd_q.sent[-1].close_terminal is False  # type: ignore[attr-defined]
+
+
 def test_stop_worker_escalates_to_terminate(engine: Engine) -> None:
     """A worker that ignores the stop command must still be cleaned up."""
     engine.sync()

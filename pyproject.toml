@@ -20,6 +20,8 @@ dev = [
     "pyinstaller>=6.11",
     "ruff>=0.14",
     "pytest-asyncio>=1.4.0",
+    "mypy>=2.3.1",
+    "types-psutil>=7.2.2.20260906",
 ]
 
 [build-system]
@@ -41,3 +43,20 @@ ignore = ["E501"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src/mt5copier"]
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_return_any = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = "MetaTrader5"
+ignore_missing_imports = true

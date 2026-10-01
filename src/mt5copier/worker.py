@@ -23,9 +23,13 @@ from __future__ import annotations
 
 import queue
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import psutil
+
+from .discovery import find_terminal_pid
 from .executor import UNREADABLE, Executor, LivePosition, ReadFailure
 from .logging_setup import configure, get_logger
 from .protocol import (
@@ -62,6 +66,12 @@ class _Session:
         self._mt5 = mt5
         self._exe_path = exe_path
         self.connected = False
+        self._launched_pid: int | None = None
+        """The terminal's pid, set only when *this* ``connect()`` call was the one that started
+        it -- i.e. nothing was running at ``exe_path`` the instant before. None means either we
+        are not connected, or the terminal was already running, which makes it the user's to
+        close, not ours. Re-derived on every connect, so a terminal we launched that later
+        crashes and gets relaunched by hand is correctly no longer considered ours."""
 
     def connect(self) -> tuple[bool, str | None]:
         """Call ``initialize(path=...)``. Returns (ok, error message).
@@ -69,7 +79,11 @@ class _Session:
         This is the only place that may launch a terminal: per the MT5 docs, ``initialize()``
         starts the terminal if it is not already running. That is why discovery never calls it
         and why this runs only for terminals the user has explicitly designated.
+
+        Notes whether this call is the one that launched it, by checking just before: an
+        instance already running is the user's own, not ours to ever close later.
         """
+        already_running = find_terminal_pid(self._exe_path) is not None
         try:
             ok = self._mt5.initialize(str(self._exe_path), timeout=_INIT_TIMEOUT_MS)
         except Exception as exc:  # the extension can raise, not just return False
@@ -77,17 +91,44 @@ class _Session:
         if not ok:
             return False, f"initialize() failed: {self._last_error()}"
         self.connected = True
+        self._launched_pid = None if already_running else find_terminal_pid(self._exe_path)
         return True, None
 
-    def disconnect(self) -> None:
-        if not self.connected:
+    def disconnect(self, *, close_terminal: bool = False) -> None:
+        """Close the MT5 session. With ``close_terminal=True``, also close the terminal
+        process itself -- but only the one this session launched.
+
+        Plain disconnect (the reconnect path) must never close the terminal: it would kill the
+        very instance a moment before reconnecting to it. Only a caller that is done with this
+        terminal for good passes ``close_terminal=True``.
+        """
+        if self.connected:
+            try:
+                self._mt5.shutdown()
+            except Exception as exc:
+                log.debug("shutdown() raised, ignoring: %r", exc)
+            finally:
+                self.connected = False
+        if close_terminal:
+            self._close_launched_terminal()
+
+    def _close_launched_terminal(self) -> None:
+        pid = self._launched_pid
+        self._launched_pid = None
+        if pid is None:
             return
         try:
-            self._mt5.shutdown()
+            proc = psutil.Process(pid)
+            if str(proc.exe()).lower() != str(self._exe_path).lower():
+                # The pid was recycled for something else entirely; refuse to touch it.
+                log.warning("pid %s is no longer the terminal; not closing", pid)
+                return
+            proc.terminate()
+            log.info("closed terminal pid=%s (we launched it)", pid)
+        except psutil.NoSuchProcess:
+            pass  # already gone
         except Exception as exc:
-            log.debug("shutdown() raised, ignoring: %r", exc)
-        finally:
-            self.connected = False
+            log.debug("could not close terminal pid=%s: %r", pid, exc)
 
     def _last_error(self) -> str:
         try:
@@ -433,7 +474,7 @@ def run_worker(
     log_file: str,
     poll_interval_ms: int = 250,
     reconnect_backoff_s: list[float] | None = None,
-    _session_factory: Any = None,
+    _session_factory: Callable[[Path], _Session] | None = None,
 ) -> None:
     """Worker process entry point.
 
@@ -456,7 +497,7 @@ def run_worker(
     if _session_factory is None:
         import MetaTrader5 as mt5  # noqa: N813 -- the package's own capitalisation
 
-        def _session_factory(path: Path) -> _Session:  # type: ignore[misc]
+        def _session_factory(path: Path) -> _Session:
             return _Session(mt5, path)
 
     session = _session_factory(Path(exe_path))
@@ -465,6 +506,10 @@ def run_worker(
     attempts = 0
     next_retry_at = 0.0
     running = True
+    close_terminal = False
+    """Set from a STOP command's own flag. Stays False for every other way this loop can end
+    (a crash, the queue breaking, an unflagged STOP) -- an unplanned exit must never surprise
+    the user by closing a terminal they are still looking at."""
 
     def publish(snap: Snapshot) -> None:
         try:
@@ -501,7 +546,8 @@ def run_worker(
                     running = False
                     break
                 if cmd is None or getattr(cmd, "kind", None) is CommandKind.STOP:
-                    wlog.info("stop requested")
+                    close_terminal = bool(getattr(cmd, "close_terminal", False))
+                    wlog.info("stop requested (close_terminal=%s)", close_terminal)
                     running = False
                     break
                 if isinstance(cmd, OrderCommand):
@@ -605,7 +651,7 @@ def run_worker(
             )
         )
     finally:
-        session.disconnect()
+        session.disconnect(close_terminal=close_terminal)
         seq += 1
         publish(Snapshot(terminal_id=terminal_id, state=WorkerState.STOPPED, seq=seq))
         wlog.info("worker stopped")

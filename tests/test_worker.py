@@ -385,6 +385,123 @@ def test_disconnect_is_idempotent() -> None:
     assert mt5.shutdown_calls == 1
 
 
+# --- launching and closing the terminal we started ------------------------------------------
+#
+# connect() can launch the terminal (MT5's own initialize() does that); symmetrically, we must
+# be the one to close it again -- but only the instance we actually started, never one the user
+# already had open.
+
+
+class FakeProcess:
+    """Stand-in for ``psutil.Process``, for the one call ``disconnect()`` makes against it."""
+
+    def __init__(self, pid: int, exe: str = "x.exe") -> None:
+        self.pid = pid
+        self._exe = exe
+        self.terminated = False
+
+    def exe(self) -> str:
+        return self._exe
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+
+def _lookup_that_appears_after_launch(monkeypatch: pytest.MonkeyPatch, pid: int) -> None:
+    """Nothing running before connect(), the given pid running after -- i.e. we launched it."""
+    calls = {"n": 0}
+
+    def fake_lookup(path: Path) -> int | None:
+        calls["n"] += 1
+        return None if calls["n"] == 1 else pid
+
+    monkeypatch.setattr("mt5copier.worker.find_terminal_pid", fake_lookup)
+
+
+def test_connect_remembers_the_pid_it_launched(monkeypatch: pytest.MonkeyPatch) -> None:
+    _lookup_that_appears_after_launch(monkeypatch, 4242)
+    session = _Session(FakeMT5(), Path("x.exe"))
+    session.connect()
+    assert session._launched_pid == 4242
+
+
+def test_connect_does_not_claim_a_terminal_already_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("mt5copier.worker.find_terminal_pid", lambda path: 9999)
+    session = _Session(FakeMT5(), Path("x.exe"))
+    session.connect()
+    assert session._launched_pid is None
+
+
+def test_disconnect_with_close_terminal_closes_what_it_launched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _lookup_that_appears_after_launch(monkeypatch, 4242)
+    proc = FakeProcess(4242, exe="x.exe")
+    monkeypatch.setattr("mt5copier.worker.psutil.Process", lambda pid: proc)
+
+    session = _Session(FakeMT5(), Path("x.exe"))
+    session.connect()
+    session.disconnect(close_terminal=True)
+    assert proc.terminated
+
+
+def test_plain_disconnect_never_closes_the_terminal() -> None:
+    """The reconnect path calls this. Closing the terminal here would kill the very instance
+    it is about to reconnect to."""
+    session = _Session(FakeMT5(), Path("x.exe"))
+    session.connect()
+    session._launched_pid = 4242  # pretend we launched one, to prove the default ignores it
+    session.disconnect()
+    # No psutil.Process patched in at all; reaching for it would raise, so a clean run proves
+    # _close_launched_terminal() was never called.
+
+
+def test_close_terminal_never_touches_one_we_did_not_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("mt5copier.worker.find_terminal_pid", lambda path: 4242)  # already up
+    touched: list[int] = []
+    monkeypatch.setattr(
+        "mt5copier.worker.psutil.Process",
+        lambda pid: touched.append(pid) or FakeProcess(pid),
+    )
+    session = _Session(FakeMT5(), Path("x.exe"))
+    session.connect()
+    session.disconnect(close_terminal=True)
+    assert touched == []
+
+
+def test_close_terminal_refuses_a_pid_the_os_recycled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pid we recorded now belongs to something else entirely -- never act on it."""
+    _lookup_that_appears_after_launch(monkeypatch, 4242)
+    proc = FakeProcess(4242, exe="notepad.exe")  # not the terminal any more
+    monkeypatch.setattr("mt5copier.worker.psutil.Process", lambda pid: proc)
+
+    session = _Session(FakeMT5(), Path("x.exe"))
+    session.connect()
+    session.disconnect(close_terminal=True)
+    assert not proc.terminated
+
+
+def test_close_terminal_tolerates_the_process_already_being_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import psutil
+
+    _lookup_that_appears_after_launch(monkeypatch, 4242)
+
+    def raise_gone(pid: int) -> FakeProcess:
+        raise psutil.NoSuchProcess(pid)
+
+    monkeypatch.setattr("mt5copier.worker.psutil.Process", raise_gone)
+
+    session = _Session(FakeMT5(), Path("x.exe"))
+    session.connect()
+    session.disconnect(close_terminal=True)  # must not raise
+
+
 # --- full worker loop ----------------------------------------------------------------------
 
 
@@ -397,8 +514,16 @@ def drain(q: queue.Queue) -> list[Snapshot]:
             return out
 
 
+_PLAIN_STOP = Command(kind=CommandKind.STOP)
+
+
 def run_until_stopped(
-    mt5: FakeMT5, tmp_path: Path, *, timeout: float = 5.0, poll_ms: int = 50
+    mt5: FakeMT5,
+    tmp_path: Path,
+    *,
+    timeout: float = 5.0,
+    poll_ms: int = 50,
+    stop_command: Command = _PLAIN_STOP,
 ) -> list[Snapshot]:
     """Run the worker in a thread, wait for it to connect, then stop it cleanly."""
     out_q: queue.Queue = queue.Queue()
@@ -422,7 +547,7 @@ def run_until_stopped(
             break
         deadline.wait(0.05)
 
-    cmd_q.put(Command(kind=CommandKind.STOP))
+    cmd_q.put(stop_command)
     thread.join(timeout=timeout)
     assert not thread.is_alive(), "worker did not stop"
     return collected + drain(out_q)
@@ -460,6 +585,30 @@ def test_worker_shuts_down_session_on_exit(tmp_path: Path) -> None:
     mt5 = FakeMT5()
     run_until_stopped(mt5, tmp_path)
     assert mt5.shutdown_calls >= 1
+
+
+def test_worker_closes_the_terminal_it_launched_when_told_to(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _lookup_that_appears_after_launch(monkeypatch, 4242)
+    proc = FakeProcess(4242, exe="x.exe")
+    monkeypatch.setattr("mt5copier.worker.psutil.Process", lambda pid: proc)
+
+    run_until_stopped(
+        FakeMT5(), tmp_path, stop_command=Command(kind=CommandKind.STOP, close_terminal=True)
+    )
+    assert proc.terminated
+
+
+def test_worker_leaves_the_terminal_open_on_a_plain_stop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _lookup_that_appears_after_launch(monkeypatch, 4242)
+    proc = FakeProcess(4242, exe="x.exe")
+    monkeypatch.setattr("mt5copier.worker.psutil.Process", lambda pid: proc)
+
+    run_until_stopped(FakeMT5(), tmp_path)  # the default stop_command, close_terminal=False
+    assert not proc.terminated
 
 
 def test_worker_stops_on_bare_none_sentinel(tmp_path: Path) -> None:

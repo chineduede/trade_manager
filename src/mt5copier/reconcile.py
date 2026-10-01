@@ -401,18 +401,18 @@ def reconcile_slave(
     for ticket in sorted(copied_by_ticket):
         if ticket in master_by_ticket:
             continue
-        c = copied_by_ticket[ticket]
+        stale = copied_by_ticket[ticket]
         out.append(
             Action(
                 kind=ActionKind.CLOSE,
                 terminal_id=cfg.terminal_id,
                 master_ticket=ticket,
-                master_symbol=c.slave_symbol,
-                slave_symbol=c.slave_symbol,
-                type=c.type,
-                master_volume=c.master_volume,
-                slave_ticket=c.slave_ticket,
-                volume=c.volume,
+                master_symbol=stale.slave_symbol,
+                slave_symbol=stale.slave_symbol,
+                type=stale.type,
+                master_volume=stale.master_volume,
+                slave_ticket=stale.slave_ticket,
+                volume=stale.volume,
             )
         )
 
@@ -541,21 +541,21 @@ def reconcile_slave_orders(
     for ticket in sorted(copied_by_ticket):
         if ticket in resting:
             continue
-        c = copied_by_ticket[ticket]
+        stale = copied_by_ticket[ticket]
         filled = ticket in position_tickets
         out.append(
             Action(
                 kind=ActionKind.ORDER_FILLED if filled else ActionKind.CANCEL,
                 terminal_id=cfg.terminal_id,
                 master_ticket=ticket,
-                master_symbol=c.slave_symbol,
-                slave_symbol=c.slave_symbol,
-                type=c.order_type.direction,
-                order_type=c.order_type,
-                master_volume=c.master_volume,
-                entry=c.entry,
-                slave_ticket=c.slave_ticket,
-                volume=c.volume,
+                master_symbol=stale.slave_symbol,
+                slave_symbol=stale.slave_symbol,
+                type=stale.order_type.direction,
+                order_type=stale.order_type,
+                master_volume=stale.master_volume,
+                entry=stale.entry,
+                slave_ticket=stale.slave_ticket,
+                volume=stale.volume,
                 skip_reason=SkipReason.NOTHING_TO_SEND if filled else None,
             )
         )
@@ -668,9 +668,38 @@ class BeliefStore(Protocol):
     def positions(self, terminal_id: str | None = None) -> list[CopiedPosition]: ...
     def orders(self, terminal_id: str | None = None) -> list[CopiedOrder]: ...
     def get_position(self, terminal_id: str, master_ticket: int) -> CopiedPosition | None: ...
-    def remember_position(self, **kw: Any) -> Any: ...
-    def remember_order(self, **kw: Any) -> Any: ...
-    def update(self, terminal_id: str, master_ticket: int, **changes: Any) -> Any: ...
+
+    def remember_position(
+        self,
+        *,
+        terminal_id: str,
+        master_ticket: int,
+        slave_symbol: str,
+        direction: PositionType,
+        master_volume: float,
+        slave_ticket: int | None = None,
+        slave_volume: float | None = None,
+        synced_sl: float = 0.0,
+        synced_tp: float = 0.0,
+    ) -> object: ...
+
+    def remember_order(
+        self,
+        *,
+        terminal_id: str,
+        master_ticket: int,
+        slave_symbol: str,
+        direction: PositionType,
+        order_type: OrderType,
+        master_volume: float,
+        entry: float = 0.0,
+        slave_ticket: int | None = None,
+        slave_volume: float | None = None,
+        synced_sl: float = 0.0,
+        synced_tp: float = 0.0,
+    ) -> object: ...
+
+    def update(self, terminal_id: str, master_ticket: int, **changes: object) -> object: ...
     def forget(self, terminal_id: str, master_ticket: int) -> None: ...
 
 
@@ -761,7 +790,9 @@ class _MemoryBeliefs:
         self._orders[(terminal_id, master_ticket)] = copy
         return copy
 
-    def update(self, terminal_id: str, master_ticket: int, **changes: Any) -> Any:
+    def update(
+        self, terminal_id: str, master_ticket: int, **changes: object
+    ) -> CopiedPosition | CopiedOrder | None:
         """Apply changes, translating the store's field names to the in-memory ones.
 
         The store calls the filled size ``slave_volume`` and these dataclasses call it
@@ -769,14 +800,22 @@ class _MemoryBeliefs:
         caller can pass one set of changes without knowing which kind it will land on.
         """
         key = (terminal_id, master_ticket)
-        for bucket in (self._positions, self._orders):
-            current = bucket.get(key)  # type: ignore[attr-defined]
-            if current is None:
-                continue
-            renamed = {("volume" if k == "slave_volume" else k): v for k, v in changes.items()}
-            allowed = {k: v for k, v in renamed.items() if k in current.__slots__}
-            bucket[key] = replace(current, **allowed)  # type: ignore[index,arg-type]
-            return bucket[key]
+        renamed = {("volume" if k == "slave_volume" else k): v for k, v in changes.items()}
+
+        current_position = self._positions.get(key)
+        if current_position is not None:
+            allowed = {k: v for k, v in renamed.items() if k in current_position.__slots__}
+            updated_position = replace(current_position, **allowed)  # type: ignore[arg-type]
+            self._positions[key] = updated_position
+            return updated_position
+
+        current_order = self._orders.get(key)
+        if current_order is not None:
+            allowed = {k: v for k, v in renamed.items() if k in current_order.__slots__}
+            updated_order = replace(current_order, **allowed)  # type: ignore[arg-type]
+            self._orders[key] = updated_order
+            return updated_order
+
         return None
 
     def forget(self, terminal_id: str, master_ticket: int) -> None:
@@ -1430,10 +1469,8 @@ class CopyLedger:
         Unassigning a slave stops the copier acting on it, which is all it should mean. If it is
         re-assigned, startup reconciliation matches the rows back up.
         """
-        tracked = {
-            (c.terminal_id, c.master_ticket)
-            for c in (*self._store.positions(), *self._store.orders())
-        }
+        tracked = {(c.terminal_id, c.master_ticket) for c in self._store.positions()}
+        tracked |= {(c.terminal_id, c.master_ticket) for c in self._store.orders()}
         for excluded in (self._excluded, self._excluded_orders):
             for tid in list(excluded):
                 if tid not in slave_ids:
