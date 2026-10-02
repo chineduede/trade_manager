@@ -1,5 +1,6 @@
-"""Websocket push: a bad token is rejected before ``accept()``, fragments arrive on each tick,
-and a connection only ever receives log lines appended after it connected.
+"""Websocket push: a bad token is rejected before ``accept()``, a changed fragment arrives, an
+*unchanged* one is never resent, and a connection only ever receives log lines appended after it
+connected.
 """
 
 from __future__ import annotations
@@ -78,13 +79,42 @@ def test_a_missing_token_is_rejected_too(client: TestClient) -> None:
             pass
 
 
-def test_correct_token_receives_health_then_one_row_fragment(client: TestClient) -> None:
+def test_a_change_after_connecting_sends_the_changed_health_and_row(
+    client: TestClient, engine: FakeEngine
+) -> None:
     with client.websocket_connect("/ws/state?token=test-token&log_offset=0") as ws:
+        engine.blocked_reason = "no master assigned"
+        engine.views_list = [
+            TerminalView(cfg=engine.config.terminals[TID], supervised=True, process_alive=True)
+        ]
         health_frag = ws.receive_text()
         row_frag = ws.receive_text()
     assert 'id="health-bar"' in health_frag
+    assert "no master assigned" in health_frag
     assert f'id="row-{TID}"' in row_frag
     assert "Alpha Broker" in row_frag
+
+
+def test_unchanged_health_and_row_are_never_resent(client: TestClient) -> None:
+    """Regression test: the health bar and every row were being unconditionally re-sent --
+    and therefore DOM-replaced, and flashed by the page's own flash-on-update affordance -- on
+    every single tick regardless of whether anything had changed. With nothing in the engine
+    changing, the only thing that should ever arrive is the log line written below; if health
+    or a row were still being resent, one of *those* would be the first message received here,
+    not the log append.
+    """
+    log_path = log_dir() / "copier.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("existing\n")
+    offset = log_path.stat().st_size
+
+    with client.websocket_connect(f"/ws/state?token=test-token&log_offset={offset}") as ws:
+        log_path.write_text(log_path.read_text() + "new line\n")
+        message = ws.receive_text()
+
+    assert "new line" in message
+    assert 'id="health-bar"' not in message
+    assert f'id="row-{TID}"' not in message
 
 
 def test_a_connection_only_sees_log_lines_appended_after_it_connected(client: TestClient) -> None:
@@ -96,14 +126,8 @@ def test_a_connection_only_sees_log_lines_appended_after_it_connected(client: Te
     with client.websocket_connect(
         f"/ws/state?token=test-token&log_offset={offset_at_connect}"
     ) as ws:
-        ws.receive_text()  # first tick: health
-        ws.receive_text()  # first tick: the one row -- no log fragment, nothing new yet
-
         log_path.write_text(log_path.read_text() + "line written after connecting\n")
-
-        ws.receive_text()  # second tick: health
-        ws.receive_text()  # second tick: the one row
-        append_frag = ws.receive_text()  # second tick: the new log line
+        append_frag = ws.receive_text()
 
     assert "line written after connecting" in append_frag
     assert "line before the dashboard connected" not in append_frag

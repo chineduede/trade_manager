@@ -112,7 +112,7 @@ def test_render_log_lines_colors_each_line_by_its_level() -> None:
 def test_render_log_lines_falls_back_on_an_unrecognised_line() -> None:
     """A traceback continuation line has no level prefix at all -- it must not be misclassified
     as some arbitrary level, and must not crash the renderer."""
-    html = render_log_lines("  File \"engine.py\", line 42, in _reconcile\n")
+    html = render_log_lines('  File "engine.py", line 42, in _reconcile\n')
     assert '<span class="log-line log-line-plain">' in html
 
 
