@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from rich.markup import escape
 from rich.text import Text
@@ -750,14 +750,81 @@ class CopierApp(App[None]):
         self._persist_and_sync()
 
     def action_unassign(self) -> None:
+        """Take the selected terminal's role away -- asking first if that strands open copies.
+
+        Unassigning a slave stops its copies being managed, and unassigning the master also
+        unassigns every slave, so all of theirs go. Either way the person is shown the copies
+        and has to agree, exactly as for a settings edit (:meth:`_apply_settings`).
+        """
         tid = self._selected_id()
         if tid is None:
             return
-        swept = role_actions.unassign(self._cfg, tid)
+        # Unreadable reads as nothing to ask about; the engine reads again and refuses.
+        stake = self._engine.copies_at_stake(tid) or {}
+        if not stake:
+            self._commit_unassign(tid, {})
+            return
+
+        cfg = self._cfg.terminals[tid]
+        slaves = [self._cfg.display_name(t.terminal_id) for t in self._cfg.slaves]
+        change = f"unassign {self._cfg.display_name(tid)}"
+        if cfg.role is Role.MASTER and slaves:
+            change += f" (the master), and with it its slaves {', '.join(slaves)}"
+
+        def decided(agreed: bool | None) -> None:
+            if agreed:
+                self._commit_unassign(tid, stake)
+
+        self.push_screen(
+            OrphanConfirmScreen(
+                copies=self._by_name(stake),
+                changes=change,
+                live=not self._cfg.dry_run,
+                halt=self.action_panic,
+                unassigning=True,
+            ),
+            decided,
+        )
+
+    def _commit_unassign(self, tid: str, given_up: Mapping[str, Sequence[OpenCopy]]) -> None:
+        was_master = self._cfg.terminals[tid].role is Role.MASTER
+        swept = [t.terminal_id for t in self._cfg.slaves] if was_master else []
+        refusal = self._engine.unassign(tid, orphan=self._agreed(given_up))
+        if refusal is not None:
+            self.notify(
+                f"{self._cfg.display_name(tid)} was not unassigned: {refusal}", severity="error"
+            )
+            return
         if swept:
-            names = ", ".join(self._cfg.terminals[t].label or t[:8] for t in swept)
+            names = ", ".join(self._cfg.display_name(t) for t in swept)
             self.notify(f"master unassigned; also unassigned slave(s) left with no master: {names}")
         self._persist_and_sync()
+        self._report_given_up(given_up)
+
+    def _by_name(self, stake: Mapping[str, Sequence[OpenCopy]]) -> dict[str, list[OpenCopy]]:
+        return {self._cfg.display_name(t): list(held) for t, held in stake.items()}
+
+    @staticmethod
+    def _agreed(given_up: Mapping[str, Sequence[OpenCopy]]) -> dict[str, list[int]] | None:
+        """What the person agreed to give up, in the form the engine checks it against."""
+        if not given_up:
+            return None
+        return {t: [c.master_ticket for c in held] for t, held in given_up.items()}
+
+    def _report_given_up(self, given_up: Mapping[str, Sequence[OpenCopy]]) -> None:
+        """Say, per slave, which copies were orphaned and are now the person's to close."""
+        for t, held in given_up.items():
+            name = self._cfg.display_name(t)
+            if self._cfg.dry_run:
+                said = f"{len(held)} simulated copies let go; they are no longer managed."
+            else:
+                tickets = [f"#{c.slave_ticket}" for c in held if c.slave_ticket is not None]
+                named = f" ({', '.join(tickets[:5])}{', ...' if len(tickets) > 5 else ''})"
+                said = (
+                    f"{copies_word(len(held))} orphaned{named if tickets else ''}. "
+                    "They stay open and are no longer managed: close them by hand."
+                )
+            self.notify(f"{name}: {said}", severity="warning", timeout=20)
 
     def action_edit_settings(self) -> None:
         """Open the settings form for the selected terminal."""
@@ -809,20 +876,20 @@ class CopierApp(App[None]):
 
         # An unreadable store reads as "nothing to ask about" here, and that is safe: the engine
         # reads it again under its lock and refuses an edit it cannot account for. What is asked
-        # about is only ever a courtesy; the engine is the one that cannot be raced.
-        copies = self._engine.open_copies(new.terminal_id) or []
-        if not copies:
-            done(self._commit_settings(new, outcome, ()))
+        # about is only ever a courtesy; the engine is the one that cannot be raced. For the
+        # master this is every slave's copies when the edit disables it, and nothing otherwise.
+        stake = self._engine.copies_at_stake(new.terminal_id, new) or {}
+        if not stake:
+            done(self._commit_settings(new, outcome, {}))
             return
 
         def decided(agreed: bool | None) -> None:
             if agreed:
-                done(self._commit_settings(new, outcome, copies))
+                done(self._commit_settings(new, outcome, stake))
 
         self.push_screen(
             OrphanConfirmScreen(
-                label=new.label or new.terminal_id[:8],
-                copies=copies,
+                copies=self._by_name(stake),
                 changes=describe_changes(outcome.changes, limit=160),
                 live=not self._cfg.dry_run,
                 halt=self.action_panic,
@@ -831,7 +898,10 @@ class CopierApp(App[None]):
         )
 
     def _commit_settings(
-        self, new: TerminalConfig, outcome: EditOutcome, given_up: Sequence[OpenCopy]
+        self,
+        new: TerminalConfig,
+        outcome: EditOutcome,
+        given_up: Mapping[str, Sequence[OpenCopy]],
     ) -> str | None:
         """Swap the edit in, record it, save it, and say what changed and what was given up.
 
@@ -843,9 +913,7 @@ class CopierApp(App[None]):
         copying is live is the kind of thing that has to be findable afterwards -- and a change
         to the demo-only guard's override is logged as a warning, so it stands out from one.
         """
-        refusal = self._engine.apply_settings(
-            new, orphan=[c.master_ticket for c in given_up] if given_up else None
-        )
+        refusal = self._engine.apply_settings(new, orphan=self._agreed(given_up))
         if refusal is not None:
             return refusal
         guard_moved = any(c.name == LIVE_OVERRIDE for c in outcome.changes)
@@ -858,17 +926,7 @@ class CopierApp(App[None]):
         )
         self._persist_and_sync()
         self.notify(f"{new.label}: {describe_changes(outcome.changes, limit=160)}")
-        if given_up:
-            if self._cfg.dry_run:
-                said = f"{len(given_up)} simulated copies let go; they are no longer managed."
-            else:
-                tickets = [f"#{c.slave_ticket}" for c in given_up if c.slave_ticket is not None]
-                named = f" ({', '.join(tickets[:5])}{', ...' if len(tickets) > 5 else ''})"
-                said = (
-                    f"{copies_word(len(given_up))} orphaned{named if tickets else ''}. "
-                    "They stay open and are no longer managed: close them by hand."
-                )
-            self.notify(f"{new.label}: {said}", severity="warning", timeout=20)
+        self._report_given_up(given_up)
         for warning in advisories(outcome):
             self.notify(warning, severity="warning", timeout=12)
         return None
@@ -912,8 +970,8 @@ class CopierApp(App[None]):
     def action_clear_detection(self) -> None:
         """Forget every believed copy, so the diff starts from nothing.
 
-        Useful when switching master: the old beliefs describe positions that were never ours,
-        and leaving them in would produce a CLOSE for each one.
+        Switching master no longer needs this: unassigning the old one gives up every slave's
+        copies (see :meth:`action_unassign`), so no record of its tickets is left to close.
         """
         self._engine.clear_detection_state()
         self._refresh()

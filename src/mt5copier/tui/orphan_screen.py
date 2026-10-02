@@ -1,8 +1,11 @@
-"""The confirmation shown before a settings change gives up a terminal's open copies.
+"""The confirmation shown before a change gives up open copies: a settings edit, or a role
+being taken away.
 
-Every setting is treated alike: an edit to a terminal that holds copies stops the copier managing
-them. Which edits *would* have been safe under an open copy is a question nobody has to answer,
-so long as the person is shown what they are giving up and agrees. This screen is that showing.
+Every change is treated alike: one that stops the copier managing open copies is only made once
+the person has been shown what they are giving up and agrees. Which edits *would* have been safe
+under an open copy is a question nobody has to answer. This screen is that showing.
+
+Unassigning the master strands every slave's copies at once, so the copies are listed per slave.
 
 It defaults to Cancel. Confirming abandons real positions -- they stay open, and nothing closes
 or moves them any more -- so the resting choice is the one that changes nothing.
@@ -10,7 +13,7 @@ or moves them any more -- so the resting choice is the one that changes nothing.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 
 from rich.markup import escape
 from textual import on
@@ -29,7 +32,11 @@ carries every one, and the count in the title is always the whole number."""
 
 
 class OrphanConfirmScreen(ModalScreen[bool]):
-    """Ask whether to give up a terminal's open copies. Dismisses with True if agreed."""
+    """Ask whether to give up open copies. Dismisses with True if agreed.
+
+    ``copies`` is keyed by the name of the slave that holds them. ``unassigning`` words the
+    screen for a role being taken away rather than a settings edit.
+    """
 
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
@@ -68,27 +75,39 @@ class OrphanConfirmScreen(ModalScreen[bool]):
 
     def __init__(
         self,
-        label: str,
-        copies: Sequence[OpenCopy],
+        copies: Mapping[str, Sequence[OpenCopy]],
         changes: str,
         live: bool,
         halt: Callable[[], None],
+        *,
+        unassigning: bool = False,
     ) -> None:
         super().__init__()
-        self._label = label
-        self._copies = list(copies)
+        self._copies = {name: list(held) for name, held in copies.items() if held}
         self._changes = changes
         self._live = live
         self._halt = halt
+        self._unassigning = unassigning
 
     def compose(self) -> ComposeResult:
-        shown = self._copies[:_LISTED]
-        lines = [escape(describe_copy(c)) for c in shown]
-        if len(self._copies) > len(shown):
-            lines.append(f"... and {len(self._copies) - len(shown)} more (all are in the log)")
+        total = sum(len(held) for held in self._copies.values())
+        grouped = len(self._copies) > 1
+        lines: list[str] = []
+        shown = 0
+        for name, held in self._copies.items():
+            if grouped:
+                lines.append(f"[b]{escape(name)}[/b]")
+            for copy in held:
+                if shown == _LISTED:
+                    break
+                lines.append(("  " if grouped else "") + escape(describe_copy(copy)))
+                shown += 1
+        if total > shown:
+            lines.append(f"... and {total - shown} more (all are in the log)")
+        holders = ", ".join(self._copies)
         with VerticalScroll(id="dialog", can_focus=False):
             yield Static(
-                f"[b]Orphan {copies_word(len(self._copies))} on {escape(self._label)}?[/b]",
+                f"[b]Orphan {copies_word(total)} on {escape(holders)}?[/b]",
                 id="title",
             )
             if not self._live:
@@ -98,7 +117,12 @@ class OrphanConfirmScreen(ModalScreen[bool]):
                     id="dryrun",
                 )
             yield Static(
-                "Changing these settings stops the copier managing what this terminal has open:",
+                (
+                    "Unassigning stops the copier managing what is open on the slaves it affects:"
+                    if self._unassigning
+                    else "Changing these settings stops the copier managing what this terminal "
+                    "has open:"
+                ),
                 id="lead",
             )
             yield Static("\n".join(lines), id="copies")
@@ -110,12 +134,16 @@ class OrphanConfirmScreen(ModalScreen[bool]):
                 id="consequence",
             )
             yield Static(
-                f"[dim]The change:[/dim] {escape(self._changes)}. It applies to every trade "
-                "copied from now on.",
+                f"[dim]The change:[/dim] {escape(self._changes)}."
+                + ("" if self._unassigning else " It applies to every trade copied from now on."),
                 id="changes",
             )
             with Horizontal(id="buttons"):
-                yield Button("Orphan them and apply", variant="error", id="go")
+                yield Button(
+                    "Orphan them and unassign" if self._unassigning else "Orphan them and apply",
+                    variant="error",
+                    id="go",
+                )
                 yield Button("Cancel  esc", id="cancel")
 
     def on_mount(self) -> None:

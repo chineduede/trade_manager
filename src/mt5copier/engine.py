@@ -20,10 +20,11 @@ import queue
 import threading
 import time
 from collections import deque
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from . import role_actions
 from .config import AppConfig, Role, SizingMode, TerminalConfig
 from .logging_setup import get_logger
 from .paths import dryrun_store_path, log_dir, mapping_db_path
@@ -942,23 +943,92 @@ class Engine:
             log.exception("could not read the copies open on %s", terminal_id[:8])
             return None
 
+    def copies_at_stake(
+        self, terminal_id: str, new: TerminalConfig | None = None
+    ) -> dict[str, list[OpenCopy]] | None:
+        """The open copies a change to this terminal would give up, by slave, or None if any of
+        them cannot be read. ``new`` is a settings edit; None means unassigning it.
+
+        Slaves with nothing open are left out, so an empty dict means there is nothing to ask.
+        """
+        with self._lock:
+            return self._stake(terminal_id, new)
+
+    def _stake_ids(self, terminal_id: str, new: TerminalConfig | None) -> list[str]:
+        """Which slaves' copies a change to this terminal gives up.
+
+        A slave (or anything not the master) only ever stakes its own. The master holds no
+        copies, but every slave's copies hang off it: unassigning it sweeps the slaves along
+        (see :func:`role_actions.unassign`), and disabling it stops anything being mirrored. Any
+        other edit to the master leaves the copies managed, so stakes nothing.
+        """
+        cfg = self._cfg.terminals[terminal_id]
+        if cfg.role is not Role.MASTER:
+            return [terminal_id]
+        losing = new is None or (cfg.enabled and not new.enabled)
+        return [t.terminal_id for t in self._cfg.slaves] if losing else []
+
+    def _stake(
+        self, terminal_id: str, new: TerminalConfig | None
+    ) -> dict[str, list[OpenCopy]] | None:
+        """Caller must hold the lock."""
+        stake: dict[str, list[OpenCopy]] = {}
+        for tid in self._stake_ids(terminal_id, new):
+            held = self._open_copies(tid)
+            if held is None:
+                return None
+            if held:
+                stake[tid] = held
+        return stake
+
+    def _give_up_agreed(
+        self,
+        stake: dict[str, list[OpenCopy]] | None,
+        orphan: Mapping[str, Collection[int]] | None,
+    ) -> str | None:
+        """Give up what is at stake, if it is exactly what the person agreed to. None means done
+        (or nothing was at stake); otherwise why not, with nothing given up.
+
+        ``orphan`` is, per slave, the master tickets of the copies the person was shown. It has
+        to match what is held *now*: a copy that opened while they were deciding is one they
+        were not told about, and giving it up unasked is not what they confirmed.
+
+        Caller must hold the lock, and must make its change before releasing it.
+        """
+        if stake is None:
+            return "its open copies could not be read, so they cannot be given up safely"
+        if not stake:
+            return None
+        if orphan is None:
+            total = sum(len(held) for held in stake.values())
+            return f"{copies_word(total)} would be orphaned; that has to be confirmed"
+        agreed = {tid: set(tickets) for tid, tickets in orphan.items() if tickets}
+        if agreed != {tid: {c.master_ticket for c in held} for tid, held in stake.items()}:
+            return "its open copies changed while you were deciding; try again"
+        if any(self._ledger.inflight_on(tid) for tid in stake):
+            return "commands to this slave are still in flight; try again in a moment"
+        for tid in stake:
+            try:
+                self._give_up_copies(tid)
+            except Exception:
+                log.exception("giving up the open copies on %s failed", tid[:8])
+                return "giving up its open copies failed part-way; nothing was applied (see log)"
+        return None
+
     def apply_settings(
-        self, new: TerminalConfig, *, orphan: Collection[int] | None = None
+        self, new: TerminalConfig, *, orphan: Mapping[str, Collection[int]] | None = None
     ) -> str | None:
         """Swap in an edited terminal, or return why it was refused. None means it went in.
 
         Every edit is one atomic swap, so the drain thread never sees half of one.
 
-        **A terminal that holds copies is only changed by giving them up.** The copier stops
-        managing them: nothing closes them when the master does, moves their stops, or mirrors a
-        partial close, and they stay open on the slave. That replaces a rule per setting -- which
-        ones were safe to change under an open copy, which had to be refused -- with one rule
-        that does not depend on knowing the answer.
-
-        ``orphan`` is the master tickets of the copies the person was shown and agreed to give
-        up. It has to match what is held *now*, exactly: a copy that opened while they were
-        deciding is one they were not told about, and giving it up unasked is not what they
-        confirmed. The refusal names which of the ways it went wrong.
+        **A change that would stop copies being managed is only made by giving them up.** For a
+        slave that is any edit at all: the copier stops managing its copies -- nothing closes
+        them when the master does, moves their stops, or mirrors a partial close -- and they
+        stay open on the slave. That replaces a rule per setting -- which ones were safe to
+        change under an open copy, which had to be refused -- with one rule that does not depend
+        on knowing the answer. For the master it is disabling it, which strands every slave's
+        copies the same way. See :meth:`_give_up_agreed` for what ``orphan`` must hold.
 
         The check, the giving up and the swap happen under one hold of the lock, and the drain
         thread dispatches under the same lock. Doing them in turn would leave a gap for an open
@@ -974,24 +1044,30 @@ class Engine:
                 # replace_terminal refuses this too, but only after the copies had been given
                 # up, and a caller bug must not cost a person their tracking for nothing.
                 raise ValueError("a settings edit cannot change a terminal's role; use set_role")
-            held = self._open_copies(tid)
-            if held is None:
-                return "its open copies could not be read, so they cannot be given up safely"
-            if held:
-                if orphan is None:
-                    return f"{copies_word(len(held))} would be orphaned; that has to be confirmed"
-                if set(orphan) != {c.master_ticket for c in held}:
-                    return "its open copies changed while you were deciding; try again"
-                if self._ledger.inflight_on(tid):
-                    return "commands to this slave are still in flight; try again in a moment"
-                try:
-                    self._give_up_copies(tid)
-                except Exception:
-                    log.exception("giving up the open copies on %s failed", tid[:8])
-                    return (
-                        "giving up its open copies failed part-way; nothing was applied (see log)"
-                    )
+            refusal = self._give_up_agreed(self._stake(tid, new), orphan)
+            if refusal is not None:
+                return refusal
             self._cfg.replace_terminal(new)
+        return None
+
+    def unassign(
+        self, terminal_id: str, *, orphan: Mapping[str, Collection[int]] | None = None
+    ) -> str | None:
+        """Take this terminal's role away, giving up the copies that strands. None means done.
+
+        The same rule as :meth:`apply_settings`, for the same reason. Unassigning a slave stops
+        its copies being managed; unassigning the master also unassigns every slave (see
+        :func:`role_actions.unassign`), so all of theirs go. Before this asked, those copy
+        records stayed behind -- and under the *next* master, whose tickets they do not match,
+        the first tick proposed closing every one of them.
+
+        The caller still has to save the config and :meth:`sync`, which stops the workers.
+        """
+        with self._lock:
+            refusal = self._give_up_agreed(self._stake(terminal_id, None), orphan)
+            if refusal is not None:
+                return refusal
+            role_actions.unassign(self._cfg, terminal_id)
         return None
 
     def _give_up_copies(self, terminal_id: str) -> None:

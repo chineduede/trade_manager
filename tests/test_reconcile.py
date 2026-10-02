@@ -2487,7 +2487,7 @@ def test_agreeing_gives_the_copies_up_and_applies_the_edit(
     eng = live_engine(engine_cfg, tmp_path)
     new = edited(eng, invert=True)
 
-    assert eng.apply_settings(new, orphan=[11, 12]) is None
+    assert eng.apply_settings(new, orphan={TID_SLAVE: [11, 12]}) is None
 
     assert eng.config.terminals[TID_SLAVE] is new
     assert held_by(eng) == [], "no longer tracked"
@@ -2500,7 +2500,7 @@ def test_what_was_given_up_is_reported_as_orphans_and_the_slave_is_not_held(
     the person agreed to it. So the slave goes on copying under its new settings."""
     seed_live_store(tmp_path, stale_row())
     eng = live_engine(engine_cfg, tmp_path)
-    assert eng.apply_settings(edited(eng, risk_percent=0.5), orphan=[11]) is None
+    assert eng.apply_settings(edited(eng, risk_percent=0.5), orphan={TID_SLAVE: [11]}) is None
 
     (orphan,) = eng.orphans(TID_SLAVE)
     assert (orphan.slave_ticket, orphan.symbol, orphan.volume) == (900, "EURUSD", 0.5)
@@ -2516,7 +2516,7 @@ def test_the_orphans_survive_the_next_reconciliation_still_acknowledged(
     eng = live_engine(engine_cfg, tmp_path)
     cmd_q = arm_slave(eng)
     wire_slave(eng, open_positions=(pos(ticket=900, volume=0.5, magic=COPIER_MAGIC),))
-    assert eng.apply_settings(edited(eng, risk_percent=0.5), orphan=[11]) is None
+    assert eng.apply_settings(edited(eng, risk_percent=0.5), orphan={TID_SLAVE: [11]}) is None
 
     eng._reconcile(snap(open_positions=(pos(ticket=11, sl=0.0),)))
 
@@ -2545,7 +2545,7 @@ def test_the_master_trade_is_not_copied_again_after_the_engine_gives_it_up(
     appear, and its row is gone: the next tick would open it again. The master gives it a stop so
     that the re-derived open is a different action from anything reported before."""
     eng, cmd_q = watched_copy_of_11(engine_cfg, tmp_path)
-    assert eng.apply_settings(edited(eng, risk_percent=0.5), orphan=[11]) is None
+    assert eng.apply_settings(edited(eng, risk_percent=0.5), orphan={TID_SLAVE: [11]}) is None
 
     eng._reconcile(snap(open_positions=(pos(ticket=11, sl=1.08),)))
 
@@ -2556,7 +2556,7 @@ def test_a_trade_opened_after_giving_up_is_copied_under_the_new_settings(
     engine_cfg: AppConfig, tmp_path: Path
 ) -> None:
     eng, cmd_q = watched_copy_of_11(engine_cfg, tmp_path)
-    assert eng.apply_settings(edited(eng, risk_percent=0.5), orphan=[11]) is None
+    assert eng.apply_settings(edited(eng, risk_percent=0.5), orphan={TID_SLAVE: [11]}) is None
 
     eng._reconcile(snap(open_positions=(pos(ticket=11, sl=0.0), pos(ticket=12, sl=1.08))))
 
@@ -2573,7 +2573,7 @@ def test_agreeing_to_a_different_set_of_copies_is_refused(
     eng = live_engine(engine_cfg, tmp_path)
     before = eng.config.terminals[TID_SLAVE]
 
-    refusal = eng.apply_settings(edited(eng, invert=True), orphan=[11])
+    refusal = eng.apply_settings(edited(eng, invert=True), orphan={TID_SLAVE: [11]})
 
     assert refusal is not None
     assert "changed while you were deciding" in refusal
@@ -2586,7 +2586,7 @@ def test_agreeing_to_a_copy_that_is_gone_is_refused_too(
 ) -> None:
     seed_live_store(tmp_path, stale_row())
     eng = live_engine(engine_cfg, tmp_path)
-    refusal = eng.apply_settings(edited(eng, invert=True), orphan=[11, 99])
+    refusal = eng.apply_settings(edited(eng, invert=True), orphan={TID_SLAVE: [11, 99]})
     assert refusal is not None
     assert held_by(eng) == [11]
 
@@ -2603,7 +2603,7 @@ def test_it_is_refused_while_a_command_is_still_in_flight(engine: Engine) -> Non
     assert len(cmd_q.sent) == 2, "the second open is out and unanswered"
     before = engine.config.terminals[TID_SLAVE]
 
-    refusal = engine.apply_settings(edited(engine, invert=True), orphan=[11])
+    refusal = engine.apply_settings(edited(engine, invert=True), orphan={TID_SLAVE: [11]})
 
     assert refusal is not None
     assert "in flight" in refusal
@@ -2649,7 +2649,7 @@ def test_a_failure_part_way_is_a_refusal_and_not_a_crash(
 
     monkeypatch.setattr(CopyLedger, "abandon", boom)
 
-    refusal = eng.apply_settings(edited(eng, invert=True), orphan=[11])
+    refusal = eng.apply_settings(edited(eng, invert=True), orphan={TID_SLAVE: [11]})
 
     assert refusal is not None
     assert "part-way" in refusal
@@ -2663,7 +2663,7 @@ def test_a_role_change_is_refused_before_anything_is_given_up(
     seed_live_store(tmp_path, stale_row())
     eng = live_engine(engine_cfg, tmp_path)
     with pytest.raises(ValueError, match="role"):
-        eng.apply_settings(edited(eng, role=Role.UNASSIGNED), orphan=[11])
+        eng.apply_settings(edited(eng, role=Role.UNASSIGNED), orphan={TID_SLAVE: [11]})
     assert held_by(eng) == [11]
 
 
@@ -2676,7 +2676,7 @@ def test_a_dry_run_lets_go_of_its_simulated_copies_and_reports_no_orphans(engine
     assert engine.believed_copies() == 1
     seen = engine.action_total
 
-    assert engine.apply_settings(edited(engine, risk_percent=0.5), orphan=[11]) is None
+    assert engine.apply_settings(edited(engine, risk_percent=0.5), orphan={TID_SLAVE: [11]}) is None
 
     assert engine.believed_copies() == 0
     assert engine.orphans() == []
@@ -2703,3 +2703,119 @@ def test_the_check_and_the_swap_happen_under_the_drain_threads_lock(engine: Engi
     assert done.wait(2)
     worker.join()
     assert engine.config.terminals[TID_SLAVE].risk_percent == 0.5
+
+
+# --- unassigning gives up open copies, the same way a settings edit does ----------------------
+
+
+def stake_tickets(eng: Engine, terminal_id: str, new: TerminalConfig | None = None) -> object:
+    stake = eng.copies_at_stake(terminal_id, new)
+    assert stake is not None
+    return {tid: [c.master_ticket for c in held] for tid, held in stake.items()}
+
+
+def test_unassigning_a_slave_with_copies_is_refused_until_it_is_agreed_to(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    seed_live_store(tmp_path, stale_row())
+    eng = live_engine(engine_cfg, tmp_path)
+
+    refusal = eng.unassign(TID_SLAVE)
+
+    assert refusal is not None and "1 open copy" in refusal
+    assert eng.config.terminals[TID_SLAVE].role is Role.SLAVE, "nothing changed"
+    assert held_by(eng) == [11], "and nothing was let go"
+
+
+def test_agreeing_unassigns_the_slave_and_lists_its_copies_as_orphans(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    seed_live_store(tmp_path, stale_row())
+    eng = live_engine(engine_cfg, tmp_path)
+
+    assert eng.unassign(TID_SLAVE, orphan={TID_SLAVE: [11]}) is None
+
+    assert eng.config.terminals[TID_SLAVE].role is Role.UNASSIGNED
+    assert eng.config.terminals[TID_MASTER].role is Role.MASTER
+    assert held_by(eng) == [], "no record is left behind to act on later"
+    assert [o.slave_ticket for o in eng.orphans(TID_SLAVE)] == [900]
+
+
+def test_unassigning_a_slave_with_nothing_open_asks_nothing(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    eng = live_engine(engine_cfg, tmp_path)
+    assert eng.copies_at_stake(TID_SLAVE) == {}
+    assert eng.unassign(TID_SLAVE) is None
+    assert eng.config.terminals[TID_SLAVE].role is Role.UNASSIGNED
+
+
+def test_unassigning_the_master_stakes_every_slaves_copies(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    """The master holds none itself, but unassigning it unassigns its slaves, so theirs go."""
+    seed_live_store(tmp_path, stale_row())
+    eng = live_engine(engine_cfg, tmp_path)
+
+    assert stake_tickets(eng, TID_MASTER) == {TID_SLAVE: [11]}
+    refusal = eng.unassign(TID_MASTER)
+
+    assert refusal is not None and "confirmed" in refusal
+    assert eng.config.terminals[TID_MASTER].role is Role.MASTER
+    assert eng.config.terminals[TID_SLAVE].role is Role.SLAVE
+
+
+def test_switching_master_no_longer_leaves_records_behind_to_close(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    """The bug this rule closes. Records are filed by master *ticket*, not by master, so under the
+    next master -- which has none of those tickets -- the first tick proposed a CLOSE for every
+    one. Unassigning the old master now gives them up, so there is nothing left to close."""
+    seed_live_store(tmp_path, stale_row())
+    eng = live_engine(engine_cfg, tmp_path)
+
+    assert eng.unassign(TID_MASTER, orphan={TID_SLAVE: [11]}) is None
+
+    assert eng.config.terminals[TID_MASTER].role is Role.UNASSIGNED
+    assert eng.config.terminals[TID_SLAVE].role is Role.UNASSIGNED, "swept with its master"
+    assert held_by(eng) == []
+    assert [o.slave_ticket for o in eng.orphans(TID_SLAVE)] == [900]
+
+
+def test_an_agreement_naming_the_wrong_slave_is_refused(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    seed_live_store(tmp_path, stale_row())
+    eng = live_engine(engine_cfg, tmp_path)
+
+    refusal = eng.unassign(TID_MASTER, orphan={TID_OTHER: [11]})
+
+    assert refusal is not None and "changed while you were deciding" in refusal
+    assert held_by(eng) == [11]
+
+
+def test_disabling_the_master_stakes_every_slaves_copies(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    """A disabled master is not watched, so nothing is mirrored onto its slaves' copies."""
+    seed_live_store(tmp_path, stale_row())
+    eng = live_engine(engine_cfg, tmp_path)
+    off = eng.config.terminals[TID_MASTER].model_copy(update={"enabled": False})
+
+    assert stake_tickets(eng, TID_MASTER, off) == {TID_SLAVE: [11]}
+    assert eng.apply_settings(off) is not None
+    assert eng.config.terminals[TID_MASTER].enabled is True
+
+    assert eng.apply_settings(off, orphan={TID_SLAVE: [11]}) is None
+    assert eng.config.terminals[TID_MASTER].enabled is False
+    assert held_by(eng) == []
+
+
+def test_any_other_edit_to_the_master_stakes_nothing(engine_cfg: AppConfig, tmp_path: Path) -> None:
+    seed_live_store(tmp_path, stale_row())
+    eng = live_engine(engine_cfg, tmp_path)
+    edit = eng.config.terminals[TID_MASTER].model_copy(update={"symbol_suffix": "p"})
+
+    assert eng.copies_at_stake(TID_MASTER, edit) == {}
+    assert eng.apply_settings(edit) is None
+    assert held_by(eng) == [11], "the slave's copies are still managed"

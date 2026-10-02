@@ -64,10 +64,19 @@ re-derived fresh every `connect()`, not carried over from an earlier worker inst
 freshly-launched one closes correctly on unassign, twice, across several back-to-back restart
 cycles with no pid confusion between them.
 
-**The only thing left in the whole live-verification backlog** is the known, still-unplanned
-gap: what disabling the **master** does to its slaves' open copies. The orphan rule only fires
-on the terminal being edited, and a master holds no copies of its own, so today nothing asks
-and nothing is known to happen — this needs a design decision before it needs a test.
+**The last gap in the live-verification backlog — what removing a role does to open copies —
+was decided and built on 2026-10-02 (option "A": ask, then give them up).** Tracing it turned up
+a real hazard as well as a missing question: copy records are filed by master *ticket*, not by
+master, and unassigning kept them. So after switching masters, the first tick under the new one
+found none of the old tickets and proposed a CLOSE for every copy on every slave — real closes,
+in live mode, that nobody asked for. Now every change that strands copies goes through the same
+rule settings edits already used (`Engine.copies_at_stake` / `Engine.unassign` /
+`apply_settings`): unassigning a slave stakes its copies; unassigning the master (which sweeps
+its slaves) or disabling it stakes every slave's. The person sees them, per slave, and has to
+agree; agreeing gives them up as acknowledged orphans, so no record outlives its master. Unit
+covered, and **confirmed on a demo run 2026-10-02**: unassign a master over a live copy, assign
+a new master, nothing closes. Recording the master on each copy record (so a foreign ticket can
+never match) is left for multi-master, which needs it anyway.
 
 Everything in "Safety rails" under Stage 2c is now built — the demo-only guard landed with
 Stage 2b deliberately, in the same commit as the first code able to send.
@@ -1177,6 +1186,20 @@ outranks the others in importance — that's still the user's call each time thi
   copying account-wide rather than acting on one position. Needs its own semantics settled
   (per-slave? what each trigger actually does — pause new copies, or close everything) before
   anything is built.
+
+  **Margin checks belong here (parked 2026-10-02).** MT5 can price a trade's margin before it
+  is sent (`order_calc_margin(action, symbol, volume, price)`, in the account currency), and
+  every snapshot already carries `margin_free` (unused so far; `account_info()` also gives
+  `margin` and `margin_level`). So the executor could, after sizing and before sending, compute
+  "this copy needs $X, which is Y% of free margin", show it, and enforce a per-slave limit.
+  Undecided, to settle alongside the other prop-firm rules: what an over-limit trade does
+  (refuse it, shrink it to fit — which copies at less risk than asked — or only report it), and
+  whether there is a default limit. Motivating incident: on 2026-10-02 a first trade on a
+  freshly selected symbol (BlackBull, EURGBPp) was sized at 279 lots, capped to 100 by
+  `volume_max`, and only stopped by the broker's `NO_MONEY`. The likely cause is
+  `order_calc_profit` answering wrongly before the symbol's prices were ready (unconfirmed);
+  either a margin limit or a sanity check on that number would have caught it before sending.
+  Until then, a per-slave **Max lot** is the backstop.
 - **Post trades to Telegram.** Notify a channel/bot when a copy opens, closes, or modifies.
   Read-only with respect to trading — it must never become a control surface, nothing it does
   can feed back into a trading decision — so it's lower-risk than the two above, but still needs

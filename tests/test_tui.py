@@ -8,7 +8,7 @@ trades on the wrong account.
 
 from __future__ import annotations
 
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from pathlib import Path
 
 import pytest
@@ -122,22 +122,65 @@ class StubEngine:
         copies = self.copies.get(terminal_id, [])
         return None if copies is None else list(copies)
 
-    def apply_settings(
-        self, new: TerminalConfig, *, orphan: Collection[int] | None = None
+    def copies_at_stake(
+        self, terminal_id: str, new: TerminalConfig | None = None
+    ) -> dict[str, list[OpenCopy]] | None:
+        """The real engine's rule: a slave stakes its own copies; the master stakes every
+        slave's when unassigned (``new`` None) or disabled, and nothing otherwise."""
+        cfg = self._cfg.terminals[terminal_id]
+        if cfg.role is not Role.MASTER:
+            ids = [terminal_id]
+        elif new is None or (cfg.enabled and not new.enabled):
+            ids = [t.terminal_id for t in self._cfg.slaves]
+        else:
+            ids = []
+        stake: dict[str, list[OpenCopy]] = {}
+        for tid in ids:
+            held = self.open_copies(tid)
+            if held is None:
+                return None
+            if held:
+                stake[tid] = held
+        return stake
+
+    def _give_up(
+        self, stake: dict[str, list[OpenCopy]] | None, orphan: Mapping[str, Collection[int]] | None
     ) -> str | None:
-        """The real engine's contract: a slave that holds copies is only changed by giving them
-        up, and only when the ones agreed to are exactly the ones held now."""
-        held = self.open_copies(new.terminal_id)
-        if held is None:
+        """The real engine's contract: copies are only given up when the ones agreed to are
+        exactly the ones held now."""
+        if stake is None:
             return "its open copies could not be read, so they cannot be given up safely"
-        if held:
-            if orphan is None:
-                return f"{copies_word(len(held))} would be orphaned; that has to be confirmed"
-            if set(orphan) != {c.master_ticket for c in held}:
-                return "its open copies changed while you were deciding; try again"
-            self.given_up.append((new.terminal_id, sorted(orphan)))
-            self.copies[new.terminal_id] = []
+        if not stake:
+            return None
+        if orphan is None:
+            total = sum(len(h) for h in stake.values())
+            return f"{copies_word(total)} would be orphaned; that has to be confirmed"
+        agreed = {t: set(tickets) for t, tickets in orphan.items() if tickets}
+        if agreed != {t: {c.master_ticket for c in h} for t, h in stake.items()}:
+            return "its open copies changed while you were deciding; try again"
+        for tid in stake:
+            self.given_up.append((tid, sorted(agreed[tid])))
+            self.copies[tid] = []
+        return None
+
+    def apply_settings(
+        self, new: TerminalConfig, *, orphan: Mapping[str, Collection[int]] | None = None
+    ) -> str | None:
+        refusal = self._give_up(self.copies_at_stake(new.terminal_id, new), orphan)
+        if refusal is not None:
+            return refusal
         self._cfg.replace_terminal(new)
+        return None
+
+    def unassign(
+        self, terminal_id: str, *, orphan: Mapping[str, Collection[int]] | None = None
+    ) -> str | None:
+        from mt5copier import role_actions
+
+        refusal = self._give_up(self.copies_at_stake(terminal_id), orphan)
+        if refusal is not None:
+            return refusal
+        role_actions.unassign(self._cfg, terminal_id)
         return None
 
 
@@ -1776,3 +1819,96 @@ async def test_the_override_dialog_is_usable_on_an_80_by_24_terminal(app: Copier
         assert region.y + region.height <= 24
         drawn = html.unescape(app.export_screenshot()).replace("\xa0", " ")
         assert "Turn ON" in drawn
+
+
+# --- unassigning over open copies asks first --------------------------------------------------
+
+
+async def _press_unassign_on(app: CopierApp, pilot: object, terminal_id: str) -> None:
+    app.query_one("#terminals").move_cursor(row=row_of(app, terminal_id))
+    await pilot.press("u")  # type: ignore[attr-defined]
+    await pilot.pause()  # type: ignore[attr-defined]
+
+
+async def test_unassigning_a_slave_with_copies_asks_and_cancel_changes_nothing(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    async with app.run_test(size=(100, 40)) as pilot:
+        cfg.set_role(TID_MASTER, Role.MASTER)
+        cfg.set_role(TID_SLAVE, Role.SLAVE)
+        app._refresh()
+        app._engine.copies[TID_SLAVE] = [copy_of(11, 900, "EURGBPp", 1.5)]  # type: ignore[attr-defined]
+        await _press_unassign_on(app, pilot, TID_SLAVE)
+
+        question = app.screen
+        assert isinstance(question, OrphanConfirmScreen)
+        assert "Orphan 1 open copy on Beta Broker" in _text(question, "#title")
+        assert "#900" in _text(question, "#copies")
+        assert "Unassigning" in _text(question, "#lead")
+        assert "unassign" in str(question.query_one("#go", Button).label).lower()
+
+        await pilot.press("escape")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].role is Role.SLAVE
+        assert app._engine.given_up == []  # type: ignore[attr-defined]
+
+
+async def test_agreeing_unassigns_the_slave_and_says_what_to_close(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    async with app.run_test(size=(100, 40)) as pilot:
+        cfg.dry_run = False
+        cfg.set_role(TID_MASTER, Role.MASTER)
+        cfg.set_role(TID_SLAVE, Role.SLAVE)
+        app._refresh()
+        app._engine.copies[TID_SLAVE] = [copy_of(11, 900)]  # type: ignore[attr-defined]
+        await _press_unassign_on(app, pilot, TID_SLAVE)
+
+        app.screen.query_one("#go", Button).press()
+        await pilot.pause()
+
+        assert cfg.terminals[TID_SLAVE].role is Role.UNASSIGNED
+        assert app._engine.given_up == [(TID_SLAVE, [11])]  # type: ignore[attr-defined]
+        assert any("#900" in t and "close them by hand" in t for t in _toasts(app))
+
+
+async def test_unassigning_the_master_asks_about_every_slaves_copies(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    async with app.run_test(size=(100, 40)) as pilot:
+        cfg.set_role(TID_MASTER, Role.MASTER)
+        cfg.set_role(TID_SLAVE, Role.SLAVE)
+        app._refresh()
+        app._engine.copies[TID_SLAVE] = [copy_of(11, 900)]  # type: ignore[attr-defined]
+        await _press_unassign_on(app, pilot, TID_MASTER)
+
+        question = app.screen
+        assert isinstance(question, OrphanConfirmScreen)
+        assert "Beta Broker" in _text(question, "#title"), "named by the slave holding them"
+        assert "Beta Broker" in _text(question, "#changes"), "and it says the slave goes too"
+
+        question.query_one("#go", Button).press()
+        await pilot.pause()
+        assert cfg.terminals[TID_MASTER].role is Role.UNASSIGNED
+        assert cfg.terminals[TID_SLAVE].role is Role.UNASSIGNED
+        assert app._engine.given_up == [(TID_SLAVE, [11])]  # type: ignore[attr-defined]
+
+
+async def test_unassigning_with_nothing_open_asks_nothing(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test() as pilot:
+        cfg.set_role(TID_MASTER, Role.MASTER)
+        app._refresh()
+        await _press_unassign_on(app, pilot, TID_MASTER)
+        assert not isinstance(app.screen, OrphanConfirmScreen)
+        assert cfg.terminals[TID_MASTER].role is Role.UNASSIGNED
+
+
+async def test_the_unassign_button_asks_too(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test(size=(180, 40)) as pilot:
+        cfg.set_role(TID_MASTER, Role.MASTER)
+        cfg.set_role(TID_SLAVE, Role.SLAVE)
+        app._refresh()
+        app._engine.copies[TID_SLAVE] = [copy_of(11, 900)]  # type: ignore[attr-defined]
+        await _click_cell(app, pilot, TID_SLAVE, "action")
+        assert isinstance(app.screen, OrphanConfirmScreen)
+        assert cfg.terminals[TID_SLAVE].role is Role.SLAVE

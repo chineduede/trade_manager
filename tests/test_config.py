@@ -523,3 +523,47 @@ def test_symbol_map_is_saved_beside_the_other_symbol_fields(tmp_path: Path) -> N
     save(cfg, path)
     keys = list(json.loads(path.read_text(encoding="utf-8"))["terminals"]["A" * 32])
     assert keys.index("symbol_suffix") < keys.index("symbol_map") < keys.index("symbol_whitelist")
+
+
+def test_a_config_saved_with_custom_name_still_loads_with_every_setting(tmp_path: Path) -> None:
+    """The regression that reset a real config on 2026-10-02: a development build saved
+    ``custom_name`` on every terminal, the field was then removed, and the next load failed and
+    started from defaults -- dry run back on, roles and risk settings gone."""
+    path = tmp_path / "config.json"
+    master_tid, slave_tid = "A" * 32, "B" * 32
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "dry_run": False,
+                "copying_enabled": True,
+                "terminals": {
+                    master_tid: {
+                        "terminal_id": master_tid,
+                        "label": "Master",
+                        "role": "master",
+                        "custom_name": "",
+                    },
+                    slave_tid: {
+                        "terminal_id": slave_tid,
+                        "label": "Slave",
+                        "role": "slave",
+                        "risk_cash": 300.0,
+                        "custom_name": "My Funded",
+                        "last_login": 42,
+                        "last_server": "Broker-Live",
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    cfg = load(path)
+
+    assert cfg.dry_run is False
+    assert cfg.copying_enabled is True
+    assert cfg.terminals[slave_tid].role is Role.SLAVE
+    assert cfg.terminals[slave_tid].risk_cash == 300.0
+    assert cfg.display_name(slave_tid) == "My Funded", "a name that was set is kept, by account"
+    assert not list(tmp_path.glob("*.bad-*.json")), "nothing was treated as corrupt"

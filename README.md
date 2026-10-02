@@ -48,7 +48,7 @@ dist/mt5copier.exe
 |---|---|
 | `m` | Make the selected terminal the Master. Refused while another terminal is the master: unassign that one first |
 | `s` | Make the selected terminal a Slave (needs a master) |
-| `u` | Unassign. Unassigning the master also unassigns its slaves |
+| `u` | Unassign. Unassigning the master also unassigns its slaves. **If that leaves open copies unmanaged, it asks first** and lists them per slave; agreeing orphans them (they stay open, for you to close by hand) |
 | `e` | Edit the selected terminal's settings: sizing, the no-stop policy, the copy flags, `invert`, and its symbol prefix, suffix, map and filters. **Saving any change to a slave that has open copies first asks, and if you agree those copies are orphaned:** they stay open on the slave, but the copier stops managing them (no closes, stop moves or partials), and the master's trades for them are not copied again. In the form `ctrl+s` saves, `esc` cancels, and `F9` still halts copying |
 | `l` | Turn the selected slave's live-trading override on or off — the demo-only guard's override. **On** needs the terminal's name typed out in full; off takes one press. While any terminal has it on, the status bar says `NON-DEMO ALLOWED` |
 | `r` | Rescan for terminals |

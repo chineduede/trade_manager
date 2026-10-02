@@ -39,7 +39,7 @@ log = get_logger(__name__)
 
 SCHEMA_VERSION = 2
 
-_REMOVED_TERMINAL_FIELDS = ("default_sl_points",)
+_REMOVED_TERMINAL_FIELDS = ("default_sl_points", "custom_name")
 """Fields dropped from :class:`TerminalConfig`, stripped on load.
 
 The schema is ``extra="forbid"``, so a key that no longer exists would fail validation, and
@@ -428,6 +428,15 @@ def _migrate(raw: dict[str, object]) -> dict[str, object]:
     for entry in terminals.values():
         if not isinstance(entry, dict):
             continue
+        # ``custom_name`` was a per-terminal name, briefly saved by a development build before
+        # names moved to the account (see :func:`account_key`). Keep any that were set by filing
+        # them under the account the terminal was last logged into, then drop the field.
+        name = entry.get("custom_name")
+        key = account_key(entry.get("last_login"), entry.get("last_server"))
+        if isinstance(name, str) and name.strip() and key is not None:
+            names = raw.setdefault("account_names", {})
+            if isinstance(names, dict):
+                names.setdefault(key, name.strip())
         for field_name in _REMOVED_TERMINAL_FIELDS:
             if entry.pop(field_name, None) is not None:
                 log.info("dropped retired config field %r", field_name)
