@@ -40,6 +40,7 @@ from .protocol import (
     OrderType,
     PendingOrder,
     Position,
+    PositionLive,
     PositionType,
     Snapshot,
     WorkerState,
@@ -361,7 +362,7 @@ class _Session:
                 connect_attempts=attempts,
             )
 
-        open_positions = self._read_positions()
+        open_positions, live_positions = self._read_positions()
         pending_orders = self._read_orders()
 
         # A terminal can be reachable while its broker link is down; report that distinctly
@@ -380,12 +381,17 @@ class _Session:
             equity=getattr(account, "equity", None),
             margin_free=getattr(account, "margin_free", None),
             leverage=getattr(account, "leverage", None),
+            margin=_opt_float(account, "margin"),
+            margin_level=_opt_float(account, "margin_level"),
+            profit=_opt_float(account, "profit"),
             trade_allowed=getattr(terminal, "trade_allowed", None),
             trade_mode=getattr(account, "trade_mode", None),
             terminal_connected=broker_up,
             terminal_build=getattr(terminal, "build", None),
+            ping_last_us=_opt_int(terminal, "ping_last"),
             positions=None if open_positions is None else len(open_positions),
             open_positions=open_positions,
+            live_positions=live_positions,
             pending_orders=pending_orders,
             error=None if broker_up else "terminal not connected to broker",
             connect_attempts=attempts,
@@ -429,8 +435,12 @@ class _Session:
                 return None
         return tuple(out)
 
-    def _read_positions(self) -> tuple[Position, ...] | None:
-        """Read the open positions, or None if they could not be read.
+    def _read_positions(
+        self,
+    ) -> tuple[tuple[Position, ...] | None, tuple[PositionLive, ...] | None]:
+        """Read the open positions and their live values, or ``(None, None)`` if they could
+        not be read. One ``positions_get()`` call fills both: the live half was always in the
+        reply and used to be thrown away.
 
         Replaces the ``positions_total()`` count rather than adding to it: the list already
         carries the count, and one IPC round-trip per tick is cheaper than two.
@@ -443,11 +453,13 @@ class _Session:
             raw = self._mt5.positions_get()
         except Exception as exc:
             log.debug("positions_get() raised: %r", exc)
-            return None
+            return None, None
         if raw is None:
-            return self._empty_or_unknown("positions", "positions_total")
+            empty = self._empty_or_unknown("positions", "positions_total")
+            return empty, empty
 
         out: list[Position] = []
+        live: list[PositionLive] = []
         for p in raw:
             try:
                 out.append(
@@ -469,8 +481,35 @@ class _Session:
                 # absence from the master's list is what a CLOSE is derived from. Fail the whole
                 # read instead, so this tick is skipped rather than misread.
                 log.warning("unparseable position %r (%s); treating read as failed", p, exc)
-                return None
-        return tuple(out)
+                return None, None
+            live.append(
+                PositionLive(
+                    ticket=out[-1].ticket,
+                    price_current=_opt_float(p, "price_current"),
+                    profit=_opt_float(p, "profit"),
+                    swap=_opt_float(p, "swap"),
+                )
+            )
+        return tuple(out), tuple(live)
+
+
+def _opt_float(obj: object, name: str) -> float | None:
+    """A display-only field, or None if it is missing or not a number. Never raises: these
+    values decorate a snapshot and must not be able to fail one."""
+    value = getattr(obj, name, None)
+    try:
+        return None if value is None else float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _opt_int(obj: object, name: str) -> int | None:
+    """As :func:`_opt_float`, for an integer field."""
+    value = getattr(obj, name, None)
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _backoff_delay(schedule: list[float], attempt: int) -> float:

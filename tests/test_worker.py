@@ -36,6 +36,9 @@ class FakeAccount:
     equity: float = 99_912.5
     margin_free: float = 99_000.0
     leverage: int = 100
+    margin: float = 912.5
+    margin_level: float = 10_949.3
+    profit: float = 32.5
 
 
 @dataclass
@@ -43,6 +46,7 @@ class FakeTerminal:
     connected: bool = True
     trade_allowed: bool = True
     build: int = 4885
+    ping_last: int = 41_250
 
 
 @dataclass
@@ -59,6 +63,9 @@ class FakePosition:
     time: int = 1_700_000_000
     magic: int = 0
     comment: str = ""
+    price_current: float = 1.08620
+    profit: float = 60.0
+    swap: float = -1.25
 
 
 @dataclass
@@ -320,6 +327,84 @@ def test_one_unparseable_position_fails_the_whole_read() -> None:
     session = _Session(FakeMT5(positions=(Broken(),)), Path("x.exe"))  # type: ignore[arg-type]
     session.connect()
     assert session.poll("TID", seq=1, attempts=0).open_positions is None
+
+
+def test_poll_carries_live_values_beside_each_position() -> None:
+    session = _Session(FakeMT5(positions=(FakePosition(ticket=77),)), Path("x"))
+    session.connect()
+    snap = session.poll("TID", seq=1, attempts=0)
+    assert snap.live_positions is not None
+    (live,) = snap.live_positions
+    assert (live.ticket, live.price_current, live.profit, live.swap) == (77, 1.08620, 60.0, -1.25)
+
+
+def test_a_moving_pl_leaves_the_position_itself_unchanged() -> None:
+    """The whole point of keeping live values apart: the reconciler compares positions, and a
+    P/L tick must not look like a modification."""
+    mt5 = FakeMT5(positions=(FakePosition(ticket=77),))
+    session = _Session(mt5, Path("x"))
+    session.connect()
+    first = session.poll("TID", seq=1, attempts=0)
+    mt5.positions = (FakePosition(ticket=77, price_current=1.0900, profit=150.0, swap=-2.0),)
+    second = session.poll("TID", seq=2, attempts=0)
+    assert first.open_positions == second.open_positions
+    assert first.live_positions != second.live_positions
+
+
+def test_live_values_are_unknown_exactly_when_positions_are() -> None:
+    mt5 = FakeMT5()
+    mt5.positions = None
+    mt5.positions_total_value = 3
+    session = _Session(mt5, Path("x.exe"))
+    session.connect()
+    assert session.poll("TID", seq=1, attempts=0).live_positions is None
+    mt5.positions_total_value = 0
+    assert session.poll("TID", seq=2, attempts=0).live_positions == ()
+
+
+def test_a_missing_or_junk_live_value_is_blank_not_a_failed_read() -> None:
+    @dataclass
+    class Sparse(FakePosition):
+        profit: object = None
+        swap: object = "n/a"
+
+    session = _Session(FakeMT5(positions=(Sparse(ticket=5),)), Path("x"))  # type: ignore[arg-type]
+    session.connect()
+    snap = session.poll("TID", seq=1, attempts=0)
+    assert snap.open_positions is not None and len(snap.open_positions) == 1
+    assert snap.live_positions is not None
+    (live,) = snap.live_positions
+    assert live.profit is None and live.swap is None and live.price_current == 1.08620
+
+
+def test_poll_reads_margin_floating_pl_and_ping() -> None:
+    session = _Session(FakeMT5(), Path("x.exe"))
+    session.connect()
+    snap = session.poll("TID", seq=1, attempts=0)
+    assert (snap.margin, snap.margin_level, snap.profit) == (912.5, 10_949.3, 32.5)
+    assert snap.ping_last_us == 41_250
+
+
+def test_a_broker_without_the_display_fields_still_connects() -> None:
+    @dataclass
+    class BareAccount:
+        login: int = 1
+        balance: float = 100.0
+        equity: float = 100.0
+
+    @dataclass
+    class BareTerminal:
+        connected: bool = True
+
+    session = _Session(
+        FakeMT5(account=BareAccount(), terminal=BareTerminal()),  # type: ignore[arg-type]
+        Path("x.exe"),
+    )
+    session.connect()
+    snap = session.poll("TID", seq=1, attempts=0)
+    assert snap.is_live
+    assert snap.margin is None and snap.margin_level is None and snap.profit is None
+    assert snap.ping_last_us is None
 
 
 def test_poll_converts_resting_orders() -> None:

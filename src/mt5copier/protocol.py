@@ -80,6 +80,22 @@ class Position:
         return self.sl != 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class PositionLive:
+    """The per-tick half of a position: what :class:`Position` deliberately leaves out.
+
+    Kept apart so that nothing the reconciler compares changes on every tick. This is for
+    display only -- nothing in ``reconcile.py`` or the ledger may read it. Each value is None
+    when the broker did not supply it, which never fails the read: a missing P/L is a blank
+    cell, whereas a missing position is a CLOSE.
+    """
+
+    ticket: int
+    price_current: float | None = None
+    profit: float | None = None
+    swap: float | None = None
+
+
 class OrderType(IntEnum):
     """MT5's ``ORDER_TYPE_*`` values, restated rather than imported for the same reason as
     :class:`PositionType`."""
@@ -401,10 +417,18 @@ class Snapshot:
     margin_free: float | None = None
     leverage: int | None = None
     trade_allowed: bool | None = None
+    margin: float | None = None
+    """Margin in use, in the account currency. Display only, like the two below."""
+    margin_level: float | None = None
+    """Equity / margin as a percentage. MT5 reports 0 when no margin is in use."""
+    profit: float | None = None
+    """Floating P/L across every open position, in the account currency."""
 
     # From terminal_info()
     terminal_connected: bool | None = None
     terminal_build: int | None = None
+    ping_last_us: int | None = None
+    """``terminal_info().ping_last``: the last ping to the trade server, in microseconds."""
 
     # From positions_get()
     positions: int | None = None
@@ -417,6 +441,11 @@ class Snapshot:
     The distinction is load-bearing: the reconciler derives a CLOSE for every copy it cannot
     find on the master, so feeding it an empty list after a failed read would propose closing
     every copied position at once. Consumers must treat None as "do not reconcile this tick"."""
+
+    live_positions: tuple[PositionLive, ...] | None = None
+    """Floating P/L, current price and swap per open position, read by the same
+    ``positions_get()`` call as ``open_positions`` and None exactly when it is. Display only:
+    see :class:`PositionLive` for why it is not part of :class:`Position`."""
 
     pending_orders: tuple[PendingOrder, ...] | None = None
     """Resting limit/stop orders, with the same None-means-unknown rule as ``open_positions``,

@@ -1158,7 +1158,8 @@ are the design, not a limitation waiting to be lifted.
   `reconcile.py` or the ledger reads. Mixing them in would make every tick look like a
   modification.
 
-  *Phase 1, the data (worker → `Snapshot`, no UI):*
+  *Phase 1, the data (worker → `Snapshot`, no UI) — **built 2026-10-02**, unit-tested; nothing
+  displays it yet:*
   - `PositionLive(ticket, price_current, profit, swap)`, as `Snapshot.live_positions`, with the
     usual rule: `None` means the read failed, not "no positions". This adds no MT5 calls:
     `positions_get()` already returns these fields, and today they are thrown away.
