@@ -10,7 +10,7 @@ and its CLOSE both filled on a real demo account (IC Markets Global master → B
 slave). `dry_run` is **false** in the live config; the executor's demo-only guard sits
 underneath every send. Since then the per-terminal settings editor, the `l` live-override
 dialog, the orphan-on-settings-edit rule, and closing a terminal the copier itself launched (on
-`stop()`/unassign) have all landed and are committed (`master`, 849 tests as of 2026-10-02).
+`stop()`/unassign) have all landed and are committed (`master`, 872 tests as of 2026-10-02).
 
 **Most of the trading logic beyond that first OPEN/CLOSE pair is still unverified against a
 broker** — built and unit-tested, not yet seen filling or refusing for real. "Live verification
@@ -1145,7 +1145,7 @@ favour of making the TUI simpler and better-looking.
 model; `AppConfig`'s one-master rule and `Engine._reconcile()`'s single `self._cfg.master` read
 are the design, not a limitation waiting to be lifted.
 
-- **Terminal detail page — planned 2026-10-02, next up.** More detail per terminal, so it can be
+- **Terminal detail page — planned and built 2026-10-02; needs a demo run.** More detail per terminal, so it can be
   shown visually. The user's choices: live per-position P/L, risk/margin gauges, and copy-health
   stats (equity history was not picked). They live on **a new per-terminal page** (Enter on a
   terminal row opens it; Esc goes back), and the history is **kept for the session only**, in
@@ -1190,7 +1190,7 @@ are the design, not a limitation waiting to be lifted.
     returns a frozen copy. It never gets a reference into the engine's live state, which the
     drain thread changes without a lock against the UI.
 
-  *Phase 3, the page (`tui/terminal_screen.py`):*
+  *Phase 3, the page (`tui/terminal_screen.py`, view-model in `terminal_detail.py`) — **built 2026-10-02**, unit- and Pilot-tested, not yet seen against real terminals. As built: Enter opens it (a mouse click never does, so the button cells stay safe), Esc goes back; prices are shown with decimals read off the prices themselves, since the snapshot carries no `digits`:*
   - Header: name, role, demo/live, connection state, ping, balance → equity, and floating P/L
     in colour.
   - **Positions table**: symbol, side, lots, open price, current price, SL/TP and the distance

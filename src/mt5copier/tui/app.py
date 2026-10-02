@@ -64,6 +64,7 @@ from ..settings_edit import (
 from .live_override_screen import LiveOverrideScreen
 from .orphan_screen import OrphanConfirmScreen
 from .settings_screen import SettingsScreen
+from .terminal_screen import TerminalScreen
 
 log = get_logger(__name__)
 
@@ -194,6 +195,15 @@ class TerminalTable(DataTable[Text]):
         if row_key is not None and column_key is not None:
             self.post_message(self.Clicked(row_key, column_key))
 
+    class OpenRequested(Message):
+        """Enter was pressed on a row: open that terminal's detail page."""
+
+    def action_select_cursor(self) -> None:
+        # Only the key reaches here. A mouse click selects through its own path, so clicking
+        # a button cell twice can never open the page by accident.
+        super().action_select_cursor()
+        self.post_message(self.OpenRequested())
+
 
 class NavItem(Static):
     """One sidebar link. Clicking it does what its number key does."""
@@ -268,6 +278,7 @@ class CopierApp(App[None]):
                     "[b]m[/b] master   [b]s[/b] slave\n"
                     "[b]u[/b] unassign [b]e[/b] settings\n"
                     "[b]d[/b] start/stop copying\n"
+                    "[b]Enter[/b] terminal details\n"
                     "[b]F9[/b] panic halt\n"
                     "[b]?[/b] every key",
                     id="keys",
@@ -1060,6 +1071,14 @@ class CopierApp(App[None]):
             "slave": self.action_set_slave,
             "unassign": self.action_unassign,
         }[row_action(self._cfg, self._cfg.terminals[event.row_key])]()
+
+    @on(TerminalTable.OpenRequested)
+    def action_open_terminal(self) -> None:
+        """Open the selected terminal's detail page. Esc on that page comes back here."""
+        tid = self._selected_id()
+        if tid is None:
+            return
+        self.push_screen(TerminalScreen(self._engine, self._cfg, tid))
 
     @on(DataTable.RowHighlighted)
     def _on_row(self, event: DataTable.RowHighlighted) -> None:

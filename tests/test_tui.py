@@ -15,7 +15,16 @@ import pytest
 from textual.widgets import Button, Checkbox, Input, Select, Static, TextArea
 
 from mt5copier.config import AppConfig, NoStopPolicy, Role, SizingMode, TerminalConfig
+from mt5copier.copy_stats import TerminalStats
 from mt5copier.engine import RecordedAction, RecordedResult, TerminalView
+from mt5copier.protocol import (
+    COPIER_MAGIC,
+    Position,
+    PositionLive,
+    PositionType,
+    Snapshot,
+    WorkerState,
+)
 from mt5copier.reconcile import OpenCopy
 from mt5copier.settings_edit import copies_word
 from mt5copier.store import Orphan
@@ -23,6 +32,7 @@ from mt5copier.tui.app import CopierApp
 from mt5copier.tui.live_override_screen import LiveOverrideScreen
 from mt5copier.tui.orphan_screen import OrphanConfirmScreen
 from mt5copier.tui.settings_screen import SettingsScreen
+from mt5copier.tui.terminal_screen import TerminalScreen
 
 TID_MASTER = "A" * 32
 TID_SLAVE = "B" * 32
@@ -48,6 +58,8 @@ class StubEngine:
         """What the stub says each slave holds. ``None`` is a read that failed."""
         self.given_up: list[tuple[str, list[int]]] = []
         """Each time the engine was agreed a slave's copies could be given up: (slave, tickets)."""
+        self.snapshots: dict[str, Snapshot] = {}
+        self.stats: dict[str, TerminalStats] = {}
 
     def start(self) -> None:
         self.started = True
@@ -65,7 +77,10 @@ class StubEngine:
         self.reconnected.append(terminal_id)
 
     def views(self) -> list[TerminalView]:
-        views = [TerminalView(cfg=t.model_copy(deep=True)) for t in self._cfg.terminals.values()]
+        views = [
+            TerminalView(cfg=t.model_copy(deep=True), snapshot=self.snapshots.get(t.terminal_id))
+            for t in self._cfg.terminals.values()
+        ]
         views.sort(key=lambda v: (v.cfg.label.lower(), v.cfg.terminal_id))
         return views
 
@@ -117,6 +132,9 @@ class StubEngine:
         return sum(1 for r in self.results if not r.result.ok)
 
     # --- the settings editor ----------------------------------------------------------------
+
+    def terminal_stats(self, terminal_id: str) -> TerminalStats:
+        return self.stats.get(terminal_id, TerminalStats())
 
     def open_copies(self, terminal_id: str) -> list[OpenCopy] | None:
         copies = self.copies.get(terminal_id, [])
@@ -1912,3 +1930,155 @@ async def test_the_unassign_button_asks_too(app: CopierApp, cfg: AppConfig) -> N
         await _click_cell(app, pilot, TID_SLAVE, "action")
         assert isinstance(app.screen, OrphanConfirmScreen)
         assert cfg.terminals[TID_SLAVE].role is Role.SLAVE
+
+
+# --- the terminal detail page ----------------------------------------------------------------
+
+
+def _detail_text(app: CopierApp, widget_id: str) -> str:
+    return str(app.screen.query_one(widget_id, Static).render())
+
+
+def _wire_copying(app: CopierApp, cfg: AppConfig) -> None:
+    """A master with one position, and a slave holding its copy plus an unmanaged one."""
+    cfg.terminals[TID_MASTER].role = Role.MASTER
+    cfg.terminals[TID_SLAVE].role = Role.SLAVE
+    engine = app._engine
+    engine.snapshots[TID_MASTER] = Snapshot(  # type: ignore[attr-defined]
+        terminal_id=TID_MASTER,
+        state=WorkerState.CONNECTED,
+        balance=10_000.0,
+        equity=10_120.0,
+        currency="USD",
+        open_positions=(
+            Position(
+                ticket=100,
+                symbol="EURUSD",
+                type=PositionType.BUY,
+                volume=1.0,
+                price_open=1.08500,
+                sl=1.08000,
+            ),
+        ),
+        live_positions=(PositionLive(ticket=100, price_current=1.08620, profit=120.0),),
+    )
+    engine.snapshots[TID_SLAVE] = Snapshot(  # type: ignore[attr-defined]
+        terminal_id=TID_SLAVE,
+        state=WorkerState.CONNECTED,
+        trade_mode=0,
+        balance=5_000.0,
+        equity=5_040.0,
+        margin=500.0,
+        margin_level=1_008.0,
+        margin_free=4_540.0,
+        currency="USD",
+        ping_last_us=41_250,
+        open_positions=(
+            Position(
+                ticket=5001,
+                symbol="EURUSD",
+                type=PositionType.BUY,
+                volume=0.5,
+                price_open=1.08504,
+                sl=1.08000,
+                magic=COPIER_MAGIC,
+            ),
+            Position(
+                ticket=6000, symbol="GBPUSD", type=PositionType.SELL, volume=0.2, price_open=1.27000
+            ),
+        ),
+        live_positions=(
+            PositionLive(ticket=5001, price_current=1.08620, profit=58.0, swap=-0.4),
+            PositionLive(ticket=6000, price_current=1.27100, profit=-20.0),
+        ),
+    )
+    engine.copies[TID_SLAVE] = [  # type: ignore[attr-defined]
+        OpenCopy(master_ticket=100, slave_ticket=5001, symbol="EURUSD", volume=0.5, resting=False)
+    ]
+    engine.stats[TID_SLAVE] = TerminalStats(  # type: ignore[attr-defined]
+        latencies_ms=(120.0, 80.0, 95.0),
+        slippage_points=(4.0,),
+        succeeded=3,
+        refused=1,
+        connected_for_s=125.0,
+    )
+
+
+async def _open(app: CopierApp, pilot: object, terminal_id: str) -> TerminalScreen:
+    app._refresh()
+    table = app.query_one("#terminals")
+    table.move_cursor(row=row_of(app, terminal_id))  # type: ignore[attr-defined]
+    table.focus()
+    await pilot.press("enter")  # type: ignore[attr-defined]
+    await pilot.pause()  # type: ignore[attr-defined]
+    assert isinstance(app.screen, TerminalScreen)
+    return app.screen
+
+
+async def test_enter_opens_the_terminal_page_and_escape_returns(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    _wire_copying(app, cfg)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open(app, pilot, TID_SLAVE)
+        assert screen.terminal_id == TID_SLAVE
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not isinstance(app.screen, TerminalScreen)
+        assert app.focused is app.query_one("#terminals")
+
+
+async def test_the_slave_page_shows_positions_risk_and_health(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    _wire_copying(app, cfg)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open(app, pilot, TID_SLAVE)
+        header = _detail_text(app, "#td-header")
+        assert "Beta Broker" in header
+        assert "DEMO" in header
+        assert "41 ms" in header
+        assert "+$40.00" in header
+
+        account = _detail_text(app, "#td-account")
+        assert "10%" in account, "500 of 5,040 equity is in use"
+        assert "1,008%" in account
+        assert "EURUSD" in account and "GBPUSD" in account
+
+        health = _detail_text(app, "#td-health")
+        assert "median 95 ms" in health
+        assert "+4.0" in health
+        assert "3 ok" in health and "1 refused" in health
+        assert "2m 05s" in health
+
+        table = screen.query_one("#td-positions")
+        assert table.row_count == 2  # type: ignore[attr-defined]
+        links = [str(table.get_row_at(i)[-1]) for i in range(2)]  # type: ignore[attr-defined]
+        assert links == ["copy of #100 (master 1 lots)", "manual / not ours"]
+
+
+async def test_the_master_page_counts_slaves_and_has_no_copy_health(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    _wire_copying(app, cfg)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open(app, pilot, TID_MASTER)
+        table = screen.query_one("#td-positions")
+        assert str(table.get_row_at(0)[-1]) == "on 1/1 slaves"  # type: ignore[attr-defined]
+        assert "nothing to time" in _detail_text(app, "#td-health")
+
+
+async def test_a_terminal_with_no_snapshot_opens_without_crashing(app: CopierApp) -> None:
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _open(app, pilot, TID_BROKEN)
+        assert "not connected" in _detail_text(app, "#td-account")
+
+
+async def test_clicking_a_row_never_opens_the_page(app: CopierApp) -> None:
+    """Only Enter does: the ACTIONS and gear cells are buttons, and a double click on one
+    must not also navigate away."""
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.click("#terminals", offset=(5, 3))
+        await pilot.click("#terminals", offset=(5, 3))
+        await pilot.pause()
+        assert not isinstance(app.screen, TerminalScreen)
