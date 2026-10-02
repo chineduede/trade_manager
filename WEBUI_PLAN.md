@@ -452,6 +452,116 @@ correct polling attributes. 763 tests pass, `ruff`/`ruff format`/`mypy` clean. T
 and whether the pixel aesthetic and responsiveness actually read the way they're meant to, is
 still only verifiable by opening it.
 
+## Stage A, third visual/structural pass -- 2026-10-02
+
+The sidebar rebuild above was still "lacking... dull" and "not easily extensible" per the user,
+after two redesigns already. Asked with concrete ASCII previews again rather than guessing a
+third time (ASCII preview, both a visual-direction and a nav-shape question, `AskUserQuestion`):
+**pixel retro, intensified** (not abandoned) and **a sidebar with a reserved, pinned-bottom slot
+for Stage C's panic control** (not a wider top nav, not an overflow menu).
+
+**Extensibility was a real code smell, not just a feeling -- found concretely in `routes.py` and
+`base.html` before changing anything:**
+- Every page used to be copy-paste: a route + a hand-written `<a href="...?token=...">` added to
+  `base.html`'s nav by hand for each one. Fixed with `routes.py`'s new `NavItem`/`NAV` list --
+  one place that knows what pages exist; `base.html` just loops over whatever `nav` it's given.
+  Stage B/C add `NavItem("settings", "SETTINGS", "/settings")` etc. to that one list and nothing
+  in the template changes.
+- Each page route rebuilt the same `{"token":..., "page":...}` context dict by hand. Replaced
+  with a `_page()` helper in `routes.py`'s closure so a route body only supplies what's actually
+  page-specific (`health=...`, `rows=...`, `log_text=...`).
+- The top nav had no structural room for an "always-reachable panic control" (a
+  `WEBUI_PLAN.md` non-negotiable for Stage C). `base.html` now has an empty
+  `{% block nav_footer %}{% endblock %}` inside a sidebar slot pinned to the bottom via
+  `margin-top: auto` -- Stage C overrides that one block and the control lands in a fixed,
+  on-every-page position with no other template touched. **Left genuinely empty for now, on
+  purpose** -- a dead/fake panic button would be worse than no button on a tool that moves
+  money, so nothing fake was added just to "show" extensibility.
+
+**Visual: pixel retro kept, not replaced, per the user's pick.** What changed, scoped exactly to
+what was asked (grayscale+status elsewhere stays untouched):
+- One new decorative token, `--accent: #4dff8c` (a brighter phosphor green than the validated,
+  deliberately muted `--status-good`) used in exactly two places: the blinking title caret
+  (`.caret`, `@keyframes caret-blink`, respects `prefers-reduced-motion`) and a glow
+  (`box-shadow`) on `.badge-good` only -- the tier a viewer is scanning a table for. It carries
+  no status meaning and must never be reused as a status color; doing so would collide with the
+  data-viz skill's status/ink separation that every earlier pass was careful to preserve.
+- A subtle, fixed, `pointer-events: none` CRT scanline overlay (`repeating-linear-gradient`,
+  ~3.5% opacity) over the whole viewport -- decorative texture, confirmed not to block clicks
+  since `pointer-events: none` removes it from hit-testing regardless of stacking order.
+- No other color, motion, or texture changed -- intentionally, per the user's own pick of
+  "intensified," not "redesigned again."
+
+**Structural layout: top nav replaced by a sidebar.** `.app-shell` (flex row) holding
+`.sidebar` (fixed `--sidebar-width: 220px`, the brand/title, the nav list, the pinned footer
+slot) and `.main` (the page content, unchanged panels/tables/log). Below 640px the sidebar
+flips to a horizontal top bar (`flex-direction: row`, wrapping) rather than a collapsible
+drawer -- deliberately the same "well-established pattern reasoned about without a browser"
+discipline as the first retro pass's breakpoints, not a hamburger-menu-plus-JS-toggle that would
+need a real browser to confirm.
+
+**Verified structurally only, same caveat as every pass before this one:** no browser was
+reachable this session. Verification was the real `TestClient` against the real app (fake
+`Engine`, same fixture pattern as `tests/test_web_routes.py`) with the rendered HTML inspected
+directly for the sidebar/caret/scanline markup, the "current" link, and that partials still come
+back bare -- plus the full suite. 763 tests still pass (no new ones needed -- the existing route
+tests already assert nav/current/partial-is-bare behavior structurally, via `_nav_tag()`, not by
+exact markup, so they kept working through the sidebar rewrite unchanged), `ruff`/`ruff
+format`/`mypy` all clean. The visual result is still unverified until actually opened in a
+browser.
+
+## Stage A, fourth visual pass -- 2026-10-02: a real reference site, a real bug fix, and the first "looks good" since this started
+
+The sidebar from the third pass had one real bug: the active nav link's "pressed button" effect
+(shadow collapses, box translates into where it was) came straight from the old horizontal top
+nav, where it read fine. In a vertical, full-width sidebar list it translated the active link
+4px right/down, knocking it out of column alignment with every link above and below it -- caught
+by the user as "doesn't look properly aligned when clicked." Fixed by dropping the translate
+entirely in favor of an inset glow (`box-shadow: inset 0 0 0 1px ...`), which reads as "pressed"
+without moving the box's edges at all.
+
+**Then the user pointed at a concrete reference, https://tetsuobot.com, as "more or less the
+look I'm aiming for."** Per this document's own rule, that got pulled apart for real rather than
+designed from the name: `WebFetch`/`ctx_fetch_and_index` for the page structure (a terminal/CLI
+aesthetic -- boot-sequence text, `tetsuobot:~$` prompts, ASCII progress bars -- not literally
+8-bit pixel), then the actual live CSS fetched and regex-parsed for real hex colors, font-family
+values, and border-radius/texture keywords, since a markdown conversion of the page would have
+thrown all of that away. Found: `JetBrains Mono` + `Orbitron`, a near-black `#0a0a0f`/`#12121a`
+background, a dominant cyan `#00f0ff` glow accent (used in dozens of `rgba(0,240,255,*)` shadow
+opacities), a sparing magenta `#ff00aa`, small `2-4px` border-radius, and grid/noise/glitch
+texture keywords.
+
+**One open call before touching anything: Tetsuo's palette vs. this project's own validated
+status colors.** Asked rather than assumed, since "never re-derive the status/ink colors" had
+held across all three earlier passes. **Decided: keep the validated `good`/`warning`/`serious`/
+`critical` hexes exactly as they are; adopt only Tetsuo's chrome** (background, ink, fonts,
+cyan/magenta accent, grid texture). Concretely this meant *removing* the previous pass's
+glow-on-`badge-good` touch, not keeping it -- a cyan glow on the "good" badge would have started
+reading as "cyan means good," exactly the status/accent collision the skill's rule exists to
+prevent, now doubly true with a second accent hue (magenta) in play that means nothing at all.
+The decorative accent only ever touches structural chrome now: nav hover/active glow, panel
+edges, the title caret.
+
+**Fonts vendored the same way as before** (fetched once from `fonts.gstatic.com` with a
+browser user-agent, not CDN-loaded) -- `jetbrains-mono.woff2` turned out to be a single variable
+file that Google's own CSS references twice, once per weight declaration (400 and 700 pointing
+at the identical URL); replicated that exactly rather than fetching "two" files that are actually
+one. `orbitron-700.woff2` is the one weight used. Old `press-start-2p.woff2`/`vt323.woff2`
+deleted rather than left as dead weight in `copier.spec`'s directory-level `static/` `datas`
+entry.
+
+**Deliberately left out: the reference site's animated glitch-flicker on its hero title.** That
+reads fine as a one-off landing-page hero line; this title sits in the sidebar of every page of a
+live trading dashboard, permanently in view, and an unreviewable constant flicker risked
+annoyance over flair. Kept the existing static blinking cursor (recolored cyan) instead -- stated
+as a scoping choice, not silently dropped.
+
+**This is the first pass in the whole web-UI saga where opening it for real produced "looks much
+better" instead of a bug report or "still lacking."** Still worth recording plainly: every prior
+"verified structurally, unseen in a browser" caveat in this document was eventually followed by
+either a real bug (the flashing fix) or a redesign ask (this whole chain) once actually opened --
+this is the first time that loop closed clean. 763 tests pass, `ruff`/`ruff format`/`mypy` clean.
+
 ## What this plan deliberately does not cover
 
 Hosting this for anyone not on the same machine, multi-user accounts/roles within the web UI,

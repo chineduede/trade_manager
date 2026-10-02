@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
+<h2 class="content-title">LOG</h2>
 <div id="log-panel" class="panel log-tail"
      hx-get="/partials/log?token={{ token }}" hx-trigger="every 3s" hx-swap="innerHTML">{% include "_log_inner.html" %}</div>
 {% endblock %}

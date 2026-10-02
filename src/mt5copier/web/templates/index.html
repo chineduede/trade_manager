@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
+<h2 class="content-title">HOME</h2>
 <div id="health-bar" class="health-bar panel"
      hx-get="/partials/health?token={{ token }}" hx-trigger="every 2s" hx-swap="innerHTML">
   {% include "_health_inner.html" %}

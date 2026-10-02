@@ -18,7 +18,9 @@ replacing that node outright would leave the observer watching a detached elemen
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
@@ -36,6 +38,25 @@ _TEMPLATES.env.filters["tier_badge"] = badge_for_tier
 LOG_TAIL_LINES = 200
 
 
+@dataclass(frozen=True)
+class NavItem:
+    """One entry in the sidebar. Adding a page is adding one of these plus one route --
+    `base.html` renders the list it's given, it never hardcodes a link itself."""
+
+    slug: str
+    label: str
+    path: str
+
+
+# The single place that knows what pages exist. Stage B/C add SETTINGS / ROLES / OVERRIDE here
+# and nothing in base.html has to change for the link to appear.
+NAV: list[NavItem] = [
+    NavItem("home", "HOME", "/"),
+    NavItem("terminals", "TERMINALS", "/terminals"),
+    NavItem("log", "LOG", "/log"),
+]
+
+
 def _log_path() -> Path:
     return log_dir() / "copier.log"
 
@@ -46,39 +67,38 @@ def build_router(engine: Engine, auth: TokenAuth) -> APIRouter:
     def _token(request: Request) -> str:
         return request.query_params.get("token", "")
 
+    def _page(request: Request, template: str, page: str, **extra: Any) -> HTMLResponse:
+        """Shared context every full page needs (token + the nav list to render) so a route
+        body only ever supplies what's actually page-specific."""
+        return _TEMPLATES.TemplateResponse(
+            request,
+            template,
+            {"token": _token(request), "page": page, "nav": NAV, **extra},
+        )
+
     # --- pages -------------------------------------------------------------------------------
 
     @router.get("/", response_class=HTMLResponse)
     def home(request: Request, _: None = Depends(auth.require)) -> HTMLResponse:
-        return _TEMPLATES.TemplateResponse(
+        return _page(
             request,
             "index.html",
-            {
-                "token": _token(request),
-                "page": "home",
-                "health": engine.health(),
-                "blocked_reason": engine.blocked_reason,
-            },
+            "home",
+            health=engine.health(),
+            blocked_reason=engine.blocked_reason,
         )
 
     @router.get("/terminals", response_class=HTMLResponse)
     def terminals_page(request: Request, _: None = Depends(auth.require)) -> HTMLResponse:
-        return _TEMPLATES.TemplateResponse(
-            request,
-            "terminals.html",
-            {"token": _token(request), "page": "terminals", "rows": all_rows(engine)},
-        )
+        return _page(request, "terminals.html", "terminals", rows=all_rows(engine))
 
     @router.get("/log", response_class=HTMLResponse)
     def log_page(request: Request, _: None = Depends(auth.require)) -> HTMLResponse:
-        return _TEMPLATES.TemplateResponse(
+        return _page(
             request,
             "log.html",
-            {
-                "token": _token(request),
-                "page": "log",
-                "log_text": read_log_tail(_log_path(), max_lines=LOG_TAIL_LINES),
-            },
+            "log",
+            log_text=read_log_tail(_log_path(), max_lines=LOG_TAIL_LINES),
         )
 
     # --- partials, polled by the pages above ------------------------------------------------
