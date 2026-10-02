@@ -10,7 +10,7 @@ and its CLOSE both filled on a real demo account (IC Markets Global master → B
 slave). `dry_run` is **false** in the live config; the executor's demo-only guard sits
 underneath every send. Since then the per-terminal settings editor, the `l` live-override
 dialog, the orphan-on-settings-edit rule, and closing a terminal the copier itself launched (on
-`stop()`/unassign) have all landed and are committed (`master`, 815 tests as of 2026-10-02).
+`stop()`/unassign) have all landed and are committed (`master`, 849 tests as of 2026-10-02).
 
 **Most of the trading logic beyond that first OPEN/CLOSE pair is still unverified against a
 broker** — built and unit-tested, not yet seen filling or refusing for real. "Live verification
@@ -1170,7 +1170,10 @@ are the design, not a limitation waiting to be lifted.
     as "—" and never fails the snapshot. That differs from a position that won't parse, which
     has to fail the whole read.
 
-  *Phase 2, copy-health stats (engine-side, session only):*
+  *Phase 2, copy-health stats (engine-side, session only) — **built 2026-10-02** in
+  `copy_stats.py`, unit-tested; nothing displays it yet. As built: `OrderResult` carries `point`
+  on a filled OPEN/PLACE; uptime is the current connection's length, not a ratio; a command the
+  queue refused counts as a transient failure with no latency; late answers are counted too:*
   - **Latency** = when the result arrived − when the command was sent. `_pending_cmd` already
     holds `sent_at`, so this is one subtraction at the place the result is matched. Kept per
     slave in a ring buffer (around 200 samples) for a sparkline, plus last/median/max.

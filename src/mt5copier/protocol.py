@@ -353,6 +353,9 @@ class OrderResult:
     price: float | None = None
     attempts: int = 0
     error: str | None = None
+    point: float | None = None
+    """The slave symbol's point size, on a filled OPEN or PLACE, so slippage can be told in
+    points without the engine asking the terminal. Display only."""
 
     target_gone: bool = False
     """The position or order this acted on does not exist any more.

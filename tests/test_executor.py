@@ -759,3 +759,15 @@ def test_forgetting_the_cached_symbols_makes_the_next_command_re_read_them() -> 
 
     executor.forget_symbols()
     assert executor.execute(cmd(command_id=3)).ok
+
+
+def test_a_filled_open_reports_the_symbols_point_for_slippage() -> None:
+    result = run(FakeSession())
+    assert result.ok
+    assert result.point == 0.00001
+
+
+def test_a_refused_open_carries_no_point() -> None:
+    result = run(FakeSession(results=[FakeResult(retcode=int(Retcode.INVALID_STOPS))]))
+    assert not result.ok
+    assert result.point is None

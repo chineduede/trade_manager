@@ -26,6 +26,7 @@ from pathlib import Path
 
 from . import role_actions
 from .config import AppConfig, Role, SizingMode, TerminalConfig
+from .copy_stats import StatsBook, TerminalStats
 from .logging_setup import get_logger
 from .paths import dryrun_store_path, log_dir, mapping_db_path
 from .protocol import (
@@ -174,6 +175,8 @@ class Engine:
         self._results: deque[RecordedResult] = deque(maxlen=_RESULT_HISTORY)
         self._failed_total = 0
         self._warned_undispatchable: set[ActionKind] = set()
+        self._stats = StatsBook()
+        """Copy-health numbers for the detail page. Display only; nothing here decides."""
 
         self._dryrun_path = state_path if state_path is not None else dryrun_store_path()
         self._mapping_path = mapping_path if mapping_path is not None else mapping_db_path()
@@ -340,6 +343,7 @@ class Engine:
                 pass
         self._snapshots.pop(terminal_id, None)
         self._received_at.pop(terminal_id, None)
+        self._stats.on_worker_gone(terminal_id)
         # A worker that died or restarted may have missed closes, so its slave has to be
         # matched against the store again before anything is derived for it.
         self._forget_reconciliation(terminal_id)
@@ -392,6 +396,7 @@ class Engine:
                         snap = replace(snap, error=current.error)
                 self._snapshots[snap.terminal_id] = snap
                 self._received_at[snap.terminal_id] = time.monotonic()
+                self._stats.on_state(snap.terminal_id, snap.state, now=time.monotonic())
                 self._reconcile(snap)
 
     # --- Stage 2a: detection ----------------------------------------------------------------
@@ -433,6 +438,7 @@ class Engine:
 
         for tid, ticket in self._ledger.expire_inflight():
             log.error("gave up waiting for #%s on %s", ticket, tid[:8])
+            self._stats.on_expired(tid)
             # If that order did reach the broker, a position exists that we have no record of.
             # Reconciling this slave again is what turns it into a reported orphan instead of
             # a silence -- which is exactly what the expiry message promises.
@@ -467,6 +473,8 @@ class Engine:
         for action in actions:
             self._actions.append(RecordedAction(ts=now, action=action))
             self._action_total += 1
+            if action.skip_reason is not None:
+                self._stats.on_skipped(action.terminal_id, action.skip_reason.value)
             cfg = cfgs.get(action.terminal_id)
             log.info(
                 "%s %s: %s",
@@ -567,9 +575,17 @@ class Engine:
             )
             return
 
+        sent_at = time.monotonic()
         self._pending_cmd[(action.terminal_id, action.master_ticket, action.kind)] = (
             command_id,
-            time.monotonic(),
+            sent_at,
+        )
+        self._stats.on_sent(
+            command_id,
+            sent_at=sent_at,
+            op=action.kind,
+            direction=action.type,
+            master_entry=action.entry,
         )
         log.info("-> %s %s #%s (cmd %s)", cfg.label, action.kind, action.master_ticket, command_id)
 
@@ -604,6 +620,7 @@ class Engine:
             error=error,
         )
         self._record_result(result)
+        self._stats.on_abandoned(result)
         self._ledger.apply_result(result)
 
     def _on_result(self, result: OrderResult) -> None:
@@ -620,6 +637,7 @@ class Engine:
         expected = self._pending_cmd.get(key)
         if expected is None or expected[0] != result.command_id:
             self._record_result(result)
+            self._stats.on_late(result.terminal_id)
             log.error(
                 "dropping result for %s #%s on %s: it answers command %s, we are waiting on %s",
                 result.op,
@@ -631,6 +649,7 @@ class Engine:
             return
         del self._pending_cmd[key]
         self._record_result(result)
+        self._stats.on_result(result, now=time.monotonic())
         if result.ok:
             log.info("%s", result.describe())
         else:
@@ -652,12 +671,18 @@ class Engine:
         cutoff = time.monotonic() - _PENDING_CMD_TTL_S
         for key in [k for k, (_, sent_at) in self._pending_cmd.items() if sent_at < cutoff]:
             del self._pending_cmd[key]
+        self._stats.forget_sent_before(cutoff)
 
     def recent_results(self, limit: int | None = None) -> list[RecordedResult]:
         """Most recent order results, oldest first."""
         with self._lock:
             items = list(self._results)
         return items if limit is None else items[-limit:]
+
+    def terminal_stats(self, terminal_id: str) -> TerminalStats:
+        """This terminal's copy-health numbers for the session, as a read-only copy."""
+        with self._lock:
+            return self._stats.snapshot(terminal_id, now=time.monotonic())
 
     @property
     def failed_total(self) -> int:

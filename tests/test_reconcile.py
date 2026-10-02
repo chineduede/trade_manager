@@ -2819,3 +2819,75 @@ def test_any_other_edit_to_the_master_stakes_nothing(engine_cfg: AppConfig, tmp_
     assert eng.copies_at_stake(TID_MASTER, edit) == {}
     assert eng.apply_settings(edit) is None
     assert held_by(eng) == [11], "the slave's copies are still managed"
+
+
+# --- copy-health statistics ---------------------------------------------------------------------
+
+
+def dispatch_open(eng: Engine, ticket: int = 11) -> OrderCommand:
+    go_live(eng)
+    wire_slave(eng)
+    cmd_q = arm_slave(eng)
+    watch(eng)
+    eng._reconcile(snap(open_positions=(pos(ticket=ticket, price_open=1.08500),)))
+    cmd = cmd_q.sent[-1]
+    assert isinstance(cmd, OrderCommand)
+    return cmd
+
+
+def test_an_answered_open_is_timed_counted_and_measured_for_slippage(engine: Engine) -> None:
+    cmd = dispatch_open(engine)
+    engine._on_result(
+        OrderResult(
+            command_id=cmd.command_id,
+            terminal_id=TID_SLAVE,
+            op=cmd.op,
+            master_ticket=cmd.master_ticket,
+            ok=True,
+            slave_ticket=5001,
+            filled_volume=0.5,
+            price=1.08504,
+            point=0.00001,
+            attempts=2,
+        )
+    )
+    stats = engine.terminal_stats(TID_SLAVE)
+    assert stats.succeeded == 1
+    assert stats.retried == 1
+    assert len(stats.latencies_ms) == 1
+    assert stats.latencies_ms[0] >= 0
+    assert stats.slippage_points == pytest.approx((4.0,)), "a buy filled 4 points higher"
+
+
+def test_a_late_answer_is_counted_as_dropped_not_as_an_outcome(engine: Engine) -> None:
+    cmd = dispatch_open(engine)
+    answer(engine, cmd, command_id=cmd.command_id + 99)
+    stats = engine.terminal_stats(TID_SLAVE)
+    assert stats.dropped_late == 1
+    assert stats.answered == 0
+
+
+def test_a_command_the_queue_refused_counts_as_a_transient_failure(engine: Engine) -> None:
+    go_live(engine)
+    wire_slave(engine)
+    arm_slave(engine, accept=False)
+    watch(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
+    stats = engine.terminal_stats(TID_SLAVE)
+    assert stats.failed_transient == 1
+    assert stats.latencies_ms == ()
+
+
+def test_skipped_decisions_are_counted_by_reason(engine: Engine) -> None:
+    wire_slave(engine)
+    engine._reconcile(snap(open_positions=(pos(ticket=11), pos(ticket=12))))
+    stats = engine.terminal_stats(TID_SLAVE)
+    assert stats.skipped == ((SkipReason.PREEXISTING.value, 2),)
+
+
+def test_the_stats_are_a_copy_the_ui_cannot_disturb(engine: Engine) -> None:
+    cmd = dispatch_open(engine)
+    before = engine.terminal_stats(TID_SLAVE)
+    answer(engine, cmd)
+    assert before.answered == 0
+    assert engine.terminal_stats(TID_SLAVE).answered == 1

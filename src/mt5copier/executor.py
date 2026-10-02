@@ -26,6 +26,7 @@ which is what :class:`ReadFailure` is for.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from enum import Enum
 from typing import Any, Protocol
 
@@ -551,7 +552,7 @@ class Executor:
             choose_filling(facts.filling_mask, is_pending=is_pending),
             is_pending,
         )
-        return self._send(
+        result = self._send(
             cmd,
             request,
             symbol,
@@ -559,6 +560,7 @@ class Executor:
             facts.filling_mask,
             reprice_direction=None if is_pending else cmd.direction,
         )
+        return replace(result, point=facts.point) if result.ok else result
 
     def _send(
         self,

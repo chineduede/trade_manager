@@ -344,3 +344,17 @@ def test_drain_consumes_order_results(engine: Engine) -> None:
     )
     assert [r.result.master_ticket for r in engine.recent_results()] == [11]
     assert engine.failed_total == 1
+
+
+def test_drain_tracks_connection_uptime_and_disconnects(engine: Engine) -> None:
+    run_drain(
+        engine,
+        [
+            Snapshot(terminal_id=TID_A, state=WorkerState.CONNECTED, seq=1),
+            Snapshot(terminal_id=TID_A, state=WorkerState.DISCONNECTED, seq=2),
+            Snapshot(terminal_id=TID_A, state=WorkerState.CONNECTED, seq=3),
+        ],
+    )
+    stats = engine.terminal_stats(TID_A)
+    assert stats.disconnects == 1
+    assert stats.connected_for_s is not None
