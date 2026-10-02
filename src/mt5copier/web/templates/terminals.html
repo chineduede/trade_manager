@@ -1,8 +1,0 @@
-{% extends "base.html" %}
-{% block content %}
-<h2 class="content-title">TERMINALS</h2>
-<div id="terminals-panel" class="panel"
-     hx-get="/partials/terminals?token={{ token }}" hx-trigger="every 2s" hx-swap="innerHTML">
-  {% include "_terminals_inner.html" %}
-</div>
-{% endblock %}

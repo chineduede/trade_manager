@@ -40,17 +40,15 @@ dist/mt5copier.exe
 | `--list` | Print discovered terminals and exit. Launches nothing, connects to nothing. |
 | `--check` | Verify the MetaTrader5 extension imports. The main smoke test for a frozen build. |
 | `--paths` | Print resolved config and log locations. |
-| `--web` | Serve the read-only web dashboard instead of the TUI (Stage A — see below). |
-| `--port` | Port for `--web` (default `8765`); always binds `127.0.0.1` only. |
 | `--version` | Version. |
 
 ### Keys
 
 | Key | Action |
 |---|---|
-| `m` | Make the selected terminal the Master (exclusive — demotes any previous master) |
-| `s` | Toggle the selected terminal as a Slave |
-| `u` | Unassign |
+| `m` | Make the selected terminal the Master. Refused while another terminal is the master: unassign that one first |
+| `s` | Make the selected terminal a Slave (needs a master) |
+| `u` | Unassign. Unassigning the master also unassigns its slaves |
 | `e` | Edit the selected terminal's settings: sizing, the no-stop policy, the copy flags, `invert`, and its symbol prefix, suffix, map and filters. **Saving any change to a slave that has open copies first asks, and if you agree those copies are orphaned:** they stay open on the slave, but the copier stops managing them (no closes, stop moves or partials), and the master's trades for them are not copied again. In the form `ctrl+s` saves, `esc` cancels, and `F9` still halts copying |
 | `l` | Turn the selected slave's live-trading override on or off — the demo-only guard's override. **On** needs the terminal's name typed out in full; off takes one press. While any terminal has it on, the status bar says `NON-DEMO ALLOWED` |
 | `r` | Rescan for terminals |
@@ -61,37 +59,24 @@ dist/mt5copier.exe
 | `F9` | **PANIC** — halt copying. Never closes or modifies a position. |
 | `q` | Quit |
 
-Clicking the `M` or `S` column of a row assigns that role directly.
+| `?` | Show every key; `?` again or `esc` closes the list |
+| `1` / `2` | Switch between the Terminals and Log pages (or click them in the sidebar) |
 
-## Web dashboard (Stage A: read-only)
+Only the everyday keys are listed in the footer; `?` shows the rest.
 
-```bash
-uv run python -m mt5copier --web            # http://127.0.0.1:8765
-uv run python -m mt5copier --web --port 9000
-```
+### The screen
 
-Prints a one-time URL (`http://127.0.0.1:<port>/?token=...`) and serves a read-only, three-page
-dashboard (`/`, `/terminals`, `/log`) from inside the **same process** as the engine — the same
-`Engine`, the same `SingleInstanceLock`, just a second way to look at it alongside the TUI.
-**Nothing reachable here can place, modify or close an order**: every route is a `GET`, and
-there is no JSON API either — each page's live panel polls its own `GET /partials/...` route via
-htmx (`hx-trigger="every Ns"`), not a websocket and not a hand-rolled JS client.
-
-- **Auth** is a random token generated fresh every run (Jupyter-notebook style), required on
-  every route, page or partial. Nothing to set up, nothing persisted.
-- **Always binds `127.0.0.1`** — written directly into the `uvicorn.run()` call, not read from a
-  config field, so there is no path to `0.0.0.0` short of editing source.
-- `/terminals` shows per-terminal status (bracketed text badges — `[OK]`/`[WARN]`/`[ERR]`/
-  `[DEAD]`/`[OFF]` — mapped onto a good/warning/serious/critical scale), balance, equity, and
-  account-level floating P&L (`equity − balance`; not per-position — `Position` carries no live
-  `profit` field by design, see `protocol.py`). `/log` shows a live tail of `copier.log`.
-- Pixel/8-bit retro visual style, responsive down to phone width. Built with FastAPI + Jinja2 +
-  htmx polling against per-resource routes — no websocket.
-
-Stage A of four. Settings/roles, the live-override dialog and panic, and new trading features
-(breakeven, prop-firm guards, …) are later stages that land in the web UI only — the TUI stays
-the frozen, proven baseline once they arrive. Full design, the decisions behind it, and the
-staged build order are in `WEBUI_PLAN.md`.
+The terminal table is grouped into **MASTER**, **SLAVES** and **UNASSIGNED**, with each row's
+status badge (`[OK]` / `[WARN]` / `[ERR]` / `[DEAD]` / `[OFF]`), balance, equity and
+account-level floating P/L (`equity − balance`). An empty group says what to press to fill it.
+Each row ends in two buttons. The first offers the one role step that can come next: **👑 Master**
+on every unassigned terminal while there is no master, **🔗 Slave** once there is one, and a
+**Unassign** on a master or slave. The **⚙️** gear opens the terminal's settings. Roles are set
+explicitly, never toggled, so replacing the master is two steps: unassign it, then pick the new
+one. Below the table, **ACTIVITY** shows what the
+copier decided and the next panel shows the selected terminal's account and settings. The
+sidebar (hidden below 110 columns) shows whether this is a dry run or live, and links to the
+**LOG** page, a coloured tail of `copier.log`.
 
 ## How it works
 
@@ -312,8 +297,8 @@ src/mt5copier/
   executor.py        the ONLY module that can create an order
   store.py           SQLite ownership: which slave position is whose copy
   engine.py          supervisor: spawn, aggregate, diff, reconcile, dispatch
+  presentation.py    view-model for the UI: status tiers, money formatting, log tail
   tui/app.py         Textual UI
-  web/               FastAPI dashboard (Stage A, read-only) -- see WEBUI_PLAN.md
 launcher.py          frozen entry point (see note below)
 copier.spec          PyInstaller spec
 ```

@@ -381,6 +381,7 @@ class _Session:
             margin_free=getattr(account, "margin_free", None),
             leverage=getattr(account, "leverage", None),
             trade_allowed=getattr(terminal, "trade_allowed", None),
+            trade_mode=getattr(account, "trade_mode", None),
             terminal_connected=broker_up,
             terminal_build=getattr(terminal, "build", None),
             positions=None if open_positions is None else len(open_positions),

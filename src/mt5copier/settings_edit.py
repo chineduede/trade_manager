@@ -40,7 +40,8 @@ from enum import Enum, StrEnum
 
 from pydantic import ValidationError
 
-from .config import NoStopPolicy, Role, SizingMode, TerminalConfig
+from .config import AppConfig, NoStopPolicy, Role, SizingMode, TerminalConfig, account_key
+from .reconcile import OpenCopy
 
 
 class Kind(StrEnum):
@@ -229,7 +230,8 @@ SECTIONS: tuple[Section, ...] = (
 )
 
 EDITABLE: tuple[EditableField, ...] = tuple(f for s in SECTIONS for f in s.fields)
-_BY_NAME: dict[str, EditableField] = {f.name: f for f in EDITABLE}
+BY_NAME: dict[str, EditableField] = {f.name: f for f in EDITABLE}
+"""Every editable field by name, for callers that need one field rather than a section."""
 
 
 def _number(value: float) -> str:
@@ -390,6 +392,14 @@ def copies_word(count: int) -> str:
     return f"{count} open {'copy' if count == 1 else 'copies'}"
 
 
+def describe_copy(copy: OpenCopy) -> str:
+    """One line naming an open copy, for the orphan-confirm screen in either UI."""
+    ticket = f"#{copy.slave_ticket}" if copy.slave_ticket is not None else "(no ticket)"
+    kind = "  resting order" if copy.resting else ""
+    volume = f"{copy.volume:g} lots" if copy.volume is not None else "lots unknown"
+    return f"{ticket}  {copy.symbol}  {volume}{kind}"
+
+
 def apply_edits(current: TerminalConfig, raw: Mapping[str, str | bool]) -> EditOutcome:
     """Apply what the form holds to ``current``, or say what is wrong with it.
 
@@ -404,14 +414,14 @@ def apply_edits(current: TerminalConfig, raw: Mapping[str, str | bool]) -> EditO
     Naming a field that is not editable raises. That is a bug in the caller, and quietly
     ignoring it would mean a setting the user thinks they changed was not.
     """
-    unknown = sorted(set(raw) - set(_BY_NAME))
+    unknown = sorted(set(raw) - set(BY_NAME))
     if unknown:
         raise ValueError(f"not editable here: {', '.join(unknown)}")
 
     updates: dict[str, object] = {}
     errors: dict[str, str] = {}
     for name, value in raw.items():
-        spec = _BY_NAME[name]
+        spec = BY_NAME[name]
         if value == initial_text(current, spec):
             continue
         try:
@@ -428,7 +438,7 @@ def apply_edits(current: TerminalConfig, raw: Mapping[str, str | bool]) -> EditO
         new = None
         for err in exc.errors():
             key = str(err["loc"][0]) if err["loc"] else ""
-            errors.setdefault(key if key in _BY_NAME else "", _message(err))
+            errors.setdefault(key if key in BY_NAME else "", _message(err))
 
     if errors or new is None:
         return EditOutcome(config=None, errors=errors, changes=())
@@ -497,6 +507,30 @@ def set_live_override(
     )
 
 
+def rename(cfg: AppConfig, terminal_id: str, name: str) -> str | None:
+    """Set (or, given blank, clear) the name for whichever *account* this terminal is last known
+    to be logged into -- see :func:`~mt5copier.config.account_key`'s own docstring for why a name
+    follows the account, not the terminal. Refuses when no account is known yet (discovery has
+    never read a login off this terminal) -- there is nothing to attach a name to.
+
+    Not routed through :func:`apply_edits`: a name is cosmetic, never read by the diff engine or
+    the executor, so gating it behind the orphan-confirm step that guards every *trading*
+    setting would ask a person to give up open copies to rename a terminal. Same reasoning
+    ``role_actions.py`` already applies to role changes -- applied immediately, not held for a
+    confirmation step that exists to protect something this can never affect.
+    """
+    tcfg = cfg.terminals[terminal_id]
+    key = account_key(tcfg.last_login, tcfg.last_server)
+    if key is None:
+        return "no account is known for this terminal yet; nothing to name"
+    stripped = name.strip()
+    if stripped:
+        cfg.account_names[key] = stripped
+    else:
+        cfg.account_names.pop(key, None)
+    return None
+
+
 def _show(value: object) -> str:
     if isinstance(value, Enum):
         return str(value.value)
@@ -525,6 +559,50 @@ def describe_changes(changes: tuple[Change, ...], limit: int | None = None) -> s
     if limit is not None and len(text) > limit:
         return text[: limit - 3] + "..."
     return text
+
+
+def summarize_slave(cfg: TerminalConfig) -> str:
+    """One sentence describing what this slave's settings actually do, for the detail panel.
+
+    A generator with a fixed priority. What this picks is, in order, the single
+    most behaviour-changing fact after sizing -- the one thing that, if someone only read this
+    line, they would most need to know:
+
+    1. Sizing (always first -- every slave has one).
+    2. ``invert``, if set -- it flips every trade's direction, the largest possible surprise.
+    3. ``no_stop_policy`` widening risk (LOT_MULTIPLE), if set -- trades it cannot bound.
+    4. Otherwise, what it mirrors (stop/target moves, partial closes) or that it mirrors nothing.
+
+    Returns "" for anything that is not a slave -- a master or an unassigned terminal has no
+    copy settings to summarise.
+    """
+    if cfg.role is not Role.SLAVE:
+        return ""
+    if cfg.sizing_mode is SizingMode.FIXED_CASH_RISK:
+        sizing = f"Risks {_number(cfg.risk_cash)} per trade."
+    else:
+        sizing = f"Risks {_number(cfg.risk_percent)}% of its balance per trade."
+
+    if cfg.invert:
+        detail = "Trades in the opposite direction."
+    elif cfg.no_stop_policy is NoStopPolicy.LOT_MULTIPLE:
+        detail = (
+            f"Copies trades with no stop at {_number(cfg.no_stop_lot_multiple)}x the "
+            "master's lots, unprotected."
+        )
+    else:
+        mirrors = []
+        if cfg.copy_sltp:
+            mirrors.append("stops and targets")
+        if cfg.copy_partials:
+            mirrors.append("partial closes")
+        if not mirrors:
+            detail = "Does not mirror stop, target or partial-close changes."
+        elif len(mirrors) == 1:
+            detail = f"Mirrors {mirrors[0]}."
+        else:
+            detail = f"Mirrors {mirrors[0]} and {mirrors[1]}."
+    return f"{sizing} {detail}"
 
 
 def advisories(outcome: EditOutcome) -> list[str]:

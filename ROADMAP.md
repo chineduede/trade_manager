@@ -1126,11 +1126,10 @@ Two consequences:
 
 ## Future features — not yet scoped
 
-Ideas parked for after the live verification backlog and the web UI's first stages are done
-(sequencing in `WEBUI_PLAN.md`). None of these has a design yet — each needs its own
-policy-then-build-then-demo-verify pass, the same as every stage above, before it is built.
-Their UI, if any, lands in the web UI only, per `WEBUI_PLAN.md`'s sequencing decision — the TUI
-does not gain them.
+Ideas parked for after the live verification backlog is done. None of these has a design yet —
+each needs its own policy-then-build-then-demo-verify pass, the same as every stage above,
+before it is built. Their UI, if any, lands in the TUI — the web UI was dropped on 2026-10-02 in
+favour of making the TUI simpler and better-looking.
 
 **Ordered deliberately, not just listed: multi-master support goes first if any of this is built
 at all.** It's the only one of the four that changes the data model everything else would build
@@ -1156,6 +1155,22 @@ outranks the others in importance — that's still the user's call each time thi
   `PermissionError` on Windows once two processes held the same rotating file open. Moot now
   anyway: `single_instance.py` (2026-10-01) refuses a second full run outright via an OS-held
   file lock, so that path is no longer even reachable by accident.
+
+  **Sharpened 2026-10-02 (user's own framing, "connections"): settings belong to the pair, not
+  the terminal.** The note above only questioned *which master a slave reconciles against*; it
+  still assumed one `TerminalConfig` per terminal holds one settings bundle regardless. The
+  sharper framing: as a slave connects to a master, that pairing — call it a connection — is
+  what should own the settings bundle (risk %, symbol map, `copy_sltp`, `invert`, everything in
+  `settings_edit.py`'s `SECTIONS`), because some of those settings may legitimately differ per
+  master a slave copies from, not just per slave. Concretely this means `TerminalConfig` stops
+  being the settings holder and a slave can hold zero or more `(slave_terminal_id,
+  master_terminal_id)` connections, each with its own bundle — a real fork on top of the
+  `master_id`-per-slave idea above, not an additional field on it. No design yet; still needs its
+  own policy-then-build-then-demo-verify pass like everything else on this list, and it changes
+  `config.py` (the settings fields currently on `TerminalConfig`, `AppConfig._validate_roles`'s
+  one-master rule), `engine.py` (`Engine._reconcile()`'s single `self._cfg.master` read), and
+  `reconcile.py`/`CopyLedger`'s belief keys all at once, so it should be designed as one piece
+  with the `master_id` work above, not bolted on after.
 - **Breakeven.** Move a copy's stop to entry (± buffer) once price has moved some distance.
   Reuses the already-built `MODIFY_SLTP` dispatch path; the new part is the trigger logic.
 - **Prop-firm guards.** Daily loss limit, max drawdown, consistency-rule-style caps that halt

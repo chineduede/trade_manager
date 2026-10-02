@@ -30,12 +30,6 @@ datas = [
     *textual_datas,
     # Our own stylesheet, at the path CSS_PATH resolves to inside the bundle.
     ("src/mt5copier/tui/app.tcss", "mt5copier/tui"),
-    # Web UI (Stage A): Jinja2 templates and vendored static JS/CSS, read from disk at request
-    # time via paths relative to web/app.py and web/routes.py -- PyInstaller's import graph has
-    # no way to see that, so these must be listed explicitly or the frozen --web serves 404s for
-    # everything despite building without error.
-    ("src/mt5copier/web/templates", "mt5copier/web/templates"),
-    ("src/mt5copier/web/static", "mt5copier/web/static"),
 ]
 
 hiddenimports = [
@@ -49,19 +43,6 @@ hiddenimports = [
     "mt5copier.worker",
     "mt5copier.protocol",
     "mt5copier.logging_setup",
-    # uvicorn picks its event loop and HTTP/websocket protocol implementations at runtime via
-    # importlib (uvicorn.loops.auto, uvicorn.protocols.http.auto, uvicorn.protocols.websockets.auto)
-    # rather than a static import PyInstaller's analysis can follow -- a known class of PyInstaller
-    # gotcha for uvicorn specifically, flagged in WEBUI_PLAN.md before this was ever built. Without
-    # these, `--web` imports cleanly and then fails at the first request or socket upgrade.
-    "uvicorn.loops.auto",
-    "uvicorn.loops.asyncio",
-    "uvicorn.protocols.http.auto",
-    "uvicorn.protocols.http.h11_impl",
-    "uvicorn.protocols.http.httptools_impl",
-    "uvicorn.protocols.websockets.auto",
-    "uvicorn.protocols.websockets.websockets_impl",
-    "uvicorn.lifespan.on",
 ]
 
 a = Analysis(

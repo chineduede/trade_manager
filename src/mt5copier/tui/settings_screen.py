@@ -22,7 +22,7 @@ from rich.markup import escape
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, Checkbox, Input, Label, Select, Static, TextArea
@@ -79,6 +79,11 @@ class SettingsScreen(ModalScreen[bool]):
     }
     SettingsScreen .row {
         height: auto;
+        border-left: tall $surface;
+    }
+    SettingsScreen .row:focus-within {
+        background: $primary 15%;
+        border-left: tall $primary;
     }
     SettingsScreen .label {
         width: 26;
@@ -98,20 +103,29 @@ class SettingsScreen(ModalScreen[bool]):
     }
     SettingsScreen .error {
         display: none;
-        margin-left: 26;
+        margin-left: 27;
         color: $error;
     }
     SettingsScreen .error.flag {
-        margin-left: 4;
+        margin-left: 5;
+    }
+    SettingsScreen #footer {
+        dock: bottom;
+        height: auto;
     }
     SettingsScreen #help {
         height: auto;
-        min-height: 2;
-        margin-top: 1;
-        color: $text-muted;
+        min-height: 4;
+        padding: 0 1;
+        border: round $primary;
+        border-title-color: $primary;
+        border-title-style: bold;
+        background: $primary 8%;
+        color: $text;
     }
-    SettingsScreen #readonly {
+    SettingsScreen #override {
         height: auto;
+        margin-bottom: 1;
         color: $text-muted;
     }
     SettingsScreen #general-error {
@@ -157,6 +171,11 @@ class SettingsScreen(ModalScreen[bool]):
                 else "[dim]dry run - nothing is sent either way.[/dim]",
                 id="mode",
             )
+            yield Static(
+                f"[dim]Live trading on a non-demo account:[/dim] "
+                f"{_on_off(cfg.allow_live_trading)}  [dim](change it with l on the terminal list)[/dim]",
+                id="override",
+            )
             for index, section in enumerate(SECTIONS):
                 yield Static(
                     f"[b]{section.title}[/b]",
@@ -164,18 +183,16 @@ class SettingsScreen(ModalScreen[bool]):
                 )
                 for spec in section.fields:
                     yield from self._row(spec, initial[spec.name])
-            yield Static("", id="help")
-            yield Static(
-                f"[dim]Not editable here:[/dim] live trading on a non-demo account "
-                f"({_on_off(cfg.allow_live_trading)}) is the demo-only guard's override, and has "
-                "its own key, l, on the terminal list. The terminal's name comes from "
-                "discovery. Copies already open keep the size they opened at.",
-                id="readonly",
-            )
             yield Static("", id="general-error")
-            with Horizontal(id="buttons"):
-                yield Button("Save  ctrl+s", variant="primary", id="save")
-                yield Button("Cancel  esc", id="cancel")
+            # Docked, so it stays put while the fields scroll: the help for the field being
+            # edited is always on screen, in a panel titled with that field's name, instead of
+            # somewhere below the form. One container, because widgets docked to the same edge
+            # overlap rather than stack.
+            with Vertical(id="footer"):
+                yield Static("", id="help")
+                with Horizontal(id="buttons"):
+                    yield Button("Save  ctrl+s", variant="primary", id="save")
+                    yield Button("Cancel  esc", id="cancel")
 
     def _row(self, spec: EditableField, value: str | bool) -> ComposeResult:
         with Horizontal(classes="row"):
@@ -260,7 +277,9 @@ class SettingsScreen(ModalScreen[bool]):
         name = widget_id.removeprefix(_FIELD_PREFIX)
         spec = next((s for s in EDITABLE if s.name == name), None)
         if spec is not None:
-            self.query_one("#help", Static).update(escape(spec.help))
+            panel = self.query_one("#help", Static)
+            panel.border_title = escape(spec.label)
+            panel.update(escape(spec.help))
 
     # --- actions ----------------------------------------------------------------------------
 

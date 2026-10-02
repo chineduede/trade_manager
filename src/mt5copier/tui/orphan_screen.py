@@ -21,18 +21,11 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
 from ..reconcile import OpenCopy
-from ..settings_edit import copies_word
+from ..settings_edit import copies_word, describe_copy
 
 _LISTED = 8
 """Copies named on screen. A long list would push the buttons off a small terminal; the log
 carries every one, and the count in the title is always the whole number."""
-
-
-def describe_copy(copy: OpenCopy) -> str:
-    ticket = f"#{copy.slave_ticket}" if copy.slave_ticket is not None else "(no ticket)"
-    kind = "  resting order" if copy.resting else ""
-    volume = f"{copy.volume:g} lots" if copy.volume is not None else "lots unknown"
-    return f"{ticket}  {copy.symbol}  {volume}{kind}"
 
 
 class OrphanConfirmScreen(ModalScreen[bool]):

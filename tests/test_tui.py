@@ -174,7 +174,8 @@ def app(cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Copi
 
 
 def row_of(app: CopierApp, terminal_id: str) -> int:
-    return app._row_ids.index(terminal_id)
+    """The table row a terminal is drawn on -- section headings take rows too."""
+    return app._row_keys.index(terminal_id)
 
 
 # --- rendering -----------------------------------------------------------------------------
@@ -233,22 +234,46 @@ async def test_pressing_m_sets_master(app: CopierApp, cfg: AppConfig) -> None:
         assert cfg.master.terminal_id == TID_MASTER
 
 
-async def test_master_is_exclusive(app: CopierApp, cfg: AppConfig) -> None:
-    """Assigning a second master must demote the first, not fail validation later."""
+async def test_the_master_is_not_replaced_without_unassigning_it_first(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    """Pressing m on another terminal is refused while there is a master; unassign, then m."""
     async with app.run_test() as pilot:
         await pilot.press("m")
         await pilot.press("down")
         await pilot.press("m")
-        assert cfg.terminals[TID_MASTER].role is Role.UNASSIGNED
+        assert cfg.terminals[TID_MASTER].role is Role.MASTER
+        assert cfg.terminals[TID_SLAVE].role is Role.UNASSIGNED
+
+        app.query_one("#terminals").move_cursor(row=row_of(app, TID_MASTER))
+        await pilot.press("u")
+        app.query_one("#terminals").move_cursor(row=row_of(app, TID_SLAVE))
+        await pilot.press("m")
         assert cfg.terminals[TID_SLAVE].role is Role.MASTER
 
 
-async def test_pressing_s_toggles_slave(app: CopierApp, cfg: AppConfig) -> None:
+async def test_pressing_s_sets_slave_and_does_not_toggle(app: CopierApp, cfg: AppConfig) -> None:
     async with app.run_test() as pilot:
+        cfg.set_role(TID_SLAVE, Role.MASTER)  # a slave needs a master to exist first
         await pilot.press("s")
         assert cfg.terminals[TID_MASTER].role is Role.SLAVE
         await pilot.press("s")
-        assert cfg.terminals[TID_MASTER].role is Role.UNASSIGNED
+        assert cfg.terminals[TID_MASTER].role is Role.SLAVE
+
+
+async def test_question_mark_opens_and_closes_the_key_list(app: CopierApp) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press("question_mark")
+        await pilot.pause()
+        assert app.screen.query("HelpPanel")
+        await pilot.press("question_mark")
+        await pilot.pause()
+        assert not app.screen.query("HelpPanel")
+        await pilot.press("question_mark")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+        assert not app.screen.query("HelpPanel")
 
 
 async def test_cannot_make_the_master_a_slave_by_accident(app: CopierApp, cfg: AppConfig) -> None:
@@ -294,41 +319,102 @@ async def test_role_change_triggers_engine_sync(app: CopierApp) -> None:
 # --- mouse ---------------------------------------------------------------------------------
 
 
-async def _select_cell(app: CopierApp, pilot: object, terminal_id: str, column: int) -> None:
-    """Emit the CellSelected message the DataTable would send for a click on that cell."""
-    from textual.coordinate import Coordinate
-    from textual.widgets import DataTable
+async def _click_cell(app: CopierApp, pilot: object, terminal_id: str, column: str) -> None:
+    """A real mouse click on that terminal's cell, at the screen position the table drew it.
 
-    table = app.query_one("#terminals", DataTable)
-    coord = Coordinate(row_of(app, terminal_id), column)
-    table.move_cursor(row=coord.row, column=coord.column)
-    table.post_message(
-        DataTable.CellSelected(
-            table,
-            value=table.get_cell_at(coord),
-            coordinate=coord,
-            cell_key=table.coordinate_to_cell_key(coord),
-        )
-    )
+    Real, not a posted message: a row-cursor DataTable never sends CellSelected, so the only
+    honest test of a clickable cell is a click.
+    """
+    from mt5copier.tui.app import _COLUMNS, TerminalTable
+
+    table = app.query_one("#terminals", TerminalTable)
+    x = 1  # the border
+    for key, _, width in _COLUMNS:
+        if key == column:
+            break
+        x += width + 2 * table.cell_padding
+    x += table.cell_padding + 1
+    y = 1 + 1 + row_of(app, terminal_id)  # border, header, row
+    assert await pilot.click(TerminalTable, offset=(x, y))  # type: ignore[attr-defined]
     await pilot.pause()  # type: ignore[attr-defined]
 
 
-async def test_clicking_master_column_assigns_master(app: CopierApp, cfg: AppConfig) -> None:
-    async with app.run_test() as pilot:
-        await _select_cell(app, pilot, TID_SLAVE, column=0)
+async def test_with_no_master_every_row_offers_master(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test(size=(180, 40)) as pilot:
+        await _click_cell(app, pilot, TID_SLAVE, "action")
         assert cfg.terminals[TID_SLAVE].role is Role.MASTER
 
 
-async def test_clicking_slave_column_toggles_slave(app: CopierApp, cfg: AppConfig) -> None:
-    async with app.run_test() as pilot:
-        await _select_cell(app, pilot, TID_SLAVE, column=1)
+async def test_with_a_master_the_other_rows_offer_slave(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test(size=(180, 40)) as pilot:
+        await _click_cell(app, pilot, TID_MASTER, "action")
+        assert cfg.terminals[TID_MASTER].role is Role.MASTER
+        await _click_cell(app, pilot, TID_SLAVE, "action")
         assert cfg.terminals[TID_SLAVE].role is Role.SLAVE
+        assert cfg.terminals[TID_MASTER].role is Role.MASTER, "a click never replaces the master"
+
+
+async def test_an_assigned_rows_action_is_unassign(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test(size=(180, 40)) as pilot:
+        cfg.set_role(TID_MASTER, Role.MASTER)
+        cfg.set_role(TID_SLAVE, Role.SLAVE)
+        app._refresh()
+        await _click_cell(app, pilot, TID_SLAVE, "action")
+        assert cfg.terminals[TID_SLAVE].role is Role.UNASSIGNED
+        await _click_cell(app, pilot, TID_MASTER, "action")
+        assert cfg.terminals[TID_MASTER].role is Role.UNASSIGNED
+
+
+async def test_the_gear_opens_settings(app: CopierApp) -> None:
+    async with app.run_test(size=(180, 40)) as pilot:
+        await _click_cell(app, pilot, TID_SLAVE, "settings")
+        assert isinstance(app.screen, SettingsScreen)
 
 
 async def test_clicking_other_columns_does_not_change_roles(app: CopierApp, cfg: AppConfig) -> None:
-    async with app.run_test() as pilot:
-        await _select_cell(app, pilot, TID_SLAVE, column=2)  # the BROKER column
+    async with app.run_test(size=(180, 40)) as pilot:
+        await _click_cell(app, pilot, TID_SLAVE, "terminal")
+        await _click_cell(app, pilot, TID_SLAVE, "status")
         assert cfg.terminals[TID_SLAVE].role is Role.UNASSIGNED
+
+
+async def test_the_table_is_grouped_by_role(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test() as pilot:
+        await pilot.press("m")
+        keys = app._row_keys
+        assert keys.index(TID_MASTER) < keys.index("§slaves") < keys.index("§unassigned")
+        assert keys.index("§unassigned") < keys.index(TID_SLAVE)
+
+
+async def test_the_cursor_steps_over_section_rows(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test() as pilot:
+        assert app._selected_id() == TID_MASTER, "it starts on a terminal, not a heading"
+        await pilot.press("m")
+        assert app._selected_id() == TID_MASTER, "the cursor followed it into its new group"
+        await pilot.press("down")
+        await pilot.pause()
+        assert app._selected_id() == TID_SLAVE
+        await pilot.press("up")
+        await pilot.pause()
+        assert app._selected_id() == TID_MASTER
+
+
+async def test_the_log_page_shows_the_log_file(
+    app: CopierApp, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from textual.widgets import RichLog
+
+    (tmp_path / "copier.log").write_text(
+        "2026-10-02 00:34:02 WARNING [MainProcess] x: something to see\n", encoding="utf-8"
+    )
+    monkeypatch.setattr("mt5copier.tui.app.log_dir", lambda: tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.press("2")
+        await pilot.pause()
+        panel = app.query_one("#log", RichLog)
+        assert any("something to see" in line.text for line in panel.lines)
+        await pilot.press("1")
+        assert app.focused is app.query_one("#terminals")
 
 
 # --- panic ---------------------------------------------------------------------------------
@@ -455,7 +541,13 @@ async def test_a_refresh_tick_during_teardown_is_harmless(app: CopierApp) -> Non
 async def _open_editor(
     app: CopierApp, pilot: object, terminal_id: str = TID_SLAVE
 ) -> SettingsScreen:
-    """Make ``terminal_id`` a slave, select it, and open its settings."""
+    """Make ``terminal_id`` a slave, select it, and open its settings.
+
+    Needs a master to exist first -- ``role_actions.set_slave`` refuses to create a slave
+    otherwise -- so this gives TID_MASTER the role directly, the same way other tests here reach
+    into ``cfg``/``app._cfg`` for a precondition rather than drive it through a keypress.
+    """
+    app._cfg.set_role(TID_MASTER, Role.MASTER)  # type: ignore[attr-defined]
     app.query_one("#terminals").move_cursor(row=row_of(app, terminal_id))
     await pilot.press("s")  # type: ignore[attr-defined]
     await pilot.press("e")  # type: ignore[attr-defined]
@@ -754,14 +846,96 @@ async def test_the_form_has_no_field_for_the_live_trading_override_the_name_or_t
             assert not screen.query(f"#f-{name}"), name
 
 
-async def test_the_form_says_what_it_leaves_out(app: CopierApp, cfg: AppConfig) -> None:
+async def test_the_help_panel_follows_focus_and_stays_on_screen(app: CopierApp) -> None:
+    """Help for the field being edited is titled with its name, and is drawn even when that
+    field is far down a form too tall for the terminal."""
+    import html
+
+    from mt5copier.settings_edit import EDITABLE
+
+    async with app.run_test(size=(100, 30)) as pilot:
+        screen = await _open_editor(app, pilot)
+        help_panel = screen.query_one("#help", Static)
+        assert help_panel.border_title == EDITABLE[0].label
+
+        last = EDITABLE[-1]
+        screen.query_one(f"#f-{last.name}").focus()
+        await pilot.pause()
+        assert help_panel.border_title == last.label
+        drawn = html.unescape(app.export_screenshot()).replace("\xa0", " ")
+        assert last.label in drawn
+        assert last.help.split()[0] in drawn
+
+
+def _connected_views(app: CopierApp, *, trade_mode: int) -> None:
+    """Make the stub engine report every terminal connected, on an account of this trade mode."""
+    import time
+
+    from mt5copier.protocol import Snapshot, WorkerState
+
+    stub_views = app._engine.views
+
+    def views() -> list[TerminalView]:
+        out = []
+        for v in stub_views():
+            v.supervised = True
+            v.process_alive = True
+            v.received_at = time.monotonic()
+            v.snapshot = Snapshot(
+                terminal_id=v.cfg.terminal_id, state=WorkerState.CONNECTED, trade_mode=trade_mode
+            )
+            out.append(v)
+        return out
+
+    app._engine.views = views  # type: ignore[method-assign]
+
+
+async def test_a_live_slave_held_by_the_demo_guard_looks_blocked_and_says_press_l(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    from mt5copier.tui.app import _ICON_BLOCKED, TerminalTable
+
+    async with app.run_test() as pilot:
+        cfg.set_role(TID_MASTER, Role.MASTER)
+        cfg.set_role(TID_SLAVE, Role.SLAVE)
+        _connected_views(app, trade_mode=2)  # real money
+        app._refresh()
+        app.query_one("#terminals").move_cursor(row=row_of(app, TID_SLAVE))
+        await pilot.pause()
+
+        table = app.query_one("#terminals", TerminalTable)
+        assert _ICON_BLOCKED in str(table.get_cell(TID_SLAVE, "terminal"))
+        assert "[BLOCKED] press l" in str(table.get_cell(TID_SLAVE, "status"))
+        assert "BLOCKED" not in str(table.get_cell(TID_MASTER, "status")), "masters are not held"
+        assert "BLOCKED 1" in _statusbar(app)
+        assert "Press l" in str(app.query_one("#detail", Static).render())
+
+        cfg.terminals[TID_SLAVE].allow_live_trading = True
+        app._refresh()
+        assert "BLOCKED" not in str(table.get_cell(TID_SLAVE, "status"))
+        assert "BLOCKED" not in _statusbar(app)
+
+
+async def test_a_demo_slave_is_not_blocked(app: CopierApp, cfg: AppConfig) -> None:
+    from mt5copier.tui.app import TerminalTable
+
+    async with app.run_test():
+        cfg.set_role(TID_MASTER, Role.MASTER)
+        cfg.set_role(TID_SLAVE, Role.SLAVE)
+        _connected_views(app, trade_mode=0)  # demo
+        app._refresh()
+        table = app.query_one("#terminals", TerminalTable)
+        assert "[OK]" in str(table.get_cell(TID_SLAVE, "status"))
+        assert "BLOCKED" not in _statusbar(app)
+
+
+async def test_the_form_shows_the_overrides_state(app: CopierApp, cfg: AppConfig) -> None:
     cfg.terminals[TID_SLAVE].allow_live_trading = True
     async with app.run_test() as pilot:
         screen = await _open_editor(app, pilot)
-        note = str(screen.query_one("#readonly", Static).render())
-        assert "live trading" in note
-        assert "(on)" in note
-        assert "discovery" in note
+        note = str(screen.query_one("#override", Static).render())
+        assert "Live trading" in note
+        assert ": on" in note
 
 
 # --- the symbol section ----------------------------------------------------------------------
@@ -1249,6 +1423,9 @@ async def _open_override(
     app: CopierApp, pilot: object, terminal_id: str = TID_SLAVE, *, role_key: str | None = "s"
 ) -> LiveOverrideScreen:
     """Select ``terminal_id``, give it a role with ``role_key`` (None keeps its own), press l."""
+    if role_key == "s":
+        # Same precondition _open_editor needs: a slave can't be created with no master.
+        app._cfg.set_role(TID_MASTER, Role.MASTER)  # type: ignore[attr-defined]
     app.query_one("#terminals").move_cursor(row=row_of(app, terminal_id))
     if role_key is not None:
         await pilot.press(role_key)  # type: ignore[attr-defined]
@@ -1581,8 +1758,8 @@ async def test_the_status_bar_follows_the_dialog(app: CopierApp) -> None:
 async def test_the_settings_form_points_at_the_key_for_the_override(app: CopierApp) -> None:
     async with app.run_test() as pilot:
         screen = await _open_editor(app, pilot)
-        note = str(screen.query_one("#readonly", Static).render())
-        assert "own key" in note
+        note = str(screen.query_one("#override", Static).render())
+        assert "with l" in note
         assert "config.json" not in note, "it is no longer a hand edit"
 
 

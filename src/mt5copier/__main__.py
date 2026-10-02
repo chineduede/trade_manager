@@ -38,17 +38,6 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="verify the MetaTrader5 extension can be imported, then exit",
     )
-    parser.add_argument(
-        "--web",
-        action="store_true",
-        help="serve the web dashboard instead of the TUI (Stage A: read-only)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8765,
-        help="port for --web (default: 8765); always binds 127.0.0.1 only",
-    )
     return parser.parse_args(argv)
 
 
@@ -114,14 +103,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        if args.web:
-            from .web import run as run_web
+        from .tui import run
 
-            run_web(port=args.port)
-        else:
-            from .tui import run
-
-            run()
+        run()
     except KeyboardInterrupt:
         return 130
     finally:

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from mt5copier.config import NoStopPolicy, Role, SizingMode, TerminalConfig
+from mt5copier.config import AppConfig, NoStopPolicy, Role, SizingMode, TerminalConfig, account_key
 from mt5copier.settings_edit import (
     EDITABLE,
     Kind,
@@ -20,6 +20,7 @@ from mt5copier.settings_edit import (
     describe_changes,
     initial_values,
     live_override_phrase,
+    rename,
     set_live_override,
 )
 
@@ -569,3 +570,62 @@ def test_putting_the_guard_back_needs_no_warning_of_its_own() -> None:
 def test_an_unrelated_edit_says_nothing_about_the_guard() -> None:
     outcome = apply_edits(make(allow_live_trading=True), {"risk_percent": "0.5"})
     assert advisories(outcome) == []
+
+
+# --- rename: a name on the account, never gated by the orphan-confirm pipeline --------------
+
+
+def _cfg_with_account(**overrides: object) -> AppConfig:
+    return AppConfig(terminals={TID: make(last_login=123, last_server="A-Live", **overrides)})  # type: ignore[arg-type]
+
+
+def test_rename_sets_the_accounts_name() -> None:
+    cfg = _cfg_with_account()
+    assert rename(cfg, TID, "My Funded Account") is None
+    assert cfg.account_names[account_key(123, "A-Live")] == "My Funded Account"
+    assert cfg.display_name(TID) == "My Funded Account"
+
+
+def test_rename_strips_surrounding_whitespace() -> None:
+    cfg = _cfg_with_account()
+    rename(cfg, TID, "  My Funded Account  ")
+    assert cfg.account_names[account_key(123, "A-Live")] == "My Funded Account"
+
+
+def test_rename_to_blank_clears_it_back_to_the_label() -> None:
+    cfg = _cfg_with_account()
+    rename(cfg, TID, "My Funded Account")
+    rename(cfg, TID, "")
+    assert account_key(123, "A-Live") not in cfg.account_names
+    assert cfg.display_name(TID) == "Slave"  # make()'s label, not the id fallback
+
+
+def test_rename_refuses_when_no_account_is_known_yet() -> None:
+    cfg = AppConfig(terminals={TID: make()})  # no last_login
+    refusal = rename(cfg, TID, "My Funded Account")
+    assert refusal is not None
+    assert "no account is known" in refusal
+    assert cfg.account_names == {}
+
+
+def test_rename_never_touches_any_other_field() -> None:
+    """A name is cosmetic -- nothing about renaming should go anywhere near risk settings."""
+    cfg = _cfg_with_account(risk_percent=2.5)
+    rename(cfg, TID, "New Name")
+    assert cfg.terminals[TID].risk_percent == 2.5
+    assert cfg.terminals[TID].role is Role.SLAVE
+
+
+def test_rename_follows_the_account_to_a_different_terminal() -> None:
+    """The whole point of keying by account instead of terminal_id."""
+    other_tid = "B" * 32
+    cfg = AppConfig(
+        terminals={
+            TID: make(last_login=123, last_server="A-Live"),
+            other_tid: TerminalConfig(
+                terminal_id=other_tid, label="Other", last_login=123, last_server="A-Live"
+            ),
+        }
+    )
+    rename(cfg, TID, "My Funded Account")
+    assert cfg.display_name(other_tid) == "My Funded Account"

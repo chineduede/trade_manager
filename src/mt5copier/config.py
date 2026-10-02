@@ -253,6 +253,27 @@ class TerminalConfig(BaseModel):
         return f"{self.risk_percent:g}%"
 
 
+def account_key(login: int | None, server: str | None) -> str | None:
+    """Canonical key for naming an *account*, not a terminal -- ``None`` when no account is
+    known yet (nothing to name).
+
+    A terminal installation can log into more than one account over its life (a demo today, a
+    funded account tomorrow), so a name kept on :class:`TerminalConfig` would follow whichever
+    account happened to be logged in when it was set, not the account itself -- exactly backward
+    from what a rename is for. Keyed by account instead, the same name reappears wherever that
+    account is logged in, on any terminal, and a different account logged into the same terminal
+    shows its own name (or none) rather than inheriting one that was never about it.
+
+    ``server`` is part of the key, not an afterthought: an MT5 login number is only unique
+    *within* one broker's own servers, and two different brokers can and do hand out the same
+    account number -- a key on the login alone would silently merge two unrelated accounts'
+    names the day that collision happened to occur.
+    """
+    if login is None:
+        return None
+    return f"{login}@{server or ''}"
+
+
 class AppConfig(BaseModel):
     """Root config document."""
 
@@ -298,6 +319,10 @@ class AppConfig(BaseModel):
 
     terminals: dict[str, TerminalConfig] = Field(default_factory=dict)
 
+    account_names: dict[str, str] = Field(default_factory=dict)
+    """Names the person set, keyed by :func:`account_key` -- the *account*, not the terminal it
+    happens to be logged into right now. See :func:`account_key`'s own docstring for why."""
+
     @model_validator(mode="after")
     def _validate_roles(self) -> Self:
         masters = [t.terminal_id for t in self.terminals.values() if t.role is Role.MASTER]
@@ -321,6 +346,23 @@ class AppConfig(BaseModel):
     def assigned(self) -> list[TerminalConfig]:
         """Terminals we should hold a connection to: any with a role, and enabled."""
         return [t for t in self.terminals.values() if t.role is not Role.UNASSIGNED and t.enabled]
+
+    def display_name(self, terminal_id: str) -> str:
+        """The name to show this terminal by right now: the name set for whichever account it's
+        last known to be logged into (see :func:`account_key`), else discovery's own ``label``,
+        else the id's first eight hex characters -- the same last-resort the log and every
+        notification already fall back to. One place for a fallback chain several call sites
+        used to repeat by hand (``cfg.label or terminal_id[:8]``), so a rename shows up
+        everywhere a terminal's name already does without hunting down every one of those call
+        sites, only the one place this actually reads the name from.
+        """
+        tcfg = self.terminals[terminal_id]
+        key = account_key(tcfg.last_login, tcfg.last_server)
+        if key is not None:
+            name = self.account_names.get(key)
+            if name:
+                return name
+        return tcfg.label or terminal_id[:8]
 
     def set_role(self, terminal_id: str, role: Role) -> None:
         """Assign a role, demoting any existing master so the one-master rule always holds."""
@@ -351,6 +393,26 @@ class AppConfig(BaseModel):
         if new.role is not old.role:
             raise ValueError("a settings edit cannot change a terminal's role; use set_role")
         self.terminals[new.terminal_id] = new
+
+
+def _demote_orphaned_slaves(cfg: AppConfig) -> list[str]:
+    """A slave with no master makes no sense -- copying has nothing to watch -- but a config
+    written before :func:`mt5copier.role_actions.unassign` learned to sweep slaves along with
+    the master it's unassigning, or one hand-edited into that shape, can still hold one.
+
+    Fixed here, on load, the same way :func:`_migrate` fixes schema drift -- deliberately **not**
+    a model validator next to :meth:`AppConfig._validate_roles`'s one-master rule. A validator
+    would make :meth:`AppConfig.model_validate` raise on exactly the file this exists to repair,
+    and :func:`load` treats a validation failure as corruption and resets to defaults: destroying
+    every one of the user's settings to fix a role field would be a far worse outcome than
+    quietly correcting it and moving on.
+    """
+    if cfg.master is not None:
+        return []
+    swept = [t.terminal_id for t in cfg.terminals.values() if t.role is Role.SLAVE]
+    for tid in swept:
+        cfg.terminals[tid].role = Role.UNASSIGNED
+    return swept
 
 
 def _migrate(raw: dict[str, object]) -> dict[str, object]:
@@ -422,7 +484,17 @@ def load(path: Path | None = None) -> AppConfig:
         return AppConfig()
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
-        return AppConfig.model_validate(_migrate(raw))
+        cfg = AppConfig.model_validate(_migrate(raw))
+        swept = _demote_orphaned_slaves(cfg)
+        if swept:
+            log.warning("slave(s) with no master found on load; unassigned: %s", swept)
+            try:
+                save(cfg, target)
+            except OSError:
+                log.exception(
+                    "could not persist the orphaned-slave cleanup; will retry on next save"
+                )
+        return cfg
     except Exception as exc:
         backup = target.with_suffix(f".bad-{os.getpid()}.json")
         try:

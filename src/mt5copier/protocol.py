@@ -17,6 +17,14 @@ import time
 from dataclasses import dataclass, field
 from enum import IntEnum, StrEnum
 
+ACCOUNT_TRADE_MODE_DEMO = 0
+"""``account_info().trade_mode``'s demo value. Contest is 1, real is 2.
+
+Lives here, not in :mod:`mt5copier.executor`, so the pure read-only check in
+:mod:`mt5copier.presentation` (a slave's "held back: not a demo account" state) and the
+executor's own send-time refusal (:meth:`Executor._guard_live_account`) compare against the same
+constant instead of two copies of the same magic number drifting apart."""
+
 COPIER_MAGIC = 260919
 """Stamped on every order this copier sends, so it can recognise its own positions.
 
@@ -419,6 +427,15 @@ class Snapshot:
     """Human-readable last error, kept for display even after a later success."""
 
     connect_attempts: int = 0
+
+    trade_mode: int | None = None
+    """``account_info().trade_mode`` -- compare against :data:`ACCOUNT_TRADE_MODE_DEMO`. None
+    when it could not be read, which the executor's own guard treats as *not* demo ("we could
+    not tell" is not a reason to trade someone's funded account) -- see
+    :meth:`mt5copier.presentation.row_info`, which applies the same policy for display.
+
+    Before this, nothing carried the demo/live fact to the supervisor at all; only the worker
+    process could see it, and only at send time."""
 
     @property
     def is_live(self) -> bool:

@@ -3,7 +3,7 @@
 Deployment shape for Stage 1: the engine runs inside the UI process on a background thread,
 and workers are subprocesses. ``zele-mt5`` put a WebSocket IPC server between its engine and
 any consumer, which is the right call once there are several consumers (it grew a web dashboard
-that used exactly that seam) -- but Stage 1 has precisely one consumer, the Textual app, so the
+that used exactly that seam; this project tried one and dropped it) -- but Stage 1 has precisely one consumer, the Textual app, so the
 server would be unused indirection. The public surface here is deliberately narrow and
 serialisable-friendly (:meth:`views` returns plain data), so a future IPC layer can wrap the
 engine without reaching into it.

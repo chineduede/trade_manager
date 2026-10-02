@@ -41,7 +41,14 @@ from .execution import (
 )
 from .execution import describe_retcode as _describe
 from .logging_setup import get_logger
-from .protocol import ActionKind, OrderCommand, OrderResult, PositionType, SizingBasis
+from .protocol import (
+    ACCOUNT_TRADE_MODE_DEMO,
+    ActionKind,
+    OrderCommand,
+    OrderResult,
+    PositionType,
+    SizingBasis,
+)
 from .sizing import (
     SizingFailure,
     SizingResult,
@@ -64,9 +71,6 @@ Past this the trade is stale enough that not copying it is the better answer."""
 
 BACKOFF_S = 0.15
 """Pause after TOO_MANY_REQUESTS. Short: the alternative to retrying is abandoning."""
-
-ACCOUNT_TRADE_MODE_DEMO = 0
-"""``ACCOUNT_TRADE_MODE_DEMO``. Contest is 1 and real is 2."""
 
 
 class ReadFailure(Enum):

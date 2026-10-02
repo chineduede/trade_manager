@@ -19,6 +19,7 @@ from mt5copier.config import (
     Role,
     SizingMode,
     TerminalConfig,
+    account_key,
     load,
     merge_discovery,
     save,
@@ -195,6 +196,66 @@ def test_risk_label(kwargs: dict[str, object], expected: str) -> None:
     assert TerminalConfig(terminal_id=TID_A, **kwargs).risk_label() == expected  # type: ignore[arg-type]
 
 
+def test_account_key_is_none_with_no_login() -> None:
+    assert account_key(None, "A-Live") is None
+
+
+def test_account_key_combines_login_and_server() -> None:
+    """Server is part of the key -- two different brokers can hand out the same login number."""
+    assert account_key(123, "A-Live") != account_key(123, "B-Live")
+
+
+def test_display_name_prefers_the_named_account_over_the_label() -> None:
+    cfg = AppConfig(
+        terminals={
+            TID_A: TerminalConfig(
+                terminal_id=TID_A, label="Alpha Broker", last_login=123, last_server="A-Live"
+            )
+        },
+        account_names={account_key(123, "A-Live"): "My Funded Account"},
+    )
+    assert cfg.display_name(TID_A) == "My Funded Account"
+
+
+def test_display_name_falls_back_to_label_then_to_the_id() -> None:
+    cfg = AppConfig(terminals={TID_A: TerminalConfig(terminal_id=TID_A, label="Alpha Broker")})
+    assert cfg.display_name(TID_A) == "Alpha Broker"
+    cfg2 = AppConfig(terminals={TID_A: TerminalConfig(terminal_id=TID_A)})
+    assert cfg2.display_name(TID_A) == TID_A[:8]
+
+
+def test_display_name_ignores_an_account_name_for_a_different_account() -> None:
+    """The name is keyed by account, not terminal -- a name set for some other login/server
+    must never leak onto a terminal that isn't logged into that account."""
+    cfg = AppConfig(
+        terminals={
+            TID_A: TerminalConfig(
+                terminal_id=TID_A, label="Alpha Broker", last_login=123, last_server="A-Live"
+            )
+        },
+        account_names={account_key(999, "A-Live"): "Someone Else's Account"},
+    )
+    assert cfg.display_name(TID_A) == "Alpha Broker"
+
+
+def test_display_name_follows_the_account_to_a_different_terminal() -> None:
+    """The whole point: the same account logged into a different terminal shows the same name."""
+    key = account_key(123, "A-Live")
+    cfg = AppConfig(
+        terminals={
+            TID_A: TerminalConfig(
+                terminal_id=TID_A, label="Terminal One", last_login=123, last_server="A-Live"
+            ),
+            TID_B: TerminalConfig(
+                terminal_id=TID_B, label="Terminal Two", last_login=123, last_server="A-Live"
+            ),
+        },
+        account_names={key: "My Funded Account"},
+    )
+    assert cfg.display_name(TID_A) == "My Funded Account"
+    assert cfg.display_name(TID_B) == "My Funded Account"
+
+
 # --- merge ---------------------------------------------------------------------------------
 
 
@@ -222,12 +283,14 @@ def test_merge_preserves_user_settings(tmp_path: Path) -> None:
                 symbol_suffix="p",
                 symbol_map={"XAUUSD": "XAUUSD.s"},
             )
-        }
+        },
+        account_names={account_key(42, "A-Live"): "My Funded Account"},
     )
     merge_discovery(cfg, [disc(TID_A, "Broker A", exe, login=42, server="A-Live")])
     t = cfg.terminals[TID_A]
     assert t.label == "Broker A"  # refreshed
     assert t.exe_path == exe  # refreshed
+    assert cfg.display_name(TID_A) == "My Funded Account"  # account name, untouched by the merge
     assert t.role is Role.SLAVE  # preserved
     assert t.risk_cash == 250.0  # preserved
     assert t.sizing_mode is SizingMode.FIXED_CASH_RISK
@@ -291,6 +354,39 @@ def test_load_missing_file_returns_defaults(tmp_path: Path) -> None:
     assert load(tmp_path / "absent.json").terminals == {}
 
 
+def test_load_demotes_a_slave_found_with_no_master(tmp_path: Path) -> None:
+    """A slave with no master makes no sense -- fixed on load, the same way a retired field is,
+    rather than enforced as a model validator that would quarantine exactly the file this
+    repairs (see ``_demote_orphaned_slaves``'s own docstring)."""
+    path = tmp_path / "config.json"
+    save(
+        AppConfig(terminals={TID_A: TerminalConfig(terminal_id=TID_A, role=Role.SLAVE)}),
+        path,
+    )
+    # Written directly as a slave with no master -- save() itself goes through pydantic, which
+    # does not forbid this shape, only AppConfig._validate_roles's one-master rule does.
+
+    cfg = load(path)
+    assert cfg.terminals[TID_A].role is Role.UNASSIGNED
+    # The fix is persisted immediately, not just corrected in memory.
+    assert load(path).terminals[TID_A].role is Role.UNASSIGNED
+
+
+def test_load_leaves_a_slave_alone_when_its_master_is_present(tmp_path: Path) -> None:
+    path = tmp_path / "config.json"
+    save(
+        AppConfig(
+            terminals={
+                TID_A: TerminalConfig(terminal_id=TID_A, role=Role.MASTER),
+                TID_B: TerminalConfig(terminal_id=TID_B, role=Role.SLAVE),
+            }
+        ),
+        path,
+    )
+    cfg = load(path)
+    assert cfg.terminals[TID_B].role is Role.SLAVE
+
+
 def test_load_corrupt_file_moves_it_aside_and_recovers(tmp_path: Path) -> None:
     """A bad config must never prevent startup, and must never be silently destroyed."""
     path = tmp_path / "config.json"
@@ -312,6 +408,7 @@ def test_a_retired_field_is_dropped_rather_than_failing_the_whole_config(tmp_pat
     user every setting they had. Strip it instead."""
     path = tmp_path / "config.json"
     tid = "A" * 32
+    master_tid = "B" * 32
     path.write_text(
         json.dumps(
             {
@@ -323,7 +420,11 @@ def test_a_retired_field_is_dropped_rather_than_failing_the_whole_config(tmp_pat
                         "role": "slave",
                         "risk_percent": 2.5,
                         "default_sl_points": 200,
-                    }
+                    },
+                    # A master has to exist too, or load()'s no-master-no-slave cleanup would
+                    # demote "Alpha" to unassigned before this test ever gets to the field it's
+                    # actually about.
+                    master_tid: {"terminal_id": master_tid, "label": "Master", "role": "master"},
                 },
             }
         ),
