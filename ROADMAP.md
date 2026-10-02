@@ -10,7 +10,7 @@ and its CLOSE both filled on a real demo account (IC Markets Global master → B
 slave). `dry_run` is **false** in the live config; the executor's demo-only guard sits
 underneath every send. Since then the per-terminal settings editor, the `l` live-override
 dialog, the orphan-on-settings-edit rule, and closing a terminal the copier itself launched (on
-`stop()`/unassign) have all landed and are committed (`master`, HEAD `dcd4e60`, 706 tests).
+`stop()`/unassign) have all landed and are committed (`master`, 815 tests as of 2026-10-02).
 
 **Most of the trading logic beyond that first OPEN/CLOSE pair is still unverified against a
 broker** — built and unit-tested, not yet seen filling or refusing for real. "Live verification
@@ -76,7 +76,8 @@ its slaves) or disabling it stakes every slave's. The person sees them, per slav
 agree; agreeing gives them up as acknowledged orphans, so no record outlives its master. Unit
 covered, and **confirmed on a demo run 2026-10-02**: unassign a master over a live copy, assign
 a new master, nothing closes. Recording the master on each copy record (so a foreign ticket can
-never match) is left for multi-master, which needs it anyway.
+never match) is not done: multi-master was dropped from the roadmap on 2026-10-02, and with one
+master at a time the give-up rule above is what keeps tickets unambiguous.
 
 Everything in "Safety rails" under Stage 2c is now built — the demo-only guard landed with
 Stage 2b deliberately, in the same commit as the first code able to send.
@@ -245,10 +246,10 @@ in this file, it's linked by name instead of repeated here.
   leaves things sane." Previously unit-tested only, against a faked `psutil.Process`
   (commit `dcd4e60`).
 
-**Known gap, not yet even a plan**
-- [ ] What disabling the **master** does to its slaves' open copies — the orphan rule only
-  fires on the terminal being edited, and a master holds no copies, so today nothing asks and
-  nothing is known to happen. Needs a decision before it needs a test.
+**Closed 2026-10-02**
+- [x] What disabling or unassigning the **master** does to its slaves' open copies — decided
+  and built (`cef19d2`): every slave's copies are staked, shown, and given up as acknowledged
+  orphans only once the person agrees. Confirmed on a demo run; see "Where the project is".
 
 ---
 
@@ -1140,46 +1141,76 @@ each needs its own policy-then-build-then-demo-verify pass, the same as every st
 before it is built. Their UI, if any, lands in the TUI — the web UI was dropped on 2026-10-02 in
 favour of making the TUI simpler and better-looking.
 
-**Ordered deliberately, not just listed: multi-master support goes first if any of this is built
-at all.** It's the only one of the four that changes the data model everything else would build
-on top of — the ledger's belief keys, per-master attribution, and halt/notify scope are all
-currently implicit ("the one master"). Building breakeven, prop-firm guards, or Telegram
-notifications first means redoing their master-attribution logic when multi-master lands later;
-building multi-master first means the other three are written against the right shape from the
-start. This is a sequencing note for *if/when* multi-master is picked up, not a statement that it
-outranks the others in importance — that's still the user's call each time this list is revisited.
+**Multi-master support was dropped on 2026-10-02**, by the user. One master at a time stays the
+model; `AppConfig`'s one-master rule and `Engine._reconcile()`'s single `self._cfg.master` read
+are the design, not a limitation waiting to be lifted.
 
-- **Multi-master support.** Today `AppConfig` hard-enforces exactly one master
-  (`config.py:301-309` raises on a second one; `set_role()` demotes any existing master rather
-  than allow two) and `Engine._reconcile()` is keyed off the single `self._cfg.master` property
-  (`engine.py:411-413`) — slaves aren't linked to *a* master, they're all implicitly reconciled
-  against *the* master. Real support needs: a `master_id` on each slave (or a master-group
-  concept), `_reconcile` dispatching per-master instead of reading one singleton, and
-  `BeliefStore`/`CopyLedger` keys disambiguated by master — right now `(terminal_id,
-  master_ticket)` assumes tickets from *the* master are unambiguous, and two masters can easily
-  collide on ticket numbers for the same slave. **Running two separate `mt5copier` processes
-  was never a substitute** for this — `config.json`, `mapping.db`, and `copier.log` are all
-  fixed, un-overridable paths (`paths.py:42-57`), so two instances would have raced on
-  `config.json` (silent last-writer-wins) and `copier.log`'s rotation could throw
-  `PermissionError` on Windows once two processes held the same rotating file open. Moot now
-  anyway: `single_instance.py` (2026-10-01) refuses a second full run outright via an OS-held
-  file lock, so that path is no longer even reachable by accident.
+- **Terminal detail page — planned 2026-10-02, next up.** More detail per terminal, so it can be
+  shown visually. The user's choices: live per-position P/L, risk/margin gauges, and copy-health
+  stats (equity history was not picked). They live on **a new per-terminal page** (Enter on a
+  terminal row opens it; Esc goes back), and the history is **kept for the session only**, in
+  bounded in-memory buffers that start empty on every launch.
 
-  **Sharpened 2026-10-02 (user's own framing, "connections"): settings belong to the pair, not
-  the terminal.** The note above only questioned *which master a slave reconciles against*; it
-  still assumed one `TerminalConfig` per terminal holds one settings bundle regardless. The
-  sharper framing: as a slave connects to a master, that pairing — call it a connection — is
-  what should own the settings bundle (risk %, symbol map, `copy_sltp`, `invert`, everything in
-  `settings_edit.py`'s `SECTIONS`), because some of those settings may legitimately differ per
-  master a slave copies from, not just per slave. Concretely this means `TerminalConfig` stops
-  being the settings holder and a slave can hold zero or more `(slave_terminal_id,
-  master_terminal_id)` connections, each with its own bundle — a real fork on top of the
-  `master_id`-per-slave idea above, not an additional field on it. No design yet; still needs its
-  own policy-then-build-then-demo-verify pass like everything else on this list, and it changes
-  `config.py` (the settings fields currently on `TerminalConfig`, `AppConfig._validate_roles`'s
-  one-master rule), `engine.py` (`Engine._reconcile()`'s single `self._cfg.master` read), and
-  `reconcile.py`/`CopyLedger`'s belief keys all at once, so it should be designed as one piece
-  with the `master_id` work above, not bolted on after.
+  **The rule that shapes the data: live values never touch `Position`.** `Position` deliberately
+  holds only the fields that stay the same from tick to tick, so the reconciler sees a position
+  as unchanged until it really changes. Floating P/L, current price and swap change on every
+  tick. They go in a **separate** payload on the `Snapshot`, keyed by ticket, which nothing in
+  `reconcile.py` or the ledger reads. Mixing them in would make every tick look like a
+  modification.
+
+  *Phase 1, the data (worker → `Snapshot`, no UI):*
+  - `PositionLive(ticket, price_current, profit, swap)`, as `Snapshot.live_positions`, with the
+    usual rule: `None` means the read failed, not "no positions". This adds no MT5 calls:
+    `positions_get()` already returns these fields, and today they are thrown away.
+  - From `account_info()`: `margin`, `margin_level`, `profit` (`margin_free` is already carried,
+    but nothing uses it yet).
+  - From `terminal_info()`: `ping_last` (microseconds, the terminal's own trade-server ping).
+  - Everything is optional and defaults to `None`, so a missing field on an odd broker shows
+    as "—" and never fails the snapshot. That differs from a position that won't parse, which
+    has to fail the whole read.
+
+  *Phase 2, copy-health stats (engine-side, session only):*
+  - **Latency** = when the result arrived − when the command was sent. `_pending_cmd` already
+    holds `sent_at`, so this is one subtraction at the place the result is matched. Kept per
+    slave in a ring buffer (around 200 samples) for a sparkline, plus last/median/max.
+  - **Slippage** on OPEN = the slave's fill `price` against the master's `price_open`, in points.
+    That needs the symbol's `point`, which only the worker knows, so `OrderResult` gains `point`
+    (or the executor reports the slippage itself). The sign is "against us", not
+    buy/sell-relative.
+  - **Counters** per slave: filled, refused (FATAL), retried (`attempts > 1`), expired
+    (`expire_inflight`), skipped (by reason). These are counts of what the ledger already logs.
+  - **Connection uptime**: time spent `CONNECTED` versus anything else since the app launched,
+    plus the number of disconnects, taken from the snapshot state changes the engine already
+    watches.
+  - The UI reads all of this through one read-only `Engine.terminal_stats(terminal_id)` that
+    returns a frozen copy. It never gets a reference into the engine's live state, which the
+    drain thread changes without a lock against the UI.
+
+  *Phase 3, the page (`tui/terminal_screen.py`):*
+  - Header: name, role, demo/live, connection state, ping, balance → equity, and floating P/L
+    in colour.
+  - **Positions table**: symbol, side, lots, open price, current price, SL/TP and the distance
+    to each, swap, and P/L. On a **slave**, each copy sits next to its master position (from
+    the mapping store: master ticket, master P/L, and the copy's P/L as a % of the master's).
+    On the **master**, the reverse: how many slaves hold each position. Orphans are marked.
+  - **Gauges** (Textual `ProgressBar` / bar text): margin used against equity, a margin-level %
+    with warn/danger colours, free margin, and **exposure per symbol** (net lots per symbol,
+    long against short).
+  - **Health**: a latency `Sparkline`, slippage stats, the counters, uptime and disconnects.
+    The panel is empty on the master, which receives no commands.
+  - It refreshes on the app's existing 0.5s timer, and only while the page is visible.
+
+  *Explicitly not in scope:* money at risk to the stop per position. It needs an
+  `order_calc_profit` call per position per tick, inside the worker, which is a
+  cost on the latency-critical master loop, so it is left for the margin/prop-firm pass below.
+  Also out: any persistence (the user chose session only) and any charting library (Textual's
+  own widgets are enough).
+
+  *Verification:* unit tests for each phase (that the live payload leaves `Position` equality
+  alone and that `None` is handled; latency/slippage/counters from scripted results; the page
+  rendered headless with Textual's `Pilot`). Then a demo run: open, partial-close, move a stop
+  and close on the master, and check that the page tracks it against the Trade tab on both
+  terminals.
 - **Breakeven.** Move a copy's stop to entry (± buffer) once price has moved some distance.
   Reuses the already-built `MODIFY_SLTP` dispatch path; the new part is the trigger logic.
 - **Prop-firm guards.** Daily loss limit, max drawdown, consistency-rule-style caps that halt
