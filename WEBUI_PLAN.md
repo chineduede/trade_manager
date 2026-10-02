@@ -353,6 +353,20 @@ All 748+ tests still pass after this pass (4 new ones added for `render_log_line
 `_status_icon.html` files land inside the existing directory-level `datas` entries for
 `templates/` and `static/`, not named individually.
 
+**The caveat above was immediately justified: the user opened it in a real browser and the
+whole page flashed continuously.** Root cause: `ws_state()` sent the health bar and every row on
+*every* tick, unconditionally, regardless of whether anything had changed. `hx-swap-oob="true"`
+replaces the whole element with a fresh DOM node, so this meant a brand-new node for the health
+bar and every row twice a second, forever — and `dashboard.js`'s flash-on-update affordance
+fires on any added node with an id, so it dutifully flashed all of it, continuously. Fixed by
+tracking the last fragment actually sent per connection (seeded from the engine's current state
+right after `accept()`, since the index page this connection follows already rendered that same
+state moments ago) and only sending a fragment whose rendered HTML differs from what was last
+sent — the same "only touch what changed" discipline `tui/app.py`'s `_rebuild_rows` already
+follows for the Textual UI, ported to the websocket. Two existing tests had encoded the bug as
+an assumption ("every tick sends health then one row") and needed rewriting along with the fix;
+a new regression test (`test_unchanged_health_and_row_are_never_resent`) asserts the opposite.
+
 ## What this plan deliberately does not cover
 
 Hosting this for anyone not on the same machine, multi-user accounts/roles within the web UI,
