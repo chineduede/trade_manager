@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}MT5 Copier{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js"></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="page-header">
+      <h1>MT5 COPIER</h1>
+      <nav class="nav">
+        <a href="/?token={{ token }}"{% if page == "home" %} class="current" aria-current="page"{% endif %}>HOME</a>
+        <a href="/terminals?token={{ token }}"{% if page == "terminals" %} class="current" aria-current="page"{% endif %}>TERMINALS</a>
+        <a href="/log?token={{ token }}"{% if page == "log" %} class="current" aria-current="page"{% endif %}>LOG</a>
+      </nav>
+      <p class="subtitle">STAGE A &middot; READ-ONLY</p>
+    </header>
+
+    {% block content %}{% endblock %}
+  </div>
+
+  <script src="/static/dashboard.js"></script>
+</body>
+</html>

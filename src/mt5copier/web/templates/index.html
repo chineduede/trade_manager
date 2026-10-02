@@ -1,42 +1,9 @@
-<!DOCTYPE html>
-<html lang="en" data-theme="dark">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>MT5 Copier</title>
-  <link rel="stylesheet" href="/static/style.css">
-  <script src="/static/htmx.min.js"></script>
-  <script src="/static/htmx-ws.js"></script>
-</head>
-<body hx-ext="ws" ws-connect="/ws/state?token={{ token }}&log_offset={{ log_offset }}">
-  <div class="shell">
-    <header class="page-header">
-      <h1>MT5 Copier</h1>
-      <p class="subtitle">Stage A &middot; read-only dashboard</p>
-    </header>
+{% extends "base.html" %}
+{% block content %}
+<div id="health-bar" class="health-bar panel"
+     hx-get="/partials/health?token={{ token }}" hx-trigger="every 2s" hx-swap="innerHTML">
+  {% include "_health_inner.html" %}
+</div>
 
-    {% include "_health.html" %}
-
-    <table>
-      <thead>
-        <tr>
-          <th>Terminal</th>
-          <th>Role</th>
-          <th>Status</th>
-          <th class="num">Balance</th>
-          <th class="num">Equity</th>
-          <th class="num">Floating P/L</th>
-        </tr>
-      </thead>
-      <tbody id="terminal-table-body">
-        {% for row in rows %}{% include "_row.html" %}{% endfor %}
-      </tbody>
-    </table>
-
-    <h2>Log</h2>
-    <div id="log-tail" class="log-tail">{{ log_text | log_lines }}</div>
-  </div>
-
-  <script src="/static/dashboard.js"></script>
-</body>
-</html>
+<p class="home-blurb">Live, read-only status. See TERMINALS for account detail, LOG for the raw tail.</p>
+{% endblock %}

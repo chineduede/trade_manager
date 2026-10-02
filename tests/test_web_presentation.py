@@ -1,7 +1,7 @@
 """Pure view-model logic: status tiers, row derivation, log-tail reading.
 
-No ASGI app or websocket needed here -- that is the point of keeping ``presentation.py``
-separate from ``routes.py`` (see its module docstring).
+No ASGI app needed here -- that is the point of keeping ``presentation.py`` separate from
+``routes.py`` (see its module docstring).
 """
 
 from __future__ import annotations
@@ -13,8 +13,8 @@ from mt5copier.config import Role, TerminalConfig
 from mt5copier.engine import TerminalView
 from mt5copier.protocol import Snapshot, WorkerState
 from mt5copier.web.presentation import (
+    badge_for_tier,
     read_log_tail,
-    read_new_log_lines,
     render_log_lines,
     row_info,
     tier_for_status,
@@ -37,6 +37,18 @@ def test_tier_for_status_maps_the_known_states() -> None:
 
 def test_tier_for_status_defaults_unknown_text_to_muted() -> None:
     assert tier_for_status("something this table has never seen") == "muted"
+
+
+def test_badge_for_tier_covers_every_known_tier() -> None:
+    assert badge_for_tier("good") == "[OK]"
+    assert badge_for_tier("warning") == "[WARN]"
+    assert badge_for_tier("serious") == "[ERR]"
+    assert badge_for_tier("critical") == "[DEAD]"
+    assert badge_for_tier("muted") == "[OFF]"
+
+
+def test_badge_for_tier_falls_back_on_an_unknown_tier() -> None:
+    assert badge_for_tier("something new") == "[??]"
 
 
 def test_row_info_without_a_snapshot_shows_no_numbers() -> None:
@@ -127,9 +139,7 @@ def test_render_log_lines_escapes_html_in_the_message() -> None:
 
 
 def test_read_log_tail_on_a_missing_file_is_empty(tmp_path: Path) -> None:
-    tail = read_log_tail(tmp_path / "nope.log")
-    assert tail.text == ""
-    assert tail.offset == 0
+    assert read_log_tail(tmp_path / "nope.log") == ""
 
 
 def test_read_log_tail_keeps_only_the_last_n_lines(tmp_path: Path) -> None:
@@ -137,37 +147,16 @@ def test_read_log_tail_keeps_only_the_last_n_lines(tmp_path: Path) -> None:
     # would make this test about platform newline handling instead of the tail-trimming logic.
     path = tmp_path / "copier.log"
     path.write_bytes(("\n".join(f"line {i}" for i in range(10)) + "\n").encode())
-    tail = read_log_tail(path, max_lines=3)
-    assert tail.text == "line 7\nline 8\nline 9"
-    assert tail.offset == path.stat().st_size
+    assert read_log_tail(path, max_lines=3) == "line 7\nline 8\nline 9"
 
 
-def test_read_new_log_lines_returns_only_what_was_appended(tmp_path: Path) -> None:
+def test_read_log_tail_reflects_whatever_is_in_the_file_right_now(tmp_path: Path) -> None:
+    """Every poll re-reads the file fresh and the panel is fully replaced -- there is no
+    byte-offset bookkeeping here (unlike the push-based design this replaced), so a later call
+    simply sees whatever the file holds at that moment."""
     path = tmp_path / "copier.log"
     path.write_bytes(b"first\n")
-    offset = path.stat().st_size
+    assert read_log_tail(path) == "first"
     with path.open("ab") as f:
         f.write(b"second\n")
-    tail = read_new_log_lines(path, offset)
-    assert tail.text == "second\n"
-    assert tail.offset == path.stat().st_size
-
-
-def test_read_new_log_lines_with_nothing_new_is_empty(tmp_path: Path) -> None:
-    path = tmp_path / "copier.log"
-    path.write_bytes(b"first\n")
-    offset = path.stat().st_size
-    tail = read_new_log_lines(path, offset)
-    assert tail.text == ""
-    assert tail.offset == offset
-
-
-def test_read_new_log_lines_restarts_from_zero_after_rotation(tmp_path: Path) -> None:
-    """A file smaller than the tracked offset means the log rotated underneath us -- read the
-    whole fresh file as new rather than silently going quiet or raising."""
-    path = tmp_path / "copier.log"
-    path.write_bytes(b"a" * 500)
-    stale_offset = 500
-    path.write_bytes(b"fresh after rotation\n")
-    tail = read_new_log_lines(path, stale_offset)
-    assert tail.text == "fresh after rotation\n"
+    assert read_log_tail(path) == "first\nsecond"

@@ -70,22 +70,23 @@ uv run python -m mt5copier --web            # http://127.0.0.1:8765
 uv run python -m mt5copier --web --port 9000
 ```
 
-Prints a one-time URL (`http://127.0.0.1:<port>/?token=...`) and serves a read-only dashboard
-from inside the **same process** as the engine — the same `Engine`, the same
-`SingleInstanceLock`, just a second way to look at it alongside the TUI. **Nothing reachable here
-can place, modify or close an order**: the page and the websocket that pushes it live are the
-only two routes that exist.
+Prints a one-time URL (`http://127.0.0.1:<port>/?token=...`) and serves a read-only, three-page
+dashboard (`/`, `/terminals`, `/log`) from inside the **same process** as the engine — the same
+`Engine`, the same `SingleInstanceLock`, just a second way to look at it alongside the TUI.
+**Nothing reachable here can place, modify or close an order**: every route is a `GET`, and
+there is no JSON API either — each page's live panel polls its own `GET /partials/...` route via
+htmx (`hx-trigger="every Ns"`), not a websocket and not a hand-rolled JS client.
 
-- **Auth** is a random token generated fresh every run (Jupyter-notebook style), required on the
-  page load and on the websocket handshake. Nothing to set up, nothing persisted.
+- **Auth** is a random token generated fresh every run (Jupyter-notebook style), required on
+  every route, page or partial. Nothing to set up, nothing persisted.
 - **Always binds `127.0.0.1`** — written directly into the `uvicorn.run()` call, not read from a
   config field, so there is no path to `0.0.0.0` short of editing source.
-- Shows per-terminal status (mapped onto a dark good/warning/serious/critical scale), balance,
-  equity, account-level floating P&L (`equity − balance`; not per-position — `Position` carries
-  no live `profit` field by design, see `protocol.py`), and a live tail of `copier.log`.
-- Built with FastAPI + Jinja2 + htmx's websocket extension: the server pushes rendered HTML
-  fragments over one websocket per client (out-of-band swaps by element id), not a JSON API
-  driving a hand-rolled JS client.
+- `/terminals` shows per-terminal status (bracketed text badges — `[OK]`/`[WARN]`/`[ERR]`/
+  `[DEAD]`/`[OFF]` — mapped onto a good/warning/serious/critical scale), balance, equity, and
+  account-level floating P&L (`equity − balance`; not per-position — `Position` carries no live
+  `profit` field by design, see `protocol.py`). `/log` shows a live tail of `copier.log`.
+- Pixel/8-bit retro visual style, responsive down to phone width. Built with FastAPI + Jinja2 +
+  htmx polling against per-resource routes — no websocket.
 
 Stage A of four. Settings/roles, the live-override dialog and panic, and new trading features
 (breakeven, prop-firm guards, …) are later stages that land in the web UI only — the TUI stays

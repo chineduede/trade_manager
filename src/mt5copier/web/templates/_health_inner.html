@@ -1,0 +1,18 @@
+<div class="stat-tile">
+  <span class="stat-value">{{ health.supervised }}/{{ health.total }}</span>
+  <span class="stat-label">SUPERVISED</span>
+</div>
+<div class="stat-tile">
+  <span class="stat-value tier-good-text">{{ health.live }}</span>
+  <span class="stat-label">LIVE</span>
+</div>
+<div class="stat-tile">
+  <span class="stat-value {{ 'tier-serious-text' if health.stale else '' }}">{{ health.stale }}</span>
+  <span class="stat-label">STALE</span>
+</div>
+{% if blocked_reason %}
+<div class="stat-tile stat-tile-alert tier-critical-text">
+  <span class="badge badge-critical">[!!]</span>
+  <span>DETECTION PAUSED: {{ blocked_reason }}</span>
+</div>
+{% endif %}

@@ -1,8 +1,8 @@
 """Pure view-model logic for the web dashboard: status tiers, row data, log tails.
 
 Kept separate from ``routes.py`` so the mapping from engine state to a display tier, and the
-log-tail arithmetic, can be unit tested without an ASGI app or a websocket -- the same reason
-``sizing.py`` and ``symbols.py`` stay pure and separate from the I/O-heavy modules.
+log-tail arithmetic, can be unit tested without an ASGI app -- the same reason ``sizing.py`` and
+``symbols.py`` stay pure and separate from the I/O-heavy modules.
 
 Status tiers follow the mapping decided in WEBUI_PLAN.md's "UI feel" section, reusing this
 project's own existing vocabulary (``protocol.WorkerState``, ``TerminalView.status()``,
@@ -36,11 +36,27 @@ _TIER_BY_STATUS: dict[str, Tier] = {
     "stopped": "muted",
 }
 
+STATUS_BADGE: dict[Tier, str] = {
+    "good": "[OK]",
+    "warning": "[WARN]",
+    "serious": "[ERR]",
+    "critical": "[DEAD]",
+    "muted": "[OFF]",
+}
+"""Bracketed text badges instead of an icon. Text reads as its own tier without relying on an
+icon *shape* to carry the distinction -- it is the same accessibility rule the previous SVG
+icons were chasing (a status color never appears without a non-color cue), just satisfied in a
+way that also happens to fit a retro-terminal status line better than an SVG glyph would."""
+
 
 def tier_for_status(status_text: str) -> Tier:
     """A held slave overrides this to "warning" at the call site (see :func:`row_info`) --
     holding is orthogonal to connection status, so it is not folded into this table."""
     return _TIER_BY_STATUS.get(status_text, "muted")
+
+
+def badge_for_tier(tier: Tier) -> str:
+    return STATUS_BADGE.get(tier, "[??]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,25 +118,22 @@ def all_rows(engine: Engine) -> list[RowInfo]:
     ]
 
 
-@dataclass(frozen=True, slots=True)
-class LogTail:
-    text: str
-    offset: int
-    """Byte offset to resume reading from on the next call."""
-
-
-def read_log_tail(path: Path, *, max_lines: int = 200) -> LogTail:
-    """The last ``max_lines`` of the log file, plus the offset to resume from.
+def read_log_tail(path: Path, *, max_lines: int = 200) -> str:
+    """The last ``max_lines`` of the log file, as plain text.
 
     A missing file (nothing logged yet, or a fresh install) reads as empty, not an error --
-    nothing has gone wrong, there is simply nothing to show yet.
+    nothing has gone wrong, there is simply nothing to show yet. Each poll of the log page or
+    its partial route calls this fresh and the response fully replaces the panel -- there is no
+    byte-offset bookkeeping to get wrong, unlike the push-based design this replaced (see
+    WEBUI_PLAN.md's "Stage A rebuilt" section for why that tracking was dropped along with the
+    websocket).
     """
     try:
         data = path.read_bytes()
     except OSError:
-        return LogTail(text="", offset=0)
+        return ""
     lines = data.decode("utf-8", errors="replace").splitlines()
-    return LogTail(text="\n".join(lines[-max_lines:]), offset=len(data))
+    return "\n".join(lines[-max_lines:])
 
 
 _LOG_LEVEL_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} (\S+)")
@@ -150,26 +163,3 @@ def render_log_lines(text: str) -> Markup:
         css_class = _LOG_LEVEL_CLASS.get(level or "", "log-line-plain")
         rendered.append(f'<span class="log-line {css_class}">{escape(line)}</span>')
     return Markup("\n".join(rendered))
-
-
-def read_new_log_lines(path: Path, since_offset: int) -> LogTail:
-    """Bytes appended since ``since_offset``.
-
-    A file smaller than ``since_offset`` means the log rotated underneath us; restarting from 0
-    rather than clamping avoids a giant burst of "new" text from the fresh file's own backlog.
-    """
-    try:
-        size = path.stat().st_size
-    except OSError:
-        return LogTail(text="", offset=since_offset)
-    if size < since_offset:
-        since_offset = 0
-    if size == since_offset:
-        return LogTail(text="", offset=since_offset)
-    try:
-        with path.open("rb") as f:
-            f.seek(since_offset)
-            data = f.read()
-    except OSError:
-        return LogTail(text="", offset=since_offset)
-    return LogTail(text=data.decode("utf-8", errors="replace"), offset=size)

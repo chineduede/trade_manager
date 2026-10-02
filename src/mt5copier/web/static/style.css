@@ -1,9 +1,24 @@
-/* Trading-terminal style, decided 2026-10-02 -- see WEBUI_PLAN.md's "UI feel" section.
-   Status/ink tokens are the data-viz skill's validated reference palette, not eyeballed hex --
-   this is a status dashboard, not a chart, so only those slots apply. Spacing/radius/type scale
-   below are this page's own system, built for this redesign (2026-10-02 pass #2 -- the first
-   pass shipped a bare table with a colored dot for status and nothing else; this one adds real
-   hierarchy, icons instead of hue-only dots, and a few small live-feeling touches). */
+/* Pixel / 8-bit retro, decided 2026-10-02 (second redesign pass) -- see WEBUI_PLAN.md's "UI
+   feel" and "Stage A rebuilt" sections. Status/ink tokens stay the data-viz skill's validated
+   reference palette, unchanged from the first pass -- pixel/retro is a shape and typography
+   language on top of already-accessible colors, not a reason to re-derive them.
+
+   Fonts vendored locally (not Google Fonts CDN), same "works offline" discipline as htmx:
+   Press Start 2P (OFL) for the title only, used sparingly -- it is close to unreadable at body
+   size; VT323 (OFL) for everything else, a pixel-terminal font that stays legible at table-row
+   density. */
+
+@font-face {
+  font-family: "Press Start 2P";
+  src: url("/static/press-start-2p.woff2") format("woff2");
+  font-display: swap;
+}
+@font-face {
+  font-family: "VT323";
+  src: url("/static/vt323.woff2") format("woff2");
+  font-display: swap;
+}
+
 :root {
   color-scheme: dark;
   --surface:          #1a1a19;
@@ -16,94 +31,121 @@
   --status-warning:   #fab219;
   --status-serious:   #ec835a;
   --status-critical:  #d03b3b;
-  --flash-color:      rgba(255, 255, 255, 0.10);
 
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
   --space-5: 24px;
-  --space-6: 32px;
 
-  --radius-sm: 4px;
-  --radius-md: 8px;
+  --pixel-border: 3px;
+  --shadow-offset: 4px;
 
-  --font-sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-display: "Press Start 2P", monospace;
+  --font-body: "VT323", ui-monospace, monospace;
 }
 
 * { box-sizing: border-box; }
 
-html, body {
-  background: var(--page);
-}
+html, body { background: var(--page); }
 
 body {
   margin: 0;
   color: var(--ink-primary);
-  font-family: var(--font-sans);
-  font-size: 14px;
-  line-height: 1.5;
+  font-family: var(--font-body);
+  font-size: 18px;
+  line-height: 1.45;
 }
 
 .shell {
-  max-width: 1100px;
+  max-width: 1000px;
   margin: 0 auto;
-  padding: var(--space-5) var(--space-4) var(--space-6);
+  padding: var(--space-5) var(--space-4) var(--space-5);
 }
 
-/* ---------- header ---------- */
+/* ---------- header / nav ---------- */
 
 .page-header {
-  margin-bottom: var(--space-4);
+  margin-bottom: var(--space-5);
 }
 .page-header h1 {
-  margin: 0;
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-display);
   font-size: 20px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.04em;
+  line-height: 1.6;
 }
-.page-header .subtitle {
-  margin: var(--space-1) 0 0;
+.subtitle {
+  margin: var(--space-2) 0 0;
   color: var(--ink-muted);
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
+  font-size: 15px;
+  letter-spacing: 0.05em;
 }
 
-h2 {
-  font-size: 12px;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--ink-muted);
-  margin: var(--space-5) 0 var(--space-2);
+.nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+}
+.nav a {
+  display: inline-block;
+  padding: var(--space-1) var(--space-3);
+  border: var(--pixel-border) solid var(--ink-secondary);
+  background: var(--surface);
+  color: var(--ink-secondary);
+  text-decoration: none;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  box-shadow: var(--shadow-offset) var(--shadow-offset) 0 #000;
+}
+.nav a:hover {
+  color: var(--ink-primary);
+  border-color: var(--ink-primary);
+}
+.nav a.current {
+  color: var(--page);
+  background: var(--ink-primary);
+  border-color: var(--ink-primary);
+  /* A pressed button: shadow collapses and the box nudges into where the shadow was. */
+  box-shadow: none;
+  transform: translate(var(--shadow-offset), var(--shadow-offset));
 }
 
-/* ---------- health bar: a strip of stat tiles, not one run-together line ---------- */
+/* ---------- panels (pixel-bordered boxes with a hard offset shadow) ---------- */
+
+.panel {
+  background: var(--surface);
+  border: var(--pixel-border) solid var(--hairline);
+  box-shadow: var(--shadow-offset) var(--shadow-offset) 0 #000;
+  padding: var(--space-4);
+  margin-top: var(--space-4);
+}
+
+.home-blurb {
+  color: var(--ink-muted);
+  margin-top: var(--space-4);
+  font-size: 16px;
+}
+
+/* ---------- health bar: a strip of stat tiles ---------- */
 
 .health-bar {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-5);
   align-items: center;
-  background: var(--surface);
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-md);
-  padding: var(--space-3) var(--space-4);
 }
-
 .stat-tile {
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
 .stat-value {
-  font-size: 18px;
-  font-weight: 700;
+  font-size: 22px;
   font-variant-numeric: tabular-nums;
 }
 .stat-label {
-  font-size: 11px;
-  text-transform: uppercase;
+  font-size: 13px;
   letter-spacing: 0.06em;
   color: var(--ink-muted);
 }
@@ -111,34 +153,30 @@ h2 {
   flex-direction: row;
   align-items: center;
   gap: var(--space-2);
-  font-weight: 600;
 }
 
 /* ---------- table ---------- */
 
+.table-scroll {
+  overflow-x: auto;
+}
 table {
   width: 100%;
   border-collapse: collapse;
-  background: var(--surface);
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-md);
-  overflow: hidden;
-  margin-top: var(--space-4);
 }
 th, td {
   padding: var(--space-2) var(--space-3);
   text-align: left;
-  border-bottom: 1px solid var(--hairline);
+  border-bottom: 2px solid var(--hairline);
   vertical-align: middle;
+  white-space: nowrap;
 }
 tbody tr:last-child td { border-bottom: none; }
-tbody tr:hover { background: rgba(255, 255, 255, 0.03); }
+tbody tr:hover { background: rgba(255, 255, 255, 0.04); }
 th {
   color: var(--ink-muted);
-  font-weight: 600;
-  text-transform: uppercase;
-  font-size: 11px;
   letter-spacing: 0.05em;
+  font-size: 14px;
 }
 th.num, td.num {
   font-variant-numeric: tabular-nums;
@@ -148,46 +186,41 @@ th.num, td.num {
 /* The master row is the single most important fact on the page -- give it visual weight
    instead of making the viewer read every role badge to find it. */
 tr.row-master {
-  border-left: 3px solid var(--ink-primary);
-}
-tr.row-master td:first-child {
-  font-weight: 600;
+  border-left: var(--pixel-border) solid var(--ink-primary);
 }
 
 .status-cell {
   display: flex;
   align-items: center;
   gap: var(--space-2);
-}
-.status-icon {
-  width: 14px;
-  height: 14px;
-  flex-shrink: 0;
+  white-space: normal;
 }
 
 .role-badge {
   display: inline-block;
   padding: 2px 8px;
-  border-radius: 3px;
-  font-size: 10px;
-  font-weight: 700;
+  border: 2px solid var(--hairline);
+  font-size: 13px;
   letter-spacing: 0.05em;
-  border: 1px solid var(--hairline);
   color: var(--ink-secondary);
 }
 .role-master { border-color: var(--ink-primary); color: var(--ink-primary); }
 .role-unassigned { color: var(--ink-muted); border-style: dashed; }
 
+/* Bracketed text badges, not an icon -- a status reads by its letters, not just its color,
+   which is at least as accessible as an icon shape and fits a retro terminal status line. */
 .badge {
   display: inline-block;
-  padding: 2px 8px;
-  border-radius: 3px;
-  font-size: 11px;
-  font-weight: 600;
+  padding: 1px 6px;
+  font-size: 13px;
+  font-weight: bold;
   letter-spacing: 0.03em;
 }
-.badge-warning { background: var(--status-warning); color: #1a1a19; }
+.badge-good { background: var(--status-good); color: #0d0d0d; }
+.badge-warning { background: var(--status-warning); color: #0d0d0d; }
+.badge-serious { background: var(--status-serious); color: #0d0d0d; }
 .badge-critical { background: var(--status-critical); color: #ffffff; }
+.badge-muted { background: var(--ink-muted); color: #0d0d0d; }
 
 .tier-good-text { color: var(--status-good); }
 .tier-warning-text { color: var(--status-warning); }
@@ -201,16 +234,12 @@ tr.row-master td:first-child {
 /* ---------- log panel ---------- */
 
 .log-tail {
-  margin-top: var(--space-2);
-  background: var(--surface);
-  border: 1px solid var(--hairline);
-  border-radius: var(--radius-md);
-  padding: var(--space-3);
-  max-height: 320px;
+  max-height: 60vh;
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-word;
   font-variant-numeric: tabular-nums;
+  font-size: 16px;
 }
 .log-line { color: var(--ink-secondary); }
 .log-info { color: var(--ink-secondary); }
@@ -219,12 +248,16 @@ tr.row-master td:first-child {
 .log-error, .log-critical { color: var(--status-critical); }
 .log-line-plain { color: var(--ink-muted); }
 
-/* ---------- live-update highlight ---------- */
+/* ---------- responsive ---------- */
 
-@keyframes flash-update {
-  from { background-color: var(--flash-color); }
-  to { background-color: transparent; }
-}
-.flash {
-  animation: flash-update var(--flash-ms, 700ms) ease-out;
+@media (max-width: 640px) {
+  .shell {
+    padding: var(--space-4) var(--space-2) var(--space-4);
+  }
+  body { font-size: 16px; }
+  .page-header h1 { font-size: 16px; }
+  .nav a { font-size: 14px; padding: var(--space-1) var(--space-2); }
+  .panel { padding: var(--space-3); }
+  .health-bar { gap: var(--space-4); }
+  th, td { padding: var(--space-1) var(--space-2); font-size: 14px; }
 }

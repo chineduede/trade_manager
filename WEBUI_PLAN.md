@@ -367,6 +367,91 @@ follows for the Textual UI, ported to the websocket. Two existing tests had enco
 an assumption ("every tick sends health then one row") and needed rewriting along with the fix;
 a new regression test (`test_unchanged_health_and_row_are_never_resent`) asserts the opposite.
 
+## Stage A rebuilt, 2026-10-02 — architecture and visual feel both reopened
+
+Even after the flashing fix above, the user said the redesign was still lacking, that htmx
+might be falling short, and asked for three things explicitly: "use urls for resources" (not one
+page pushed over a socket), a different visual direction ("minimalistic and retro," landing on
+pixel/8-bit after a round of concrete previews), and genuine responsiveness, which the first two
+passes never added. This is the second time a decision here has been reopened after shipping —
+both times by asking first, per this document's own rule, not assumed.
+
+**Websocket push is gone. htmx stays, but as polling against per-resource routes.** The user's
+first instinct was "a real JSON API + separate navigable pages," but confirmed afterward that if
+htmx alone can cover "use urls for resources" with no JSON needed, stick with htmx — so there is
+still no JSON API and still no hand-rolled JS client parsing one. What changed is the push model:
+
+- **Three real pages, not one:** `GET /`, `GET /terminals`, `GET /log`, each its own
+  server-rendered Jinja2 template extending a shared `base.html` (nav + shell), not three
+  sections of one screen.
+- **Each page's live panel polls its own partial route** — `GET /partials/health`,
+  `/partials/terminals`, `/partials/log` — via a stable element carrying
+  `hx-get` + `hx-trigger="every Ns"` + `hx-swap="innerHTML"`. This satisfies "use urls for
+  resources" directly: each resource genuinely has its own URL now, fetchable on its own.
+- **No self-replacing "outerHTML swap of self."** The htmx polling idiom that swaps the whole
+  trigger element (re-including its own `hx-get`) exists mainly so a response can *stop* polling
+  by omitting the trigger — not needed here, and it would have broken the log panel's
+  auto-scroll: `innerHTML` replaces only a stable element's *children*, so the same DOM node
+  keeps existing (and keeps polling, and keeps being watchable by a `MutationObserver`) forever;
+  an outerHTML self-swap would hand that observer a new node it was never watching.
+- **No more byte-offset tracking for the log.** Each poll just re-reads and re-renders the last
+  200 lines and the panel's content is fully replaced — simpler than the previous push design's
+  incremental-append bookkeeping, at the cost of not literally only sending *new* bytes. Given
+  the log panel polls independently (every 3s) rather than being pushed on a shared 0.5s tick,
+  this trade reads as a clear simplification, not a regression.
+- **`dashboard.js` is now one job, not two.** The flash-on-update affordance is gone along with
+  the websocket it was built for (there is no more "every fragment resent on every tick" failure
+  mode to flash against, by construction, since polling only ever fetches one resource's current
+  state on its own schedule). What's left: stick-to-bottom auto-scroll on the log panel, via
+  `MutationObserver` on the one stable, never-replaced log element — the same "lean on a stable
+  standard DOM API, not on htmx's internal event payload shapes" discipline as before, now
+  additionally justified by needing a node that survives every poll.
+
+**Visual feel: pixel/8-bit retro, replacing trading-terminal dark.** Decided via concrete ASCII
+previews (green-phosphor CRT, amber data-terminal, quiet minimal, pixel/8-bit — the user picked
+pixel/8-bit) rather than another round of guessing. What changed:
+
+- **Status badges are bracketed text, not an icon or a dot:** `[OK]` / `[WARN]` / `[ERR]` /
+  `[DEAD]` / `[OFF]`, via `presentation.badge_for_tier()`. This satisfies the same accessibility
+  rule the SVG icons were chasing (a status color never carries meaning by hue alone) without
+  needing an icon library at all — text reads as its own tier regardless of color vision, and it
+  fits a retro terminal status line better than a smooth SVG glyph would have next to it.
+- **No border-radius anywhere; hard 3px borders with a flat, non-blurred offset shadow**
+  (`box-shadow: 4px 4px 0 #000`) on every panel and nav link — the classic retro-UI "pixel
+  bevel." The current-page nav link collapses its shadow and nudges into where the shadow was,
+  simulating a pressed button.
+- **Two vendored pixel fonts, not Google Fonts CDN** (same "works offline" discipline as htmx):
+  Press Start 2P (OFL) for the page title only — it is close to unreadable at body size — and
+  VT323 (OFL) for everything else, a pixel-terminal font that stays legible at table-row density.
+  Both fetched once from `fonts.gstatic.com` and committed as `.woff2` files under `static/`.
+- **The validated status/ink color tokens are unchanged.** Pixel/retro is a shape and typography
+  language layered on top of already-accessible colors, not a reason to re-derive them.
+- **Real responsive breakpoints**, added for the first time (neither earlier pass had any): a
+  `max-width` shell with shrinking padding, a horizontally-scrollable table wrapper, and a
+  `640px` breakpoint that reduces font sizes and padding — standard, well-established patterns
+  chosen because they could be reasoned about correctly without a browser to test them in,
+  deliberately not anything more elaborate (e.g. a card-based table transform) that would carry
+  more risk of being wrong unseen.
+
+**Tests rewritten for the new routes, not just patched.** `test_web_push.py` (the websocket)
+is gone; `test_web_auth.py` (tests `TokenAuth` directly, independent of routes) needed no
+changes. `test_web_routes.py` now covers all three pages and three partials, including that a
+partial returns *only* its fragment — not a full page, which would otherwise nest the whole
+page inside itself on every poll. Fixing these up front caught a real latent bug in the test
+fixture itself: `received_at=0.0` always read as stale, because `time.monotonic()` on this
+machine starts in the millions, not near zero — masked for several commits by an assertion
+(`"connected" in resp.text`) that is trivially true whenever "not connected" is on the page too,
+since it's a substring of it. Fixed the fixture and tightened the assertions that had been
+silently proving nothing.
+
+**Same caveat as before, because the facts haven't changed: none of this has been seen in a
+real browser.** Verified structurally — the real server was run end to end (real config load,
+real discovery, all three pages and all three partials returned 200, both vendored fonts served)
+and the rendered HTML inspected directly for correct nav highlighting, correct badges, and
+correct polling attributes. 763 tests pass, `ruff`/`ruff format`/`mypy` clean. The visual result,
+and whether the pixel aesthetic and responsiveness actually read the way they're meant to, is
+still only verifiable by opening it.
+
 ## What this plan deliberately does not cover
 
 Hosting this for anyone not on the same machine, multi-user accounts/roles within the web UI,
