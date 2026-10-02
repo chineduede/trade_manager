@@ -12,7 +12,13 @@ from pathlib import Path
 from mt5copier.config import Role, TerminalConfig
 from mt5copier.engine import TerminalView
 from mt5copier.protocol import Snapshot, WorkerState
-from mt5copier.web.presentation import read_log_tail, read_new_log_lines, row_info, tier_for_status
+from mt5copier.web.presentation import (
+    read_log_tail,
+    read_new_log_lines,
+    render_log_lines,
+    row_info,
+    tier_for_status,
+)
 
 TID = "A" * 32
 
@@ -85,6 +91,39 @@ def test_a_stale_held_slave_is_not_downgraded_from_serious_to_warning() -> None:
     row = row_info(view, timeout_s=0.001, hold_reason="whatever")
     assert row.status_text == "stale"
     assert row.tier == "serious"
+
+
+def test_render_log_lines_on_empty_text_is_empty() -> None:
+    assert render_log_lines("") == ""
+
+
+def test_render_log_lines_colors_each_line_by_its_level() -> None:
+    text = (
+        "2026-10-02 00:33:33 INFO    [MainProcess] mt5copier.engine: OPEN filled\n"
+        "2026-10-02 00:34:02 WARNING [MainProcess] mt5copier.engine: stale slave\n"
+        "2026-10-02 00:34:05 ERROR   [MainProcess] mt5copier.engine: send failed\n"
+    )
+    html = render_log_lines(text)
+    assert '<span class="log-line log-info">' in html
+    assert '<span class="log-line log-warning">' in html
+    assert '<span class="log-line log-error">' in html
+
+
+def test_render_log_lines_falls_back_on_an_unrecognised_line() -> None:
+    """A traceback continuation line has no level prefix at all -- it must not be misclassified
+    as some arbitrary level, and must not crash the renderer."""
+    html = render_log_lines("  File \"engine.py\", line 42, in _reconcile\n")
+    assert '<span class="log-line log-line-plain">' in html
+
+
+def test_render_log_lines_escapes_html_in_the_message() -> None:
+    """Log messages can contain anything a broker or a symbol name throws at them -- this must
+    never be interpreted as markup."""
+    html = render_log_lines(
+        "2026-10-02 00:33:33 INFO    [MainProcess] mt5copier.engine: <script>alert(1)</script>\n"
+    )
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
 
 
 def test_read_log_tail_on_a_missing_file_is_empty(tmp_path: Path) -> None:

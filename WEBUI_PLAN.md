@@ -303,6 +303,56 @@ either reopening that decision or fetching it out-of-band from the reconcile pat
 here — account-level equity-vs-balance uses data already on `Snapshot` and still gives the
 good/critical P&L coloring the UI feel calls for.
 
+### Redesign pass, 2026-10-02 — the first cut's visual design was weak, named and fixed
+
+The first version that shipped above was a bare table with a colored dot for status and nothing
+else — flagged by the user as "extremely horrible," correctly. htmx was not the cause (it has no
+visual opinion at all; it only decides how fragments get swapped in) — the CSS/HTML itself was
+thin. Concrete gaps, and what replaced them:
+
+- **Status was hue-only** (a colored dot, no shape) — the exact thing the data-viz skill's own
+  rule warns against ("a status color never appears without an icon + label"). Replaced with
+  real status icons: five SVGs (`circle-check`, `triangle-alert`, `octagon-alert`, `circle-x`,
+  `circle-minus`) pulled once from Lucide (ISC license) and inlined in a new
+  `_status_icon.html` macro — `stroke="currentColor"` lets the existing `tier-*-text` color
+  classes drive the icon's color, so there is exactly one source of truth per tier, not two.
+  This is the "library" explored per the user's "perhaps we can explore libraries if needed" —
+  a vendored icon set with zero runtime dependency, not a CSS framework (a generic framework
+  would have fought the already-validated dark palette more than it helped).
+- **The log panel was a flat gray dump.** `presentation.render_log_lines()` now classifies each
+  line by its level (parsed from the log format's own `%(levelname)-7s` field) and wraps it in a
+  `<span>` colored by the same status tokens, so a WARNING or ERROR is visible without reading
+  every line.
+- **No visual weight on the master row** — the single fact that matters most wasn't emphasized
+  at all. `tr.row-master` now gets a left accent border and bolded label.
+- **Role was plain uppercase text**, indistinguishable from a regular cell. Now a bordered
+  badge, explicitly *not* colored with status hues (role is identity, not state — reusing a
+  status color for it would be exactly the collision the data-viz skill's rule warns against).
+- **No `max-width`** — the page stretched edge-to-edge on a wide monitor. Added a centered
+  `.shell` container, plus a proper page header (title + subtitle) and a stat-tile health bar
+  instead of one run-together line.
+- **The "HELD" column was empty dead space** for almost every row. Folded into the status cell
+  instead of living in its own mostly-blank column.
+- **Two small live-feeling touches**, both plain vanilla JS (`static/dashboard.js`), no
+  framework: the log panel auto-scrolls when the viewer is already at the bottom and caps
+  retained history at 400 lines so a long-running session doesn't grow the DOM forever; any
+  element htmx swaps in out-of-band gets a brief CSS flash so an update away from where the
+  viewer is looking is still noticeable. Both are built on `MutationObserver`, a stable standard
+  DOM API, deliberately **not** on htmx's own swap-lifecycle events — this session's environment
+  has no way to open a real browser and confirm the exact payload shape of htmx's internal
+  events, so the implementation leans on an API that can be reasoned about directly instead.
+  **Caveat, stated plainly: none of this redesign was seen rendered in an actual browser** — no
+  browser/screenshot tool was reachable in this session. Verification here is structural only:
+  the rendered HTML was inspected directly (ids, classes, icon markup, log-level classes all
+  present and correctly derived) against both synthetic data and a real live run that discovered
+  real terminals on this machine, and the full test suite (quoted below) still passes. Treat the
+  visual result as unverified until actually looked at in a browser.
+
+All 748+ tests still pass after this pass (4 new ones added for `render_log_lines`), `ruff`,
+`ruff format`, and `mypy` all clean. No `copier.spec` change needed — the new `dashboard.js` and
+`_status_icon.html` files land inside the existing directory-level `datas` entries for
+`templates/` and `static/`, not named individually.
+
 ## What this plan deliberately does not cover
 
 Hosting this for anyone not on the same machine, multi-user accounts/roles within the web UI,

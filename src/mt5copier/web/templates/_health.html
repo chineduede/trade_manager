@@ -1,10 +1,21 @@
-<div id="health-bar" hx-swap-oob="true"
-     class="health-bar {{ 'tier-critical' if blocked_reason else 'tier-good' }}">
-  <strong>MT5 COPIER</strong>
-  <span>{{ health.supervised }}/{{ health.total }} supervised</span>
-  <span>{{ health.live }} live</span>
-  <span>{{ health.stale }} stale</span>
+{% from "_status_icon.html" import status_icon %}
+<div id="health-bar" hx-swap-oob="true" class="health-bar">
+  <div class="stat-tile">
+    <span class="stat-value">{{ health.supervised }}/{{ health.total }}</span>
+    <span class="stat-label">Supervised</span>
+  </div>
+  <div class="stat-tile">
+    <span class="stat-value tier-good-text">{{ health.live }}</span>
+    <span class="stat-label">Live</span>
+  </div>
+  <div class="stat-tile">
+    <span class="stat-value {{ 'tier-serious-text' if health.stale else '' }}">{{ health.stale }}</span>
+    <span class="stat-label">Stale</span>
+  </div>
   {% if blocked_reason %}
-    <span class="badge badge-critical">DETECTION PAUSED: {{ blocked_reason }}</span>
+    <div class="stat-tile stat-tile-alert tier-critical-text">
+      {{ status_icon('critical') }}
+      <span>DETECTION PAUSED: {{ blocked_reason }}</span>
+    </div>
   {% endif %}
 </div>

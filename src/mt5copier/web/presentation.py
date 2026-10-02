@@ -11,8 +11,11 @@ project's own existing vocabulary (``protocol.WorkerState``, ``TerminalView.stat
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
+
+from markupsafe import Markup, escape
 
 from ..engine import Engine, TerminalView
 
@@ -118,6 +121,35 @@ def read_log_tail(path: Path, *, max_lines: int = 200) -> LogTail:
         return LogTail(text="", offset=0)
     lines = data.decode("utf-8", errors="replace").splitlines()
     return LogTail(text="\n".join(lines[-max_lines:]), offset=len(data))
+
+
+_LOG_LEVEL_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} (\S+)")
+_LOG_LEVEL_CLASS = {
+    "DEBUG": "log-debug",
+    "INFO": "log-info",
+    "WARNING": "log-warning",
+    "ERROR": "log-error",
+    "CRITICAL": "log-critical",
+}
+
+
+def render_log_lines(text: str) -> Markup:
+    """Wrap each line of a log tail in a ``<span>`` colored by its level, for the dashboard's
+    log panel -- a line is otherwise indistinguishable gray text regardless of whether it's an
+    INFO heartbeat or a WARNING worth noticing. A line that doesn't start with a recognised
+    level (a traceback continuation, for instance) falls back to a neutral class rather than
+    being guessed at. Returns a ``Markup`` so Jinja's autoescape does not re-escape it -- the
+    escaping already happened per-line, here.
+    """
+    if not text:
+        return Markup("")
+    rendered = []
+    for line in text.splitlines():
+        match = _LOG_LEVEL_RE.match(line)
+        level = match.group(1) if match else None
+        css_class = _LOG_LEVEL_CLASS.get(level or "", "log-line-plain")
+        rendered.append(f'<span class="log-line {css_class}">{escape(line)}</span>')
+    return Markup("\n".join(rendered))
 
 
 def read_new_log_lines(path: Path, since_offset: int) -> LogTail:

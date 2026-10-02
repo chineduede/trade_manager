@@ -24,11 +24,12 @@ from fastapi.templating import Jinja2Templates
 from ..engine import Engine
 from ..paths import log_dir
 from .auth import TokenAuth
-from .presentation import RowInfo, all_rows, read_log_tail, read_new_log_lines
+from .presentation import RowInfo, all_rows, read_log_tail, read_new_log_lines, render_log_lines
 
 log = logging.getLogger(__name__)
 
 _TEMPLATES = Jinja2Templates(directory=Path(__file__).resolve().parent / "templates")
+_TEMPLATES.env.filters["log_lines"] = render_log_lines
 
 PUSH_INTERVAL_S = 0.5
 """Matches the Textual TUI's own ``_on_timer`` cadence -- no reason to push the browser faster
