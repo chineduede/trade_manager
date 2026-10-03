@@ -425,3 +425,13 @@ def test_clearing_detection_state_empties_the_book(engine: Engine) -> None:
     engine._reconcile(master_snap(pos(ticket=11)))
     engine.clear_detection_state()
     assert engine.day_book() == []
+
+
+def test_a_stop_move_says_what_was_set_and_on_which_trade() -> None:
+    book = DayBook()
+    book.begin_tick(1.0, [pos(ptype=PositionType.SELL)], [])
+    book.add(action(kind=ActionKind.MODIFY_SLTP), Outcome.DRY_RUN)
+    book.end_tick([], {})
+    assert describe_master(book.events()[0]) == (
+        "set stop 84,532.7, target 85,165.81 on BTCUSD sell 0.78"
+    )

@@ -26,7 +26,7 @@ from textual.widgets import ContentSwitcher, DataTable, Static
 
 from .. import config as config_mod
 from ..config import AppConfig, Role
-from ..day_book import Outcome, SlaveOutcome, describe_master, describe_outcome
+from ..day_book import MasterEvent, Outcome, SlaveOutcome, describe_master, describe_outcome
 from ..discovery import discover_terminals
 from ..engine import TerminalView
 from ..log_entries import (
@@ -508,25 +508,38 @@ class NewCopierApp(CopierApp):
         )
         table.add_column(no_wrap=True)
         table.add_column(ratio=1)
+        master = self._cfg.master
+        master_name = (
+            f"Master ({self._cfg.display_name(master.terminal_id)})" if master else "Master"
+        )
+
+        def slave_name(tid: str) -> str:
+            # A terminal that is no longer a slave has no number, but still had this outcome.
+            number = numbers.get(tid)
+            role = f"Slave {number}" if number else "Slave"
+            return f"{role} ({self._cfg.display_name(tid)[:24]})"
+
+        shown: list[tuple[MasterEvent, list[tuple[str, SlaveOutcome]]]] = []
         lines = 0
         for event in reversed(events):
             if lines >= _DAYBOOK_ROWS:
                 break
-            when = Text(time.strftime("%H:%M:%S", time.localtime(event.ts)), style=MUTED)
-            head = Text("A ", style=f"bold {FG}")
-            head.append(
-                describe_master(event), style=f"bold {FG}" if not event.preexisting else MUTED
-            )
-            table.add_row(when, head)
-            lines += 1
             ordered = sorted(event.outcomes, key=lambda o: numbers.get(o.terminal_id, 99))
-            for out in ordered:
-                number = numbers.get(out.terminal_id)
-                line = Text(f"{number if number else '-'} ", style=FG)
-                line.append(f"{self._cfg.display_name(out.terminal_id)[:22]:<22}  ")
+            shown.append((event, [(slave_name(o.terminal_id), o) for o in ordered]))
+            lines += 1 + len(ordered)
+        # Wide enough for the longest slave name shown, so the outcomes line up.
+        width = max((len(name) for _, outs in shown for name, _ in outs), default=0)
+
+        for event, outs in shown:
+            when = Text(time.strftime("%H:%M:%S", time.localtime(event.ts)), style=MUTED)
+            style = MUTED if event.preexisting else f"bold {FG}"
+            head = Text(f"{master_name} ", style=style)
+            head.append(describe_master(event), style=style)
+            table.add_row(when, head)
+            for name, out in outs:
+                line = Text(f"{name:<{width}}  ", style=FG)
                 line.append(describe_outcome(event.kind, out), style=_tone(out))
                 table.add_row("", line)
-                lines += 1
         panel.update(table)
 
     # --- the log page -----------------------------------------------------------------------

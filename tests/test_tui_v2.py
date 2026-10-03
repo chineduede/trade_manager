@@ -355,8 +355,8 @@ async def test_the_day_book_lists_each_master_trade_with_every_slaves_outcome(
         app._refresh()
         await pilot.pause()
         said = plain(app.query_one("#daybook", Static).content)
-        assert "A opened BTCUSD buy 0.78 at 84,854" in said
-        assert "1 Beta" in said and "opened 3.11 lots in 360 ms" in said
+        assert "Master (Alpha Broker) opened BTCUSD buy 0.78 at 84,854" in said
+        assert "Slave 1 (Beta Broker)" in said and "opened 3.11 lots in 360 ms" in said
         assert "refused: not a demo account" in said
 
 

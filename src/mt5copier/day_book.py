@@ -462,7 +462,7 @@ def describe_master(event: MasterEvent) -> str:
             return f"closed part of {what}: {_num(event.volume_before)} to {vol}"
         return f"closed part of {what}, {vol} left"
     if kind is ActionKind.MODIFY_SLTP:
-        return f"moved {what} {vol} to stop {_price(event.sl)}, target {_price(event.tp)}"
+        return f"set stop {_price(event.sl)}, target {_price(event.tp)} on {what} {vol}"
     if kind is ActionKind.PLACE:
         return f"placed {what} {vol} at {_price(event.entry)}"
     if kind is ActionKind.MODIFY_ORDER:
