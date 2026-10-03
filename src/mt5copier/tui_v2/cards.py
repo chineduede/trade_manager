@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from rich.console import Group, RenderableType
 from rich.table import Table
 from rich.text import Text
-from textual.renderables.digits import Digits
 
 from ..config import SizingMode, TerminalConfig
 from ..engine import TerminalView
@@ -62,12 +61,55 @@ def margin_line(snap: Snapshot | None) -> Text:
     return margin
 
 
-def big_amount(value: float | None, width: int) -> RenderableType:
-    """A balance in the 3-row digits, which is as near as a terminal gets to the design's large
-    type -- or plain bold when the card is too narrow for them."""
+# Solid 3x5 glyphs for the big balance, one string per pixel row ("#" is lit). Three rows of
+# half blocks draw six pixel rows, so the sixth (only the comma's tail) sits under the line.
+_GLYPHS: dict[str, tuple[str, ...]] = {
+    "0": ("###", "# #", "# #", "# #", "###"),
+    "1": (" # ", "## ", " # ", " # ", "###"),
+    "2": ("###", "  #", "###", "#  ", "###"),
+    "3": ("###", "  #", "###", "  #", "###"),
+    "4": ("# #", "# #", "###", "  #", "  #"),
+    "5": ("###", "#  ", "###", "  #", "###"),
+    "6": ("###", "#  ", "###", "# #", "###"),
+    "7": ("###", "  #", "  #", "  #", "  #"),
+    "8": ("###", "# #", "###", "# #", "###"),
+    "9": ("###", "# #", "###", "  #", "###"),
+    ".": (" ", " ", " ", " ", "#"),
+    ",": (" ", " ", " ", " ", "#", "#"),
+    "(": (" #", "# ", "# ", "# ", " #"),
+    ")": ("# ", " #", " #", " #", "# "),
+}
+_HALF = {(True, True): "█", (True, False): "▀", (False, True): "▄", (False, False): " "}
+
+
+def block_width(text: str) -> int:
+    """How wide :func:`block_digits` draws ``text``, or 0 if it has a character it cannot."""
+    if not text or any(c not in _GLYPHS for c in text):
+        return 0
+    return sum(len(_GLYPHS[c][0]) for c in text) + len(text) - 1
+
+
+def block_digits(text: str) -> list[str]:
+    """``text`` in solid half-block digits: three lines, a column apart between characters."""
+    rows = ["", "", ""]
+    for n, c in enumerate(text):
+        glyph = _GLYPHS[c]
+        wide = len(glyph[0])
+        pixels = [*glyph, *([" " * wide] * (6 - len(glyph)))]
+        for r in range(3):
+            top, bottom = pixels[2 * r], pixels[2 * r + 1]
+            if n:
+                rows[r] += " "
+            rows[r] += "".join(_HALF[top[x] == "#", bottom[x] == "#"] for x in range(wide))
+    return rows
+
+
+def big_amount(value: float | None, width: int) -> Text:
+    """A balance in solid 3-row digits, which is as near as a terminal gets to the design's
+    large bold type -- or plain bold when the card is too narrow for them."""
     text = amount(value)
-    if value is not None and 0 < Digits.get_width(text) <= width:
-        return Digits(text, style="bold")
+    if value is not None and 0 < block_width(text) <= width:
+        return Text("\n".join(block_digits(text)), style="bold", no_wrap=True)
     return Text(text, style="bold")
 
 

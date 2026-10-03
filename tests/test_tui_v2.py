@@ -402,6 +402,9 @@ async def test_the_log_page_merges_the_file_and_the_day_book_and_filters_them(
         assert [e.terminal_id for e in shown] == [TID_SLAVE, None, TID_MASTER, TID_SLAVE]
         assert shown[-1].text == "Opened 3.11 lots in 360 ms"
         assert "problems only · 1" in plain(app.query_one("#logbar", Static).content)
+        who = [app._log_cells(e, app._terminal_numbers())[2].plain for e in shown]
+        assert who[1] == "copier"
+        assert who[2].startswith("Master (") and who[3].startswith("Slave 1 (")
 
         await pilot.press("f")
         assert [e.text for e in app._log_shown or []] == ["something odd"]
@@ -414,6 +417,20 @@ async def test_the_log_page_merges_the_file_and_the_day_book_and_filters_them(
         await pilot.pause()
         assert isinstance(app.screen, TerminalScreen)
         assert app._selected_id() == TID_SLAVE
+
+
+def test_the_big_balance_is_drawn_in_solid_digits() -> None:
+    from mt5copier.tui_v2.cards import big_amount, block_digits, block_width
+
+    assert block_digits("10.5") == [
+        "▄█  █▀█   █▀▀",
+        " █  █ █   ▀▀█",
+        "▀▀▀ ▀▀▀ ▀ ▀▀▀",
+    ]
+    assert block_width("10.5") == 13
+    assert block_width("—") == 0
+    assert big_amount(1234.5, 40).plain.count("\n") == 2
+    assert big_amount(1234.5, 10).plain == "1,234.50", "too narrow: plain bold"
 
 
 def test_a_slave_card_shows_its_margin_like_the_masters() -> None:

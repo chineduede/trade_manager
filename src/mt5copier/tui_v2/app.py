@@ -681,9 +681,16 @@ class NewCopierApp(CopierApp):
             who = Text("copier", style=MUTED)
         else:
             style = f"bold {FG}" if entry.tone is Tone.MASTER else FG
+            # As the day book names them: "Master (name)", "Slave 2 (name)".
             number = numbers.get(entry.terminal_id)
-            who = Text(f"{number} " if number else "", style=style)
-            who.append(self._cfg.display_name(entry.terminal_id)[:24], style=style)
+            if number == "A":
+                role = "Master"
+            elif number:
+                role = f"Slave {number}"
+            else:
+                role = "Terminal"
+            name = self._cfg.display_name(entry.terminal_id)[:24]
+            who = Text(f"{role} ({name})", style=style)
         first, *rest = entry.text.splitlines() or [""]
         text = Text(first, style=_TONE_STYLE[entry.tone])
         if rest:
