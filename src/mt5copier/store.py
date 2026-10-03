@@ -51,6 +51,13 @@ CREATE TABLE IF NOT EXISTS copies (
     entry         REAL    NOT NULL DEFAULT 0,
     synced_sl     REAL    NOT NULL DEFAULT 0,
     synced_tp     REAL    NOT NULL DEFAULT 0,
+    point         REAL    NOT NULL DEFAULT 0,
+    digits        INTEGER NOT NULL DEFAULT 0,
+    risk_distance REAL    NOT NULL DEFAULT 0,
+    price_value   REAL    NOT NULL DEFAULT 0,
+    breakeven_sl  REAL    NOT NULL DEFAULT 0,
+    breakeven_exempt INTEGER NOT NULL DEFAULT 0,
+    breakeven_at  REAL    NOT NULL DEFAULT 0,
     opened_at     REAL    NOT NULL,
     updated_at    REAL    NOT NULL,
     PRIMARY KEY (terminal_id, master_ticket)
@@ -58,6 +65,19 @@ CREATE TABLE IF NOT EXISTS copies (
 CREATE INDEX IF NOT EXISTS copies_by_slave_ticket
     ON copies (terminal_id, slave_ticket);
 """
+
+_ADDED_COLUMNS = (
+    ("point", "REAL NOT NULL DEFAULT 0"),
+    ("digits", "INTEGER NOT NULL DEFAULT 0"),
+    ("risk_distance", "REAL NOT NULL DEFAULT 0"),
+    ("price_value", "REAL NOT NULL DEFAULT 0"),
+    ("breakeven_sl", "REAL NOT NULL DEFAULT 0"),
+    ("breakeven_exempt", "INTEGER NOT NULL DEFAULT 0"),
+    ("breakeven_at", "REAL NOT NULL DEFAULT 0"),
+)
+"""Columns added after the table first shipped, for breakeven. ``CREATE TABLE IF NOT EXISTS``
+leaves an older file's table as it was, so each is added on open when it is missing. The
+defaults read as "not known" and "not triggered", which is what an older copy is."""
 
 
 class CopyKind(StrEnum):
@@ -86,6 +106,13 @@ class Copy:
     entry: float = 0.0
     synced_sl: float = 0.0
     synced_tp: float = 0.0
+    point: float = 0.0
+    digits: int = 0
+    risk_distance: float = 0.0
+    price_value: float = 0.0
+    breakeven_sl: float = 0.0
+    breakeven_exempt: bool = False
+    breakeven_at: float = 0.0
     opened_at: float = 0.0
     updated_at: float = 0.0
 
@@ -100,6 +127,13 @@ class Copy:
             synced_tp=self.synced_tp,
             slave_ticket=self.slave_ticket,
             volume=self.slave_volume,
+            point=self.point,
+            digits=self.digits,
+            risk_distance=self.risk_distance,
+            price_value=self.price_value,
+            breakeven_sl=self.breakeven_sl,
+            breakeven_exempt=self.breakeven_exempt,
+            breakeven_at=self.breakeven_at,
         )
 
     def as_order(self) -> CopiedOrder:
@@ -114,6 +148,10 @@ class Copy:
             synced_tp=self.synced_tp,
             slave_ticket=self.slave_ticket,
             volume=self.slave_volume,
+            point=self.point,
+            digits=self.digits,
+            risk_distance=self.risk_distance,
+            price_value=self.price_value,
         )
 
 
@@ -144,6 +182,10 @@ class MappingStore:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA busy_timeout=30000")
         conn.executescript(_SCHEMA)
+        have = {r["name"] for r in conn.execute("PRAGMA table_info(copies)")}
+        for name, decl in _ADDED_COLUMNS:
+            if name not in have:
+                conn.execute(f"ALTER TABLE copies ADD COLUMN {name} {decl}")
         conn.commit()
         self._conn = conn
         self._pid = os.getpid()
@@ -192,8 +234,9 @@ class MappingStore:
                 INSERT OR REPLACE INTO copies (
                     terminal_id, master_ticket, kind, slave_ticket, slave_symbol, direction,
                     order_type, master_volume, slave_volume, entry, synced_sl, synced_tp,
-                    opened_at, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    point, digits, risk_distance, price_value, breakeven_sl,
+                    breakeven_exempt, breakeven_at, opened_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     stamped.terminal_id,
@@ -208,6 +251,13 @@ class MappingStore:
                     stamped.entry,
                     stamped.synced_sl,
                     stamped.synced_tp,
+                    stamped.point,
+                    stamped.digits,
+                    stamped.risk_distance,
+                    stamped.price_value,
+                    stamped.breakeven_sl,
+                    int(stamped.breakeven_exempt),
+                    stamped.breakeven_at,
                     stamped.opened_at,
                     stamped.updated_at,
                 ),
@@ -227,6 +277,10 @@ class MappingStore:
         slave_volume: float | None = None,
         synced_sl: float = 0.0,
         synced_tp: float = 0.0,
+        point: float = 0.0,
+        digits: int = 0,
+        risk_distance: float = 0.0,
+        price_value: float = 0.0,
     ) -> Copy:
         """Record a copied position. Keeps the original ``opened_at`` if there is one."""
         existing = self.get(terminal_id, master_ticket)
@@ -242,6 +296,10 @@ class MappingStore:
                 slave_volume=slave_volume,
                 synced_sl=synced_sl,
                 synced_tp=synced_tp,
+                point=point,
+                digits=digits,
+                risk_distance=risk_distance,
+                price_value=price_value,
                 opened_at=existing.opened_at if existing else 0.0,
             )
         )
@@ -260,6 +318,10 @@ class MappingStore:
         slave_volume: float | None = None,
         synced_sl: float = 0.0,
         synced_tp: float = 0.0,
+        point: float = 0.0,
+        digits: int = 0,
+        risk_distance: float = 0.0,
+        price_value: float = 0.0,
     ) -> Copy:
         existing = self.get(terminal_id, master_ticket)
         return self.record(
@@ -276,6 +338,10 @@ class MappingStore:
                 slave_volume=slave_volume,
                 synced_sl=synced_sl,
                 synced_tp=synced_tp,
+                point=point,
+                digits=digits,
+                risk_distance=risk_distance,
+                price_value=price_value,
                 opened_at=existing.opened_at if existing else 0.0,
             )
         )
@@ -466,6 +532,13 @@ def _from_row(row: sqlite3.Row) -> Copy:
         entry=float(row["entry"]),
         synced_sl=float(row["synced_sl"]),
         synced_tp=float(row["synced_tp"]),
+        point=float(row["point"]),
+        digits=int(row["digits"]),
+        risk_distance=float(row["risk_distance"]),
+        price_value=float(row["price_value"]),
+        breakeven_sl=float(row["breakeven_sl"]),
+        breakeven_exempt=bool(row["breakeven_exempt"]),
+        breakeven_at=float(row["breakeven_at"]),
         opened_at=float(row["opened_at"]),
         updated_at=float(row["updated_at"]),
     )

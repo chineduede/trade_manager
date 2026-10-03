@@ -355,7 +355,14 @@ class OrderResult:
     error: str | None = None
     point: float | None = None
     """The slave symbol's point size, on a filled OPEN or PLACE, so slippage can be told in
-    points without the engine asking the terminal. Display only."""
+    points without the engine asking the terminal. Also kept on the copy record, where it is
+    what a breakeven's slippage buffer is counted in."""
+    digits: int | None = None
+    """The slave symbol's digits, alongside ``point``, for rounding a breakeven stop."""
+    price_value: float | None = None
+    """On a filled OPEN or PLACE: what a 1.0 move in price is worth on one lot, in the account
+    currency. Kept on the copy record, where it turns the slave's commission into a breakeven
+    distance."""
 
     target_gone: bool = False
     """The position or order this acted on does not exist any more.

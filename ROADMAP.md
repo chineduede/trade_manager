@@ -1231,8 +1231,104 @@ are the design, not a limitation waiting to be lifted.
   worker's last snapshots were drained after it was reaped, and its high `seq` made the
   out-of-order check refuse every snapshot from the replacement, which counts from 0. Snapshots
   now carry `worker_pid`, and the drain drops any not from the terminal's current worker.
-- **Breakeven.** Move a copy's stop to entry (± buffer) once price has moved some distance.
-  Reuses the already-built `MODIFY_SLTP` dispatch path; the new part is the trigger logic.
+- **Breakeven — planned and built 2026-10-03; unit- and Pilot-tested, awaiting its demo run.** Move a copy's stop to entry (± buffer) once price has
+  moved some distance. The user's choices: the trigger is **per slave, either a distance in
+  pips or a multiple of R**; the stop goes to **entry plus a buffer in pips**; both are
+  measured on **the slave's own position** (its own fill and current price, so slippage and
+  reversed copies come out right); **slaves only**, never the master's own trades.
+
+  **The rule that shapes it: a breakeven is a floor, not a one-off move.** The diff compares
+  the master's stop against `synced_sl` (the stop last sent), so a stop moved by anything
+  else is put back on the next tick. Instead, a triggered copy records `breakeven_sl`, and
+  `reconcile_slave` sends the *more protective* of that floor and the master's stop. A master
+  stop that moves in a more protective direction (trailing) is still copied. One that moves
+  back toward a loss, or is cleared, is ignored for that copy. The floor lives on the copy
+  record (SQLite), so it survives a restart, and the reconciler stays pure: it reads belief,
+  never live prices.
+
+  **Revised 2026-10-03, after the first demo run (the user's call): no pips anywhere.** On a
+  2-digit symbol the old rule made a pip 1 point, so on BTCUSD the default 1-pip buffer was one
+  cent and a 10-pip trigger was ten cents. Now:
+  - **The buffer is the slave's costs:** entry + the round-turn commission as a price distance
+    (`commission_per_lot_round_turn` ÷ the value of a 1.0 price move per lot) + the
+    `slippage_buffer_points`. The value per price move is asked of the slave's terminal on each
+    fill (`order_calc_profit` over 1000 points, the call sizing already uses), carried as
+    `OrderResult.price_value`, and kept on the copy record. The conversion runs at trigger
+    time, so a commission edit applies to open copies. The stop is rounded *away* from entry.
+    The user knows the commission setting doesn't apply to every symbol; there the stop just
+    sits further out. A copy opened before `price_value` was kept can't be priced when a
+    commission is set, so it never triggers, and the engine says so once with a WARNING.
+  - **The trigger is a fraction of R** (`breakeven_trigger_r`, e.g. 0.3 or 1), **or a raw price
+    per position** (`B`, unchanged). `breakeven_trigger_pips` and `breakeven_buffer_pips` are
+    gone. They're stripped on load, and a saved `breakeven_mode: "pips"` loads as `off` with a
+    WARNING, never guessed into some R.
+
+  The original plan follows; where it says pips, read the revision above.
+
+  *Settings (per slave, "Breakeven" section of the editor):* `breakeven_mode` (off / pips /
+  R, default off), `breakeven_trigger` (pips or R, by mode), `breakeven_buffer_pips` (default
+  1, 0 = exact entry). A pip is 10 points on a 3- or 5-digit symbol and 1 point otherwise.
+  The pips trigger has to exceed the buffer, or the stop would land beyond the current price.
+
+  *Data the copy record gains:* `point` and `digits` (from the OPEN/PLACE result, which
+  already carries `point`; `digits` is new), and `risk_distance` (the initial distance from
+  fill to stop, the "1R" an R trigger measures in; 0 when the copy opened with no stop, so
+  an R trigger never fires on a lot-multiple copy). A filled pending order carries all
+  three over in `_on_fill`. Store columns are added by `ALTER TABLE` when missing.
+
+  *The trigger (engine side):* before each `ledger.step`, for each connected slave with
+  breakeven on, compare each untriggered copy's slave position (`price_open` from
+  `open_positions`, `price_current` from `live_positions`, matched by `slave_ticket`) to its
+  threshold. On crossing it, write the floor and log it at INFO; the next diff sends the
+  `MODIFY_SLTP` through the existing path. That makes this the first reader of
+  `PositionLive` outside the UI, a deliberate exception. It only feeds the trigger, never
+  the diff. A dry run never triggers, since its copies don't exist on the slave.
+
+  *Interactions, decided:*
+  - **`copy_sltp` off:** breakeven still applies. The floor is raised against the copy's own
+    synced stop rather than the master's.
+  - **Take-profit:** untouched.
+  - **Editing breakeven settings is exempt from the give-up rule** (the user's call): an edit
+    that changes *only* breakeven fields keeps the slave's copies, and the new settings apply
+    to trades already open. They change how a stop is managed from now on, never a copy's
+    direction or size, which is what the rule protects.
+  - **Per-trade exemption** (the user's call): on the detail page, `b` on a slave's copy row
+    toggles `breakeven_exempt` on that copy record. An exempt copy never triggers. If its
+    floor was already set, exempting clears it and the copy follows the master's stop again.
+  - **Per-trade breakeven price** (the user's call, added while building): `B` on a copy row
+    sets `breakeven_at`, the price at which that copy goes to breakeven. It replaces the
+    slave's pips/R trigger for that copy, and works even with the slave's breakeven off. It
+    must be past entry + buffer on the profitable side (checked against the copy's own fill);
+    blank clears it. Setting a price lifts an exemption, and exempting clears the price.
+  - **Making the user aware of the floor** (the user's call: keep the rule, but say so).
+    The settings help text and the `B` dialog state it, and the log line when breakeven fires
+    says the stop now only tightens. Whenever the master's stop is looser than a copy's
+    floor, the diff reports a skipped `MODIFY_SLTP` (`SkipReason.BREAKEVEN_HOLDS`) naming the
+    master's level. It appears once per distinct level, because the ledger de-duplicates
+    on value, and right after breakeven fires it doubles as confirmation that the floor
+    holds.
+  - **Floats:** the trigger allows half a point of slack, so a copy sitting exactly on its
+    trigger isn't missed by a rounding error (a unit test caught 0.0009999 < 0.001 on a sell).
+  - **A refused move is retried, but only with more room — found on the first demo run,
+    2026-10-03.** BlackBull, BTCUSD: breakeven fired (a hand-set price) with the price about
+    $19 above the new stop, and the broker refused it, `INVALID_STOPS`. The symbol reports
+    `trade_stops_level` 0, but its spread floats around 1300 points ($13), and the broker
+    enforces a minimum distance it doesn't publish. Two gaps then made the failure silent.
+    The refusal was final (the Stage 3 rule for any refused modify). And when breakeven
+    fired again later at the same level, the identical `MODIFY_SLTP` matched the refused one
+    in the ledger's de-duplication and was dropped without a word. Now a refused breakeven
+    clears the floor (the copy stays on the master's stop, which the broker accepted) and
+    logs a WARNING. The engine re-arms it only once the price is 1.5× further from the stop
+    than at the refused attempt, so retries happen at strictly better distances and never
+    once per tick. And `set_breakeven` forgets the last reported stop move, so a re-armed
+    floor is always sent.
+
+  *Verification:* unit tests for the trigger maths (pips/R, buy/sell, 3/5-digit vs. index,
+  no-stop copies), the floor in the diff (trailing master followed, loosening master and
+  cleared stop ignored, `copy_sltp` off), the store migration, and the settings validation.
+  Then a demo run: open on the master, let a slave copy cross the trigger, see its stop move
+  to entry + buffer while the master's stays put, and move the master's stop back to see it
+  ignored.
 - **Prop-firm guards.** Daily loss limit, max drawdown, consistency-rule-style caps that halt
   copying account-wide rather than acting on one position. Needs its own semantics settled
   (per-slave? what each trigger actually does — pause new copies, or close everything) before

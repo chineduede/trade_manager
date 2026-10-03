@@ -29,7 +29,13 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from .discovery import DiscoveredTerminal
 from .logging_setup import get_logger
@@ -39,7 +45,12 @@ log = get_logger(__name__)
 
 SCHEMA_VERSION = 2
 
-_REMOVED_TERMINAL_FIELDS = ("default_sl_points", "custom_name")
+_REMOVED_TERMINAL_FIELDS = (
+    "default_sl_points",
+    "custom_name",
+    "breakeven_trigger_pips",
+    "breakeven_buffer_pips",
+)
 """Fields dropped from :class:`TerminalConfig`, stripped on load.
 
 The schema is ``extra="forbid"``, so a key that no longer exists would fail validation, and
@@ -106,6 +117,20 @@ class NoStopPolicy(StrEnum):
       not apply to these trades at all; ``max_lot`` still does.
     * The copy opens **unprotected**, exactly as the master's did. The UI marks it.
     """
+
+
+class BreakevenMode(StrEnum):
+    """What moves a slave's copies to breakeven, if anything. Slaves only."""
+
+    OFF = "off"
+    R = "r"
+    """Once the copy is ``breakeven_trigger_r`` times its initial stop distance beyond its
+    fill. A copy opened with no stop has no R, so it never triggers."""
+
+
+BREAKEVEN_FIELDS = frozenset({"breakeven_mode", "breakeven_trigger_r"})
+"""The settings an edit may change without giving up the slave's open copies. They change how
+a copy's stop is managed from here on, never its direction or size."""
 
 
 class TerminalConfig(BaseModel):
@@ -192,6 +217,14 @@ class TerminalConfig(BaseModel):
     copy_partials: bool = True
     copy_pending: bool = False
     """Mirror pending orders (limit/stop) as well as open positions. Stage 4; unused so far."""
+
+    # --- breakeven ---------------------------------------------------------------------------
+    breakeven_mode: BreakevenMode = BreakevenMode.OFF
+    breakeven_trigger_r: float = Field(default=1.0, gt=0)
+    """How far in profit, in multiples of the copy's opening stop distance, before its stop
+    moves: 0.3 is 0.3R. Where it moves to is not a setting of its own: entry, plus enough to
+    pay ``commission_per_lot_round_turn``, plus ``slippage_buffer_points``. See
+    :mod:`mt5copier.breakeven`."""
 
     symbol_prefix: str = ""
     symbol_suffix: str = ""
@@ -457,6 +490,14 @@ def _migrate(raw: dict[str, object]) -> dict[str, object]:
         for field_name in _REMOVED_TERMINAL_FIELDS:
             if entry.pop(field_name, None) is not None:
                 log.info("dropped retired config field %r", field_name)
+        # Breakeven briefly had a pips trigger (2026-10-03), replaced by R or a hand-set price
+        # per position the same day. Turned off rather than guessed at as some R.
+        if entry.get("breakeven_mode") == "pips":
+            entry["breakeven_mode"] = "off"
+            log.warning(
+                "breakeven by pips is no longer offered; %s now has breakeven off",
+                entry.get("label") or "a slave",
+            )
     raw["version"] = SCHEMA_VERSION
     return raw
 

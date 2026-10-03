@@ -25,7 +25,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import role_actions
-from .config import AppConfig, Role, SizingMode, TerminalConfig
+from .breakeven import breakeven_level, buffer_distance, check_breakeven_price
+from .config import BREAKEVEN_FIELDS, AppConfig, BreakevenMode, Role, SizingMode, TerminalConfig
 from .copy_stats import StatsBook, TerminalStats
 from .logging_setup import get_logger
 from .paths import dryrun_store_path, log_dir, mapping_db_path
@@ -40,7 +41,7 @@ from .protocol import (
     Snapshot,
     WorkerState,
 )
-from .reconcile import Action, CopyLedger, OpenCopy, SlaveLink
+from .reconcile import Action, CopiedPosition, CopyLedger, OpenCopy, SlaveLink
 from .settings_edit import copies_word
 from .sizing import risk_budget
 from .store import MappingStore, Orphan, find_missing, find_missing_orders, find_orphans
@@ -126,6 +127,20 @@ class _Worker:
     started_at: float = field(default_factory=time.monotonic)
 
 
+_BE_RETRY_FACTOR = 1.5
+"""After a refused breakeven, how much more room than the refused attempt the price needs
+before the next try. Each try is at a strictly better distance, so a broker that keeps
+refusing is asked a handful of times as the trade runs, never once per tick."""
+
+
+def _only_breakeven_changed(old: TerminalConfig, new: TerminalConfig) -> bool:
+    """Whether an edit touches nothing but the breakeven settings (see ``BREAKEVEN_FIELDS``)."""
+    changed = {
+        name for name in TerminalConfig.model_fields if getattr(old, name) != getattr(new, name)
+    }
+    return changed <= BREAKEVEN_FIELDS
+
+
 class Engine:
     """Spawns, supervises and aggregates per-terminal workers.
 
@@ -175,6 +190,15 @@ class Engine:
         self._results: deque[RecordedResult] = deque(maxlen=_RESULT_HISTORY)
         self._failed_total = 0
         self._warned_undispatchable: set[ActionKind] = set()
+        self._be_room: dict[tuple[str, int], float] = {}
+        """Per copy: how far the price was from the breakeven stop when it was last set. Kept
+        so that if the broker refuses the stop, the retry can wait for more room than that."""
+        self._be_unpriced: set[tuple[str, int]] = set()
+        """Copies already reported as unable to go to breakeven because their commission
+        cannot be priced, so it is said once rather than every tick."""
+        self._be_min_room: dict[tuple[str, int], float] = {}
+        """Per copy: the room the price must have from the breakeven stop before trying again,
+        after a refusal. Session only: after a restart the first attempt is made as usual."""
         self._stats = StatsBook()
         """Copy-health numbers for the detail page. Display only; nothing here decides."""
 
@@ -463,6 +487,8 @@ class Engine:
         self._sweep_pending()
 
         dry = self._cfg.dry_run
+        if not dry:
+            self._arm_breakevens(links)
         try:
             actions = self._ledger.step(
                 snap.open_positions,
@@ -511,6 +537,143 @@ class Engine:
             if slave_snap is None:
                 continue
             self._dispatch(action, cfg, slave_snap)
+
+    def _arm_breakevens(self, links: list[SlaveLink]) -> None:
+        """Set a breakeven floor on every copy that has crossed its slave's trigger.
+
+        Read off each slave's newest snapshot: the copy's own fill (``open_positions``) and its
+        current price (``live_positions``). That makes this the one reader of the live payload
+        outside the UI. It only decides *whether* to set a floor; the floor itself is belief,
+        and belief is all the diff reads. A slave that is not connected, or whose positions
+        could not be read, is left for a later tick -- the floor is set late, not wrongly.
+
+        Live only: a dry run's copies do not exist on the slave, so there is nothing to measure.
+        Caller must hold the lock.
+        """
+        for tid, master_ticket in self._ledger.take_refused_breakevens():
+            key = (tid, master_ticket)
+            tried = self._be_room.pop(key, 0.0)
+            self._be_min_room[key] = max(tried * _BE_RETRY_FACTOR, self._be_min_room.get(key, 0.0))
+            cfg = self._cfg.terminals.get(tid)
+            log.warning(
+                "%s: the broker refused the breakeven stop on #%s with the price %g away from "
+                "it, likely too close for its minimum distance; it stays on the master's stop "
+                "and breakeven is tried again once the price is %g away",
+                (cfg.label if cfg is not None else "") or tid[:8],
+                master_ticket,
+                tried,
+                self._be_min_room[key],
+            )
+
+        for link in links:
+            cfg = link.cfg
+            copies = self._ledger.believed(cfg.terminal_id)
+            if not link.connected or not copies:
+                continue
+            if cfg.breakeven_mode is BreakevenMode.OFF and not any(c.breakeven_at for c in copies):
+                continue
+            snap = self._snapshots.get(cfg.terminal_id)
+            if snap is None or snap.open_positions is None or snap.live_positions is None:
+                continue
+            opened = {p.ticket: p.price_open for p in snap.open_positions}
+            current = {p.ticket: p.price_current for p in snap.live_positions}
+            for copy in copies:
+                ticket = copy.slave_ticket
+                price = current.get(ticket) if ticket is not None else None
+                if ticket is None or ticket not in opened or price is None:
+                    continue
+                self._warn_unpriced(cfg, copy)
+                try:
+                    level = breakeven_level(copy, opened[ticket], price, cfg)
+                except Exception:
+                    log.exception("breakeven check failed for #%s", copy.master_ticket)
+                    continue
+                if level is None:
+                    continue
+                key = (cfg.terminal_id, copy.master_ticket)
+                room = abs(price - level)
+                if room < self._be_min_room.get(key, 0.0):
+                    continue
+                self._be_room[key] = room
+                self._ledger.set_breakeven(cfg.terminal_id, copy.master_ticket, level)
+                log.info(
+                    "%s: breakeven reached on #%s %s (fill %s, now %s); stop moves to %s and "
+                    "from now on only tightens: the master's stop is copied only when tighter, "
+                    "and a looser or removed one is ignored. Its target still follows the master",
+                    cfg.label or cfg.terminal_id[:8],
+                    ticket,
+                    copy.slave_symbol,
+                    opened[ticket],
+                    price,
+                    level,
+                )
+
+    def _warn_unpriced(self, cfg: TerminalConfig, copy: CopiedPosition) -> None:
+        """Say once that a copy will never go to breakeven because its commission cannot be
+        turned into a distance -- it was opened before that was recorded. Without this it
+        would simply never fire, which is what the first live test looked like."""
+        key = (cfg.terminal_id, copy.master_ticket)
+        if key in self._be_unpriced or copy.breakeven_exempt or copy.breakeven_sl:
+            return
+        wanted = copy.breakeven_at or cfg.breakeven_mode is not BreakevenMode.OFF
+        if not wanted or buffer_distance(copy, cfg) is not None:
+            return
+        self._be_unpriced.add(key)
+        log.warning(
+            "%s: #%s %s will not go to breakeven: it was opened before the copier recorded "
+            "what its price moves are worth, so its commission cannot be turned into a stop "
+            "distance. Copies opened from now on are not affected",
+            cfg.label or cfg.terminal_id[:8],
+            copy.slave_ticket,
+            copy.slave_symbol,
+        )
+
+    def set_breakeven_exempt(self, terminal_id: str, master_ticket: int, exempt: bool) -> bool:
+        """Exempt one copy from breakeven, or lift that. False if it is not a position we hold.
+
+        Exempting a copy whose breakeven already fired drops the floor, so it follows the
+        master's stop again from the next tick. Under the lock, so a tick never sees half of it.
+        """
+        with self._lock:
+            done = self._ledger.set_breakeven_exempt(terminal_id, master_ticket, exempt)
+        if done:
+            log.info(
+                "#%s on %s: breakeven %s by hand",
+                master_ticket,
+                terminal_id[:8],
+                "exempted" if exempt else "re-enabled",
+            )
+        return done
+
+    def set_breakeven_at(self, terminal_id: str, master_ticket: int, price: float) -> str | None:
+        """Set one copy's breakeven price, 0 to clear it. None means done; otherwise why not.
+
+        Checked against the copy's own fill on the slave's newest snapshot, so a price on the
+        wrong side of entry is refused here rather than turning into a stop the broker refuses.
+        """
+        with self._lock:
+            copy = self._ledger.get_position(terminal_id, master_ticket)
+            if copy is None:
+                return "that position is not one of the copier's copies"
+            if price:
+                snap = self._snapshots.get(terminal_id)
+                positions = (snap.open_positions if snap is not None else None) or ()
+                fill = next(
+                    (p.price_open for p in positions if p.ticket == copy.slave_ticket), None
+                )
+                if fill is None:
+                    return "the copy's fill price cannot be read right now"
+                problem = check_breakeven_price(copy, fill, price, self._cfg.terminals[terminal_id])
+                if problem is not None:
+                    return problem
+            self._ledger.set_breakeven_at(terminal_id, master_ticket, price)
+        log.info(
+            "#%s on %s: breakeven price %s by hand",
+            master_ticket,
+            terminal_id[:8],
+            f"set to {price:g}" if price else "cleared",
+        )
+        return None
 
     def _warn_undispatchable(self, kind: ActionKind) -> None:
         """Say once per session that we are deriving something this build cannot send.
@@ -1006,6 +1169,10 @@ class Engine:
         """
         cfg = self._cfg.terminals[terminal_id]
         if cfg.role is not Role.MASTER:
+            if new is not None and _only_breakeven_changed(cfg, new):
+                # How a stop is managed from here on, never a copy's direction or size: the
+                # copies stay, and the new settings apply to them too.
+                return []
             return [terminal_id]
         losing = new is None or (cfg.enabled and not new.enabled)
         return [t.terminal_id for t in self._cfg.slaves] if losing else []
@@ -1065,7 +1232,8 @@ class Engine:
         Every edit is one atomic swap, so the drain thread never sees half of one.
 
         **A change that would stop copies being managed is only made by giving them up.** For a
-        slave that is any edit at all: the copier stops managing its copies -- nothing closes
+        slave that is any edit except one to the breakeven settings alone, which only changes how
+        a stop is managed from here on: the copier stops managing its copies -- nothing closes
         them when the master does, moves their stops, or mirrors a partial close -- and they
         stay open on the slave. That replaces a rule per setting -- which ones were safe to
         change under an open copy, which had to be refused -- with one rule that does not depend

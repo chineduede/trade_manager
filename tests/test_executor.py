@@ -767,6 +767,21 @@ def test_a_filled_open_reports_the_symbols_point_for_slippage() -> None:
     assert result.point == 0.00001
 
 
+def test_a_filled_open_reports_what_a_price_move_is_worth_per_lot() -> None:
+    """Asked over a thousand points: $1,000 lost on one lot over 0.01 of EURUSD is $100,000
+    per 1.0 of price. Breakeven turns the slave's commission into a distance with it."""
+    result = run(FakeSession(loss=1_000.0))
+    assert result.price_value == pytest.approx(100_000.0)
+
+
+def test_an_unpriceable_move_does_not_fail_a_fill() -> None:
+    session = FakeSession()
+    executor = Executor(TID, session)
+    session.loss = None  # sizing has already been done by now; only the pricing fails
+    result = executor._price_value(PositionType.BUY, "EURUSD", 1.085, 0.00001)
+    assert result is None
+
+
 def test_a_refused_open_carries_no_point() -> None:
     result = run(FakeSession(results=[FakeResult(retcode=int(Retcode.INVALID_STOPS))]))
     assert not result.ok

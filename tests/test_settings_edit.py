@@ -10,7 +10,15 @@ from __future__ import annotations
 
 import pytest
 
-from mt5copier.config import AppConfig, NoStopPolicy, Role, SizingMode, TerminalConfig, account_key
+from mt5copier.config import (
+    AppConfig,
+    BreakevenMode,
+    NoStopPolicy,
+    Role,
+    SizingMode,
+    TerminalConfig,
+    account_key,
+)
 from mt5copier.settings_edit import (
     EDITABLE,
     Kind,
@@ -42,7 +50,11 @@ def test_every_editable_field_exists_on_the_model() -> None:
 def test_a_choice_offers_every_member_of_its_enum_and_nothing_else() -> None:
     """A member missing from the form is a mode the user can no longer pick; one the enum does
     not have would fail validation on save."""
-    expected = {"sizing_mode": set(SizingMode), "no_stop_policy": set(NoStopPolicy)}
+    expected = {
+        "sizing_mode": set(SizingMode),
+        "no_stop_policy": set(NoStopPolicy),
+        "breakeven_mode": set(BreakevenMode),
+    }
     for spec in EDITABLE:
         if spec.kind is Kind.CHOICE:
             assert {v for _, v in spec.choices} == {m.value for m in expected[spec.name]}

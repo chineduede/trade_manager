@@ -276,6 +276,30 @@ in Stage 2b:
 
 Carrying them all from the start avoids a migration the first time copying is switched on.
 
+Breakeven, per slave (the "Breakeven" section of the settings form). Editing only these keeps
+the slave's open copies, and the new settings apply to them too:
+
+| Field | Meaning |
+|---|---|
+| `breakeven_mode` | `off` (default) or `r` |
+| `breakeven_trigger_r` | How far in profit, as a fraction of the copy's opening stop distance, before the stop moves: `0.3` is 0.3R. A copy opened with no stop never triggers. |
+
+Where the stop goes is not a setting of its own: it is the copy's own fill, plus the price move
+that pays `commission_per_lot_round_turn`, plus `slippage_buffer_points`, so a breakeven exit
+loses nothing. The commission is turned into a distance with what a price move is worth on that
+symbol, which the slave's terminal reports when the copy fills. On a symbol where the commission
+setting does not apply, the stop sits that much further out than it needs to; a copy opened
+before this was recorded cannot be priced and is reported once rather than moved. Instead of the
+R trigger, one position can be given its own breakeven price (`B` on the detail page).
+
+Once a copy has gone to
+breakeven, its stop never loosens: a master stop that moves to a tighter level is still copied,
+while one that moves back toward a loss, or is cleared, is ignored for that copy. The action log
+says so once per master stop level (`SKIPPED: the copy is at breakeven ...`), so a
+difference between the two terminals' stops is never unexplained. On the
+detail page, `b` exempts the selected copy from breakeven, and `B` sets that copy's own
+breakeven price, which replaces the slave's trigger and works even with breakeven off.
+
 The schema is `extra="forbid"`, and a validation failure is treated as corruption, so removing
 a field would otherwise reset every setting the user had. `_migrate()` strips retired keys
 before validation instead — `default_sl_points` went that way in schema 2.

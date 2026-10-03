@@ -88,6 +88,9 @@ class SkipReason(StrEnum):
     STOP_LIMIT_UNSUPPORTED = "stop-limit orders carry two prices and are not mirrored"
     NOTHING_TO_SEND = "the slave's own order fills by itself"
     PAUSED = "this slave is paused: it takes no new trades"
+    BREAKEVEN_HOLDS = (
+        "the copy is at breakeven, so its stop only tightens; a looser one is not copied"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,6 +204,26 @@ class CopiedPosition:
     slave_ticket: int | None = None
     volume: float | None = None
 
+    point: float = 0.0
+    digits: int = 0
+    """The slave symbol's point size and digits, from the fill: what the slippage buffer is
+    counted in and what a breakeven stop is rounded to. 0 when unknown (a copy recorded
+    before breakeven existed), which never triggers."""
+    risk_distance: float = 0.0
+    """The price distance from the slave's fill to the stop it opened with: one R. 0 when it
+    opened with no stop, so an R trigger never fires on it."""
+    price_value: float = 0.0
+    """What a 1.0 price move is worth on one lot, from the fill; 0 when unknown. Turns the
+    slave's commission into a breakeven distance."""
+    breakeven_sl: float = 0.0
+    """The breakeven floor, once triggered; 0 until then. The diff sends whichever of this
+    and the master's stop is more protective -- see :func:`protective_sl`."""
+    breakeven_exempt: bool = False
+    """Set by hand on one copy: breakeven never triggers on it, whatever the slave's setting."""
+    breakeven_at: float = 0.0
+    """Set by hand on one copy: the price at which it goes to breakeven, in place of the
+    slave's R trigger, and whether or not the slave has breakeven on. 0 is unset."""
+
 
 @dataclass(frozen=True, slots=True)
 class CopiedOrder:
@@ -221,6 +244,11 @@ class CopiedOrder:
     synced_tp: float = 0.0
     slave_ticket: int | None = None
     volume: float | None = None
+    point: float = 0.0
+    digits: int = 0
+    risk_distance: float = 0.0
+    price_value: float = 0.0
+    """Carried over to the position on a fill; see :class:`CopiedPosition`."""
 
 
 # --- pure helpers ---------------------------------------------------------------------------
@@ -285,6 +313,20 @@ def effective_levels(sl: float, tp: float, cfg: TerminalConfig) -> tuple[float, 
     master that does not set targets. That is correct, but it is worth knowing.
     """
     return (tp, sl) if cfg.invert else (sl, tp)
+
+
+def protective_sl(sl: float, floor: float, ptype: PositionType) -> float:
+    """The more protective of two stops for a position of this direction; 0 is "no stop".
+
+    Higher is more protective on a buy, lower on a sell. This is what keeps a breakeven from
+    being undone: the master's stop is still followed whenever it is the tighter of the two
+    (a trailing stop past entry), and ignored when it would loosen the copy or clear its stop.
+    """
+    if floor == 0.0:
+        return sl
+    if sl == 0.0:
+        return floor
+    return max(sl, floor) if ptype is PositionType.BUY else min(sl, floor)
 
 
 def _paused_reason(cfg: TerminalConfig) -> SkipReason | None:
@@ -488,6 +530,18 @@ def reconcile_slave(
 
         # SL/TP change, compared in slave-facing terms so an inverted copy is measured against
         # the levels it actually carries.
+        #
+        # A breakeven floor applies whether or not stops are being copied: with copy_sltp off
+        # it is raised against the stop the copy already carries, and the target stays put.
+        # Only a change that is *not* the floor's doing is subject to copy_sltp.
+        follow = cfg.copy_sltp
+        masters_sl = slave_sl
+        if not follow and c.breakeven_sl != 0.0:
+            floored = protective_sl(c.synced_sl, c.breakeven_sl, c.type)
+            if not _same(floored, c.synced_sl, _PRICE_EPS):
+                slave_sl, slave_tp, follow = floored, c.synced_tp, True
+        else:
+            slave_sl = protective_sl(slave_sl, c.breakeven_sl, c.type)
         if not (
             _same(slave_sl, c.synced_sl, _PRICE_EPS) and _same(slave_tp, c.synced_tp, _PRICE_EPS)
         ):
@@ -504,7 +558,7 @@ def reconcile_slave(
                     sl=slave_sl,
                     tp=slave_tp,
                     slave_ticket=c.slave_ticket,
-                    skip_reason=None if cfg.copy_sltp else SkipReason.SLTP_SYNC_DISABLED,
+                    skip_reason=None if follow else SkipReason.SLTP_SYNC_DISABLED,
                     # Mirroring is mirroring: a master that clears its stop leaves the copy
                     # unprotected too, because the alternative is a copy that exits where the
                     # master does not. But it has to be *seen*, and it is easy to miss -- on
@@ -512,7 +566,28 @@ def reconcile_slave(
                     # the copy, since effective_levels has swapped the pair. Gated on the
                     # skip the same way the OPEN and PLACE branches are: an action that will
                     # not be sent disarms nothing.
-                    unprotected=slave_sl == 0.0 and cfg.copy_sltp,
+                    unprotected=slave_sl == 0.0 and follow,
+                )
+            )
+        elif follow and not _same(masters_sl, slave_sl, _PRICE_EPS):
+            # Nothing to send, but the master's stop is looser than the copy's breakeven and is
+            # being ignored. Said once per level (the ledger drops a repeat), so the person can
+            # see why the two terminals' stops differ. Right after a breakeven fires it is the
+            # master's original stop, which doubles as confirmation that the floor is holding.
+            out.append(
+                Action(
+                    kind=ActionKind.MODIFY_SLTP,
+                    terminal_id=cfg.terminal_id,
+                    master_ticket=ticket,
+                    master_symbol=p.symbol,
+                    slave_symbol=slave_symbol,
+                    type=ptype,
+                    master_volume=p.volume,
+                    entry=p.price_open,
+                    sl=masters_sl,
+                    tp=slave_tp,
+                    slave_ticket=c.slave_ticket,
+                    skip_reason=SkipReason.BREAKEVEN_HOLDS,
                 )
             )
 
@@ -689,6 +764,10 @@ class BeliefStore(Protocol):
         slave_volume: float | None = None,
         synced_sl: float = 0.0,
         synced_tp: float = 0.0,
+        point: float = 0.0,
+        digits: int = 0,
+        risk_distance: float = 0.0,
+        price_value: float = 0.0,
     ) -> object: ...
 
     def remember_order(
@@ -705,6 +784,10 @@ class BeliefStore(Protocol):
         slave_volume: float | None = None,
         synced_sl: float = 0.0,
         synced_tp: float = 0.0,
+        point: float = 0.0,
+        digits: int = 0,
+        risk_distance: float = 0.0,
+        price_value: float = 0.0,
     ) -> object: ...
 
     def update(self, terminal_id: str, master_ticket: int, **changes: object) -> object: ...
@@ -751,6 +834,10 @@ class _MemoryBeliefs:
         slave_volume: float | None = None,
         synced_sl: float = 0.0,
         synced_tp: float = 0.0,
+        point: float = 0.0,
+        digits: int = 0,
+        risk_distance: float = 0.0,
+        price_value: float = 0.0,
     ) -> CopiedPosition:
         key = (terminal_id, master_ticket)
         self._orders.pop(key, None)
@@ -764,6 +851,10 @@ class _MemoryBeliefs:
             synced_tp=synced_tp,
             slave_ticket=slave_ticket,
             volume=slave_volume,
+            point=point,
+            digits=digits,
+            risk_distance=risk_distance,
+            price_value=price_value,
         )
         self._positions[key] = copy
         return copy
@@ -782,6 +873,10 @@ class _MemoryBeliefs:
         slave_volume: float | None = None,
         synced_sl: float = 0.0,
         synced_tp: float = 0.0,
+        point: float = 0.0,
+        digits: int = 0,
+        risk_distance: float = 0.0,
+        price_value: float = 0.0,
     ) -> CopiedOrder:
         copy = CopiedOrder(
             terminal_id=terminal_id,
@@ -794,6 +889,10 @@ class _MemoryBeliefs:
             synced_tp=synced_tp,
             slave_ticket=slave_ticket,
             volume=slave_volume,
+            point=point,
+            digits=digits,
+            risk_distance=risk_distance,
+            price_value=price_value,
         )
         self._orders[(terminal_id, master_ticket)] = copy
         return copy
@@ -830,6 +929,13 @@ class _MemoryBeliefs:
         key = (terminal_id, master_ticket)
         self._positions.pop(key, None)
         self._orders.pop(key, None)
+
+
+def _risk_distance(entry: float | None, sl: float) -> float:
+    """One R for a copy: the distance from its entry to the stop it opened with, or 0."""
+    if not entry or sl == 0.0:
+        return 0.0
+    return abs(entry - sl)
 
 
 def _simulated_result(action: Action) -> OrderResult:
@@ -882,6 +988,10 @@ class OpenCopy:
     volume: float | None
     resting: bool
     """A pending order rather than an open position."""
+    breakeven_sl: float = 0.0
+    breakeven_exempt: bool = False
+    breakeven_at: float = 0.0
+    """The copy's breakeven state, for the detail page. See :class:`CopiedPosition`."""
 
 
 class CopyLedger:
@@ -928,6 +1038,9 @@ class CopyLedger:
         ``copy_pending = False`` behave sensibly, mirroring the fill but not the resting order.
         """
         self._warned_increase: set[tuple[str, int]] = set()
+        self._refused_breakevens: list[tuple[str, int]] = []
+        """Copies whose breakeven move the broker refused, until the engine collects them to
+        decide when to try again. See :meth:`take_refused_breakevens`."""
         self._last_ok: dict[str, float] = {}
         """Per slave: monotonic time of the last tick where the master and that slave were both
         observed connected. Staleness here is what triggers a re-baseline."""
@@ -940,11 +1053,23 @@ class CopyLedger:
     def believed_orders(self, terminal_id: str | None = None) -> list[CopiedOrder]:
         return self._store.orders(terminal_id)
 
+    def get_position(self, terminal_id: str, master_ticket: int) -> CopiedPosition | None:
+        return self._store.get_position(terminal_id, master_ticket)
+
     def open_copies(self, terminal_id: str) -> list[OpenCopy]:
         """Every position and resting order believed to be on one slave, oldest master ticket
         first. Belief only: a command still in flight has no row yet."""
         copies = [
-            OpenCopy(p.master_ticket, p.slave_ticket, p.slave_symbol, p.volume, resting=False)
+            OpenCopy(
+                p.master_ticket,
+                p.slave_ticket,
+                p.slave_symbol,
+                p.volume,
+                resting=False,
+                breakeven_sl=p.breakeven_sl,
+                breakeven_exempt=p.breakeven_exempt,
+                breakeven_at=p.breakeven_at,
+            )
             for p in self._store.positions(terminal_id)
         ]
         copies += [
@@ -984,6 +1109,80 @@ class CopyLedger:
                 excluded_orders.add(copy.master_ticket)
         return let_go
 
+    def set_breakeven(self, terminal_id: str, master_ticket: int, sl: float) -> None:
+        """Record a breakeven floor on one copy. Nothing is sent from here: the next diff sees
+        the floor and derives the ``MODIFY_SLTP``, so it goes through the same in-flight and
+        result bookkeeping as any other stop move.
+
+        The last reported stop move for the copy is forgotten, so the one this derives is
+        always sent. Otherwise a floor set again at a level already tried -- after a refusal,
+        or an exemption lifted -- would match that earlier action and be dropped in silence.
+        """
+        self._store.update(terminal_id, master_ticket, breakeven_sl=sl)
+        self._last.pop((terminal_id, master_ticket, ActionKind.MODIFY_SLTP), None)
+
+    def take_refused_breakevens(self) -> list[tuple[str, int]]:
+        """The ``(slave, master ticket)`` pairs whose breakeven move was refused since the last
+        call. Each has had its floor cleared, so the trigger will fire again; the caller
+        decides how much further the price must go first."""
+        taken, self._refused_breakevens = self._refused_breakevens, []
+        return taken
+
+    def _unarm_refused_breakeven(self, key: tuple[str, int, ActionKind]) -> bool:
+        """If a refused stop move was a breakeven, clear the floor so it can be tried again.
+
+        A broker refuses a stop too close to the price (``INVALID_STOPS``) and often does not
+        say how close is too close: a floating-spread symbol can report no minimum at all and
+        still enforce one. So a breakeven is not final the way a mirrored stop is. Its level
+        does not change, but the price moves away from it, and the same request can succeed a
+        moment later. Clearing the floor puts the copy back on the master's stop, which the
+        broker already accepted, until the trigger fires again.
+        """
+        tid, ticket, _ = key
+        last = self._last.get(key)
+        copy = self._store.get_position(tid, ticket)
+        if (
+            last is None
+            or copy is None
+            or copy.breakeven_sl == 0.0
+            or not _same(last.sl, copy.breakeven_sl, _PRICE_EPS)
+        ):
+            return False
+        self._store.update(tid, ticket, breakeven_sl=0.0)
+        self._last.pop(key, None)
+        self._refused_breakevens.append((tid, ticket))
+        return True
+
+    def set_breakeven_exempt(self, terminal_id: str, master_ticket: int, exempt: bool) -> bool:
+        """Exempt one copy from breakeven, or lift that. False if there is no such position.
+
+        Exempting also drops a floor already set, and any breakeven price, so the copy follows
+        the master's stop again from the next tick -- which may loosen it, and that is what was
+        asked for. Lifting the exemption sets nothing: the trigger is checked afresh.
+        """
+        if self._store.get_position(terminal_id, master_ticket) is None:
+            return False
+        changes: dict[str, Any] = {"breakeven_exempt": exempt}
+        if exempt:
+            changes["breakeven_sl"] = 0.0
+            changes["breakeven_at"] = 0.0
+        self._store.update(terminal_id, master_ticket, **changes)
+        return True
+
+    def set_breakeven_at(self, terminal_id: str, master_ticket: int, price: float) -> bool:
+        """Set one copy's breakeven price (0 clears it). False if there is no such position.
+
+        Setting one lifts an exemption, since asking for a breakeven on a copy is the opposite
+        of exempting it. A floor already set is left alone: the stop has already moved.
+        """
+        if self._store.get_position(terminal_id, master_ticket) is None:
+            return False
+        changes: dict[str, Any] = {"breakeven_at": price}
+        if price:
+            changes["breakeven_exempt"] = False
+        self._store.update(terminal_id, master_ticket, **changes)
+        return True
+
     def reset_session_state(self) -> None:
         """Forget everything that is *not* belief: in-flight commands, de-duplication memory,
         exclusions and continuity.
@@ -997,6 +1196,7 @@ class CopyLedger:
         self._excluded.clear()
         self._excluded_orders.clear()
         self._warned_increase.clear()
+        self._refused_breakevens.clear()
         self._last_ok.clear()
 
     # --- the tick ------------------------------------------------------------------------
@@ -1184,6 +1384,10 @@ class CopyLedger:
             slave_volume=order.volume,
             synced_sl=order.synced_sl,
             synced_tp=order.synced_tp,
+            point=order.point,
+            digits=order.digits,
+            risk_distance=order.risk_distance,
+            price_value=order.price_value,
         )
 
     def _warn_on_growth(self, terminal_id: str, master_positions: Sequence[Position]) -> None:
@@ -1284,6 +1488,12 @@ class CopyLedger:
         self._inflight.pop(key, None)
 
         if not result.ok:
+            if (
+                result.op is ActionKind.MODIFY_SLTP
+                and not result.retryable
+                and self._unarm_refused_breakeven(key)
+            ):
+                return
             if result.op in (ActionKind.OPEN, ActionKind.PLACE):
                 bucket = self._excluded if result.op is ActionKind.OPEN else self._excluded_orders
                 bucket.setdefault(result.terminal_id, set()).add(result.master_ticket)
@@ -1337,6 +1547,10 @@ class CopyLedger:
                 slave_volume=result.filled_volume,
                 synced_sl=last.sl,
                 synced_tp=last.tp,
+                point=result.point or 0.0,
+                digits=result.digits or 0,
+                risk_distance=_risk_distance(result.price, last.sl),
+                price_value=result.price_value or 0.0,
             )
         elif result.op is ActionKind.PLACE:
             self._store.remember_order(
@@ -1351,6 +1565,11 @@ class CopyLedger:
                 slave_volume=result.filled_volume,
                 synced_sl=last.sl,
                 synced_tp=last.tp,
+                point=result.point or 0.0,
+                digits=result.digits or 0,
+                # A resting order fills at its own price, give or take a stop order's slippage.
+                risk_distance=_risk_distance(last.entry, last.sl),
+                price_value=result.price_value or 0.0,
             )
         elif result.op is ActionKind.REDUCE:
             # master_volume moves to what the master now holds, so the next partial is measured

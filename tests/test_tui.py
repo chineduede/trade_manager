@@ -9,12 +9,20 @@ trades on the wrong account.
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from textual.widgets import Button, Checkbox, DataTable, Input, Select, Static, TextArea
 
-from mt5copier.config import AppConfig, NoStopPolicy, Role, SizingMode, TerminalConfig
+from mt5copier.config import (
+    BREAKEVEN_FIELDS,
+    AppConfig,
+    NoStopPolicy,
+    Role,
+    SizingMode,
+    TerminalConfig,
+)
 from mt5copier.copy_stats import TerminalStats
 from mt5copier.engine import RecordedAction, RecordedResult, TerminalView
 from mt5copier.protocol import (
@@ -29,6 +37,7 @@ from mt5copier.reconcile import OpenCopy
 from mt5copier.settings_edit import copies_word
 from mt5copier.store import Orphan
 from mt5copier.tui.app import CopierApp
+from mt5copier.tui.breakeven_screen import BreakevenPriceScreen
 from mt5copier.tui.live_override_screen import LiveOverrideScreen
 from mt5copier.tui.orphan_screen import OrphanConfirmScreen
 from mt5copier.tui.settings_screen import SettingsScreen
@@ -143,11 +152,17 @@ class StubEngine:
     def copies_at_stake(
         self, terminal_id: str, new: TerminalConfig | None = None
     ) -> dict[str, list[OpenCopy]] | None:
-        """The real engine's rule: a slave stakes its own copies; the master stakes every
-        slave's when unassigned (``new`` None) or disabled, and nothing otherwise."""
+        """The real engine's rule: a slave stakes its own copies, unless only its breakeven
+        settings changed; the master stakes every slave's when unassigned (``new`` None) or
+        disabled, and nothing otherwise."""
         cfg = self._cfg.terminals[terminal_id]
         if cfg.role is not Role.MASTER:
-            ids = [terminal_id]
+            only_be = new is not None and all(
+                getattr(cfg, f) == getattr(new, f)
+                for f in TerminalConfig.model_fields
+                if f not in BREAKEVEN_FIELDS
+            )
+            ids = [] if only_be else [terminal_id]
         elif new is None or (cfg.enabled and not new.enabled):
             ids = [t.terminal_id for t in self._cfg.slaves]
         else:
@@ -193,6 +208,25 @@ class StubEngine:
     def set_paused(self, terminal_id: str, paused: bool) -> None:
         cfg = self._cfg.terminals[terminal_id]
         self._cfg.replace_terminal(cfg.model_copy(update={"paused": paused}))
+
+    def _change_copy(self, terminal_id: str, master_ticket: int, **changes: object) -> bool:
+        held = self.copies.get(terminal_id) or []
+        for i, c in enumerate(held):
+            if c.master_ticket == master_ticket and not c.resting:
+                held[i] = replace(c, **changes)  # type: ignore[arg-type]
+                return True
+        return False
+
+    def set_breakeven_exempt(self, terminal_id: str, master_ticket: int, exempt: bool) -> bool:
+        extra = {"breakeven_sl": 0.0, "breakeven_at": 0.0} if exempt else {}
+        return self._change_copy(terminal_id, master_ticket, breakeven_exempt=exempt, **extra)
+
+    def set_breakeven_at(self, terminal_id: str, master_ticket: int, price: float) -> str | None:
+        if price and price < 1.0851:
+            return "for a buy it has to be above 1.0851 (entry plus buffer)"
+        extra = {"breakeven_exempt": False} if price else {}
+        self._change_copy(terminal_id, master_ticket, breakeven_at=price, **extra)
+        return None
 
     def unassign(
         self, terminal_id: str, *, orphan: Mapping[str, Collection[int]] | None = None
@@ -2043,6 +2077,61 @@ async def test_the_slave_page_shows_positions_risk_and_health(
         assert table.row_count == 2  # type: ignore[attr-defined]
         links = [str(table.get_row_at(i)[-1]) for i in range(2)]  # type: ignore[attr-defined]
         assert links == ["copy of #100 (master 1 lots)", "manual / not ours"]
+
+
+def _breakeven_cell(screen: TerminalScreen, row: int = 0) -> str:
+    table = screen.query_one("#td-positions", DataTable)
+    return str(table.get_row_at(row)[-2])
+
+
+async def test_b_exempts_the_selected_copy_and_b_again_lifts_it(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    _wire_copying(app, cfg)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open(app, pilot, TID_SLAVE)
+        assert _breakeven_cell(screen) == "off"
+        await pilot.press("b")
+        await pilot.pause()
+        assert _breakeven_cell(screen) == "exempt"
+        await pilot.press("b")
+        await pilot.pause()
+        assert _breakeven_cell(screen) == "off"
+
+
+async def test_b_on_a_position_that_is_not_a_copy_does_nothing(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    _wire_copying(app, cfg)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open(app, pilot, TID_SLAVE)
+        screen.query_one("#td-positions", DataTable).move_cursor(row=1)
+        await pilot.press("b")
+        await pilot.pause()
+        assert _breakeven_cell(screen, 1) == ""
+        assert not any(c.breakeven_exempt for c in app._engine.open_copies(TID_SLAVE) or ())  # type: ignore[attr-defined]
+
+
+async def test_shift_b_sets_a_breakeven_price_and_shows_a_refusal(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    _wire_copying(app, cfg)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open(app, pilot, TID_SLAVE)
+        await pilot.press("B")
+        await pilot.pause()
+        assert isinstance(app.screen, BreakevenPriceScreen)
+        box = app.screen.query_one("#price", Input)
+        box.value = "1.08"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, BreakevenPriceScreen), "a refused price keeps the dialog"
+        assert "above 1.0851" in str(app.screen.query_one("#error", Static).render())
+        box.value = "1.087"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.screen is screen
+        assert _breakeven_cell(screen) == "at 1.08700"
 
 
 async def test_the_master_page_counts_slaves_and_has_no_copy_health(

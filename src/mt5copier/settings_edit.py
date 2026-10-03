@@ -28,7 +28,8 @@ a ``MASTER=BROKER`` map out of free text.
 
 **Nothing here knows which edits are safe under an open copy, and nothing needs to.** An edit to
 a terminal that holds copies is not judged setting by setting: the copies are given up (see
-``Engine.apply_settings``), after the person has been shown them and agreed. That is what
+``Engine.apply_settings``), after the person has been shown them and agreed. The one exception
+is an edit to the breakeven settings alone (``config.BREAKEVEN_FIELDS``), which keeps them. That is what
 ``invert`` needed -- a believed copy records the direction it opened in -- and it is what the
 sizing settings need too, and it is one rule instead of a list.
 """
@@ -43,7 +44,15 @@ from enum import Enum, StrEnum
 
 from pydantic import ValidationError
 
-from .config import AppConfig, NoStopPolicy, Role, SizingMode, TerminalConfig, account_key
+from .config import (
+    AppConfig,
+    BreakevenMode,
+    NoStopPolicy,
+    Role,
+    SizingMode,
+    TerminalConfig,
+    account_key,
+)
 from .reconcile import OpenCopy
 
 
@@ -178,6 +187,33 @@ SECTIONS: tuple[Section, ...] = (
                 "Copy pending orders",
                 Kind.FLAG,
                 "Mirror the master's resting orders as well as its open positions.",
+            ),
+        ),
+    ),
+    Section(
+        "Breakeven",
+        (
+            EditableField(
+                "breakeven_mode",
+                "Breakeven",
+                Kind.CHOICE,
+                "Move a copy's stop past its entry by its commission and slippage buffer once it "
+                "is this far in profit, measured on this slave's own fill. After that the stop "
+                "only tightens: the master's stop is copied only when tighter, a looser or "
+                "removed one is ignored, and the target still follows. Changing these keeps "
+                "open copies and applies to them too.",
+                (
+                    ("off", BreakevenMode.OFF.value),
+                    ("after a multiple of the risk (R)", BreakevenMode.R.value),
+                ),
+            ),
+            EditableField(
+                "breakeven_trigger_r",
+                "Trigger, R",
+                Kind.FLOAT,
+                "Times the copy's opening stop distance: 0.3 is 0.3R. A copy opened with no stop "
+                "never triggers. A single position can be given its own price on its detail "
+                "page instead.",
             ),
         ),
     ),

@@ -29,6 +29,7 @@ from ..protocol import ACCOUNT_TRADE_MODE_DEMO, Snapshot
 from ..terminal_detail import (
     PositionRow,
     bar,
+    breakeven_rule,
     exposure,
     format_duration,
     format_ms,
@@ -38,6 +39,7 @@ from ..terminal_detail import (
     margin_gauge,
     position_rows,
 )
+from .breakeven_screen import BreakevenPriceScreen
 
 log = get_logger(__name__)
 
@@ -64,6 +66,7 @@ _COLUMNS: tuple[tuple[str, str], ...] = (
     ("tp_room", "TO TP"),
     ("swap", "SWAP"),
     ("pl", "P/L"),
+    ("be", "BREAKEVEN"),
     ("link", "COPY"),
 )
 _RIGHT = {"lots", "open", "current", "sl", "sl_room", "tp", "tp_room", "swap", "pl"}
@@ -87,6 +90,8 @@ class TerminalScreen(Screen[None]):
         Binding("escape", "app.pop_screen", "Back"),
         Binding("backspace", "app.pop_screen", "Back", show=False),
         Binding("e", "edit_settings", "Settings"),
+        Binding("b", "toggle_breakeven_exempt", "Exempt from BE"),
+        Binding("B", "breakeven_price", "BE price"),
     ]
 
     DEFAULT_CSS = """
@@ -136,6 +141,7 @@ class TerminalScreen(Screen[None]):
         self._engine = engine
         self._cfg = cfg
         self.terminal_id = terminal_id
+        self._rows: list[PositionRow] = []
 
     def compose(self) -> ComposeResult:
         yield Static("", id="td-header")
@@ -161,6 +167,64 @@ class TerminalScreen(Screen[None]):
     def action_edit_settings(self) -> None:
         """This terminal's settings form, on top of this page; closing it comes back here."""
         self.app.open_settings(self.terminal_id)  # type: ignore[attr-defined]
+
+    def _selected_copy(self) -> PositionRow | None:
+        """The copy under the cursor, or None (with a word to say why) if it is not one."""
+        row = next((r for r in self._rows if str(r.ticket) == self._cursor_key()), None)
+        if row is None or row.master_ticket is None:
+            self.notify("select one of this slave's copies first", severity="warning")
+            return None
+        return row
+
+    def _cursor_key(self) -> str | None:
+        table = self.query_one("#td-positions", DataTable)
+        if not table.row_count:
+            return None
+        try:
+            key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+        except Exception:
+            return None
+        return key.value
+
+    def action_toggle_breakeven_exempt(self) -> None:
+        """Exempt the selected copy from breakeven, or lift that. Exempting a copy whose
+        breakeven already fired lets it follow the master's stop again."""
+        row = self._selected_copy()
+        if row is None or row.master_ticket is None:
+            return
+        exempt = row.breakeven != "exempt"
+        if not self._engine.set_breakeven_exempt(self.terminal_id, row.master_ticket, exempt):
+            self.notify("that copy is no longer tracked", severity="error")
+            return
+        self.notify(
+            f"{row.symbol} #{row.ticket}: "
+            + ("exempt from breakeven" if exempt else "breakeven back on")
+        )
+        self.refresh_page()
+
+    def action_breakeven_price(self) -> None:
+        """Set or clear the selected copy's own breakeven price."""
+        row = self._selected_copy()
+        if row is None or row.master_ticket is None:
+            return
+        master_ticket = row.master_ticket
+        current = row.breakeven[3:] if row.breakeven.startswith("at ") else ""
+
+        def done(changed: bool | None) -> None:
+            if changed:
+                self.refresh_page()
+
+        self.app.push_screen(
+            BreakevenPriceScreen(
+                title=f"{row.symbol} {row.side} #{row.ticket}",
+                current=current.replace(",", ""),
+                apply=lambda price: self._engine.set_breakeven_at(
+                    self.terminal_id, master_ticket, price
+                ),
+                halt=self.app.action_panic,  # type: ignore[attr-defined]
+            ),
+            done,
+        )
 
     def _on_timer(self) -> None:
         try:
@@ -216,6 +280,7 @@ class TerminalScreen(Screen[None]):
                     snap,
                     is_master=False,
                     copies=self._engine.open_copies(self.terminal_id) if is_slave else None,
+                    breakeven=breakeven_rule(view.cfg),
                     master_positions=master_snap.open_positions if master_snap else None,
                     orphan_tickets=(o.slave_ticket for o in self._engine.orphans(self.terminal_id)),
                 )
@@ -358,6 +423,7 @@ class TerminalScreen(Screen[None]):
         table = self.query_one("#td-positions", DataTable)
         cursor = table.cursor_row
         table.clear()
+        self._rows = rows or []
         cur = snap.currency if snap else None
         if rows is None:
             table.border_title = "POSITIONS -- could not be read"
@@ -384,6 +450,7 @@ class TerminalScreen(Screen[None]):
                 _r(_signed(r.tp_room, r.digits)),
                 _r(format_money(r.swap, None)),
                 _r(format_money(r.profit, cur, force_sign=True), pl_color),
+                Text(r.breakeven, style=_TIER_COLOR[r.breakeven_tier]),
                 Text(r.link, style=_TIER_COLOR[r.link_tier]),
                 key=str(r.ticket),
             )

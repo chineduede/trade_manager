@@ -560,7 +560,37 @@ class Executor:
             facts.filling_mask,
             reprice_direction=None if is_pending else cmd.direction,
         )
-        return replace(result, point=facts.point) if result.ok else result
+        if not result.ok:
+            return result
+        fill = (result.price or price) if not is_pending else cmd.entry
+        return replace(
+            result,
+            point=facts.point,
+            digits=facts.digits,
+            price_value=self._price_value(cmd.direction, symbol, fill, facts.point),
+        )
+
+    def _price_value(
+        self, direction: PositionType, symbol: str, price: float, point: float
+    ) -> float | None:
+        """What a 1.0 move in price is worth on one lot, in the account currency, for turning a
+        commission into a breakeven distance. Asked of the terminal the way sizing asks it, so
+        a cross-currency quote comes out right, and measured over a thousand points rather
+        than one so the broker's rounding of the answer does not swamp it.
+
+        After the order has filled, and never allowed to fail it: a None here only means the
+        copy cannot go to breakeven while a commission is set.
+        """
+        if price <= 0 or point <= 0:
+            return None
+        step = point * 1000
+        sl = price - step if direction is PositionType.BUY else price + step
+        try:
+            loss = self._session.loss_per_lot(direction, symbol, price, sl)
+        except Exception:
+            log.exception("could not price a move on %s", symbol)
+            return None
+        return loss / step if loss else None
 
     def _send(
         self,

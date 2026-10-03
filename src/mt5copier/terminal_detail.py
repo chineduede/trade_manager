@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
+from .config import BreakevenMode, TerminalConfig
 from .presentation import Tier
 from .protocol import COPIER_MAGIC, Position, PositionLive, PositionType, Snapshot
 from .reconcile import OpenCopy
@@ -45,6 +46,12 @@ class PositionRow:
     link_tier: Tier
     digits: int
     """Decimals to show this symbol's prices with (see :func:`price_digits`)."""
+    master_ticket: int | None = None
+    """The master position this is a copy of, on a slave; None for anything that is not a
+    tracked copy. What the breakeven keys act on."""
+    breakeven: str = ""
+    """This copy's breakeven state in a few words; blank for anything that is not a copy."""
+    breakeven_tier: Tier = "muted"
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,11 +104,37 @@ def _room(ptype: PositionType, current: float | None, level: float, *, stop: boo
     return level - current if stop else current - level
 
 
+def breakeven_rule(cfg: TerminalConfig) -> str:
+    """A slave's own breakeven trigger, as the column shows it for a copy with nothing set by
+    hand."""
+    if cfg.breakeven_mode is BreakevenMode.R:
+        return f"{cfg.breakeven_trigger_r:g}R"
+    return "off"
+
+
+def _breakeven_cell(copy: OpenCopy, rule: str, digits: int) -> tuple[str, Tier]:
+    if copy.breakeven_exempt:
+        return "exempt", "muted"
+    # Its own decimals count too: a level is often one digit finer than the row's prices.
+    if copy.breakeven_sl:
+        return (
+            f"✓ {format_price(copy.breakeven_sl, max(digits, price_digits(copy.breakeven_sl)))}",
+            "good",
+        )
+    if copy.breakeven_at:
+        return (
+            f"at {format_price(copy.breakeven_at, max(digits, price_digits(copy.breakeven_at)))}",
+            "warning",
+        )
+    return rule, "muted"
+
+
 def position_rows(
     snap: Snapshot,
     *,
     is_master: bool,
     copies: Sequence[OpenCopy] | None = None,
+    breakeven: str = "off",
     master_positions: Iterable[Position] | None = None,
     held_by: Mapping[int, int] | None = None,
     slave_count: int = 0,
@@ -111,7 +144,8 @@ def position_rows(
 
     On a **slave**, ``copies`` are what the store believes this slave holds, and each copy is
     named after the master position it follows. On the **master**, ``held_by`` counts, per
-    master ticket, how many slaves hold a copy, out of ``slave_count``.
+    master ticket, how many slaves hold a copy, out of ``slave_count``. ``breakeven`` is the
+    slave's own trigger (see :func:`breakeven_rule`), shown for a copy with nothing set by hand.
     """
     if snap.open_positions is None:
         return None
@@ -126,6 +160,8 @@ def position_rows(
     for p in sorted(snap.open_positions, key=lambda p: (p.symbol, p.ticket)):
         lp = live.get(p.ticket)
         current = lp.price_current if lp else None
+        digits = price_digits(p.price_open, p.sl, p.tp, current or 0.0)
+        copy: OpenCopy | None = None
         if is_master:
             n = (held_by or {}).get(p.ticket, 0)
             if slave_count == 0:
@@ -150,6 +186,9 @@ def position_rows(
                 link, tier = "ours, not yet matched", "warning"
             else:
                 link, tier = "manual / not ours", "muted"
+        be_text, be_tier = "", "muted"
+        if copy is not None:
+            be_text, be_tier = _breakeven_cell(copy, breakeven, digits)
         rows.append(
             PositionRow(
                 ticket=p.ticket,
@@ -166,7 +205,10 @@ def position_rows(
                 profit=lp.profit if lp else None,
                 link=link,
                 link_tier=tier,
-                digits=price_digits(p.price_open, p.sl, p.tp, current or 0.0),
+                digits=digits,
+                master_ticket=copy.master_ticket if copy is not None else None,
+                breakeven=be_text,
+                breakeven_tier=be_tier,
             )
         )
     return rows

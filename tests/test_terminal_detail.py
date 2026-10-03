@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
+from mt5copier.config import BreakevenMode, TerminalConfig
 from mt5copier.protocol import (
     COPIER_MAGIC,
     Position,
@@ -15,6 +18,7 @@ from mt5copier.protocol import (
 from mt5copier.reconcile import OpenCopy
 from mt5copier.terminal_detail import (
     bar,
+    breakeven_rule,
     exposure,
     format_duration,
     format_ping,
@@ -126,6 +130,45 @@ def test_a_slave_names_the_master_position_each_copy_follows() -> None:
     assert rows is not None
     assert rows[0].link == "copy of #100 (master 2 lots)"
     assert rows[0].link_tier == "good"
+
+
+@pytest.mark.parametrize(
+    ("state", "text", "tier"),
+    [
+        ({}, "0.3R", "muted"),
+        ({"breakeven_at": 1.087}, "at 1.087", "warning"),
+        ({"breakeven_sl": 1.0851}, "✓ 1.0851", "good"),
+        ({"breakeven_exempt": True}, "exempt", "muted"),
+    ],
+    ids=["slave-rule", "hand-set-price", "triggered", "exempt"],
+)
+def test_a_copy_shows_its_breakeven_state(state: dict[str, object], text: str, tier: str) -> None:
+    c = replace(copy(100, 5001), **state)  # type: ignore[arg-type]
+    rows = position_rows(
+        snap((pos(ticket=5001, magic=COPIER_MAGIC),)),
+        is_master=False,
+        copies=[c],
+        breakeven="0.3R",
+    )
+    assert rows is not None
+    assert (rows[0].breakeven, rows[0].breakeven_tier) == (text, tier)
+    assert rows[0].master_ticket == 100
+
+
+def test_a_position_that_is_not_a_copy_has_no_breakeven_state() -> None:
+    rows = position_rows(snap((pos(ticket=6000),)), is_master=False, breakeven="1R")
+    assert rows is not None
+    assert (rows[0].breakeven, rows[0].master_ticket) == ("", None)
+
+
+def test_the_slaves_own_rule_reads_in_its_own_units() -> None:
+    assert breakeven_rule(TerminalConfig(terminal_id=TID)) == "off"
+    assert (
+        breakeven_rule(
+            TerminalConfig(terminal_id=TID, breakeven_mode=BreakevenMode.R, breakeven_trigger_r=1.5)
+        )
+        == "1.5R"
+    )
 
 
 def test_a_copy_whose_master_is_gone_stands_out() -> None:
