@@ -2891,3 +2891,39 @@ def test_the_stats_are_a_copy_the_ui_cannot_disturb(engine: Engine) -> None:
     answer(engine, cmd)
     assert before.answered == 0
     assert engine.terminal_stats(TID_SLAVE).answered == 1
+
+
+# --- a paused slave -------------------------------------------------------------------------
+# Pausing stops a slave taking on new trades and nothing else: everything on a copy it already
+# holds goes on being mirrored.
+
+
+def test_a_paused_slave_declines_a_new_position() -> None:
+    action = reconcile_slave([pos()], [], slave(paused=True))[0]
+    assert action.kind is ActionKind.OPEN
+    assert action.skip_reason is SkipReason.PAUSED
+
+
+def test_a_paused_slave_declines_a_new_resting_order() -> None:
+    action = reconcile_slave_orders([order()], [], [], slave(paused=True, copy_pending=True))[0]
+    assert action.kind is ActionKind.PLACE
+    assert action.skip_reason is SkipReason.PAUSED
+
+
+def test_a_paused_slave_still_closes_and_modifies_what_it_holds() -> None:
+    cfg = slave(paused=True)
+    closed = reconcile_slave([], [copied(ticket=7)], cfg)
+    assert [(a.kind, a.executable) for a in closed] == [(ActionKind.CLOSE, True)]
+    moved = reconcile_slave([pos(sl=1.08300)], [copied(sl=1.08000)], cfg)
+    assert [(a.kind, a.executable) for a in moved] == [(ActionKind.MODIFY_SLTP, True)]
+    reduced = reconcile_slave([pos(volume=0.5)], [copied(master_volume=1.0)], cfg)
+    assert [(a.kind, a.executable) for a in reduced] == [(ActionKind.REDUCE, True)]
+
+
+def test_a_paused_slave_still_moves_and_cancels_its_resting_orders() -> None:
+    cfg = slave(paused=True, copy_pending=True)
+    moved = reconcile_slave_orders([order(price_open=1.07900)], [], [copied_order()], cfg)
+    assert [(a.kind, a.executable) for a in moved] == [(ActionKind.MODIFY_ORDER, True)]
+    cancelled = reconcile_slave_orders([], [], [copied_order()], cfg)
+    assert [a.kind for a in cancelled] == [ActionKind.CANCEL]
+    assert cancelled[0].executable

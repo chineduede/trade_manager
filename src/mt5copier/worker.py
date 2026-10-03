@@ -21,9 +21,11 @@ Two behaviours here are direct responses to gaps in ``zele-mt5``:
 
 from __future__ import annotations
 
+import os
 import queue
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -564,9 +566,11 @@ def run_worker(
     (a crash, the queue breaking, an unflagged STOP) -- an unplanned exit must never surprise
     the user by closing a terminal they are still looking at."""
 
+    pid = os.getpid()
+
     def publish(snap: Snapshot) -> None:
         try:
-            out_q.put_nowait(snap)
+            out_q.put_nowait(replace(snap, worker_pid=pid))
         except Exception as exc:
             # A full queue means the supervisor is not draining; dropping a snapshot is
             # correct, since the next tick supersedes it anyway.

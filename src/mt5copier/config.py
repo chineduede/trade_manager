@@ -118,6 +118,15 @@ class TerminalConfig(BaseModel):
     exe_path: Path | None = None
     role: Role = Role.UNASSIGNED
     enabled: bool = True
+    """No longer offered anywhere in the UI -- pausing a slave is :attr:`paused` -- but kept in
+    the schema, which forbids unknown keys, so a config file that has it still loads."""
+
+    paused: bool = False
+    """A paused slave is sent no *new* trades: the master's opens and new resting orders are
+    declined for it, and like every decline that is final, so resuming does not copy what was
+    opened in the meantime. Everything on copies it already holds -- closes, partials, stop and
+    target moves, order changes and cancels -- carries on, and it stays connected. Meaningless
+    on anything but a slave."""
 
     # --- Stage 2: sizing -------------------------------------------------------------------
     sizing_mode: SizingMode = SizingMode.PERCENT_OF_BALANCE
@@ -365,14 +374,22 @@ class AppConfig(BaseModel):
         return tcfg.label or terminal_id[:8]
 
     def set_role(self, terminal_id: str, role: Role) -> None:
-        """Assign a role, demoting any existing master so the one-master rule always holds."""
+        """Assign a role, demoting any existing master so the one-master rule always holds.
+
+        A pause belongs to one spell as a slave and does not survive a change of role: a slave
+        unassigned while paused and later made a slave again starts out copying.
+        """
         if terminal_id not in self.terminals:
             raise KeyError(terminal_id)
         if role is Role.MASTER:
             for tcfg in self.terminals.values():
                 if tcfg.role is Role.MASTER and tcfg.terminal_id != terminal_id:
                     tcfg.role = Role.UNASSIGNED
-        self.terminals[terminal_id].role = role
+                    tcfg.paused = False
+        target = self.terminals[terminal_id]
+        if target.role is not role:
+            target.paused = False
+        target.role = role
 
     def replace_terminal(self, new: TerminalConfig) -> None:
         """Swap in an edited copy of one terminal's settings, as a single assignment.

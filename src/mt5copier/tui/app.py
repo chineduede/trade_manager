@@ -112,12 +112,13 @@ THEME = Theme(
 _COLUMNS: tuple[tuple[str, str, int], ...] = (
     ("terminal", "TERMINAL", 29),
     ("role", "ROLE", 12),
-    ("status", "STATUS", 17),
+    ("status", "STATUS", 19),
     ("balance", "BALANCE", 13),
     ("equity", "EQUITY", 13),
     ("pl", "FLOATING P/L", 13),
     ("risk", "RISK", 8),
     ("action", "ACTIONS", 11),
+    ("pause", "", 4),
     ("settings", "", 4),
 )
 
@@ -128,6 +129,8 @@ _ICON_MASTER = "\U0001f451"  # crown
 _ICON_SLAVE = "\U0001f517"  # link
 _ICON_BLOCKED = "\U0001f512"  # lock
 _ICON_SETTINGS = "⚙️"  # gear
+_ICON_PAUSE = "\u23f8\ufe0f"  # pause
+_ICON_RESUME = "\u25b6\ufe0f"  # play
 
 _SECTION = "§"
 """Prefix of every row key that is not a terminal: section headings and their hints. The
@@ -195,6 +198,11 @@ class TerminalTable(DataTable[Text]):
         if row_key is not None and column_key is not None:
             self.post_message(self.Clicked(row_key, column_key))
 
+    BINDINGS = [
+        # DataTable already binds Enter, but hidden. Shown here so the footer says what it does.
+        Binding("enter", "select_cursor", "Details"),
+    ]
+
     class OpenRequested(Message):
         """Enter was pressed on a row: open that terminal's detail page."""
 
@@ -249,6 +257,7 @@ class CopierApp(App[None]):
         Binding("ctrl+r", "restart_worker", "Restart worker", show=False),
         Binding("ctrl+l", "clear_detection", "Clear ledger", show=False),
         Binding("o", "acknowledge_orphans", "Ack orphans", show=False),
+        Binding("p", "toggle_pause", "Pause/resume slave", show=False),
         Binding("1", "show_page('terminals')", "Terminals page", show=False),
         Binding("2", "show_page('log')", "Log page", show=False),
     ]
@@ -277,6 +286,7 @@ class CopierApp(App[None]):
                 yield Static(
                     "[b]m[/b] master   [b]s[/b] slave\n"
                     "[b]u[/b] unassign [b]e[/b] settings\n"
+                    "[b]p[/b] pause/resume a slave\n"
                     "[b]d[/b] start/stop copying\n"
                     "[b]Enter[/b] terminal details\n"
                     "[b]F9[/b] panic halt\n"
@@ -428,6 +438,8 @@ class CopierApp(App[None]):
 
         if role is Role.MASTER:
             role_cell = Text(" MASTER ", style=f"bold {_BG} on {_FG}")
+        elif role is Role.SLAVE and cfg.paused:
+            role_cell = Text(" PAUSED ", style=f"bold {_BG} on {_TIER_COLOR['warning']}")
         elif role is Role.SLAVE:
             role_cell = Text(" SLAVE ", style=f"bold {_FG} on {_BUTTON}")
         else:
@@ -460,7 +472,10 @@ class CopierApp(App[None]):
             _right(format_money(row.floating_pl, row.currency, force_sign=True), pl_color),
             Text(cfg.risk_label() if role is Role.SLAVE else ""),
             button,
-            _button(_ICON_SETTINGS),
+            # Only a slave can be paused, and the master has nothing to set: both cells are
+            # simply absent where they would do nothing.
+            _button(_ICON_RESUME if cfg.paused else _ICON_PAUSE) if role is Role.SLAVE else Text(),
+            Text() if role is Role.MASTER else _button(_ICON_SETTINGS),
         )
 
     def _on_timer(self) -> None:
@@ -692,6 +707,12 @@ class CopierApp(App[None]):
                 lines.append(f"  #{o.slave_ticket}  {escape(o.symbol)}  {o.volume} lots")
         if cfg.role is Role.UNASSIGNED and snap is None:
             lines.append("[dim]assign a role to connect (nothing is launched until you do)[/dim]")
+        keys = [f"[{_ACCENT}]Enter[/] [dim]positions, risk and copy health[/dim]"]
+        if cfg.role is Role.SLAVE:
+            keys.append(f"[{_ACCENT}]p[/] [dim]{'resume' if cfg.paused else 'pause'}[/dim]")
+        if cfg.role is not Role.MASTER:
+            keys.append(f"[{_ACCENT}]e[/] [dim]settings[/dim]")
+        lines.append("   ".join(keys))
         detail.update("\n".join(lines))
 
     # --- selection helpers ------------------------------------------------------------------
@@ -840,7 +861,16 @@ class CopierApp(App[None]):
     def action_edit_settings(self) -> None:
         """Open the settings form for the selected terminal."""
         tid = self._selected_id()
-        if tid is None:
+        if tid is not None:
+            self.open_settings(tid)
+
+    def open_settings(self, tid: str) -> None:
+        """Open the settings form for one terminal: from the table, or from its detail page."""
+        if self._cfg.terminals[tid].role is Role.MASTER:
+            self.notify(
+                "The master has no settings: it is only read from. Sizing, symbols and what "
+                "gets copied are set on each slave."
+            )
             return
         self.push_screen(
             SettingsScreen(
@@ -852,6 +882,39 @@ class CopierApp(App[None]):
                 live=not self._cfg.dry_run,
             )
         )
+
+    def action_toggle_pause(self) -> None:
+        """Pause or resume the selected slave: it stops (or starts again) taking new trades.
+
+        Nothing is asked first, because nothing is given up. Its open copies go on being
+        managed either way, and it stays connected.
+        """
+        tid = self._selected_id()
+        if tid is None:
+            return
+        cfg = self._cfg.terminals[tid]
+        name = self._cfg.display_name(tid)
+        if cfg.role is not Role.SLAVE:
+            self.notify("Only a slave can be paused.", severity="warning")
+            return
+        paused = not cfg.paused
+        self._engine.set_paused(tid, paused)
+        if paused:
+            log.warning("%s paused: no new trades will be copied to it", name)
+            self.notify(
+                f"{name} paused: no new trades are copied to it. Copies it already holds are "
+                "still closed, reduced and kept in sync.",
+                severity="warning",
+                timeout=10,
+            )
+        else:
+            log.warning("%s resumed", name)
+            self.notify(
+                f"{name} resumed: trades the master opens from now on are copied. Any it "
+                "opened while paused are not.",
+                timeout=10,
+            )
+        self._persist_and_sync()
 
     def action_live_override(self) -> None:
         """Open the demo-only guard's override for the selected terminal."""
@@ -1058,11 +1121,21 @@ class CopierApp(App[None]):
         The cursor is moved there first, so the action reads the clicked terminal as selected
         -- which is also what lets one action method serve both the key and the click.
         """
-        if event.column_key not in ("action", "settings") or event.row_key not in self._row_ids:
+        if event.column_key not in ("action", "pause", "settings"):
+            return
+        if event.row_key not in self._row_ids:
+            return
+        role = self._cfg.terminals[event.row_key].role
+        if event.column_key == "pause" and role is not Role.SLAVE:
+            return  # an empty cell, not a button
+        if event.column_key == "settings" and role is Role.MASTER:
             return
         self.query_one("#terminals", TerminalTable).move_cursor(
             row=self._row_keys.index(event.row_key)
         )
+        if event.column_key == "pause":
+            self.action_toggle_pause()
+            return
         if event.column_key == "settings":
             self.action_edit_settings()
             return

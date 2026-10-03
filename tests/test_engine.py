@@ -296,6 +296,36 @@ def test_drain_ignores_out_of_order_snapshots(engine: Engine) -> None:
     assert engine._snapshots[TID_A].state is WorkerState.CONNECTED
 
 
+def test_a_stopped_workers_leftovers_cannot_lock_out_its_replacement(engine: Engine) -> None:
+    """Turning a terminal off and on left it "stale" for good.
+
+    The old worker's last snapshot drained after it was reaped, with a seq in the hundreds; the
+    new worker counts from 0, so every snapshot it sent was refused as out of order.
+    """
+    engine.sync()
+    engine._workers[TID_A].process.pid = 200  # type: ignore[attr-defined]
+    run_drain(
+        engine,
+        [
+            # Still queued from the worker that was replaced (pid 100).
+            Snapshot(terminal_id=TID_A, state=WorkerState.CONNECTED, seq=900, worker_pid=100),
+            Snapshot(terminal_id=TID_A, state=WorkerState.CONNECTED, seq=1, worker_pid=200),
+        ],
+    )
+    assert engine._snapshots[TID_A].worker_pid == 200
+    assert engine._snapshots[TID_A].seq == 1
+
+
+def test_a_snapshot_for_a_terminal_with_no_worker_is_dropped(engine: Engine) -> None:
+    """Drained after its worker was stopped: filing it would show the terminal as alive."""
+    run_drain(
+        engine,
+        [Snapshot(terminal_id=TID_A, state=WorkerState.CONNECTED, seq=900, worker_pid=100)],
+        settle=0.3,
+    )
+    assert TID_A not in engine._snapshots
+
+
 def test_drain_keeps_last_error_after_recovery(engine: Engine) -> None:
     """A transient failure should leave a visible trace rather than vanishing on reconnect."""
     run_drain(
@@ -358,3 +388,19 @@ def test_drain_tracks_connection_uptime_and_disconnects(engine: Engine) -> None:
     stats = engine.terminal_stats(TID_A)
     assert stats.disconnects == 1
     assert stats.connected_for_s is not None
+
+
+def test_pausing_a_slave_keeps_it_connected_and_closes_nothing(
+    engine: Engine, cfg: AppConfig
+) -> None:
+    engine.sync()
+    engine.set_paused(TID_B, True)
+    assert cfg.terminals[TID_B].paused is True
+    engine.sync()
+    assert TID_B in engine._workers, "a paused slave stays connected"
+    assert not engine._workers[TID_B].cmd_q.sent, "and nothing was asked to stop"  # type: ignore[attr-defined]
+
+
+def test_only_a_slave_can_be_paused_by_the_engine(engine: Engine) -> None:
+    with pytest.raises(ValueError, match="only a slave"):
+        engine.set_paused(TID_A, True)

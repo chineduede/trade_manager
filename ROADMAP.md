@@ -1215,6 +1215,22 @@ are the design, not a limitation waiting to be lifted.
   rendered headless with Textual's `Pilot`). Then a demo run: open, partial-close, move a stop
   and close on the master, and check that the page tracks it against the Trade tab on both
   terminals.
+- **Pausing a slave — built 2026-10-03, replacing the `Enabled` setting.** The user found
+  `Enabled` in the settings form made little sense: turning it off disconnected the terminal
+  *and closed it* (it went down the same `sync()` path as unassigning), and it sat on the master
+  too, where it was the only setting left once the slave-only ones were hidden. Now a slave row
+  has a ⏸/▶ button (and `p`); the master has no settings form at all. **The user's rule: a pause
+  only stops new trades.** A paused slave declines the master's new positions and new resting
+  orders (`SkipReason.PAUSED`, final like every decline, so resuming does not adopt what opened
+  meanwhile), while closes, partials, SL/TP moves and order modifies/cancels on what it already
+  holds carry on; it stays connected and nothing is given up. Saved in `config.json`
+  (`paused`), cleared by any role change. `enabled` stays in the schema only so older config
+  files still load. Unit and Pilot tested; the user accepted it in the TUI on 2026-10-03.
+
+  Found on the way: turning a terminal off and on left it **"stale" for good**. A stopped
+  worker's last snapshots were drained after it was reaped, and its high `seq` made the
+  out-of-order check refuse every snapshot from the replacement, which counts from 0. Snapshots
+  now carry `worker_pid`, and the drain drops any not from the terminal's current worker.
 - **Breakeven.** Move a copy's stop to entry (± buffer) once price has moved some distance.
   Reuses the already-built `MODIFY_SLTP` dispatch path; the new part is the trigger logic.
 - **Prop-firm guards.** Daily loss limit, max drawdown, consistency-rule-style caps that halt

@@ -383,6 +383,8 @@ class Engine:
             if not isinstance(snap, Snapshot):
                 continue
             with self._lock:
+                if not self._from_live_worker(snap):
+                    continue
                 current = self._snapshots.get(snap.terminal_id)
                 # Out-of-order delivery would otherwise let a stale CONNECTING overwrite a
                 # newer CONNECTED, making the UI flicker between states.
@@ -398,6 +400,21 @@ class Engine:
                 self._received_at[snap.terminal_id] = time.monotonic()
                 self._stats.on_state(snap.terminal_id, snap.state, now=time.monotonic())
                 self._reconcile(snap)
+
+    def _from_live_worker(self, snap: Snapshot) -> bool:
+        """Whether ``snap`` came from the worker this terminal has *now*.
+
+        A stopped worker's last snapshots can still be in the queue when it is reaped, and the
+        drain files them afterwards. Kept, one would sit in ``_snapshots`` with the old worker's
+        high ``seq`` -- and since the replacement counts from 0 again, the out-of-order check
+        below would then refuse every snapshot it sent, leaving the terminal "stale" for good.
+        That is what turning a terminal off and on again did. Unstamped snapshots are let
+        through: only a worker stamps them, and it always does.
+        """
+        if snap.worker_pid is None:
+            return True
+        worker = self._workers.get(snap.terminal_id)
+        return worker is not None and getattr(worker.process, "pid", None) == snap.worker_pid
 
     # --- Stage 2a: detection ----------------------------------------------------------------
 
@@ -1074,6 +1091,20 @@ class Engine:
                 return refusal
             self._cfg.replace_terminal(new)
         return None
+
+    def set_paused(self, terminal_id: str, paused: bool) -> None:
+        """Pause or resume one slave. Unlike :meth:`apply_settings` this gives nothing up:
+        a pause declines new trades only, so the copies the slave holds stay managed.
+
+        Under the lock, so a tick never derives a slave's actions from one side of the switch
+        and dispatches them from the other. The caller still has to save the config.
+        """
+        with self._lock:
+            cfg = self._cfg.terminals[terminal_id]
+            if cfg.role is not Role.SLAVE:
+                raise ValueError("only a slave can be paused")
+            if cfg.paused is not paused:
+                self._cfg.replace_terminal(cfg.model_copy(update={"paused": paused}))
 
     def unassign(
         self, terminal_id: str, *, orphan: Mapping[str, Collection[int]] | None = None

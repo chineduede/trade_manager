@@ -22,12 +22,15 @@ a ``MASTER=BROKER`` map out of free text.
 * ``label`` is owned by discovery, which overwrites it on every rescan and at every start. An
   edit would revert silently the next time the app ran.
 * ``role`` has its own keys, and ``terminal_id`` and ``exe_path`` are not the user's to set.
+* ``paused`` is a switch on the slave's row in the terminal list, not a setting: it is flipped
+  far more often than anything here, and gives nothing up (see ``Engine.set_paused``).
+* ``enabled`` is no longer offered at all. Pausing replaced it.
 
 **Nothing here knows which edits are safe under an open copy, and nothing needs to.** An edit to
 a terminal that holds copies is not judged setting by setting: the copies are given up (see
 ``Engine.apply_settings``), after the person has been shown them and agreed. That is what
-``invert`` needed -- a believed copy records the direction it opened in -- and it is what
-``enabled`` and the sizing settings need too, and it is one rule instead of a list.
+``invert`` needed -- a believed copy records the direction it opened in -- and it is what the
+sizing settings need too, and it is one rule instead of a list.
 """
 
 from __future__ import annotations
@@ -161,12 +164,6 @@ SECTIONS: tuple[Section, ...] = (
     Section(
         "Copy behaviour",
         (
-            EditableField(
-                "enabled",
-                "Enabled",
-                Kind.FLAG,
-                "Off drops the connection to this terminal.",
-            ),
             EditableField(
                 "invert",
                 "Reverse trades (invert)",

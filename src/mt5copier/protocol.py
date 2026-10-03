@@ -410,6 +410,11 @@ class Snapshot:
     supervisor from its own arrival time, not from this: ``time.monotonic()`` is not defined
     to be comparable across processes, and wall clocks can step."""
 
+    worker_pid: int | None = None
+    """The sending worker's process id, stamped on publish. ``seq`` restarts at 0 with every
+    worker, so it only orders snapshots *within* one worker; this is what tells a leftover from
+    a worker already stopped apart from its replacement."""
+
     # From account_info()
     login: int | None = None
     server: str | None = None

@@ -86,6 +86,7 @@ class TerminalScreen(Screen[None]):
     BINDINGS = [
         Binding("escape", "app.pop_screen", "Back"),
         Binding("backspace", "app.pop_screen", "Back", show=False),
+        Binding("e", "edit_settings", "Settings"),
     ]
 
     DEFAULT_CSS = """
@@ -156,6 +157,10 @@ class TerminalScreen(Screen[None]):
         self.set_interval(0.5, self._on_timer)
         self.refresh_page()
         table.focus()
+
+    def action_edit_settings(self) -> None:
+        """This terminal's settings form, on top of this page; closing it comes back here."""
+        self.app.open_settings(self.terminal_id)  # type: ignore[attr-defined]
 
     def _on_timer(self) -> None:
         try:
@@ -260,6 +265,11 @@ class TerminalScreen(Screen[None]):
             bits.append(f"[{_MUTED}]{escape(line)}[/]")
         if info.hold_reason:
             bits.append(f"[{_TIER_COLOR['warning']}]held: {escape(info.hold_reason)}[/]")
+        if info.paused:
+            bits.append(
+                f"[bold {_TIER_COLOR['warning']}]PAUSED[/] [{_MUTED}]no new trades are copied "
+                "here; its open copies are still managed. p on the terminal list resumes it.[/]"
+            )
         return "\n".join(bits)
 
     def _account(self, snap: Snapshot | None) -> str:

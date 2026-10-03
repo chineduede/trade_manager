@@ -12,7 +12,7 @@ from collections.abc import Collection, Mapping
 from pathlib import Path
 
 import pytest
-from textual.widgets import Button, Checkbox, Input, Select, Static, TextArea
+from textual.widgets import Button, Checkbox, DataTable, Input, Select, Static, TextArea
 
 from mt5copier.config import AppConfig, NoStopPolicy, Role, SizingMode, TerminalConfig
 from mt5copier.copy_stats import TerminalStats
@@ -189,6 +189,10 @@ class StubEngine:
             return refusal
         self._cfg.replace_terminal(new)
         return None
+
+    def set_paused(self, terminal_id: str, paused: bool) -> None:
+        cfg = self._cfg.terminals[terminal_id]
+        self._cfg.replace_terminal(cfg.model_copy(update={"paused": paused}))
 
     def unassign(
         self, terminal_id: str, *, orphan: Mapping[str, Collection[int]] | None = None
@@ -1270,7 +1274,6 @@ async def test_agreeing_gives_the_copies_up_applies_the_edit_and_says_so(
         ("f-risk_percent", "0.3"),
         ("f-max_lot", "2"),
         ("f-symbol_suffix", "p"),
-        ("f-enabled", False),
         ("f-invert", True),
         ("f-copy_sltp", False),
         ("f-copy_pending", True),
@@ -1410,21 +1413,6 @@ async def test_the_question_is_usable_on_an_80_by_24_terminal(app: CopierApp) ->
         assert region.y + region.height <= 24
         drawn = html.unescape(app.export_screenshot()).replace("\xa0", " ")
         assert "Orphan them and apply" in drawn
-
-
-# --- enabled ------------------------------------------------------------------------------------
-
-
-async def test_disabling_a_slave_is_an_ordinary_edit_with_no_copies(
-    app: CopierApp, cfg: AppConfig
-) -> None:
-    async with app.run_test() as pilot:
-        screen = await _open_editor(app, pilot)
-        screen.query_one("#f-enabled", Checkbox).value = False
-        await pilot.press("ctrl+s")
-        await pilot.pause()
-        assert cfg.terminals[TID_SLAVE].enabled is False
-        assert not any("orphan" in t for t in _toasts(app))
 
 
 # --- warnings and the record ---------------------------------------------------------------
@@ -2082,3 +2070,129 @@ async def test_clicking_a_row_never_opens_the_page(app: CopierApp) -> None:
         await pilot.click("#terminals", offset=(5, 3))
         await pilot.pause()
         assert not isinstance(app.screen, TerminalScreen)
+
+
+async def test_the_footer_names_enter_on_the_terminal_table(app: CopierApp) -> None:
+    async with app.run_test(size=(160, 50)) as pilot:
+        app.query_one("#terminals").focus()
+        await pilot.pause()
+        enter = app.active_bindings["enter"].binding
+        assert enter.show and enter.description == "Details"
+
+
+async def test_e_on_the_terminal_page_opens_that_terminals_settings_and_esc_comes_back(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    _wire_copying(app, cfg)
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _open(app, pilot, TID_SLAVE)
+        await pilot.press("e")
+        await pilot.pause()
+        assert isinstance(app.screen, SettingsScreen)
+        assert app.screen._current().terminal_id == TID_SLAVE  # type: ignore[attr-defined]
+        await pilot.press("escape")
+        await pilot.pause()
+        assert isinstance(app.screen, TerminalScreen), "closing the form returns to the page"
+
+
+async def test_the_master_has_no_settings_form(app: CopierApp) -> None:
+    """Everything in the form is read off a slave. The master's gear is gone, and e says why."""
+    async with app.run_test(size=(160, 50)) as pilot:
+        app._cfg.set_role(TID_MASTER, Role.MASTER)  # type: ignore[attr-defined]
+        app._refresh()
+        app.query_one("#terminals").move_cursor(row=row_of(app, TID_MASTER))
+        await pilot.press("e")
+        await pilot.pause()
+        assert not isinstance(app.screen, SettingsScreen)
+        assert any("no settings" in t for t in _toasts(app))
+        table = app.query_one("#terminals", DataTable)
+        assert str(table.get_cell(TID_MASTER, "settings")) == ""
+        assert str(table.get_cell(TID_MASTER, "pause")) == ""
+
+
+async def test_the_form_no_longer_offers_enabled(app: CopierApp) -> None:
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_editor(app, pilot)
+        assert not screen.query("#f-enabled")
+        assert screen.query("#f-risk_percent")
+
+
+# --- pausing a slave ------------------------------------------------------------------------
+
+
+async def _with_slave(app: CopierApp, pilot: object) -> None:
+    app._cfg.set_role(TID_MASTER, Role.MASTER)  # type: ignore[attr-defined]
+    app._cfg.set_role(TID_SLAVE, Role.SLAVE)  # type: ignore[attr-defined]
+    app._refresh()
+    app.query_one("#terminals").move_cursor(row=row_of(app, TID_SLAVE))
+    await pilot.pause()  # type: ignore[attr-defined]
+
+
+async def test_p_pauses_a_slave_and_p_again_resumes_it(app: CopierApp, cfg: AppConfig) -> None:
+    from mt5copier import config as config_mod
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _with_slave(app, pilot)
+        await pilot.press("p")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].paused is True
+        assert cfg.terminals[TID_SLAVE].role is Role.SLAVE, "still a slave"
+        assert config_mod.load(app._saved_to).terminals[TID_SLAVE].paused is True  # type: ignore[attr-defined]
+        table = app.query_one("#terminals", DataTable)
+        assert "PAUSED" in str(table.get_cell(TID_SLAVE, "role"))
+        assert any("paused" in t and "still closed" in t for t in _toasts(app))
+
+        await pilot.press("p")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].paused is False
+        assert "SLAVE" in str(table.get_cell(TID_SLAVE, "role"))
+        assert any("resumed" in t for t in _toasts(app))
+
+
+async def test_pausing_asks_nothing_and_gives_up_no_copies(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _with_slave(app, pilot)
+        app._engine.copies[TID_SLAVE] = [copy_of(900)]  # type: ignore[attr-defined]
+        await pilot.press("p")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].paused is True
+        assert not isinstance(app.screen, OrphanConfirmScreen)
+        assert app._engine.given_up == []  # type: ignore[attr-defined]
+
+
+async def test_only_a_slave_can_be_paused(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _with_slave(app, pilot)
+        app.query_one("#terminals").move_cursor(row=row_of(app, TID_MASTER))
+        await pilot.press("p")
+        await pilot.pause()
+        assert cfg.terminals[TID_MASTER].paused is False
+        assert any("Only a slave" in t for t in _toasts(app))
+
+
+async def test_the_pause_cell_is_a_button_on_a_slave_row(app: CopierApp, cfg: AppConfig) -> None:
+    from mt5copier.tui.app import TerminalTable as _Table
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        await _with_slave(app, pilot)
+        app.post_message(_Table.Clicked(TID_SLAVE, "pause"))
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].paused is True
+        app.post_message(_Table.Clicked(TID_MASTER, "pause"))
+        await pilot.pause()
+        assert cfg.terminals[TID_MASTER].paused is False, "an empty cell does nothing"
+
+
+def test_every_status_fits_its_column_uncut() -> None:
+    """ "[OFF] not connected" was once cut to "not connect" by a column two cells too narrow."""
+    from mt5copier.presentation import _TIER_BY_STATUS, badge_for_tier, tier_for_status
+    from mt5copier.protocol import WorkerState
+    from mt5copier.tui.app import _COLUMNS
+
+    width = next(w for key, _, w in _COLUMNS if key == "status")
+    for text in set(_TIER_BY_STATUS) | {str(s) for s in WorkerState}:
+        badges = {badge_for_tier(tier_for_status(text))}
+        if tier_for_status(text) == "good":
+            badges.add(badge_for_tier("warning"))  # a held slave: connected, under [WARN]
+        for badge in badges:
+            assert len(f"{badge} {text}") <= width, f"{badge} {text}"

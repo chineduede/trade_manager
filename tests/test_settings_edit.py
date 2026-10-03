@@ -56,6 +56,8 @@ NOT_EDITABLE = {
     "exe_path",
     "last_login",
     "last_server",
+    "enabled",  # no longer offered: pausing replaced it, and it stays only so old files load
+    "paused",  # a switch on the slave's row, flipped far more often than any setting
 }
 
 
@@ -303,12 +305,6 @@ def test_turning_invert_off_is_an_ordinary_edit_too() -> None:
     assert describe_changes(outcome.changes) == "invert on -> off"
 
 
-def test_disabling_a_slave_is_an_ordinary_edit_with_nothing_to_warn_about() -> None:
-    outcome = apply_edits(make(), {"enabled": False})
-    assert outcome.ok
-    assert advisories(outcome) == []
-
-
 @pytest.mark.parametrize(("count", "text"), [(1, "1 open copy"), (2, "2 open copies")])
 def test_copies_are_counted_in_the_singular_and_the_plural(count: int, text: str) -> None:
     assert copies_word(count) == text
@@ -319,8 +315,6 @@ def test_no_help_text_still_promises_a_refusal_or_a_resume() -> None:
     picked back up on re-enable; now the copies are given up, and the help must not say otherwise."""
     helps = {f.name: f.help.lower() for f in EDITABLE}
     assert "refused" not in helps["invert"]
-    assert "unmanaged" not in helps["enabled"]
-    assert "turned back on" not in helps["enabled"]
 
 
 # --- symbol prefix and suffix -------------------------------------------------------------------

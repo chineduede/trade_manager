@@ -567,3 +567,26 @@ def test_a_config_saved_with_custom_name_still_loads_with_every_setting(tmp_path
     assert cfg.terminals[slave_tid].risk_cash == 300.0
     assert cfg.display_name(slave_tid) == "My Funded", "a name that was set is kept, by account"
     assert not list(tmp_path.glob("*.bad-*.json")), "nothing was treated as corrupt"
+
+
+def test_a_pause_does_not_outlive_the_slave_role() -> None:
+    """Unassigned while paused and made a slave again later, it starts out copying."""
+    cfg = AppConfig(
+        terminals={
+            "A": TerminalConfig(terminal_id="A", role=Role.MASTER),
+            "B": TerminalConfig(terminal_id="B", role=Role.SLAVE, paused=True),
+        }
+    )
+    cfg.set_role("B", Role.UNASSIGNED)
+    assert cfg.terminals["B"].paused is False
+
+
+def test_setting_the_same_role_again_keeps_the_pause() -> None:
+    cfg = AppConfig(
+        terminals={
+            "A": TerminalConfig(terminal_id="A", role=Role.MASTER),
+            "B": TerminalConfig(terminal_id="B", role=Role.SLAVE, paused=True),
+        }
+    )
+    cfg.set_role("B", Role.SLAVE)
+    assert cfg.terminals["B"].paused is True

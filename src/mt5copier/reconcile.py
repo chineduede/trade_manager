@@ -87,6 +87,7 @@ class SkipReason(StrEnum):
     PENDING_DISABLED = "copy_pending is off for this slave"
     STOP_LIMIT_UNSUPPORTED = "stop-limit orders carry two prices and are not mirrored"
     NOTHING_TO_SEND = "the slave's own order fills by itself"
+    PAUSED = "this slave is paused: it takes no new trades"
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,6 +287,12 @@ def effective_levels(sl: float, tp: float, cfg: TerminalConfig) -> tuple[float, 
     return (tp, sl) if cfg.invert else (sl, tp)
 
 
+def _paused_reason(cfg: TerminalConfig) -> SkipReason | None:
+    """Checked first, and only for something new: a pause stops the slave *taking on* trades,
+    never the upkeep of the ones it holds."""
+    return SkipReason.PAUSED if cfg.paused else None
+
+
 def _filter_reason(master_symbol: str, cfg: TerminalConfig) -> SkipReason | None:
     """Whitelist/blacklist are matched against the *master* symbol -- the name the user sees
     on the master when they type the filter, not the broker-mangled slave name."""
@@ -430,7 +437,7 @@ def reconcile_slave(
             sizing = _choose_sizing(slave_sl, cfg)
             # A filter is the user's own explicit decision, so it is the more useful thing to
             # report when both apply.
-            reason = _filter_reason(p.symbol, cfg) or sizing.skip_reason
+            reason = _paused_reason(cfg) or _filter_reason(p.symbol, cfg) or sizing.skip_reason
             out.append(
                 Action(
                     kind=ActionKind.OPEN,
@@ -573,7 +580,8 @@ def reconcile_slave_orders(
                 continue
             sizing = _choose_sizing(slave_sl, cfg)
             reason = (
-                (None if cfg.copy_pending else SkipReason.PENDING_DISABLED)
+                _paused_reason(cfg)
+                or (None if cfg.copy_pending else SkipReason.PENDING_DISABLED)
                 or _filter_reason(o.symbol, cfg)
                 # Rejected whether or not this slave inverts: a stop-limit carries an entry
                 # *and* a trigger, and mirroring only one of them is worse than not mirroring.

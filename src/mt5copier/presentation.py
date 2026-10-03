@@ -77,6 +77,9 @@ class RowInfo:
     open_trades: int | None
     """Count of open positions on this terminal right now, or None if unknown (no snapshot
     yet, or the last read failed -- see ``Snapshot.positions``'s own docstring)."""
+    paused: bool
+    """A slave the person has paused: connected and managing its copies, taking no new ones."""
+
     demo_guard_blocked: bool
     """True when this slave is connected but the live-only demo guard would currently refuse
     to trade it (``allow_live_trading`` is off and the account is not a readable demo) -- see
@@ -129,6 +132,7 @@ def row_info(
         floating_pl_tier=pl_tier,
         currency=snap.currency if snap else None,
         open_trades=snap.positions if snap else None,
+        paused=view.cfg.role is Role.SLAVE and view.cfg.paused,
         demo_guard_blocked=demo_guard_blocked,
     )
 
@@ -157,6 +161,8 @@ def slave_badge(row: RowInfo, dry_run: bool) -> tuple[str, Tier]:
         return "Held back: not a demo account", "critical"
     if row.hold_reason is not None:
         return row.hold_reason, "warning"
+    if row.paused:
+        return "Paused: no new trades are copied here", "warning"
     return ("Dry run" if dry_run else "Live"), ("warning" if dry_run else "good")
 
 
