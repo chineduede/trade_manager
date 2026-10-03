@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from rich.console import RenderableType
 from rich.style import Style
 from rich.text import Text
-from textual.geometry import Size
+from textual.geometry import Region, Size
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Static
@@ -121,6 +121,19 @@ class Chips(Widget):
                 bottom.append(f"└{h * inner}┘", style=box)
             out += [top, mid, bottom]
         return out
+
+    def chip_region(self, terminal_id: str) -> Region | None:
+        """Where one chip is drawn, on screen, laid out as :meth:`lines` lays it out."""
+        widths = [len(c.label) + 4 for c in self.items]
+        for row_no, row in enumerate(chip_rows(widths, max(self.size.width, 1))):
+            x = 0
+            for i in row:
+                if self.items[i].terminal_id == terminal_id:
+                    # The content region: the widget's padding sits above the first row.
+                    top = self.content_region
+                    return Region(top.x + x, top.y + row_no * 3, widths[i], 3)
+                x += widths[i] + 1
+        return None
 
     def get_content_height(self, container: Size, viewport: Size, width: int) -> int:
         return len(self.lines(width))

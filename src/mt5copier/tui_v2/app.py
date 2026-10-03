@@ -21,6 +21,7 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.geometry import Region
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, DataTable, Static
 
@@ -44,6 +45,7 @@ from ..paths import config_path, log_dir
 from ..presentation import read_log_tail
 from ..tui.app import CopierApp
 from . import cards
+from .menu import ActionMenu, terminal_actions
 from .style import (
     BG,
     BLUE,
@@ -91,6 +93,7 @@ class NewCopierApp(CopierApp):
         Binding("down", "step(1)", "Next card", show=False),
         Binding("enter", "open_terminal", "Details", show=False),
         Binding("f", "log_problems", "Problems only", show=False),
+        Binding("space", "menu", "Actions", show=False),
         Binding("a", "jump(0)", "Master card", show=False),
         *(Binding(str(n), f"jump({n})", f"Slave {n}", show=False) for n in range(1, 10)),
     ]
@@ -222,8 +225,45 @@ class NewCopierApp(CopierApp):
             self._select(slaves[number - 1])
 
     def action_pick(self, tid: str) -> None:
-        if tid in self._cfg.terminals:
+        """A click on a card or chip selects it; a click on the one already selected opens its
+        action menu."""
+        if tid not in self._cfg.terminals:
+            return
+        if tid == self._sel:
+            self.action_menu()
+        else:
             self._select(tid)
+
+    # --- the action menu --------------------------------------------------------------------
+
+    def action_menu(self) -> None:
+        """Open the selected terminal's action menu beside its card or chip."""
+        tid = self._sel
+        if self._page != "map" or tid is None or tid not in self._cfg.terminals:
+            return
+        anchor = self._anchor(tid)
+        if anchor is None:
+            return
+        cfg = self._cfg.terminals[tid]
+        items = terminal_actions(
+            cfg,
+            has_master=self._cfg.master is not None,
+            # Held, and with untracked positions on record: signing them off is what lifts it.
+            orphans_waiting=tid in self._engine.holds() and bool(self._engine.orphans(tid)),
+        )
+
+        def chosen(action: str | None) -> None:
+            if action is not None:
+                getattr(self, f"action_{action}")()
+
+        self.push_screen(ActionMenu(self._cfg.display_name(tid), items, anchor), chosen)
+
+    def _anchor(self, tid: str) -> Region | None:
+        """Where the terminal is drawn on screen: its card, or its chip."""
+        card = self._cards.get(tid)
+        if card is not None:
+            return card.region
+        return self.query_one("#chips", Chips).chip_region(tid)
 
     @on(Picked)
     def _on_picked(self, event: Picked) -> None:
@@ -445,6 +485,7 @@ class NewCopierApp(CopierApp):
             if self._cfg.slaves:
                 count = min(len(self._cfg.slaves), 9)
                 keys.append(key_hint("1" if count == 1 else f"1-{count}", "jump"))
+            keys.append(key_hint("space", "actions"))
             keys.append(key_hint("enter", "details"))
             keys.append(key_hint("tab", "log"))
             if sel and sel.role is Role.UNASSIGNED:

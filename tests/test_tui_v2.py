@@ -447,3 +447,88 @@ async def test_a_slave_card_with_big_digits_is_not_cut_off(
         drawn = plain(card.content, width=card.content_size.width).rstrip("\n").splitlines()
         assert any("margin" in line for line in drawn)
         assert len(drawn) <= card.content_size.height, "the card's last lines are cut off"
+
+
+# --- the action menu -------------------------------------------------------------------------
+
+
+def test_menu_offers_an_unassigned_terminal_only_the_role_it_can_take() -> None:
+    from mt5copier.config import TerminalConfig
+    from mt5copier.tui_v2.menu import terminal_actions
+
+    cfg = TerminalConfig(terminal_id=TID_SLAVE, exe_path=Path("t.exe"))
+    keys = [i.key for i in terminal_actions(cfg, has_master=False, orphans_waiting=False)]
+    assert keys == ["m", "enter", "e"]
+    keys = [i.key for i in terminal_actions(cfg, has_master=True, orphans_waiting=False)]
+    assert keys[0] == "s"
+    uninstalled = TerminalConfig(terminal_id=TID_SLAVE)
+    first = terminal_actions(uninstalled, has_master=True, orphans_waiting=False)[0]
+    assert first.action is None, "explained, not offered"
+
+
+def test_menu_for_a_slave_and_the_master() -> None:
+    from mt5copier.config import TerminalConfig
+    from mt5copier.tui_v2.menu import terminal_actions
+
+    slave = TerminalConfig(terminal_id=TID_SLAVE, role=Role.SLAVE, paused=True)
+    items = terminal_actions(slave, has_master=True, orphans_waiting=True)
+    assert [i.key for i in items] == ["enter", "o", "e", "p", "l", "c", "ctrl+r", "u"]
+    assert next(i for i in items if i.key == "p").label == "resume"
+    master = TerminalConfig(terminal_id=TID_MASTER, role=Role.MASTER)
+    keys = [i.key for i in terminal_actions(master, has_master=True, orphans_waiting=False)]
+    assert "e" not in keys and "p" not in keys, "the master has no settings and no pause"
+
+
+def test_menu_is_placed_beside_its_terminal_and_kept_on_screen() -> None:
+    from textual.geometry import Region, Size
+
+    from mt5copier.tui_v2.menu import place
+
+    screen = Size(100, 40)
+    assert place(Region(10, 5, 20, 3), Size(30, 8), screen) == (10, 8)
+    assert place(Region(90, 5, 10, 3), Size(30, 8), screen) == (70, 8), "pulled left"
+    assert place(Region(10, 36, 20, 3), Size(30, 8), screen) == (10, 28), "opens upwards"
+
+
+async def test_space_opens_the_menu_and_its_key_runs_the_action(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    from mt5copier.tui_v2.menu import ActionMenu
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.press("space")
+        assert isinstance(app.screen, ActionMenu)
+        await pilot.press("m")
+        await pilot.pause()
+        assert not isinstance(app.screen, ActionMenu)
+        assert cfg.terminals[TID_MASTER].role is Role.MASTER
+
+        # An unassigned chip: the menu offers to make it a slave, and enter picks that.
+        await pilot.press("right", "space")
+        assert isinstance(app.screen, ActionMenu)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].role is Role.SLAVE
+
+
+async def test_escape_closes_the_menu_and_changes_nothing(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    from mt5copier.tui_v2.menu import ActionMenu
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.press("space", "escape")
+        assert not isinstance(app.screen, ActionMenu)
+        assert cfg.terminals[TID_MASTER].role is Role.UNASSIGNED
+
+
+async def test_clicking_the_selected_terminal_opens_its_menu(app: NewCopierApp) -> None:
+    from mt5copier.tui_v2.menu import ActionMenu
+
+    async with app.run_test(size=(160, 50)) as pilot:
+        app.action_pick(TID_SLAVE)
+        assert app._selected_id() == TID_SLAVE
+        assert not isinstance(app.screen, ActionMenu)
+        app.action_pick(TID_SLAVE)
+        await pilot.pause()
+        assert isinstance(app.screen, ActionMenu)

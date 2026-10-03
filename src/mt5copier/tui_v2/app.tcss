@@ -171,3 +171,37 @@ Screen {
 #log > .datatable--hover {
     background: $foreground 10%;
 }
+
+/* --- the action menu ----------------------------------------------------------------------- */
+
+/* A screen of its own, so it would take the Screen rule above: solid, and padded, which would
+   both hide the Map under it and push the menu off the terminal it belongs to. */
+ActionMenu {
+    background: $background 0%;
+    padding: 0;
+}
+
+ActionMenu > #menu {
+    border: double $foreground;
+    border-title-color: $foreground;
+    border-title-style: bold;
+    background: $background;
+    height: auto;
+}
+
+ActionMenu OptionList,
+ActionMenu OptionList:focus {
+    border: none;
+    background: $background;
+    color: $foreground;
+    height: auto;
+    padding: 0 1;
+    scrollbar-size-vertical: 0;
+}
+
+ActionMenu OptionList > .option-list--option-highlighted,
+ActionMenu OptionList:focus > .option-list--option-highlighted {
+    background: $foreground;
+    color: $background;
+    text-style: bold;
+}
