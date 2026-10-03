@@ -18,6 +18,7 @@ from textual.renderables.digits import Digits
 from ..config import SizingMode, TerminalConfig
 from ..engine import TerminalView
 from ..presentation import RowInfo, slave_badge
+from ..protocol import Snapshot
 from ..terminal_detail import bar, format_ping, margin_gauge
 from .style import (
     BLUE,
@@ -46,6 +47,19 @@ def margin_bar(fraction: float | None, width: int = 10) -> str:
     """The details page's solid margin bar (see :func:`~mt5copier.terminal_detail.bar`),
     short enough for a card."""
     return bar(fraction, width)
+
+
+def margin_line(snap: Snapshot | None) -> Text:
+    """``margin ███░░░░░░░ 30%``, the bar coloured by margin level as on the details page:
+    blue while healthy, then yellow and red as it nears a margin call."""
+    if snap is None:
+        return Text("margin —", style=MUTED)
+    gauge = margin_gauge(snap)
+    margin = Text("margin ", style=MUTED)
+    margin.append(margin_bar(gauge.used_fraction), style=TIER_COLOR[gauge.level_tier])
+    if gauge.used_fraction is not None:
+        margin.append(f" {gauge.used_fraction:.0%}", style=MUTED)
+    return margin
 
 
 def big_amount(value: float | None, width: int) -> RenderableType:
@@ -125,6 +139,7 @@ def slave_card(
     else:
         lines.append(floating(info.floating_pl))
         lines.append(Text(f"{risk} · {opened}", style=MUTED))
+    lines.append(margin_line(view.snapshot))
     return Group(*lines)
 
 
@@ -146,16 +161,7 @@ def master_card(
     else:
         link = Text(info.status_text, style=f"bold {RED if info.tier != 'muted' else MUTED}")
 
-    if snap is not None:
-        gauge = margin_gauge(snap)
-        pct = "" if gauge.used_fraction is None else f" {gauge.used_fraction:.0%}"
-        margin = Text("margin ", style=MUTED)
-        # Coloured by margin level, as on the details page: blue while healthy, then yellow
-        # and red as it nears a margin call.
-        margin.append(margin_bar(gauge.used_fraction), style=TIER_COLOR[gauge.level_tier])
-        margin.append(pct, style=MUTED)
-    else:
-        margin = Text("margin —", style=MUTED)
+    margin = margin_line(snap)
 
     trades = info.open_trades
     trade_word = "—" if trades is None else f"{trades} trade{'s' if trades != 1 else ''} open"

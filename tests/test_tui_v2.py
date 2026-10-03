@@ -408,3 +408,16 @@ async def test_the_log_page_merges_the_file_and_the_day_book_and_filters_them(
         await pilot.pause()
         assert isinstance(app.screen, TerminalScreen)
         assert app._selected_id() == TID_SLAVE
+
+
+def test_a_slave_card_shows_its_margin_like_the_masters() -> None:
+    from mt5copier.config import TerminalConfig
+    from mt5copier.protocol import Snapshot, WorkerState
+    from mt5copier.tui_v2.cards import slave_card
+
+    snap = Snapshot(terminal_id=TID_SLAVE, state=WorkerState.CONNECTED, equity=1000.0, margin=300.0)
+    view = TerminalView(cfg=TerminalConfig(terminal_id=TID_SLAVE, role=Role.SLAVE), snapshot=snap)
+    row = info()
+    state = slave_state(row, dry_run=False, copying=True)
+    said = plain(slave_card(1, view, row, state, refused=0))
+    assert "margin ███░░░░░░░ 30%" in said
