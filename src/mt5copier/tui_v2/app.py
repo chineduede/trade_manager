@@ -350,7 +350,8 @@ class NewCopierApp(CopierApp):
     def _no_slaves_text(has_master: bool) -> Text:
         if has_master:
             return Text(
-                "No slaves yet: select a terminal under NOT YET OPENED and press s.", style=MUTED
+                "No slaves yet: select a terminal under NOT YET OPENED and press space.",
+                style=MUTED,
             )
         return Text("Assign a master first.", style=MUTED)
 
@@ -480,27 +481,17 @@ class NewCopierApp(CopierApp):
     def _refresh_keybar(self) -> None:
         keys: list[Text] = []
         if self._page == "map":
-            sel = self._sel and self._cfg.terminals.get(self._sel)
-            keys.append(key_hint("←→", "card"))
+            # What can be done to one terminal is in its action menu, so the bar keeps to the
+            # keys that find a terminal and those that act on the whole copier -- and leads
+            # with the key that opens the menu, named for the terminal it will act on.
+            sel = self._sel if self._sel in self._cfg.terminals else None
+            what = f"actions for {self._cfg.display_name(sel)}" if sel else "actions"
+            keys.append(key_hint("space", what, primary=True))
+            keys.append(key_hint("←→", "choose"))
             if self._cfg.slaves:
                 count = min(len(self._cfg.slaves), 9)
-                keys.append(key_hint("1" if count == 1 else f"1-{count}", "jump"))
-            keys.append(key_hint("space", "actions"))
-            keys.append(key_hint("enter", "details"))
+                keys.append(key_hint("a 1" if count == 1 else f"a 1-{count}", "go to"))
             keys.append(key_hint("tab", "log"))
-            if sel and sel.role is Role.UNASSIGNED:
-                keys.append(
-                    key_hint(
-                        "m" if self._cfg.master is None else "s",
-                        "master" if self._cfg.master is None else "slave",
-                    )
-                )
-            if sel and sel.role is not Role.MASTER:
-                keys.append(key_hint("e", "settings"))
-            if sel and sel.role is Role.SLAVE:
-                keys.append(key_hint("p", "resume" if sel.paused else "pause"))
-            if sel and sel.role is not Role.UNASSIGNED:
-                keys.append(key_hint("u", "unassign"))
             keys.append(
                 key_hint("d", "stop copying" if self._cfg.copying_enabled else "start copying")
             )
@@ -515,8 +506,8 @@ class NewCopierApp(CopierApp):
             keys.append(key_hint("tab", "map"))
         keys.append(key_hint("?", "all keys"))
 
-        left = Text("   ").join(keys)
-        right = Text("   ").join([key_hint("F9", "panic halt", color=RED), key_hint("q", "quit")])
+        left = Text("  ").join(keys)
+        right = Text("  ").join([key_hint("F9", "panic halt", color=RED), key_hint("q", "quit")])
         self.query_one("#keybar", KeyBar).update(left_right(left, right))
 
     def _refresh_daybook(self) -> None:
@@ -529,9 +520,9 @@ class NewCopierApp(CopierApp):
             if self._cfg.copying_enabled:
                 hint = "Watching the master: nothing has happened yet."
             elif self._cfg.master is None:
-                hint = "1. Select a terminal under NOT YET OPENED and press m for the master."
+                hint = "1. Select a terminal under NOT YET OPENED, press space, and make it the master."
             elif not self._cfg.slaves:
-                hint = "2. Select a terminal and press s to make it a slave."
+                hint = "2. Select another, press space, and make it a slave."
             else:
                 hint = "3. Press d to start copying."
             panel.update(Text(hint, style=MUTED))
@@ -728,15 +719,17 @@ class NewCopierApp(CopierApp):
         hint.update(self._notyet_hint())
 
     def _notyet_hint(self) -> Text:
-        """Only the key that will work: ``m`` is refused while there is a master, and ``s``
-        while there is none."""
+        """Only the role that will work: a second master is refused, and so is a slave while
+        there is no master. The menu on space offers the same, so the hint points there."""
         master = self._cfg.master
         if master is None:
-            return Text("None is launched until entered as the master (m).", style=MUTED)
-        out = Text("None is launched until entered as a slave (s). ", style=MUTED)
+            return Text(
+                "None is launched until made the master: select one and press space.", style=MUTED
+            )
+        out = Text("None is launched until made a slave: select one and press space. ", style=MUTED)
         out.append(
             f"To change the master, first unassign {self._cfg.display_name(master.terminal_id)}"
-            " (a, then u).",
+            " (press a, then space).",
             style=MUTED,
         )
         return out

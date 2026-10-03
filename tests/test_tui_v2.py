@@ -245,12 +245,12 @@ async def test_the_hint_only_offers_master_while_there_is_none(
 ) -> None:
     async with app.run_test(size=(160, 50)) as pilot:
         hint = app.query_one("#notyet-hint", Static)
-        assert "the master (m)" in plain(hint.content)
+        assert "made the master" in plain(hint.content)
         await pilot.press("m")
         await pilot.pause()
         said = plain(hint.content)
-        assert "(m)" not in said
-        assert "slave (s)" in said and "first unassign" in said
+        assert "made the master" not in said
+        assert "made a slave" in said and "first unassign" in said
 
 
 async def test_live_cards_have_the_lines_green_border(app: NewCopierApp, cfg: AppConfig) -> None:
@@ -302,13 +302,19 @@ async def test_live_and_dry_run_do_not_look_alike(app: NewCopierApp, cfg: AppCon
         assert "LIVE" in top and "DRY RUN" not in top
 
 
-async def test_the_key_bar_offers_what_the_selected_terminal_can_do(app: NewCopierApp) -> None:
+async def test_the_key_bar_leads_with_the_selected_terminals_action_menu(
+    app: NewCopierApp,
+) -> None:
     async with app.run_test(size=(160, 50)) as pilot:
-        assert "m master" in plain(app.query_one(KeyBar).content)
+        bar = plain(app.query_one(KeyBar).content)
+        assert bar.startswith(" space  actions for Alpha Broker")
+        await pilot.press("right")
+        assert "actions for Beta Broker" in plain(app.query_one(KeyBar).content)
         await pilot.press("m")
         bar = plain(app.query_one(KeyBar).content)
-        assert "u unassign" in bar and "m master" not in bar
-        assert "F9 panic halt" in bar
+        # What one terminal can do is in its menu, not spelled out on the bar.
+        assert " u " not in bar and " m " not in bar and " e " not in bar
+        assert "F9  panic halt" in bar
 
 
 async def test_number_keys_follow_the_numbers_on_the_cards(

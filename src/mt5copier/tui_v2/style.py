@@ -72,11 +72,18 @@ def floating(value: float | None) -> Text:
     return Text(f"{amount(value)} floating", style=RED if value < 0 else "")
 
 
-def key_hint(key: str, label: str, *, color: str = FG) -> Text:
-    """One key of a key bar: the key underlined and bold, then what it does."""
+def key_hint(key: str, label: str, *, color: str = FG, primary: bool = False) -> Text:
+    """One key of a key bar, drawn as a keycap -- a small filled block -- so what to press stands
+    out from what it does. ``primary`` fills it in cream, for the one key a person most needs."""
     out = Text()
-    out.append(key, style=f"bold underline {color}")
-    out.append(f" {label}", style=color)
+    if primary:
+        cap = f"bold {BG} on {FG}"
+    elif color != FG:
+        cap = f"bold {BG} on {color}"
+    else:
+        cap = f"bold {FG} on {CHIP_BG}"
+    out.append(f" {key} ", style=cap)
+    out.append(f" {label}", style=f"bold {color}" if primary else color)
     return out
 
 
