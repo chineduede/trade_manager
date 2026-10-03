@@ -185,6 +185,13 @@ class NewCopierApp(CopierApp):
             self.screen.set_focus(None)
         self._refresh_frame()
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        """Tab turns the page only on the pages themselves. Over a dialog or the settings form
+        it is theirs, to move between fields and buttons."""
+        if action == "next_page":
+            return self.screen is self.screen_stack[0] or self._detail() is not None
+        return True
+
     def action_next_page(self) -> None:
         if self._detail() is not None:
             # From a terminal's details, tab goes on to the log, as the tabs over it read.

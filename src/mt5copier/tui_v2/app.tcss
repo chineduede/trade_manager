@@ -394,10 +394,29 @@ LiveDialog #dialog {
     border: dashed $panel;
 }
 
-.dialog Button:focus {
-    text-style: bold underline;
+/* The button that enter would press is filled in full; the other is dimmed. Not underlined:
+   text style covers a button's blank rows too, which would draw lines above and below. */
+.dialog Button.keep {
+    background: $foreground 55%;
 }
 
+.dialog Button.keep:focus {
+    background: $foreground;
+}
+
+.dialog Button.danger:focus {
+    background: $error 25%;
+}
+
+.dialog Button:focus,
 .dialog Button:hover {
-    text-style: bold underline;
+    text-style: bold;
+}
+
+.dialog Button.keep:hover {
+    background: $foreground 80%;
+}
+
+.dialog Button.danger:hover {
+    background: $error 15%;
 }

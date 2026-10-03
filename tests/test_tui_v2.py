@@ -803,3 +803,34 @@ async def test_allowing_live_trading_counts_down_the_name(
         await pilot.pause()
         assert cfg.terminals[TID_SLAVE].allow_live_trading
         assert not isinstance(app.screen, LiveDialog)
+
+
+async def test_tab_inside_a_dialog_moves_between_its_buttons_not_the_pages(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    from mt5copier.tui.settings_screen import SettingsScreen
+    from mt5copier.tui_v2.dialogs import LiveDialog
+
+    cfg.terminals[TID_MASTER].role = Role.MASTER
+    cfg.terminals[TID_SLAVE].role = Role.SLAVE
+    async with app.run_test(size=(200, 50)) as pilot:
+        await pilot.press("1", "l")
+        await pilot.pause()
+        assert isinstance(app.screen, LiveDialog)
+        before = app.screen.focused
+        await pilot.press("tab")
+        assert app._page == "map", "the page under the dialog stays put"
+        assert app.screen.focused is not before
+
+        await pilot.press("escape", "e")
+        await pilot.pause()
+        assert isinstance(app.screen, SettingsScreen)
+        before = app.screen.focused
+        await pilot.press("tab")
+        assert app._page == "map"
+        assert app.screen.focused is not before, "tab walks the settings form's fields"
+
+        await pilot.press("escape")
+        await pilot.pause()
+        await pilot.press("tab")
+        assert app._page == "log", "and on the page itself it still turns the page"
