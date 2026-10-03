@@ -15,12 +15,14 @@ Nothing here is persisted. A restart starts an empty book, the same as the sessi
 
 from __future__ import annotations
 
+import time
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
-from .protocol import ActionKind, OrderResult, OrderType, PendingOrder, Position
+from .copy_stats import slippage_in_points
+from .protocol import ActionKind, OrderResult, OrderType, PendingOrder, Position, PositionType
 from .reconcile import Action, SkipReason, SlaveLink, invert_type
 
 EVENT_HISTORY = 200
@@ -85,6 +87,11 @@ class SlaveOutcome:
     attempts: int = 0
     target_gone: bool = False
     """Answered ok, but the copy it acted on was already gone from the slave."""
+    slippage_points: float | None = None
+    """On a filled open: the fill against the master's entry, in the slave symbol's points.
+    Positive is against us, as in :func:`~mt5copier.copy_stats.slippage_in_points`."""
+    ts: float | None = None
+    """Wall-clock time it was settled, or None while it is still waiting for an answer."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,8 +134,12 @@ class _Slot:
     latency_ms: float | None = None
     attempts: int = 0
     target_gone: bool = False
+    slippage_points: float | None = None
+    ts: float | None = None
     sent_at: float | None = None
     master_ticket: int = 0
+    direction: PositionType = PositionType.BUY
+    entry: float = 0.0
 
     def frozen(self) -> SlaveOutcome:
         return SlaveOutcome(
@@ -139,6 +150,8 @@ class _Slot:
             self.latency_ms,
             self.attempts,
             self.target_gone,
+            self.slippage_points,
+            self.ts,
         )
 
 
@@ -166,6 +179,7 @@ class DayBook:
     _prev_orders: dict[int, PendingOrder] = field(default_factory=dict)
     _tick: dict[tuple[int, ActionKind, bool], _Event] = field(default_factory=dict)
     _tick_ts: float = 0.0
+    _since: float = field(default_factory=time.time)
 
     # --- recording --------------------------------------------------------------------------
 
@@ -208,7 +222,13 @@ class DayBook:
             event = self._open_event(action, preexisting, invert)
             self._tick[key] = event
         event.slots[action.terminal_id] = _Slot(
-            action.terminal_id, outcome, reason, master_ticket=action.master_ticket
+            action.terminal_id,
+            outcome,
+            reason,
+            ts=None if outcome is Outcome.SENDING else self._tick_ts,
+            master_ticket=action.master_ticket,
+            direction=action.type,
+            entry=action.entry,
         )
 
     def end_tick(self, links: Iterable[SlaveLink], holds: Mapping[str, str]) -> None:
@@ -224,7 +244,11 @@ class DayBook:
                     continue
                 reason = holds.get(tid) or "it was not connected"
                 event.slots[tid] = _Slot(
-                    tid, Outcome.NOT_COPIED, reason, master_ticket=event.head.master_ticket
+                    tid,
+                    Outcome.NOT_COPIED,
+                    reason,
+                    ts=self._tick_ts,
+                    master_ticket=event.head.master_ticket,
                 )
         self._tick = {}
 
@@ -232,7 +256,7 @@ class DayBook:
         """Settle an outcome filed this tick as SENDING that was in the end not sent."""
         slot = self._tick_slot(action)
         if slot is not None and not slot.outcome.settled:
-            slot.outcome, slot.reason = outcome, reason
+            slot.outcome, slot.reason, slot.ts = outcome, reason, self._tick_ts
 
     def on_sent(self, action: Action, command_id: int, *, sent_at: float) -> None:
         slot = self._tick_slot(action)
@@ -240,12 +264,16 @@ class DayBook:
             slot.sent_at = sent_at
             self._pending[command_id] = slot
 
-    def on_result(self, result: OrderResult, *, now: float) -> None:
+    def on_result(self, result: OrderResult, *, now: float, ts: float) -> None:
         """An answer to the command the engine is waiting for. Late answers are not passed:
-        the outcome they would settle is NO_ANSWER already, and the engine refuses them."""
+        the outcome they would settle is NO_ANSWER already, and the engine refuses them.
+
+        ``now`` is the monotonic clock the send was timed on; ``ts`` the wall clock.
+        """
         slot = self._pending.pop(result.command_id, None)
         if slot is None:
             return
+        slot.ts = ts
         slot.attempts = result.attempts
         if slot.sent_at is not None:
             slot.latency_ms = max(0.0, (now - slot.sent_at) * 1000.0)
@@ -253,17 +281,22 @@ class DayBook:
             slot.outcome = Outcome.DONE
             slot.lots = result.filled_volume
             slot.target_gone = result.target_gone
+            if result.op is ActionKind.OPEN and result.price and result.point:
+                slot.slippage_points = slippage_in_points(
+                    slot.direction, slot.entry, result.price, result.point
+                )
         else:
             slot.outcome = Outcome.FAILED if result.retryable else Outcome.REFUSED
             slot.reason = result.error or result.outcome or None
 
-    def on_expired(self, terminal_id: str, master_ticket: int) -> None:
+    def on_expired(self, terminal_id: str, master_ticket: int, *, ts: float) -> None:
         """The ledger gave up waiting on this slave and ticket. It does not say which op, so
         every command still waiting there is given up on, as the ledger's own expiry does."""
         for cid, slot in list(self._pending.items()):
             if slot.terminal_id == terminal_id and slot.master_ticket == master_ticket:
                 slot.outcome = Outcome.NO_ANSWER
                 slot.reason = "the slave never answered, so the copier gave up waiting"
+                slot.ts = ts
                 del self._pending[cid]
 
     def forget_sent_before(self, cutoff: float) -> None:
@@ -271,12 +304,19 @@ class DayBook:
         for cid in [c for c, s in self._pending.items() if (s.sent_at or 0.0) < cutoff]:
             del self._pending[cid]
 
-    def clear(self) -> None:
+    def clear(self, *, ts: float) -> None:
         self._events.clear()
         self._pending.clear()
         self._tick = {}
+        self._since = ts
 
     # --- reading ----------------------------------------------------------------------------
+
+    @property
+    def complete_since(self) -> float:
+        """Wall-clock time from which every master event is still in the book: when it was
+        started or cleared, or, once it is full, the oldest event it still holds."""
+        return self._since
 
     def events(self, limit: int | None = None) -> list[MasterEvent]:
         """Most recent events, oldest first, as read-only copies."""
@@ -315,6 +355,8 @@ class DayBook:
         else:
             head = _from_action(self._ids, self._tick_ts, action, preexisting, invert)
         event = _Event(head)
+        if len(self._events) == self._events.maxlen:
+            self._since = self._events[1].head.ts
         self._events.append(event)
         return event
 

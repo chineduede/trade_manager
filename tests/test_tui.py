@@ -107,6 +107,8 @@ class StubEngine:
     def day_book(self, limit: int | None = None) -> list[MasterEvent]:
         return self.events if limit is None else self.events[-limit:]
 
+    day_book_since = 0.0
+
     @property
     def action_total(self) -> int:
         return 0

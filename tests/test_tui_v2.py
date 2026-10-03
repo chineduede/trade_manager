@@ -358,3 +358,53 @@ async def test_the_day_book_lists_each_master_trade_with_every_slaves_outcome(
         assert "A opened BTCUSD buy 0.78 at 84,854" in said
         assert "1 Beta" in said and "opened 3.11 lots in 360 ms" in said
         assert "refused: not a demo account" in said
+
+
+async def test_the_log_page_merges_the_file_and_the_day_book_and_filters_them(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    from mt5copier.paths import log_dir
+    from mt5copier.tui.terminal_screen import TerminalScreen
+
+    log_dir().mkdir(parents=True, exist_ok=True)
+    (log_dir() / "copier.log").write_text(
+        "2020-01-01 10:00:00 INFO    [MainProcess] mt5copier.engine: spawned worker pid=1 "
+        "for Beta Broker\n"
+        "2020-01-01 10:00:01 WARNING [MainProcess] mt5copier.config: something odd\n",
+        encoding="utf-8",
+    )
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.press("m", "right", "s")
+        app._engine.events = [  # type: ignore[attr-defined]
+            MasterEvent(
+                id=1,
+                ts=time.time(),
+                kind=ActionKind.OPEN,
+                preexisting=False,
+                master_ticket=11,
+                symbol="BTCUSD",
+                label="buy",
+                volume=0.78,
+                volume_before=None,
+                entry=84854.0,
+                outcomes=(SlaveOutcome(TID_SLAVE, Outcome.DONE, lots=3.11, latency_ms=360.0),),
+            )
+        ]
+        await pilot.press("tab")
+        await pilot.pause()
+        shown = app._log_shown or []
+        assert [e.terminal_id for e in shown] == [TID_SLAVE, None, TID_MASTER, TID_SLAVE]
+        assert shown[-1].text == "Opened 3.11 lots in 360 ms"
+        assert "problems only · 1" in plain(app.query_one("#logbar", Static).content)
+
+        await pilot.press("f")
+        assert [e.text for e in app._log_shown or []] == ["something odd"]
+        await pilot.press("f", "1")
+        assert {e.terminal_id for e in app._log_shown or []} == {TID_SLAVE}
+        await pilot.press("1")
+        assert len(app._log_shown or []) == 4, "the same key again shows every terminal"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(app.screen, TerminalScreen)
+        assert app._selected_id() == TID_SLAVE

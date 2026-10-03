@@ -143,8 +143,31 @@ Screen {
 
 /* --- log ----------------------------------------------------------------------------------- */
 
+#logbar {
+    height: 1;
+    margin: 1 0;
+}
+
 #log {
     background: $background;
     border: none;
-    padding-top: 1;
+    height: 1fr;
+}
+
+#log:focus {
+    background-tint: $foreground 0%;
+}
+
+#log > .datatable--header {
+    background: $background;
+}
+
+/* The line under the cursor: filled in cream, as the design's selected log line is. */
+#log > .datatable--cursor {
+    background: $foreground;
+    color: $background;
+}
+
+#log > .datatable--hover {
+    background: $foreground 10%;
 }

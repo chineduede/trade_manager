@@ -110,7 +110,7 @@ def test_an_answer_settles_the_outcome_with_lots_and_latency() -> None:
     book.add(a, Outcome.SENDING)
     book.on_sent(a, 7, sent_at=10.0)
     book.end_tick([], {})
-    book.on_result(result(7), now=10.36)
+    book.on_result(result(7), now=10.36, ts=10.36)
 
     [out] = book.events()[0].outcomes
     assert out.outcome is Outcome.DONE
@@ -127,8 +127,8 @@ def test_a_refusal_and_a_link_failure_are_told_apart() -> None:
         book.add(a, Outcome.SENDING)
         book.on_sent(a, n, sent_at=0.0)
     book.end_tick([], {})
-    book.on_result(result(1, ok=False, error="account is not a demo"), now=0.1)
-    book.on_result(result(2, ok=False, retryable=True, error="link down"), now=0.1)
+    book.on_result(result(1, ok=False, error="account is not a demo"), now=0.1, ts=0.1)
+    book.on_result(result(2, ok=False, retryable=True, error="link down"), now=0.1, ts=0.1)
 
     outs = {o.terminal_id: o for o in book.events()[0].outcomes}
     assert outs[TID_S1].outcome is Outcome.REFUSED
@@ -144,8 +144,8 @@ def test_an_unanswered_command_ends_as_no_answer() -> None:
     book.add(a, Outcome.SENDING)
     book.on_sent(a, 3, sent_at=0.0)
     book.end_tick([], {})
-    book.on_expired(TID_S1, 11)
-    book.on_result(result(3), now=1.0)  # the engine would refuse it; the book ignores it
+    book.on_expired(TID_S1, 11, ts=1.0)
+    book.on_result(result(3), now=1.0, ts=1.0)  # the engine would refuse it; the book ignores it
 
     [out] = book.events()[0].outcomes
     assert out.outcome is Outcome.NO_ANSWER

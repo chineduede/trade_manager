@@ -484,7 +484,7 @@ class Engine:
         for tid, ticket in self._ledger.expire_inflight():
             log.error("gave up waiting for #%s on %s", ticket, tid[:8])
             self._stats.on_expired(tid)
-            self._day.on_expired(tid, ticket)
+            self._day.on_expired(tid, ticket, ts=time.time())
             # If that order did reach the broker, a position exists that we have no record of.
             # Reconciling this slave again is what turns it into a reported orphan instead of
             # a silence -- which is exactly what the expiry message promises.
@@ -822,7 +822,7 @@ class Engine:
         )
         self._record_result(result)
         self._stats.on_abandoned(result)
-        self._day.on_result(result, now=time.monotonic())
+        self._day.on_result(result, now=time.monotonic(), ts=time.time())
         self._ledger.apply_result(result)
 
     def _on_result(self, result: OrderResult) -> None:
@@ -852,7 +852,7 @@ class Engine:
         del self._pending_cmd[key]
         self._record_result(result)
         self._stats.on_result(result, now=time.monotonic())
-        self._day.on_result(result, now=time.monotonic())
+        self._day.on_result(result, now=time.monotonic(), ts=time.time())
         if result.ok:
             log.info("%s", result.describe())
         else:
@@ -887,6 +887,12 @@ class Engine:
         """The master's most recent trades with each slave's outcome, oldest first."""
         with self._lock:
             return self._day.events(limit)
+
+    @property
+    def day_book_since(self) -> float:
+        """Wall-clock time from which :meth:`day_book` holds every master event."""
+        with self._lock:
+            return self._day.complete_since
 
     def terminal_stats(self, terminal_id: str) -> TerminalStats:
         """This terminal's copy-health numbers for the session, as a read-only copy."""
@@ -1380,7 +1386,7 @@ class Engine:
             store.clear()
             self._ledger.reset_session_state()
             self._actions.clear()
-            self._day.clear()
+            self._day.clear(ts=time.time())
             # Every position that was ours is now unrecorded, which is the definition of an
             # orphan. Re-reconcile rather than carry forward a clean bill of health.
             for tid in list(self._cfg.terminals):

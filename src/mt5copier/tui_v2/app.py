@@ -22,20 +22,32 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widget import Widget
-from textual.widgets import ContentSwitcher, RichLog, Static
+from textual.widgets import ContentSwitcher, DataTable, Static
 
 from .. import config as config_mod
 from ..config import AppConfig, Role
 from ..day_book import Outcome, SlaveOutcome, describe_master, describe_outcome
 from ..discovery import discover_terminals
 from ..engine import TerminalView
+from ..log_entries import (
+    Level,
+    LogEntry,
+    Tone,
+    event_entries,
+    file_entries,
+    merge,
+    select,
+    terminal_names,
+)
 from ..logging_setup import get_logger
-from ..paths import config_path
+from ..paths import config_path, log_dir
+from ..presentation import read_log_tail
 from ..tui.app import CopierApp
 from . import cards
 from .style import (
     BG,
     BLUE,
+    CHIP_BG,
     FAINT,
     FG,
     MUTED,
@@ -57,6 +69,9 @@ _DAYBOOK_EVENTS = 12
 
 _PAGES = ("map", "log")
 
+_LOG_LINES = 500
+"""How much of ``copier.log`` the log page reads, as the classic page does."""
+
 _RULED = Box("    \n    \n    \n    \n────\n    \n    \n    \n")
 """No borders, only a rule between rows, as the design's day book has."""
 
@@ -75,6 +90,7 @@ class NewCopierApp(CopierApp):
         Binding("up", "step(-1)", "Previous card", show=False),
         Binding("down", "step(1)", "Next card", show=False),
         Binding("enter", "open_terminal", "Details", show=False),
+        Binding("f", "log_problems", "Problems only", show=False),
         Binding("a", "jump(0)", "Master card", show=False),
         *(Binding(str(n), f"jump({n})", f"Slave {n}", show=False) for n in range(1, 10)),
     ]
@@ -95,6 +111,13 @@ class NewCopierApp(CopierApp):
         self._trunks: list[Trunk] = []
         """One beside each row when there is more than one row, in order."""
         self._per_row = 4
+        self._log_problems = False
+        """The log page's Show filter: problems only, or everything."""
+        self._log_from: str | None = None
+        """The log page's From filter: one terminal's entries, or None for all of them."""
+        self._log_file: tuple[object, list[LogEntry]] = (None, [])
+        """``copier.log`` as entries, with what the file looked like when it was read."""
+        self._log_shown: list[LogEntry] | None = None
 
     # --- composition ------------------------------------------------------------------------
 
@@ -113,7 +136,8 @@ class NewCopierApp(CopierApp):
                         yield Chips(id="chips")
                         yield Static("", id="notyet-hint")
             with Vertical(id="page-log"):
-                yield RichLog(id="log", wrap=False, markup=False, auto_scroll=True)
+                yield Static("", id="logbar")
+                yield DataTable(id="log", cursor_type="row")
         yield KeyBar("", id="keybar")
 
     def on_mount(self, event: events.Mount | None = None) -> None:
@@ -122,6 +146,9 @@ class NewCopierApp(CopierApp):
             event.prevent_default()
         self.register_theme(THEME)
         self.theme = THEME.name
+        log_table = self.query_one("#log", DataTable)
+        for label in ("Time", "Level", "Terminal", "Entry"):
+            log_table.add_column(Text(label, style=f"bold {FG}"), key=label.lower())
         self._engine.start()
         self._rebuild_rows()
         self.set_interval(0.5, self._on_timer)
@@ -146,9 +173,9 @@ class NewCopierApp(CopierApp):
         self._page = page
         self.query_one("#pages", ContentSwitcher).current = f"page-{page}"
         if page == "log":
-            self._log_stamp = None
+            self._log_shown = None
             self._refresh_log()
-            self.query_one("#log", RichLog).focus()
+            self.query_one("#log", DataTable).focus()
         else:
             self.screen.set_focus(None)
         self._refresh_frame()
@@ -178,7 +205,11 @@ class NewCopierApp(CopierApp):
         self._select(self._order[(at + delta) % len(self._order)])
 
     def action_jump(self, number: int) -> None:
-        """``a`` is the master's card and 1-9 the slaves', by the number each card shows."""
+        """``a`` is the master's card and 1-9 the slaves', by the number each card shows. On
+        the log page the same keys pick the one terminal to show, and again to show them all."""
+        if self._page == "log":
+            self._filter_log_to(number)
+            return
         if self._page != "map":
             return
         if number == 0:
@@ -434,6 +465,12 @@ class NewCopierApp(CopierApp):
             )
         else:
             keys.append(key_hint("↑↓", "line"))
+            keys.append(key_hint("f", "everything" if self._log_problems else "problems only"))
+            count = min(len(self._cfg.slaves), 9)
+            which = "a" + ("" if not count else " 1" if count == 1 else f" 1-{count}")
+            keys.append(key_hint(which, "one terminal"))
+            keys.append(key_hint("end", "newest"))
+            keys.append(key_hint("enter", "open that terminal"))
             keys.append(key_hint("tab", "map"))
         keys.append(key_hint("?", "all keys"))
 
@@ -492,6 +529,131 @@ class NewCopierApp(CopierApp):
                 lines += 1
         panel.update(table)
 
+    # --- the log page -----------------------------------------------------------------------
+
+    def action_log_problems(self) -> None:
+        if self._page != "log":
+            return
+        self._log_problems = not self._log_problems
+        self._refresh_log()
+        self._refresh_keybar()
+
+    def _filter_log_to(self, number: int) -> None:
+        """0 is the master, 1-9 the slaves by their card numbers. Picking the terminal already
+        shown goes back to showing all of them."""
+        if number == 0:
+            master = self._cfg.master
+            tid = master.terminal_id if master else None
+        else:
+            slaves = self._slave_ids()
+            tid = slaves[number - 1] if 1 <= number <= len(slaves) else None
+        if tid is None:
+            return
+        self._log_from = None if self._log_from == tid else tid
+        self._refresh_log()
+
+    @on(DataTable.RowSelected, "#log")
+    def _on_log_row(self, event: DataTable.RowSelected) -> None:
+        """Enter on a line opens the terminal it is about."""
+        shown = self._log_shown or []
+        row = event.cursor_row
+        tid = shown[row].terminal_id if 0 <= row < len(shown) else None
+        if tid is None or tid not in self._cfg.terminals:
+            self.notify("That line is not about one terminal.", severity="warning")
+            return
+        self._select(tid)
+        self.action_open_terminal()
+
+    def _log_entries(self) -> list[LogEntry]:
+        """``copier.log`` and the day book, merged. The file is parsed again only when it has
+        changed; the day book is cheap to read every time."""
+        path = log_dir() / "copier.log"
+        try:
+            stat = path.stat()
+            seen: object = (stat.st_size, stat.st_mtime)
+        except OSError:
+            seen = None
+        since = self._engine.day_book_since
+        stamp = (seen, since, tuple((t, c.label) for t, c in self._cfg.terminals.items()))
+        if stamp != self._log_file[0]:
+            names = terminal_names(
+                {
+                    tid: (t.label, self._cfg.display_name(tid))
+                    for tid, t in self._cfg.terminals.items()
+                }
+            )
+            text = read_log_tail(path, max_lines=_LOG_LINES)
+            self._log_file = (stamp, file_entries(text, names, covered_from=since))
+        master = self._cfg.master
+        events = event_entries(self._engine.day_book(), master.terminal_id if master else None)
+        return merge(self._log_file[1], events)
+
+    def _refresh_log(self) -> None:
+        """Redraw the log page when what it shows has changed, keeping the cursor on the line
+        it was on -- or on the newest line, if that is where it was."""
+        if self._page != "log":
+            return
+        scoped = select(self._log_entries(), problems_only=False, terminal_id=self._log_from)
+        shown = select(scoped, problems_only=self._log_problems, terminal_id=None)
+        table = self.query_one("#log", DataTable)
+        following = table.row_count == 0 or table.cursor_row >= table.row_count - 1
+        self._refresh_logbar(sum(1 for e in scoped if e.level.problem), following)
+        if shown == self._log_shown:
+            return
+        old = self._log_shown or []
+        at = old[table.cursor_row] if 0 <= table.cursor_row < len(old) else None
+        self._log_shown = shown
+        numbers = self._terminal_numbers()
+        table.clear()
+        for entry in shown:
+            table.add_row(*self._log_cells(entry, numbers))
+        if not shown:
+            return
+        target = len(shown) - 1
+        if not following and at is not None and at in shown:
+            target = shown.index(at)
+        table.move_cursor(row=target, scroll=True)
+
+    def _terminal_numbers(self) -> dict[str, str]:
+        """``A`` for the master and each slave's card number, as the map shows them."""
+        out = {tid: str(n) for n, tid in enumerate(self._slave_ids(), start=1)}
+        master = self._cfg.master
+        if master is not None:
+            out[master.terminal_id] = "A"
+        return out
+
+    def _log_cells(self, entry: LogEntry, numbers: dict[str, str]) -> tuple[Text, ...]:
+        when = Text(time.strftime("%H:%M:%S", time.localtime(entry.ts)), style=MUTED)
+        level = Text(entry.level.value, style=_LEVEL_STYLE[entry.level])
+        if entry.terminal_id is None:
+            who = Text("copier", style=MUTED)
+        else:
+            style = f"bold {FG}" if entry.tone is Tone.MASTER else FG
+            number = numbers.get(entry.terminal_id)
+            who = Text(f"{number} " if number else "", style=style)
+            who.append(self._cfg.display_name(entry.terminal_id)[:24], style=style)
+        first, *rest = entry.text.splitlines() or [""]
+        text = Text(first, style=_TONE_STYLE[entry.tone])
+        if rest:
+            text.append(f"  (+{len(rest)} more lines in copier.log)", style=FAINT)
+        return when, level, who, text
+
+    def _refresh_logbar(self, problems: int, following: bool) -> None:
+        bar = Text()
+        bar.append("Show  ", style=MUTED)
+        bar.append_text(_choice("everything", not self._log_problems))
+        bar.append(" ")
+        bar.append_text(_choice(f"problems only · {problems}", self._log_problems))
+        bar.append("     From  ", style=MUTED)
+        bar.append_text(_choice("all", self._log_from is None))
+        numbers = self._terminal_numbers()
+        for tid in sorted(numbers, key=lambda t: (numbers[t] != "A", numbers[t].zfill(2))):
+            bar.append(" ")
+            bar.append_text(_choice(numbers[tid], self._log_from == tid))
+        where = "following the newest line" if following else "end for the newest line"
+        right = Text(f"copier.log · {where}", style=MUTED)
+        self.query_one("#logbar", Static).update(left_right(bar, right))
+
     def _refresh_chips(self, unassigned: list[TerminalView] | None = None) -> None:
         if unassigned is None:
             unassigned = self._groups()[2]
@@ -524,6 +686,30 @@ class NewCopierApp(CopierApp):
             style=MUTED,
         )
         return out
+
+
+_LEVEL_STYLE = {
+    Level.DEBUG: FAINT,
+    Level.INFO: MUTED,
+    Level.WARN: f"bold {YELLOW}",
+    Level.ERROR: f"bold {RED}",
+}
+
+_TONE_STYLE = {
+    Tone.PLAIN: MUTED,
+    Tone.MASTER: f"bold {FG}",
+    Tone.DONE: BLUE,
+    Tone.QUIET: MUTED,
+    Tone.WARN: YELLOW,
+    Tone.ERROR: RED,
+}
+
+
+def _choice(label: str, chosen: bool) -> Text:
+    """One option of a filter, filled in cream when it is the one in force."""
+    if chosen:
+        return Text(f" {label} ", style=f"bold {BG} on {FG}")
+    return Text(f" {label} ", style=f"{FG} on {CHIP_BG}")
 
 
 def _tone(out: SlaveOutcome) -> str:
