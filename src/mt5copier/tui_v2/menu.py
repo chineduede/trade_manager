@@ -39,10 +39,15 @@ def terminal_actions(
     *,
     has_master: bool,
     orphans_waiting: bool,
+    not_a_demo: bool = False,
+    link_ok: bool = True,
 ) -> list[MenuItem]:
     """What can be done to this terminal now, most likely first.
 
     ``orphans_waiting`` is whether it is held for untracked positions nobody has signed off.
+    ``not_a_demo`` is whether it is connected to an account that is not a demo, so the
+    demo-only guard is holding it back. ``link_ok`` is whether its worker is connected and
+    reporting; reconnect and restart are only offered when it is not.
     """
     items: list[MenuItem] = []
     if cfg.role is Role.UNASSIGNED:
@@ -64,10 +69,15 @@ def terminal_actions(
         items.append(
             MenuItem("p", "resume" if cfg.paused else "pause: take no new trades", "toggle_pause")
         )
-    live = "live trading is allowed: change" if cfg.allow_live_trading else "allow live trading"
-    items.append(MenuItem("l", live, "live_override"))
-    items.append(MenuItem("c", "reconnect", "reconnect"))
-    items.append(MenuItem("ctrl+r", "restart its worker", "restart_worker"))
+    # The demo-only guard stops orders, so it only ever holds back a slave on a real account.
+    # Where it has been lifted, the way to put it back is offered on any terminal.
+    if cfg.allow_live_trading:
+        items.append(MenuItem("l", "live trading is allowed: turn it off", "live_override"))
+    elif cfg.role is Role.SLAVE and not_a_demo:
+        items.append(MenuItem("l", "allow live trading: not a demo account", "live_override"))
+    if not link_ok:
+        items.append(MenuItem("c", "reconnect to the terminal", "reconnect"))
+        items.append(MenuItem("ctrl+r", "restart its worker process", "restart_worker"))
     unassign = "unassign: stop copying to it" if cfg.role is Role.SLAVE else "unassign the master"
     items.append(MenuItem("u", unassign, "unassign"))
     return items

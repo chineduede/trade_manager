@@ -478,11 +478,41 @@ def test_menu_for_a_slave_and_the_master() -> None:
 
     slave = TerminalConfig(terminal_id=TID_SLAVE, role=Role.SLAVE, paused=True)
     items = terminal_actions(slave, has_master=True, orphans_waiting=True)
-    assert [i.key for i in items] == ["enter", "o", "e", "p", "l", "c", "ctrl+r", "u"]
+    assert [i.key for i in items] == ["enter", "o", "e", "p", "u"]
     assert next(i for i in items if i.key == "p").label == "resume"
     master = TerminalConfig(terminal_id=TID_MASTER, role=Role.MASTER)
     keys = [i.key for i in terminal_actions(master, has_master=True, orphans_waiting=False)]
-    assert "e" not in keys and "p" not in keys, "the master has no settings and no pause"
+    assert keys == ["enter", "u"], "no settings, no pause, and no live guard to lift"
+
+
+def test_menu_offers_live_trading_only_where_the_guard_is_in_play() -> None:
+    from mt5copier.config import TerminalConfig
+    from mt5copier.tui_v2.menu import terminal_actions
+
+    def keys(cfg: TerminalConfig, **kw: bool) -> list[str]:
+        return [i.key for i in terminal_actions(cfg, has_master=True, orphans_waiting=False, **kw)]
+
+    slave = TerminalConfig(terminal_id=TID_SLAVE, role=Role.SLAVE)
+    assert "l" not in keys(slave), "a demo account needs nothing lifted"
+    assert "l" in keys(slave, not_a_demo=True)
+    master = TerminalConfig(terminal_id=TID_MASTER, role=Role.MASTER)
+    assert "l" not in keys(master, not_a_demo=True), "the master places no orders"
+    lifted = TerminalConfig(terminal_id=TID_MASTER, role=Role.MASTER, allow_live_trading=True)
+    assert "l" in keys(lifted), "where it was lifted, it can be put back"
+
+
+def test_menu_offers_reconnect_and_restart_only_when_the_link_is_down() -> None:
+    from mt5copier.config import TerminalConfig
+    from mt5copier.tui_v2.menu import terminal_actions
+
+    slave = TerminalConfig(terminal_id=TID_SLAVE, role=Role.SLAVE)
+    up = [i.key for i in terminal_actions(slave, has_master=True, orphans_waiting=False)]
+    down = [
+        i.key
+        for i in terminal_actions(slave, has_master=True, orphans_waiting=False, link_ok=False)
+    ]
+    assert "c" not in up and "ctrl+r" not in up
+    assert "c" in down and "ctrl+r" in down
 
 
 def test_menu_is_placed_beside_its_terminal_and_kept_on_screen() -> None:

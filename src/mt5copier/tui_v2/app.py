@@ -43,6 +43,7 @@ from ..log_entries import (
 from ..logging_setup import get_logger
 from ..paths import config_path, log_dir
 from ..presentation import read_log_tail
+from ..protocol import WorkerState
 from ..tui.app import CopierApp
 from . import cards
 from .menu import ActionMenu, terminal_actions
@@ -245,11 +246,17 @@ class NewCopierApp(CopierApp):
         if anchor is None:
             return
         cfg = self._cfg.terminals[tid]
+        holds = self._engine.holds()
+        view = next((v for v in self._views() if v.cfg.terminal_id == tid), None)
+        info = self._info(view, holds) if view is not None else None
+        status = view.status(self._cfg.heartbeat_timeout_s) if view is not None else ""
         items = terminal_actions(
             cfg,
             has_master=self._cfg.master is not None,
             # Held, and with untracked positions on record: signing them off is what lifts it.
-            orphans_waiting=tid in self._engine.holds() and bool(self._engine.orphans(tid)),
+            orphans_waiting=tid in holds and bool(self._engine.orphans(tid)),
+            not_a_demo=info is not None and info.demo_guard_blocked,
+            link_ok=status == str(WorkerState.CONNECTED),
         )
 
         def chosen(action: str | None) -> None:
