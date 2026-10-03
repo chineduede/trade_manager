@@ -18,8 +18,10 @@ from test_tui import TID_BROKEN, TID_MASTER, TID_SLAVE, StubEngine, _wire_copyin
 from textual.widgets import Static
 
 from mt5copier.config import AppConfig, Role
+from mt5copier.day_book import MasterEvent, Outcome, SlaveOutcome
 from mt5copier.engine import TerminalView
 from mt5copier.presentation import RowInfo
+from mt5copier.protocol import ActionKind
 from mt5copier.tui_v2 import NewCopierApp
 from mt5copier.tui_v2.cards import margin_bar, slave_state
 from mt5copier.tui_v2.style import FAINT, GREEN, RED
@@ -325,3 +327,34 @@ async def test_number_keys_follow_the_numbers_on_the_cards(
         assert app._selected_id() == TID_BROKEN
         await pilot.press("2")
         assert app._selected_id() == TID_SLAVE
+
+
+async def test_the_day_book_lists_each_master_trade_with_every_slaves_outcome(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.press("m", "right", "s")
+        app._engine.events = [  # type: ignore[attr-defined]
+            MasterEvent(
+                id=1,
+                ts=time.time(),
+                kind=ActionKind.OPEN,
+                preexisting=False,
+                master_ticket=11,
+                symbol="BTCUSD",
+                label="buy",
+                volume=0.78,
+                volume_before=None,
+                entry=84854.0,
+                outcomes=(
+                    SlaveOutcome(TID_SLAVE, Outcome.DONE, lots=3.11, latency_ms=360.0),
+                    SlaveOutcome(TID_BROKEN, Outcome.REFUSED, reason="not a demo account"),
+                ),
+            )
+        ]
+        app._refresh()
+        await pilot.pause()
+        said = plain(app.query_one("#daybook", Static).content)
+        assert "A opened BTCUSD buy 0.78 at 84,854" in said
+        assert "1 Beta" in said and "opened 3.11 lots in 360 ms" in said
+        assert "refused: not a demo account" in said

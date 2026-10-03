@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import time
 
+from rich.box import Box
+from rich.table import Table
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
@@ -24,6 +26,7 @@ from textual.widgets import ContentSwitcher, RichLog, Static
 
 from .. import config as config_mod
 from ..config import AppConfig, Role
+from ..day_book import Outcome, SlaveOutcome, describe_master, describe_outcome
 from ..discovery import discover_terminals
 from ..engine import TerminalView
 from ..logging_setup import get_logger
@@ -33,6 +36,7 @@ from . import cards
 from .style import (
     BG,
     BLUE,
+    FAINT,
     FG,
     MUTED,
     RED,
@@ -48,8 +52,13 @@ from .widgets import Card, ChipItem, Chips, KeyBar, Picked, Rail, TopBar, Trunk
 log = get_logger(__name__)
 
 _DAYBOOK_ROWS = 12
+"""Lines the day book stops adding events at. An event's slaves are never cut off part-way."""
+_DAYBOOK_EVENTS = 12
 
 _PAGES = ("map", "log")
+
+_RULED = Box("    \n    \n    \n    \n────\n    \n    \n    \n")
+"""No borders, only a rule between rows, as the design's day book has."""
 
 
 class NewCopierApp(CopierApp):
@@ -433,11 +442,12 @@ class NewCopierApp(CopierApp):
         self.query_one("#keybar", KeyBar).update(left_right(left, right))
 
     def _refresh_daybook(self) -> None:
-        """The newest decisions, newest first. Skips are shown with their reason: a copier that
-        quietly does nothing looks the same as one that is broken."""
-        recorded = self._engine.recent_actions(limit=_DAYBOOK_ROWS)
+        """The master's newest trades, newest first, each with what every slave made of it.
+        Skips and refusals are shown with their reason: a copier that quietly does nothing
+        looks the same as one that is broken."""
+        events = self._engine.day_book(limit=_DAYBOOK_EVENTS)
         panel = self.query_one("#daybook", Static)
-        if not recorded:
+        if not events:
             if self._cfg.copying_enabled:
                 hint = "Watching the master: nothing has happened yet."
             elif self._cfg.master is None:
@@ -449,23 +459,38 @@ class NewCopierApp(CopierApp):
             panel.update(Text(hint, style=MUTED))
             return
         numbers = {tid: n for n, tid in enumerate(self._slave_ids(), start=1)}
-        lines: list[Text] = []
-        for rec in reversed(recorded):
-            a = rec.action
-            line = Text(time.strftime("%H:%M:%S", time.localtime(rec.ts)), style=MUTED)
-            line.append("  ")
-            number = numbers.get(a.terminal_id)
-            line.append(f"{number if number else '-'} ", style=FG)
-            line.append(f"{self._cfg.display_name(a.terminal_id)[:20]:<20}  ")
-            what = a.describe()
-            if not a.executable:
-                line.append(what, style=MUTED)
-            elif a.unprotected:
-                line.append(what, style=YELLOW)
-            else:
-                line.append(what, style=BLUE)
-            lines.append(line)
-        panel.update(Text("\n").join(lines))
+        table = Table(
+            box=_RULED,
+            show_header=False,
+            show_edge=False,
+            show_lines=True,
+            pad_edge=False,
+            padding=(0, 2, 0, 0),
+            border_style=FAINT,
+            expand=True,
+        )
+        table.add_column(no_wrap=True)
+        table.add_column(ratio=1)
+        lines = 0
+        for event in reversed(events):
+            if lines >= _DAYBOOK_ROWS:
+                break
+            when = Text(time.strftime("%H:%M:%S", time.localtime(event.ts)), style=MUTED)
+            head = Text("A ", style=f"bold {FG}")
+            head.append(
+                describe_master(event), style=f"bold {FG}" if not event.preexisting else MUTED
+            )
+            table.add_row(when, head)
+            lines += 1
+            ordered = sorted(event.outcomes, key=lambda o: numbers.get(o.terminal_id, 99))
+            for out in ordered:
+                number = numbers.get(out.terminal_id)
+                line = Text(f"{number if number else '-'} ", style=FG)
+                line.append(f"{self._cfg.display_name(out.terminal_id)[:22]:<22}  ")
+                line.append(describe_outcome(event.kind, out), style=_tone(out))
+                table.add_row("", line)
+                lines += 1
+        panel.update(table)
 
     def _refresh_chips(self, unassigned: list[TerminalView] | None = None) -> None:
         if unassigned is None:
@@ -499,6 +524,16 @@ class NewCopierApp(CopierApp):
             style=MUTED,
         )
         return out
+
+
+def _tone(out: SlaveOutcome) -> str:
+    """Blue when the copy was done, red when a slave fell short, muted when there was
+    deliberately nothing to do."""
+    if out.outcome is Outcome.DONE:
+        return BLUE
+    if out.outcome.problem:
+        return RED
+    return MUTED
 
 
 def run() -> None:

@@ -28,6 +28,7 @@ from . import role_actions
 from .breakeven import breakeven_level, buffer_distance, check_breakeven_price
 from .config import BREAKEVEN_FIELDS, AppConfig, BreakevenMode, Role, SizingMode, TerminalConfig
 from .copy_stats import StatsBook, TerminalStats
+from .day_book import DayBook, MasterEvent, Outcome
 from .logging_setup import get_logger
 from .paths import dryrun_store_path, log_dir, mapping_db_path
 from .protocol import (
@@ -201,6 +202,9 @@ class Engine:
         after a refusal. Session only: after a restart the first attempt is made as usual."""
         self._stats = StatsBook()
         """Copy-health numbers for the detail page. Display only; nothing here decides."""
+        self._day = DayBook()
+        """Each master trade with what became of it on every slave, for the new UI's day
+        book. Display only, like the statistics."""
 
         self._dryrun_path = state_path if state_path is not None else dryrun_store_path()
         self._mapping_path = mapping_path if mapping_path is not None else mapping_db_path()
@@ -480,6 +484,7 @@ class Engine:
         for tid, ticket in self._ledger.expire_inflight():
             log.error("gave up waiting for #%s on %s", ticket, tid[:8])
             self._stats.on_expired(tid)
+            self._day.on_expired(tid, ticket)
             # If that order did reach the broker, a position exists that we have no record of.
             # Reconciling this slave again is what turns it into a reported orphan instead of
             # a silence -- which is exactly what the expiry message promises.
@@ -513,6 +518,7 @@ class Engine:
         now = time.time()
         cfgs = {link.cfg.terminal_id: link.cfg for link in links}
         prefix = "[dry-run]" if dry else "[live]"
+        self._day.begin_tick(now, snap.open_positions, snap.pending_orders)
         for action in actions:
             self._actions.append(RecordedAction(ts=now, action=action))
             self._action_total += 1
@@ -525,18 +531,30 @@ class Engine:
                 cfg.label if cfg is not None else action.terminal_id[:8],
                 action.describe(),
             )
+            invert = cfg is not None and cfg.invert
 
             if not action.executable:
+                reason = action.skip_reason.value if action.skip_reason else None
+                self._day.add(action, Outcome.SKIPPED, reason, invert=invert)
                 continue
             if action.kind not in DISPATCHABLE_KINDS:
                 self._warn_undispatchable(action.kind)
+                self._day.add(action, Outcome.NOT_SENT, "this build cannot send it", invert=invert)
                 continue
-            if dry or cfg is None:
+            if dry:
+                self._day.add(action, Outcome.DRY_RUN, invert=invert)
+                continue
+            if cfg is None:
                 continue
             slave_snap = self._snapshots.get(action.terminal_id)
             if slave_snap is None:
+                self._day.add(
+                    action, Outcome.NOT_SENT, "the slave has not reported yet", invert=invert
+                )
                 continue
+            self._day.add(action, Outcome.SENDING, invert=invert)
             self._dispatch(action, cfg, slave_snap)
+        self._day.end_tick(links, self._hold_reason)
 
     def _arm_breakevens(self, links: list[SlaveLink]) -> None:
         """Set a breakeven floor on every copy that has crossed its slave's trigger.
@@ -707,6 +725,7 @@ class Engine:
                 action.master_ticket,
                 cfg.label,
             )
+            self._day.settle(action, Outcome.NOT_SENT, "its risk budget cannot be sized")
             return
 
         command_id = next(self._command_ids)
@@ -743,6 +762,8 @@ class Engine:
             allow_live=cfg.allow_live_trading,
         )
 
+        # Before sending, because an order that cannot be sent is answered on the spot.
+        self._day.on_sent(action, command_id, sent_at=time.monotonic())
         worker = self._workers.get(cfg.terminal_id)
         if worker is None:
             self._abandon(cmd, cfg.terminal_id, "no worker is running for this terminal")
@@ -801,6 +822,7 @@ class Engine:
         )
         self._record_result(result)
         self._stats.on_abandoned(result)
+        self._day.on_result(result, now=time.monotonic())
         self._ledger.apply_result(result)
 
     def _on_result(self, result: OrderResult) -> None:
@@ -830,6 +852,7 @@ class Engine:
         del self._pending_cmd[key]
         self._record_result(result)
         self._stats.on_result(result, now=time.monotonic())
+        self._day.on_result(result, now=time.monotonic())
         if result.ok:
             log.info("%s", result.describe())
         else:
@@ -852,12 +875,18 @@ class Engine:
         for key in [k for k, (_, sent_at) in self._pending_cmd.items() if sent_at < cutoff]:
             del self._pending_cmd[key]
         self._stats.forget_sent_before(cutoff)
+        self._day.forget_sent_before(cutoff)
 
     def recent_results(self, limit: int | None = None) -> list[RecordedResult]:
         """Most recent order results, oldest first."""
         with self._lock:
             items = list(self._results)
         return items if limit is None else items[-limit:]
+
+    def day_book(self, limit: int | None = None) -> list[MasterEvent]:
+        """The master's most recent trades with each slave's outcome, oldest first."""
+        with self._lock:
+            return self._day.events(limit)
 
     def terminal_stats(self, terminal_id: str) -> TerminalStats:
         """This terminal's copy-health numbers for the session, as a read-only copy."""
@@ -1351,6 +1380,7 @@ class Engine:
             store.clear()
             self._ledger.reset_session_state()
             self._actions.clear()
+            self._day.clear()
             # Every position that was ours is now unrecorded, which is the definition of an
             # orphan. Re-reconcile rather than carry forward a clean bill of health.
             for tid in list(self._cfg.terminals):

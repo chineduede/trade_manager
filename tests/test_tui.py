@@ -24,6 +24,7 @@ from mt5copier.config import (
     TerminalConfig,
 )
 from mt5copier.copy_stats import TerminalStats
+from mt5copier.day_book import MasterEvent
 from mt5copier.engine import RecordedAction, RecordedResult, TerminalView
 from mt5copier.protocol import (
     COPIER_MAGIC,
@@ -69,6 +70,8 @@ class StubEngine:
         """Each time the engine was agreed a slave's copies could be given up: (slave, tickets)."""
         self.snapshots: dict[str, Snapshot] = {}
         self.stats: dict[str, TerminalStats] = {}
+        self.events: list[MasterEvent] = []
+        """What the stub's day book holds, oldest first."""
 
     def start(self) -> None:
         self.started = True
@@ -100,6 +103,9 @@ class StubEngine:
 
     def recent_actions(self, limit: int | None = None) -> list[RecordedAction]:
         return []
+
+    def day_book(self, limit: int | None = None) -> list[MasterEvent]:
+        return self.events if limit is None else self.events[-limit:]
 
     @property
     def action_total(self) -> int:
