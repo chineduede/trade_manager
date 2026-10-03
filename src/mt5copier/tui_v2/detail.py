@@ -238,21 +238,37 @@ def _few(names: Sequence[str]) -> str:
     return shown + (f" +{len(names) - 3}" if len(names) > 3 else "")
 
 
-def symbols_text(cfg: TerminalConfig) -> str:
-    """``all, suffix p``: which symbols it takes, and how their names change on the way."""
-    parts = [f"only {_few(cfg.symbol_whitelist)}" if cfg.symbol_whitelist else "all"]
-    if cfg.symbol_blacklist:
-        parts.append(f"not {_few(cfg.symbol_blacklist)}")
-    if cfg.symbol_prefix:
-        parts.append(f"prefix {cfg.symbol_prefix}")
-    if cfg.symbol_suffix:
-        parts.append(f"suffix {cfg.symbol_suffix}")
-    if cfg.symbol_map:
-        parts.append(f"{len(cfg.symbol_map)} renamed")
-    return ", ".join(parts)
+def symbol_rows(cfg: TerminalConfig, example: str = "EURUSD") -> list[Row]:
+    """Which of the master's symbols it takes, and the name each is traded under here: the
+    prefix and suffix shown on a real symbol, ``example`` (one the master holds, if any), and
+    each renamed symbol with its own line."""
+    if cfg.symbol_whitelist:
+        which = f"only {_few(cfg.symbol_whitelist)}"
+    elif cfg.symbol_blacklist:
+        which = f"all except {_few(cfg.symbol_blacklist)}"
+    else:
+        which = "all"
+    rows: list[Row] = [("Symbols copied", _v(which))]
+    if cfg.symbol_whitelist and cfg.symbol_blacklist:
+        rows.append(("  never", _v(_few(cfg.symbol_blacklist))))
+    # A renamed symbol keeps its own name, so the example is one the decoration applies to.
+    example = example.upper()
+    if example in cfg.symbol_map:
+        example = next((s for s in ("EURUSD", "XAUUSD") if s not in cfg.symbol_map), example)
+    if cfg.symbol_prefix or cfg.symbol_suffix:
+        here = f"{cfg.symbol_prefix}{example}{cfg.symbol_suffix}"
+        rows.append(("Name on this broker", _v(f"{example} is traded as {here}")))
+    else:
+        rows.append(("Name on this broker", _v("the same as the master's")))
+    renamed = sorted(cfg.symbol_map.items())
+    for n, (master, here) in enumerate(renamed[:3]):
+        rows.append(("Renamed" if n == 0 else "", _v(f"{master} is traded as {here}")))
+    if len(renamed) > 3:
+        rows.append(("", _v(f"+{len(renamed) - 3} more (e settings)", MUTED)))
+    return rows
 
 
-def rule_rows(cfg: TerminalConfig, currency: str | None) -> list[Row]:
+def rule_rows(cfg: TerminalConfig, currency: str | None, example: str = "EURUSD") -> list[Row]:
     """How trades are copied to it, in the words of its settings form."""
     if cfg.no_stop_policy is NoStopPolicy.SKIP:
         no_stop = "skip the trade"
@@ -281,8 +297,8 @@ def rule_rows(cfg: TerminalConfig, currency: str | None) -> list[Row]:
         ("Stop and target moves", _v("followed" if cfg.copy_sltp else "not followed")),
         ("Partials, pending orders", _v(partials)),
         ("Breakeven", _v("off" if rule == "off" else f"at {rule}")),
-        ("Symbols", _v(symbols_text(cfg))),
     ]
+    rows += symbol_rows(cfg, example)
     if cfg.allow_live_trading:
         rows.append(("Live trading", _v("allowed", f"bold {RED}")))
     return rows
@@ -574,7 +590,7 @@ class DetailScreen(TerminalScreen):
         else:
             self._head("#td-rule-head", "RULE", "e change", key="e")
             self.query_one("#td-rule", Static).update(
-                ruled(rule_rows(cfg, snap.currency if snap else None))
+                ruled(rule_rows(cfg, snap.currency if snap else None, self._example(views)))
             )
 
         spark = self.query_one("#td-latency", Sparkline)
@@ -598,6 +614,13 @@ class DetailScreen(TerminalScreen):
 
         self._fill(cfg, snap, views)
         self._refresh_keybar(cfg)
+
+    @staticmethod
+    def _example(views: list[TerminalView]) -> str:
+        """A symbol the master holds, to show how its name changes here; EURUSD if none."""
+        master = next((v for v in views if v.cfg.role is Role.MASTER), None)
+        held = master.snapshot.open_positions if master and master.snapshot else None
+        return held[0].symbol if held else "EURUSD"
 
     def _head(self, widget: str, title: str, right: str, *, key: str | None = None) -> None:
         side = Text(style=MUTED)

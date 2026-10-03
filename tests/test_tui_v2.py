@@ -600,7 +600,8 @@ def test_the_rule_column_says_how_a_slave_is_copied_in_words() -> None:
     assert said["Master has no stop"] == "skip the trade"
     assert said["Direction"] == "same as master"
     assert said["Partials, pending orders"] == "partials only"
-    assert said["Symbols"] == "all, suffix p"
+    assert said["Symbols copied"] == "all"
+    assert said["Name on this broker"] == "EURUSD is traded as EURUSDp"
     assert "Live trading" not in said
 
     t = TerminalConfig(
@@ -618,6 +619,27 @@ def test_the_rule_column_says_how_a_slave_is_copied_in_words() -> None:
     assert said["Master has no stop"] == "copy 0.5x its lots"
     assert said["Direction"] == "reversed"
     assert said["Live trading"] == "allowed"
+    assert said["Name on this broker"] == "the same as the master's"
+
+
+def test_the_rule_column_spells_out_renamed_symbols() -> None:
+    from mt5copier.config import TerminalConfig
+    from mt5copier.tui_v2.detail import symbol_rows
+
+    t = TerminalConfig(
+        terminal_id=TID_SLAVE,
+        role=Role.SLAVE,
+        symbol_suffix="p",
+        symbol_blacklist=["XAUUSD"],
+        symbol_map={"US30": "US30", "BTCUSD": "BTCUSD.x"},
+    )
+    said = [(label, value.plain) for label, value in symbol_rows(t, "BTCUSD")]
+    assert said == [
+        ("Symbols copied", "all except XAUUSD"),
+        ("Name on this broker", "EURUSD is traded as EURUSDp"),
+        ("Renamed", "BTCUSD is traded as BTCUSD.x"),
+        ("", "US30 is traded as US30"),
+    ]
 
 
 def test_the_copying_column_reads_the_sessions_stats() -> None:
