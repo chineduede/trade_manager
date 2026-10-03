@@ -18,8 +18,19 @@ from textual.renderables.digits import Digits
 from ..config import SizingMode, TerminalConfig
 from ..engine import TerminalView
 from ..presentation import RowInfo, slave_badge
-from ..terminal_detail import format_ping, margin_gauge
-from .style import BLUE, GREEN, MUTED, RED, YELLOW, amount, badge, floating, left_right
+from ..terminal_detail import bar, format_ping, margin_gauge
+from .style import (
+    BLUE,
+    GREEN,
+    MUTED,
+    RED,
+    TIER_COLOR,
+    YELLOW,
+    amount,
+    badge,
+    floating,
+    left_right,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,11 +43,9 @@ class SlaveState:
 
 
 def margin_bar(fraction: float | None, width: int = 10) -> str:
-    """``#---------`` -- the design's margin bar, plain ASCII so it reads in any font."""
-    if fraction is None:
-        return "?" * width
-    filled = round(max(0.0, min(1.0, fraction)) * width)
-    return "#" * filled + "-" * (width - filled)
+    """The details page's solid margin bar (see :func:`~mt5copier.terminal_detail.bar`),
+    short enough for a card."""
+    return bar(fraction, width)
 
 
 def big_amount(value: float | None, width: int) -> RenderableType:
@@ -140,7 +149,11 @@ def master_card(
     if snap is not None:
         gauge = margin_gauge(snap)
         pct = "" if gauge.used_fraction is None else f" {gauge.used_fraction:.0%}"
-        margin = Text(f"margin {margin_bar(gauge.used_fraction)}{pct}", style=MUTED)
+        margin = Text("margin ", style=MUTED)
+        # Coloured by margin level, as on the details page: blue while healthy, then yellow
+        # and red as it nears a margin call.
+        margin.append(margin_bar(gauge.used_fraction), style=TIER_COLOR[gauge.level_tier])
+        margin.append(pct, style=MUTED)
     else:
         margin = Text("margin —", style=MUTED)
 

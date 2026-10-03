@@ -111,9 +111,9 @@ def test_a_slave_is_not_called_copying_while_copying_is_off() -> None:
 
 
 def test_margin_bar() -> None:
-    assert margin_bar(0.03) == "----------"
-    assert margin_bar(0.3) == "###-------"
-    assert margin_bar(None) == "??????????"
+    assert margin_bar(0.03) == "░" * 10
+    assert margin_bar(0.3) == "█" * 3 + "░" * 7
+    assert margin_bar(None) == "░" * 10
 
 
 def test_the_first_row_hangs_off_the_masters_middle() -> None:
