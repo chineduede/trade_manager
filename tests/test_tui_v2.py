@@ -421,3 +421,29 @@ def test_a_slave_card_shows_its_margin_like_the_masters() -> None:
     state = slave_state(row, dry_run=False, copying=True)
     said = plain(slave_card(1, view, row, state, refused=0))
     assert "margin ███░░░░░░░ 30%" in said
+
+
+async def test_a_slave_card_with_big_digits_is_not_cut_off(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    """The row is a fixed height, so it has to hold the tallest card: the balance in big digits
+    and the margin line under it."""
+    from mt5copier.protocol import Snapshot, WorkerState
+
+    async with app.run_test(size=(200, 55)) as pilot:
+        await pilot.press("m", "right", "s")
+        app._engine.snapshots[TID_SLAVE] = Snapshot(  # type: ignore[attr-defined]
+            terminal_id=TID_SLAVE,
+            state=WorkerState.CONNECTED,
+            balance=97512.61,
+            equity=97475.29,
+            margin=8200.0,
+            positions=1,
+        )
+        for _ in range(2):  # the first draw happens before the card knows its width
+            app._refresh()
+            await pilot.pause()
+        card = next(c for c in app.query(Card) if c.has_class("slave"))
+        drawn = plain(card.content, width=card.content_size.width).rstrip("\n").splitlines()
+        assert any("margin" in line for line in drawn)
+        assert len(drawn) <= card.content_size.height, "the card's last lines are cut off"
