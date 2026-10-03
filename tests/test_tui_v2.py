@@ -585,3 +585,119 @@ async def test_clicking_the_selected_terminal_opens_its_menu(app: NewCopierApp) 
         app.action_pick(TID_SLAVE)
         await pilot.pause()
         assert isinstance(app.screen, ActionMenu)
+
+
+# --- the details page ----------------------------------------------------------------------
+
+
+def test_the_rule_column_says_how_a_slave_is_copied_in_words() -> None:
+    from mt5copier.config import NoStopPolicy, SizingMode, TerminalConfig
+    from mt5copier.tui_v2.detail import rule_rows
+
+    t = TerminalConfig(terminal_id=TID_SLAVE, role=Role.SLAVE, symbol_suffix="p")
+    said = {label: value.plain for label, value in rule_rows(t, "USD")}
+    assert said["Risk per trade"] == "1% of balance"
+    assert said["Master has no stop"] == "skip the trade"
+    assert said["Direction"] == "same as master"
+    assert said["Partials, pending orders"] == "partials only"
+    assert said["Symbols"] == "all, suffix p"
+    assert "Live trading" not in said
+
+    t = TerminalConfig(
+        terminal_id=TID_SLAVE,
+        role=Role.SLAVE,
+        sizing_mode=SizingMode.FIXED_CASH_RISK,
+        risk_cash=250,
+        no_stop_policy=NoStopPolicy.LOT_MULTIPLE,
+        no_stop_lot_multiple=0.5,
+        invert=True,
+        allow_live_trading=True,
+    )
+    said = {label: value.plain for label, value in rule_rows(t, "EUR")}
+    assert said["Risk per trade"] == "250 EUR a trade"
+    assert said["Master has no stop"] == "copy 0.5x its lots"
+    assert said["Direction"] == "reversed"
+    assert said["Live trading"] == "allowed"
+
+
+def test_the_copying_column_reads_the_sessions_stats() -> None:
+    from mt5copier.copy_stats import TerminalStats
+    from mt5copier.tui_v2.detail import copying_rows
+
+    stats = TerminalStats(
+        latencies_ms=(360.0, 2443.0, 300.0),
+        slippage_points=(-20.0, 1175.0),
+        succeeded=3,
+        refused=1,
+        skipped=(("no stop on the master", 2),),
+    )
+    said = {label: value.plain for label, value in copying_rows(stats)}
+    assert said["Orders copied"] == "3"
+    assert said["Skipped"] == "2"
+    assert said["  most often"] == "no stop on the master x2"
+    assert said["Refused, retried, late"] == "1 / 0 / 0"
+    assert said["Delay, last / median / max"] == "300 / 360 / 2,443 ms"
+    assert said["Slippage, last"] == "1,175 pts worse"
+    assert said["Slippage, average"] == "578 pts worse"
+    assert said["Disconnects"] == "none"
+    assert copying_rows(TerminalStats())[0][1].plain == "none"
+
+
+async def test_enter_opens_the_details_page_and_arrows_walk_the_terminals(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    from mt5copier.tui_v2.detail import DetailScreen
+
+    cfg.terminals[TID_MASTER].role = Role.MASTER
+    cfg.terminals[TID_SLAVE].role = Role.SLAVE
+    async with app.run_test(size=(200, 50)) as pilot:
+        await pilot.press("1", "enter")
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DetailScreen)
+        assert screen.terminal_id == TID_SLAVE
+        band = plain(screen.query_one("#td-band", Static).content, width=200)
+        assert "1 · SLAVE OF A" in band
+        assert "RULE" in plain(screen.query_one("#td-rule-head", Static).content)
+        assert "Beta Broker" in plain(screen.query_one(TopBar).content, width=200)
+
+        await pilot.press("left")
+        assert screen.terminal_id == TID_MASTER, "the arrows go to the next terminal in place"
+        assert app._selected_id() == TID_MASTER, "and select it, so p, u and the rest act on it"
+        await pilot.pause()
+        assert "COPIED TO" in plain(screen.query_one("#td-rule-head", Static).content)
+        await pilot.press("1")
+        assert screen.terminal_id == TID_SLAVE
+
+        await pilot.press("escape")
+        assert not isinstance(app.screen, DetailScreen)
+
+
+async def test_tab_on_the_details_page_goes_to_the_log(app: NewCopierApp, cfg: AppConfig) -> None:
+    from mt5copier.tui_v2.detail import DetailScreen
+
+    cfg.terminals[TID_MASTER].role = Role.MASTER
+    async with app.run_test(size=(200, 50)) as pilot:
+        await pilot.press("enter")
+        assert isinstance(app.screen, DetailScreen)
+        await pilot.press("tab")
+        assert not isinstance(app.screen, DetailScreen)
+        assert app._page == "log"
+
+
+async def test_the_menu_on_the_details_page_leaves_out_the_details(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    from mt5copier.tui_v2.menu import ActionMenu
+
+    cfg.terminals[TID_MASTER].role = Role.MASTER
+    cfg.terminals[TID_SLAVE].role = Role.SLAVE
+    async with app.run_test(size=(200, 50)) as pilot:
+        await pilot.press("1", "enter", "space")
+        menu = app.screen
+        assert isinstance(menu, ActionMenu)
+        actions = [i.action for i in menu._items]
+        assert "open_terminal" not in actions and "toggle_pause" in actions
+        await pilot.press("p")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].paused, "the shown terminal is the one acted on"

@@ -8,6 +8,7 @@ here once and the Textual theme is built from the same values.
 
 from __future__ import annotations
 
+from rich.box import Box
 from rich.table import Table
 from rich.text import Text
 from textual.theme import Theme
@@ -100,3 +101,7 @@ def badge(text: str, color: str) -> Text:
     """A boxed word such as PAUSED or HELD BACK. A terminal cannot draw a box inside a line, so
     it is brackets around bold capitals."""
     return Text(f"[ {text} ]", style=f"bold {color}")
+
+
+RULED = Box("    \n    \n    \n    \n────\n    \n    \n    \n")
+"""No borders, only a rule between rows: the day book's and the details page's columns."""

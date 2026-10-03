@@ -205,3 +205,95 @@ ActionMenu OptionList:focus > .option-list--option-highlighted {
     color: $background;
     text-style: bold;
 }
+
+/* --- a terminal's details ------------------------------------------------------------------ */
+
+#td-page {
+    padding-top: 1;
+    scrollbar-size-vertical: 1;
+}
+
+/* The band: the terminal's name and equity, dark on cream, as the design has it. */
+#td-band {
+    background: $foreground;
+    color: $background;
+    padding: 1 2;
+    height: auto;
+}
+
+#td-notes {
+    height: auto;
+    padding: 1 0 0 0;
+}
+
+#td-columns {
+    height: auto;
+    margin-top: 1;
+}
+
+.td-col {
+    width: 1fr;
+    height: auto;
+    margin-right: 4;
+}
+
+.td-col:last-child {
+    margin-right: 0;
+}
+
+.-narrow #td-columns {
+    layout: vertical;
+}
+
+.-narrow .td-col {
+    margin-right: 0;
+    margin-bottom: 1;
+}
+
+#td-account, #td-rule, #td-copying {
+    height: auto;
+}
+
+/* Each order's delay, oldest first: blue, turning red toward the slowest. */
+#td-latency {
+    height: 3;
+    margin-top: 1;
+    border-top: solid $panel;
+    border-title-color: $text-muted;
+    border-title-align: left;
+}
+
+#td-latency > .sparkline--min-color {
+    color: $secondary;
+}
+
+#td-latency > .sparkline--max-color {
+    color: $error;
+}
+
+#td-positions-head {
+    margin-top: 2;
+}
+
+#td-positions {
+    background: $background;
+    border: none;
+    height: auto;
+}
+
+#td-positions:focus {
+    background-tint: $foreground 0%;
+}
+
+#td-positions > .datatable--header {
+    background: $background;
+}
+
+#td-positions > .datatable--cursor {
+    background: $foreground;
+    color: $background;
+}
+
+#td-positions > .datatable--hover {
+    background: $foreground 10%;
+}

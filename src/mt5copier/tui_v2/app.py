@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import time
 
-from rich.box import Box
 from rich.table import Table
 from rich.text import Text
 from textual import events, on
@@ -46,6 +45,7 @@ from ..presentation import read_log_tail
 from ..protocol import WorkerState
 from ..tui.app import CopierApp
 from . import cards
+from .detail import DetailScreen
 from .menu import ActionMenu, terminal_actions
 from .style import (
     BG,
@@ -55,6 +55,7 @@ from .style import (
     FG,
     MUTED,
     RED,
+    RULED,
     THEME,
     YELLOW,
     badge,
@@ -74,9 +75,6 @@ _PAGES = ("map", "log")
 
 _LOG_LINES = 500
 """How much of ``copier.log`` the log page reads, as the classic page does."""
-
-_RULED = Box("    \n    \n    \n    \n────\n    \n    \n    \n")
-"""No borders, only a rule between rows, as the design's day book has."""
 
 
 class NewCopierApp(CopierApp):
@@ -185,7 +183,29 @@ class NewCopierApp(CopierApp):
         self._refresh_frame()
 
     def action_next_page(self) -> None:
+        if self._detail() is not None:
+            # From a terminal's details, tab goes on to the log, as the tabs over it read.
+            self.pop_screen()
+            self.action_show_page("log")
+            return
         self.action_show_page(_PAGES[(_PAGES.index(self._page) + 1) % len(_PAGES)])
+
+    # --- the details page -------------------------------------------------------------------
+
+    def action_open_terminal(self) -> None:
+        """Open the selected terminal's details page. Esc on that page comes back here."""
+        tid = self._selected_id()
+        if tid is None:
+            return
+        detail = self._detail()
+        if detail is not None:
+            detail.show(tid)
+            return
+        self.push_screen(DetailScreen(self._engine, self._cfg, tid))
+
+    def _detail(self) -> DetailScreen | None:
+        """The details page, if it is the screen showing."""
+        return self.screen if isinstance(self.screen, DetailScreen) else None
 
     # --- selection --------------------------------------------------------------------------
 
@@ -203,19 +223,34 @@ class NewCopierApp(CopierApp):
             self._refresh_frame()
 
     def action_step(self, delta: int) -> None:
-        if self._page != "map" or not self._order:
+        """The next terminal along: on the Map, the next card; on a details page, the next
+        terminal's details."""
+        detail = self._detail()
+        if (self._page != "map" and detail is None) or not self._order:
             return
         at = self._order.index(self._sel) if self._sel in self._order else -delta
         self._select(self._order[(at + delta) % len(self._order)])
+        if detail is not None and self._sel is not None:
+            detail.show(self._sel)
 
     def action_jump(self, number: int) -> None:
         """``a`` is the master's card and 1-9 the slaves', by the number each card shows. On
-        the log page the same keys pick the one terminal to show, and again to show them all."""
+        the log page the same keys pick the one terminal to show, and again to show them all;
+        on a details page, they show that terminal's details."""
+        detail = self._detail()
+        if detail is not None:
+            self._jump_to(number)
+            if self._sel is not None:
+                detail.show(self._sel)
+            return
         if self._page == "log":
             self._filter_log_to(number)
             return
         if self._page != "map":
             return
+        self._jump_to(number)
+
+    def _jump_to(self, number: int) -> None:
         if number == 0:
             master = self._cfg.master
             if master is not None:
@@ -240,9 +275,13 @@ class NewCopierApp(CopierApp):
     def action_menu(self) -> None:
         """Open the selected terminal's action menu beside its card or chip."""
         tid = self._sel
-        if self._page != "map" or tid is None or tid not in self._cfg.terminals:
+        detail = self._detail()
+        if (self._page != "map" and detail is None) or tid is None:
             return
-        anchor = self._anchor(tid)
+        if tid not in self._cfg.terminals:
+            return
+        # On a details page the menu hangs off its band, and leaves out the details themselves.
+        anchor = detail.menu_anchor() if detail is not None else self._anchor(tid)
         if anchor is None:
             return
         cfg = self._cfg.terminals[tid]
@@ -258,6 +297,8 @@ class NewCopierApp(CopierApp):
             not_a_demo=info is not None and info.demo_guard_blocked,
             link_ok=status == str(WorkerState.CONNECTED),
         )
+        if detail is not None:
+            items = [i for i in items if i.action != "open_terminal"]
 
         def chosen(action: str | None) -> None:
             if action is not None:
@@ -439,15 +480,23 @@ class NewCopierApp(CopierApp):
         self._refresh_keybar()
 
     def _refresh_topbar(self) -> None:
+        self.query_one("#topbar", TopBar).update(self.topbar())
+
+    def topbar(self, crumb: str | None = None) -> Table:
+        """MT5 COPIER, the page tabs, and what the copier is doing. ``crumb`` is the terminal
+        whose details page is open, shown after the Map tab it was opened from."""
         left = Text()
         left.append(spaced("MT5") + "   " + spaced("Copier"), style=f"bold {FG}")
         left.append("    ")
         for page, label in (("map", "Map"), ("log", "Log")):
-            if page == self._page:
+            if (page == "map") if crumb is not None else (page == self._page):
                 left.append(f" {label} ", style=f"bold {BG} on {FG}")
             else:
                 left.append(f" {label} ", style=MUTED)
             left.append(" ")
+            if page == "map" and crumb is not None:
+                left.append(f"› {crumb}", style=f"bold {FG}")
+                left.append("   ")
 
         right = Text()
         for alert in self._alerts():
@@ -461,7 +510,7 @@ class NewCopierApp(CopierApp):
             right.append("Not copying", style=MUTED)
         right.append(f"   {time.strftime('%H:%M:%S')}   ", style=MUTED)
         right.append_text(badge("DRY RUN", YELLOW) if self._cfg.dry_run else badge("LIVE", RED))
-        self.query_one("#topbar", TopBar).update(left_right(left, right))
+        return left_right(left, right)
 
     def _alerts(self) -> list[str]:
         """What the classic status bar shouts about, kept: none of it may go unsaid."""
@@ -512,10 +561,14 @@ class NewCopierApp(CopierApp):
             keys.append(key_hint("enter", "open that terminal"))
             keys.append(key_hint("tab", "map"))
         keys.append(key_hint("?", "all keys"))
+        self.query_one("#keybar", KeyBar).update(self.keybar(keys))
 
+    @staticmethod
+    def keybar(keys: list[Text]) -> Table:
+        """A page's keys on the left, with panic and quit kept to the right on every page."""
         left = Text("  ").join(keys)
         right = Text("  ").join([key_hint("F9", "panic halt", color=RED), key_hint("q", "quit")])
-        self.query_one("#keybar", KeyBar).update(left_right(left, right))
+        return left_right(left, right)
 
     def _refresh_daybook(self) -> None:
         """The master's newest trades, newest first, each with what every slave made of it.
@@ -536,7 +589,7 @@ class NewCopierApp(CopierApp):
             return
         numbers = {tid: n for n, tid in enumerate(self._slave_ids(), start=1)}
         table = Table(
-            box=_RULED,
+            box=RULED,
             show_header=False,
             show_edge=False,
             show_lines=True,
