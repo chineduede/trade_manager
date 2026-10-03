@@ -1,0 +1,150 @@
+/* The new UI: cream on warm near-black. Colours are the theme's (see style.py). */
+
+Screen {
+    background: $background;
+    color: $foreground;
+    padding: 0 2;
+}
+
+#topbar {
+    height: 2;
+    padding-top: 1;
+}
+
+#pages {
+    height: 1fr;
+    border-top: double $foreground;
+}
+
+#keybar {
+    height: 1;
+    border-top: solid $panel;
+    height: 2;
+}
+
+.heading {
+    text-style: bold;
+    border-bottom: solid $foreground;
+    height: 2;
+}
+
+.hint {
+    color: $text-muted;
+    padding: 1 0;
+}
+
+/* --- map ----------------------------------------------------------------------------------- */
+
+#page-map {
+    padding-top: 1;
+    scrollbar-size-vertical: 1;
+}
+
+.card {
+    border: solid $foreground;
+    padding: 1 2;
+    height: auto;
+}
+
+/* Slave cards in rows of four (two when narrow), as the design has them: one slave is a
+   quarter-width card, not a banner. Rows are a fixed height so the trunk beside them can be
+   drawn the full height of the row. */
+#slaves {
+    height: auto;
+}
+
+.slave-row {
+    height: 11;
+}
+
+.slave-row > .card,
+.slave-row > .slot {
+    width: 1fr;
+    height: 100%;
+    margin-right: 2;
+}
+
+.slave-row > .card:last-child,
+.slave-row > .slot:last-child {
+    margin-right: 0;
+}
+
+#slaves > .hint {
+    margin-top: 1;
+}
+
+.card.-paused {
+    border: dashed $foreground;
+}
+
+.card.-held,
+.card.-blocked {
+    border: dashed $error;
+}
+
+.card.-down {
+    border: dashed $panel;
+}
+
+/* Live: the master while it is being copied and each slave taking its trades, in the green of
+   the lines between them (see GREEN in style.py). */
+.card.master.-live,
+.card.-copying {
+    border: solid #7fbf6e;
+}
+
+/* The selected card: a wash of cream that the card shows through, not a solid fill. */
+.card.-selected {
+    background: $foreground 20%;
+}
+
+#lower {
+    height: auto;
+    margin-top: 2;
+}
+
+#daybook-col {
+    width: 3fr;
+    height: auto;
+    margin-right: 4;
+}
+
+#notyet-col {
+    width: 2fr;
+    height: auto;
+}
+
+.-narrow #lower {
+    layout: vertical;
+}
+
+.-narrow #daybook-col {
+    width: 1fr;
+    margin-right: 0;
+    margin-bottom: 1;
+}
+
+.-narrow #notyet-col {
+    width: 1fr;
+}
+
+#daybook {
+    height: auto;
+}
+
+#chips {
+    padding-top: 1;
+}
+
+#notyet-hint {
+    color: $text-muted;
+    padding-top: 1;
+}
+
+/* --- log ----------------------------------------------------------------------------------- */
+
+#log {
+    background: $background;
+    border: none;
+    padding-top: 1;
+}

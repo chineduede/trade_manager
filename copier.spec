@@ -30,6 +30,7 @@ datas = [
     *textual_datas,
     # Our own stylesheet, at the path CSS_PATH resolves to inside the bundle.
     ("src/mt5copier/tui/app.tcss", "mt5copier/tui"),
+    ("src/mt5copier/tui_v2/app.tcss", "mt5copier/tui_v2"),
 ]
 
 hiddenimports = [

@@ -1,0 +1,173 @@
+"""What each card on the Map says. Pure: a card's text is decided here and only drawn by the
+widgets, so the tests can pin it down without starting the app.
+
+A slave card answers, in this order: which one is it (its number, for the 1-9 keys), is it
+copying, how much is in it, how is it doing right now, and what is the one thing to press if
+something is wrong with it.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from rich.console import Group, RenderableType
+from rich.table import Table
+from rich.text import Text
+from textual.renderables.digits import Digits
+
+from ..config import SizingMode, TerminalConfig
+from ..engine import TerminalView
+from ..presentation import RowInfo, slave_badge
+from ..terminal_detail import format_ping, margin_gauge
+from .style import BLUE, GREEN, MUTED, RED, YELLOW, amount, badge, floating, left_right
+
+
+@dataclass(frozen=True, slots=True)
+class SlaveState:
+    kind: str
+    """One of "copying", "idle", "paused", "held", "blocked", "down": also the card's CSS
+    class, which picks its border."""
+    status: Text
+    """The top-right word or badge."""
+
+
+def margin_bar(fraction: float | None, width: int = 10) -> str:
+    """``#---------`` -- the design's margin bar, plain ASCII so it reads in any font."""
+    if fraction is None:
+        return "?" * width
+    filled = round(max(0.0, min(1.0, fraction)) * width)
+    return "#" * filled + "-" * (width - filled)
+
+
+def big_amount(value: float | None, width: int) -> RenderableType:
+    """A balance in the 3-row digits, which is as near as a terminal gets to the design's large
+    type -- or plain bold when the card is too narrow for them."""
+    text = amount(value)
+    if value is not None and 0 < Digits.get_width(text) <= width:
+        return Digits(text, style="bold")
+    return Text(text, style="bold")
+
+
+def risk_text(cfg: TerminalConfig, currency: str | None) -> str:
+    if cfg.sizing_mode is SizingMode.FIXED_CASH_RISK:
+        mark = "$" if (currency or "").upper() in ("USD", "AUD", "CAD", "NZD", "") else ""
+        return f"risk {mark}{cfg.risk_cash:,g}" + ("" if mark else f" {currency}")
+    return f"risk {cfg.risk_percent:g}%"
+
+
+def slave_state(info: RowInfo, *, dry_run: bool, copying: bool) -> SlaveState:
+    """The same priority order as the classic UI's :func:`slave_badge`: a link that is down
+    outranks the demo guard, which outranks a hold, which outranks a pause."""
+    # ``info.tier`` is the link's own state, raised from "good" to "warning" only by a hold: so
+    # a "warning" with no hold is a link still coming up.
+    if info.tier in ("serious", "critical", "muted") or (
+        info.tier == "warning" and info.hold_reason is None
+    ):
+        text, _ = slave_badge(info, dry_run)
+        color = {"muted": MUTED, "warning": YELLOW}.get(info.tier, RED)
+        return SlaveState("down", Text(text.lower(), style=f"bold {color}"))
+    if info.demo_guard_blocked:
+        return SlaveState("blocked", badge("HELD BACK", RED))
+    if info.hold_reason is not None:
+        return SlaveState("held", badge("HELD", RED))
+    if info.paused:
+        return SlaveState("paused", badge("PAUSED", BLUE))
+    if not copying:
+        return SlaveState("idle", Text("not copying", style=f"bold {MUTED}"))
+    if dry_run:
+        return SlaveState("copying", Text("dry run", style=f"bold {YELLOW}"))
+    return SlaveState("copying", Text("copying", style=f"bold {GREEN}"))
+
+
+def slave_card(
+    number: int,
+    view: TerminalView,
+    info: RowInfo,
+    state: SlaveState,
+    *,
+    refused: int,
+    width: int = 0,
+) -> RenderableType:
+    """``width`` is the card's inside width, which decides whether the balance fits in big
+    digits."""
+    cfg = view.cfg
+    title = Text(f"{number} · SLAVE", style="bold")
+    lines: list[RenderableType] = [
+        left_right(title, state.status),
+        Text(info.label, no_wrap=True, overflow="ellipsis"),
+        big_amount(info.balance, width),
+    ]
+    risk = risk_text(cfg, info.currency)
+    opened = "—" if info.open_trades is None else f"{info.open_trades} open"
+    if state.kind == "blocked":
+        said = "not a demo" + (f" · {refused} refused" if refused else "")
+        lines.append(Text(said, style=RED))
+        lines.append(_keyed("l", "allow live trading"))
+    elif state.kind == "held":
+        lines.append(
+            Text(info.hold_reason or "held", style=YELLOW, no_wrap=True, overflow="ellipsis")
+        )
+        lines.append(_keyed("o", "acknowledge"))
+    elif state.kind == "paused":
+        lines.append(floating(info.floating_pl))
+        line = Text(f"{risk} · ", style=MUTED)
+        line.append_text(_keyed("p", "resume"))
+        lines.append(line)
+    else:
+        lines.append(floating(info.floating_pl))
+        lines.append(Text(f"{risk} · {opened}", style=MUTED))
+    return Group(*lines)
+
+
+def master_card(
+    view: TerminalView, info: RowInfo, *, slaves: int, width: int = 0
+) -> RenderableType:
+    snap = view.snapshot
+    grid = Table.grid(expand=True, padding=(0, 3))
+    grid.add_column(no_wrap=True, vertical="middle")
+    grid.add_column(no_wrap=True, vertical="middle")
+    grid.add_column(no_wrap=True, ratio=1, vertical="middle")
+    grid.add_column(justify="right", no_wrap=True, vertical="middle")
+
+    if snap is not None and info.tier == "good":
+        link = Text("connected", style=BLUE)
+        ping = format_ping(snap.ping_last_us)
+        if ping != "—":
+            link.append(f" · {ping}", style=BLUE)
+    else:
+        link = Text(info.status_text, style=f"bold {RED if info.tier != 'muted' else MUTED}")
+
+    if snap is not None:
+        gauge = margin_gauge(snap)
+        pct = "" if gauge.used_fraction is None else f" {gauge.used_fraction:.0%}"
+        margin = Text(f"margin {margin_bar(gauge.used_fraction)}{pct}", style=MUTED)
+    else:
+        margin = Text("margin —", style=MUTED)
+
+    trades = info.open_trades
+    trade_word = "—" if trades is None else f"{trades} trade{'s' if trades != 1 else ''} open"
+    feeds = f"feeds {slaves} slave{'s' if slaves != 1 else ''}"
+
+    # The big balance only when the rest still fits beside it: about 70 columns of text.
+    grid.add_row(
+        Group(Text("A · MASTER", style="bold"), Text(info.label, no_wrap=True)),
+        big_amount(info.balance, max(0, width - 75)),
+        Group(floating(info.floating_pl), margin),
+        Group(link, Text(f"{trade_word} · {feeds}", style=MUTED)),
+    )
+    return grid
+
+
+def no_master_card() -> RenderableType:
+    return Group(
+        Text("A · MASTER", style="bold"),
+        Text("none yet: select a terminal under NOT YET OPENED and press m", style=MUTED),
+    )
+
+
+def _keyed(key: str, label: str) -> Text:
+    out = Text()
+    # No colour of its own: it takes the card's, red on a held-back card and cream elsewhere.
+    out.append(key, style="bold underline")
+    out.append(f" {label}")
+    return out

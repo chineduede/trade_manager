@@ -1,0 +1,513 @@
+"""The new UI's app: the classic :class:`CopierApp`, laid out as a map.
+
+Only presentation is replaced here. The classic app's actions all find their terminal through
+:meth:`_selected_id` and redraw through :meth:`_refresh`, so overriding those two (and the
+compose/mount that build the screen) is enough for every key to keep doing exactly what it
+did -- with the selected card standing in for the selected table row.
+
+Pages: MAP (the master's card, a card per slave joined to it, the day book and the terminals
+not yet given a role) and LOG. ``tab`` switches between them, because on the Map the number
+keys jump to slave cards.
+"""
+
+from __future__ import annotations
+
+import time
+
+from rich.text import Text
+from textual import events, on
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.widget import Widget
+from textual.widgets import ContentSwitcher, RichLog, Static
+
+from .. import config as config_mod
+from ..config import AppConfig, Role
+from ..discovery import discover_terminals
+from ..engine import TerminalView
+from ..logging_setup import get_logger
+from ..paths import config_path
+from ..tui.app import CopierApp
+from . import cards
+from .style import (
+    BG,
+    BLUE,
+    FG,
+    MUTED,
+    RED,
+    THEME,
+    YELLOW,
+    badge,
+    key_hint,
+    left_right,
+    spaced,
+)
+from .widgets import Card, ChipItem, Chips, KeyBar, Picked, Rail, TopBar, Trunk
+
+log = get_logger(__name__)
+
+_DAYBOOK_ROWS = 12
+
+_PAGES = ("map", "log")
+
+
+class NewCopierApp(CopierApp):
+    """:class:`CopierApp` with the redesigned layout. Launched by ``mt5copier --new-ui``."""
+
+    CSS_PATH = "app.tcss"
+    HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (120, "-wide")]
+
+    BINDINGS = [
+        Binding("tab", "next_page", "Map / Log", show=False, priority=True),
+        Binding("shift+tab", "next_page", "Map / Log", show=False, priority=True),
+        Binding("left", "step(-1)", "Previous card", show=False),
+        Binding("right", "step(1)", "Next card", show=False),
+        Binding("up", "step(-1)", "Previous card", show=False),
+        Binding("down", "step(1)", "Next card", show=False),
+        Binding("enter", "open_terminal", "Details", show=False),
+        Binding("a", "jump(0)", "Master card", show=False),
+        *(Binding(str(n), f"jump({n})", f"Slave {n}", show=False) for n in range(1, 10)),
+    ]
+
+    def __init__(self, cfg: AppConfig) -> None:
+        super().__init__(cfg)
+        self._page = "map"
+        self._sel: str | None = None
+        self._order: list[str] = []
+        """Terminal ids in the order the arrow keys walk them: master, slaves, unassigned."""
+        self._shape: tuple[object, ...] | None = None
+        self._cards: dict[str, Card] = {}
+        self._copying_to = 0
+        """Slaves copying as of the last redraw, for the top bar."""
+        self._kinds: dict[str, str] = {}
+        """Each slave's state as of the last redraw, for its drop in the tree."""
+        self._rails: list[Rail] = []
+        self._trunks: list[Trunk] = []
+        """One beside each row when there is more than one row, in order."""
+        self._per_row = 4
+
+    # --- composition ------------------------------------------------------------------------
+
+    def compose(self) -> ComposeResult:
+        yield TopBar("", id="topbar")
+        with ContentSwitcher(initial="page-map", id="pages"):
+            with VerticalScroll(id="page-map"):
+                yield Card("", classes="master")
+                yield Vertical(id="slaves")
+                with Horizontal(id="lower"):
+                    with Vertical(id="daybook-col"):
+                        yield Static("DAY BOOK", classes="heading")
+                        yield Static("", id="daybook")
+                    with Vertical(id="notyet-col"):
+                        yield Static("", id="notyet-title", classes="heading")
+                        yield Chips(id="chips")
+                        yield Static("", id="notyet-hint")
+            with Vertical(id="page-log"):
+                yield RichLog(id="log", wrap=False, markup=False, auto_scroll=True)
+        yield KeyBar("", id="keybar")
+
+    def on_mount(self, event: events.Mount | None = None) -> None:
+        # Textual calls ``on_mount`` on every class up the MRO; the classic one builds its table.
+        if event is not None:
+            event.prevent_default()
+        self.register_theme(THEME)
+        self.theme = THEME.name
+        self._engine.start()
+        self._rebuild_rows()
+        self.set_interval(0.5, self._on_timer)
+        self._refresh()
+
+    # The classic app's panels, which this layout does not have. Its handlers still call them
+    # -- a row highlighted in a detail page's table bubbles up to the classic ``_on_row`` --
+    # so they are made to do nothing rather than look for widgets that are not there.
+
+    def _refresh_detail(self) -> None:
+        pass
+
+    def _refresh_actions(self) -> None:
+        pass
+
+    def _refresh_statusbar(self) -> None:
+        pass
+
+    # --- pages ------------------------------------------------------------------------------
+
+    def action_show_page(self, page: str) -> None:
+        self._page = page
+        self.query_one("#pages", ContentSwitcher).current = f"page-{page}"
+        if page == "log":
+            self._log_stamp = None
+            self._refresh_log()
+            self.query_one("#log", RichLog).focus()
+        else:
+            self.screen.set_focus(None)
+        self._refresh_frame()
+
+    def action_next_page(self) -> None:
+        self.action_show_page(_PAGES[(_PAGES.index(self._page) + 1) % len(_PAGES)])
+
+    # --- selection --------------------------------------------------------------------------
+
+    def _selected(self) -> TerminalView | None:
+        if self._sel is None:
+            return None
+        return next((v for v in self._views() if v.cfg.terminal_id == self._sel), None)
+
+    def _select(self, tid: str | None) -> None:
+        self._sel = tid
+        if self._cards:
+            self._refresh()
+        else:
+            self._refresh_chips()
+            self._refresh_frame()
+
+    def action_step(self, delta: int) -> None:
+        if self._page != "map" or not self._order:
+            return
+        at = self._order.index(self._sel) if self._sel in self._order else -delta
+        self._select(self._order[(at + delta) % len(self._order)])
+
+    def action_jump(self, number: int) -> None:
+        """``a`` is the master's card and 1-9 the slaves', by the number each card shows."""
+        if self._page != "map":
+            return
+        if number == 0:
+            master = self._cfg.master
+            if master is not None:
+                self._select(master.terminal_id)
+            return
+        slaves = self._slave_ids()
+        if 1 <= number <= len(slaves):
+            self._select(slaves[number - 1])
+
+    def action_pick(self, tid: str) -> None:
+        if tid in self._cfg.terminals:
+            self._select(tid)
+
+    @on(Picked)
+    def _on_picked(self, event: Picked) -> None:
+        self.action_pick(event.terminal_id)
+
+    # --- building the map -------------------------------------------------------------------
+
+    def _groups(self) -> tuple[TerminalView | None, list[TerminalView], list[TerminalView]]:
+        views = self._views()
+        master = next((v for v in views if v.cfg.role is Role.MASTER), None)
+        slaves = [v for v in views if v.cfg.role is Role.SLAVE]
+        unassigned = [v for v in views if v.cfg.role is Role.UNASSIGNED]
+        return master, slaves, unassigned
+
+    def _rebuild_rows(self) -> None:
+        """Rebuild the cards. Only when who is master, slave or unassigned has changed.
+
+        The selection stays on the terminal it was on, so a key that moves a terminal from one
+        group to another leaves it selected where it landed -- as the classic table does.
+        """
+        master, slaves, unassigned = self._groups()
+        self._shape = self._shape_of(master, slaves, unassigned)
+        self._order = (
+            ([master.cfg.terminal_id] if master else [])
+            + [v.cfg.terminal_id for v in slaves]
+            + [v.cfg.terminal_id for v in unassigned]
+        )
+
+        master_card = self.query_one(".card.master", Card)
+        master_card.terminal_id = master.cfg.terminal_id if master else ""
+        area = self.query_one("#slaves", Vertical)
+        area.remove_children()
+        self._cards = {master_card.terminal_id: master_card} if master else {}
+        self._rails = []
+        self._trunks = []
+        self._per_row = self._cards_per_row()
+        rows = [slaves[i : i + self._per_row] for i in range(0, len(slaves), self._per_row)]
+        trunk = len(rows) > 1
+        widgets: list[Widget] = []
+        for n, chunk in enumerate(rows):
+            more = n < len(rows) - 1
+            cells: list[Widget] = []
+            if trunk:
+                beside = Trunk(more=more)
+                self._trunks.append(beside)
+                cells.append(beside)
+            for v in chunk:
+                card = Card(v.cfg.terminal_id, classes="slave")
+                self._cards[card.terminal_id] = card
+                cells.append(card)
+            # Empty slots keep a lone card a quarter wide rather than stretching it.
+            cells += [Static(classes="slot") for _ in range(self._per_row - len(chunk))]
+            row = Horizontal(*cells, classes="slave-row")
+            rail = Rail(row, first=n == 0, trunk=trunk, more=more)
+            self._rails.append(rail)
+            widgets += [rail, row]
+        if not rows:
+            widgets.append(Static(self._no_slaves_text(master is not None), classes="hint"))
+        area.mount(*widgets)
+
+        keep = self._sel if self._sel in self._order else (self._order[0] if self._order else None)
+        self._select(keep)
+
+    def _slave_ids(self) -> list[str]:
+        """Slaves in the order their cards are drawn and numbered -- which the 1-9 keys and the
+        day book must follow too. Not ``cfg.slaves``, which is in the order they were added."""
+        return [v.cfg.terminal_id for v in self._groups()[1]]
+
+    def _cards_per_row(self) -> int:
+        """Four slave cards to a row, as the design has them; two on a narrow terminal."""
+        return 2 if 0 < self.size.width < 120 else 4
+
+    @staticmethod
+    def _shape_of(
+        master: TerminalView | None, slaves: list[TerminalView], unassigned: list[TerminalView]
+    ) -> tuple[object, ...]:
+        return (
+            master.cfg.terminal_id if master else None,
+            tuple(v.cfg.terminal_id for v in slaves),
+            tuple(v.cfg.terminal_id for v in unassigned),
+        )
+
+    @staticmethod
+    def _no_slaves_text(has_master: bool) -> Text:
+        if has_master:
+            return Text(
+                "No slaves yet: select a terminal under NOT YET OPENED and press s.", style=MUTED
+            )
+        return Text("Assign a master first.", style=MUTED)
+
+    # --- drawing ----------------------------------------------------------------------------
+
+    def _refresh(self) -> None:
+        master, slaves, unassigned = self._groups()
+        if self._shape_of(master, slaves, unassigned) != self._shape:
+            self._rebuild_rows()
+        holds = self._engine.holds()
+        dry_run = self._cfg.dry_run
+        copying = self._cfg.copying_enabled
+
+        master_card = self.query_one(".card.master", Card)
+        master_up = False
+        if master is None:
+            master_card.update(cards.no_master_card())
+        else:
+            master_info = self._info(master, holds)
+            master_up = master.snapshot is not None and master_info.tier == "good"
+            master_card.update(
+                cards.master_card(
+                    master,
+                    master_info,
+                    slaves=len(slaves),
+                    width=master_card.content_size.width,
+                )
+            )
+        master_card.set_class(
+            master is not None and master.cfg.terminal_id == self._sel, "-selected"
+        )
+
+        if self._cards_per_row() != self._per_row:
+            self._rebuild_rows()
+        self._copying_to = 0
+        self._kinds = {}
+        for number, v in enumerate(slaves, start=1):
+            card = self._cards.get(v.cfg.terminal_id)
+            if card is None:
+                continue
+            info = self._info(v, holds)
+            state = cards.slave_state(info, dry_run=dry_run, copying=copying)
+            selected = v.cfg.terminal_id == self._sel
+            self._kinds[v.cfg.terminal_id] = state.kind
+            if state.kind == "copying":
+                self._copying_to += 1
+            refused = self._engine.terminal_stats(v.cfg.terminal_id).refused
+            card.update(
+                cards.slave_card(
+                    number, v, info, state, refused=refused, width=card.content_size.width
+                )
+            )
+            card.set_classes(f"card slave -{state.kind}" + (" -selected" if selected else ""))
+
+        # The master is live while it is up and at least one slave is taking its trades: its
+        # border then matches the lines running from it.
+        master_card.set_class(master_up and self._copying_to > 0, "-live")
+
+        self._refresh_daybook()
+        self._refresh_chips(unassigned)
+        self._refresh_frame()
+        self._refresh_tree()
+
+    def _refresh_tree(self) -> None:
+        """Hand each rail and trunk the slaves' states: its own row's, and those of the rows
+        below, which the trunk beside and under it leads on to."""
+        rows = [[self._kinds.get(t, "") for t in rail.terminal_ids()] for rail in self._rails]
+        for n, rail in enumerate(self._rails):
+            rail.kinds = self._kinds
+            rail.below = [k for row in rows[n + 1 :] for k in row]
+            rail.refresh()
+        for n, beside in enumerate(self._trunks):
+            beside.below = [k for row in rows[n + 1 :] for k in row]
+            beside.refresh()
+
+    def _refresh_frame(self) -> None:
+        self._refresh_topbar()
+        self._refresh_keybar()
+
+    def _refresh_topbar(self) -> None:
+        left = Text()
+        left.append(spaced("MT5") + "   " + spaced("Copier"), style=f"bold {FG}")
+        left.append("    ")
+        for page, label in (("map", "Map"), ("log", "Log")):
+            if page == self._page:
+                left.append(f" {label} ", style=f"bold {BG} on {FG}")
+            else:
+                left.append(f" {label} ", style=MUTED)
+            left.append(" ")
+
+        right = Text()
+        for alert in self._alerts():
+            right.append(alert, style=f"bold {RED}")
+            right.append("   ")
+        slaves = len(self._cfg.slaves)
+        if self._cfg.copying_enabled:
+            verb = "Dry run to" if self._cfg.dry_run else "Copying to"
+            right.append(f"{verb} {self._copying_to} of {slaves} slaves")
+        else:
+            right.append("Not copying", style=MUTED)
+        right.append(f"   {time.strftime('%H:%M:%S')}   ", style=MUTED)
+        right.append_text(badge("DRY RUN", YELLOW) if self._cfg.dry_run else badge("LIVE", RED))
+        self.query_one("#topbar", TopBar).update(left_right(left, right))
+
+    def _alerts(self) -> list[str]:
+        """What the classic status bar shouts about, kept: none of it may go unsaid."""
+        out: list[str] = []
+        blocked = self._engine.blocked_reason
+        if blocked is not None and self._cfg.copying_enabled:
+            out.append("DETECTION PAUSED")
+        lifted = [
+            t.label or t.terminal_id[:8]
+            for t in self._cfg.terminals.values()
+            if t.allow_live_trading
+        ]
+        if lifted:
+            out.append(f"NON-DEMO ALLOWED: {', '.join(lifted)}")
+        h = self._engine.health()
+        if h["stale"]:
+            out.append(f"STALE {h['stale']}")
+        if self._engine.holds():
+            out.append(f"HELD {len(self._engine.holds())}")
+        if self._engine.failed_total:
+            out.append(f"FAILED {self._engine.failed_total}")
+        return out
+
+    def _refresh_keybar(self) -> None:
+        keys: list[Text] = []
+        if self._page == "map":
+            sel = self._sel and self._cfg.terminals.get(self._sel)
+            keys.append(key_hint("←→", "card"))
+            if self._cfg.slaves:
+                count = min(len(self._cfg.slaves), 9)
+                keys.append(key_hint("1" if count == 1 else f"1-{count}", "jump"))
+            keys.append(key_hint("enter", "details"))
+            keys.append(key_hint("tab", "log"))
+            if sel and sel.role is Role.UNASSIGNED:
+                keys.append(
+                    key_hint(
+                        "m" if self._cfg.master is None else "s",
+                        "master" if self._cfg.master is None else "slave",
+                    )
+                )
+            if sel and sel.role is not Role.MASTER:
+                keys.append(key_hint("e", "settings"))
+            if sel and sel.role is Role.SLAVE:
+                keys.append(key_hint("p", "resume" if sel.paused else "pause"))
+            if sel and sel.role is not Role.UNASSIGNED:
+                keys.append(key_hint("u", "unassign"))
+            keys.append(
+                key_hint("d", "stop copying" if self._cfg.copying_enabled else "start copying")
+            )
+        else:
+            keys.append(key_hint("↑↓", "line"))
+            keys.append(key_hint("tab", "map"))
+        keys.append(key_hint("?", "all keys"))
+
+        left = Text("   ").join(keys)
+        right = Text("   ").join([key_hint("F9", "panic halt", color=RED), key_hint("q", "quit")])
+        self.query_one("#keybar", KeyBar).update(left_right(left, right))
+
+    def _refresh_daybook(self) -> None:
+        """The newest decisions, newest first. Skips are shown with their reason: a copier that
+        quietly does nothing looks the same as one that is broken."""
+        recorded = self._engine.recent_actions(limit=_DAYBOOK_ROWS)
+        panel = self.query_one("#daybook", Static)
+        if not recorded:
+            if self._cfg.copying_enabled:
+                hint = "Watching the master: nothing has happened yet."
+            elif self._cfg.master is None:
+                hint = "1. Select a terminal under NOT YET OPENED and press m for the master."
+            elif not self._cfg.slaves:
+                hint = "2. Select a terminal and press s to make it a slave."
+            else:
+                hint = "3. Press d to start copying."
+            panel.update(Text(hint, style=MUTED))
+            return
+        numbers = {tid: n for n, tid in enumerate(self._slave_ids(), start=1)}
+        lines: list[Text] = []
+        for rec in reversed(recorded):
+            a = rec.action
+            line = Text(time.strftime("%H:%M:%S", time.localtime(rec.ts)), style=MUTED)
+            line.append("  ")
+            number = numbers.get(a.terminal_id)
+            line.append(f"{number if number else '-'} ", style=FG)
+            line.append(f"{self._cfg.display_name(a.terminal_id)[:20]:<20}  ")
+            what = a.describe()
+            if not a.executable:
+                line.append(what, style=MUTED)
+            elif a.unprotected:
+                line.append(what, style=YELLOW)
+            else:
+                line.append(what, style=BLUE)
+            lines.append(line)
+        panel.update(Text("\n").join(lines))
+
+    def _refresh_chips(self, unassigned: list[TerminalView] | None = None) -> None:
+        if unassigned is None:
+            unassigned = self._groups()[2]
+        self.query_one("#notyet-title", Static).update(f"NOT YET OPENED · {len(unassigned)}")
+        self.query_one("#chips", Chips).set_items(
+            [
+                ChipItem(
+                    terminal_id=v.cfg.terminal_id,
+                    label=self._cfg.display_name(v.cfg.terminal_id),
+                    usable=v.cfg.exe_path is not None,
+                    selected=v.cfg.terminal_id == self._sel,
+                )
+                for v in unassigned
+            ]
+        )
+        hint = self.query_one("#notyet-hint", Static)
+        hint.display = bool(unassigned)
+        hint.update(self._notyet_hint())
+
+    def _notyet_hint(self) -> Text:
+        """Only the key that will work: ``m`` is refused while there is a master, and ``s``
+        while there is none."""
+        master = self._cfg.master
+        if master is None:
+            return Text("None is launched until entered as the master (m).", style=MUTED)
+        out = Text("None is launched until entered as a slave (s). ", style=MUTED)
+        out.append(
+            f"To change the master, first unassign {self._cfg.display_name(master.terminal_id)}"
+            " (a, then u).",
+            style=MUTED,
+        )
+        return out
+
+
+def run() -> None:
+    """Entry point for ``--new-ui``: the same start-up as the classic UI, then this app."""
+    cfg = config_mod.load()
+    try:
+        config_mod.merge_discovery(cfg, discover_terminals())
+        config_mod.save(cfg)
+    except Exception:
+        log.exception("initial discovery failed; starting with saved config only")
+    log.info("config at %s (new UI)", config_path())
+    NewCopierApp(cfg).run()

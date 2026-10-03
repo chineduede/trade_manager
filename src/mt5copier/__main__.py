@@ -38,6 +38,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="verify the MetaTrader5 extension can be imported, then exit",
     )
+    parser.add_argument(
+        "--new-ui",
+        action="store_true",
+        help="open the redesigned interface instead of the classic one",
+    )
     return parser.parse_args(argv)
 
 
@@ -103,7 +108,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        from .tui import run
+        if args.new_ui:
+            from .tui_v2 import run
+        else:
+            from .tui import run
 
         run()
     except KeyboardInterrupt:
