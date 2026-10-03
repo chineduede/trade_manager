@@ -723,3 +723,83 @@ async def test_the_menu_on_the_details_page_leaves_out_the_details(
         await pilot.press("p")
         await pilot.pause()
         assert cfg.terminals[TID_SLAVE].paused, "the shown terminal is the one acted on"
+
+
+# --- the questions that guard money --------------------------------------------------------
+
+
+def test_unassigning_the_master_says_its_slaves_go_too() -> None:
+    from mt5copier.tui_v2.dialogs import letters_to_go, unassign_lead
+
+    assert unassign_lead(Role.MASTER, 4, 2) == (
+        "It is the master, so its 4 slaves are released too. Two of them hold open copies:"
+    )
+    assert unassign_lead(Role.MASTER, 1, 1) == (
+        "It is the master, so its 1 slave is released too. It holds open copies:"
+    )
+    assert unassign_lead(Role.SLAVE, 3, 1) == "It holds open copies:"
+    assert letters_to_go("VT Markets (P", "VT Markets (Pty)").plain == "3 letters to go"
+    assert letters_to_go(" vt markets (pty) ", "VT Markets (Pty)").plain == "that is the name"
+    assert letters_to_go("VX", "VT Markets (Pty)").plain == "not the name"
+
+
+async def test_unassigning_with_open_copies_asks_in_the_new_dialog(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    from mt5copier.reconcile import OpenCopy
+    from mt5copier.tui_v2.dialogs import OrphanDialog
+
+    cfg.terminals[TID_MASTER].role = Role.MASTER
+    cfg.terminals[TID_SLAVE].role = Role.SLAVE
+    async with app.run_test(size=(200, 50)) as pilot:
+        app._engine.copies[TID_SLAVE] = [  # type: ignore[attr-defined]
+            OpenCopy(
+                master_ticket=11, slave_ticket=501, symbol="BTCUSD", volume=3.11, resting=False
+            )
+        ]
+        await pilot.press("a", "u")
+        await pilot.pause()
+        dialog = app.screen
+        assert isinstance(dialog, OrphanDialog)
+        said = " ".join(plain(s.content, width=200) for s in dialog.query(Static))
+        assert "UNASSIGN ALPHA BROKER?" in said
+        assert "1 Beta Broker" in said and "BTCUSD 3.11 lots" in said and "#501" in said
+        assert dialog.focused is not None and dialog.focused.id == "cancel", "rests on keep"
+
+        await pilot.press("escape")
+        assert cfg.terminals[TID_MASTER].role is Role.MASTER, "esc keeps everything"
+        await pilot.press("u")
+        await pilot.pause()
+        await pilot.click("#go")
+        await pilot.pause()
+        assert cfg.terminals[TID_MASTER].role is Role.UNASSIGNED
+
+
+async def test_allowing_live_trading_counts_down_the_name(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    from textual.widgets import Button
+
+    from mt5copier.tui_v2.dialogs import LiveDialog
+
+    cfg.terminals[TID_MASTER].role = Role.MASTER
+    cfg.terminals[TID_SLAVE].role = Role.SLAVE
+    async with app.run_test(size=(200, 50)) as pilot:
+        await pilot.press("1", "l")
+        await pilot.pause()
+        dialog = app.screen
+        assert isinstance(dialog, LiveDialog)
+        go = dialog.query_one("#go", Button)
+        assert go.has_class("-waiting")
+        await pilot.press(*"Beta")
+        assert "letters to go" in plain(dialog.query_one("#to-go", Static).content)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not cfg.terminals[TID_SLAVE].allow_live_trading, "half a name is refused"
+        assert "not the name" in plain(dialog.query_one("#error", Static).content)
+        await pilot.press(*" Broker")
+        assert not go.has_class("-waiting")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].allow_live_trading
+        assert not isinstance(app.screen, LiveDialog)

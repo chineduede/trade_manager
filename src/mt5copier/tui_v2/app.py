@@ -46,6 +46,7 @@ from ..protocol import WorkerState
 from ..tui.app import CopierApp
 from . import cards
 from .detail import DetailScreen
+from .dialogs import LiveDialog, OrphanDialog
 from .menu import ActionMenu, terminal_actions
 from .style import (
     BG,
@@ -81,6 +82,8 @@ class NewCopierApp(CopierApp):
     """:class:`CopierApp` with the redesigned layout. Launched by ``mt5copier --new-ui``."""
 
     CSS_PATH = "app.tcss"
+    ORPHAN_SCREEN = OrphanDialog
+    LIVE_OVERRIDE_SCREEN = LiveDialog
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (120, "-wide")]
 
     BINDINGS = [

@@ -238,6 +238,11 @@ class CopierApp(App[None]):
     TITLE = "MT5 Trade Copier"
     SUB_TITLE = "Stage 2c - live copying"
 
+    # The dialogs that guard open copies and the demo-only guard. Named here so the new UI can
+    # draw them its own way; what they ask, and what is done with the answer, stays theirs.
+    ORPHAN_SCREEN: type[OrphanConfirmScreen] = OrphanConfirmScreen
+    LIVE_OVERRIDE_SCREEN: type[LiveOverrideScreen] = LiveOverrideScreen
+
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (110, "-wide")]
     """Below 110 columns the sidebar goes, so the table keeps the width."""
 
@@ -808,7 +813,7 @@ class CopierApp(App[None]):
                 self._commit_unassign(tid, stake)
 
         self.push_screen(
-            OrphanConfirmScreen(
+            self.ORPHAN_SCREEN(
                 copies=self._by_name(stake),
                 changes=change,
                 live=not self._cfg.dry_run,
@@ -922,7 +927,7 @@ class CopierApp(App[None]):
         if tid is None:
             return
         self.push_screen(
-            LiveOverrideScreen(
+            self.LIVE_OVERRIDE_SCREEN(
                 current=lambda: self._cfg.terminals[tid],
                 apply=self._apply_settings,
                 halt=self.action_panic,
@@ -962,7 +967,7 @@ class CopierApp(App[None]):
                 done(self._commit_settings(new, outcome, stake))
 
         self.push_screen(
-            OrphanConfirmScreen(
+            self.ORPHAN_SCREEN(
                 copies=self._by_name(stake),
                 changes=describe_changes(outcome.changes, limit=160),
                 live=not self._cfg.dry_run,

@@ -297,3 +297,107 @@ ActionMenu OptionList:focus > .option-list--option-highlighted {
 #td-positions > .datatable--hover {
     background: $foreground 10%;
 }
+
+/* --- the questions that guard money -------------------------------------------------------- */
+
+/* Screens of their own, so they would take the Screen rule at the top: solid and padded. They
+   dim what is under them instead, and sit in the middle of it. */
+OrphanDialog,
+LiveDialog {
+    background: #0c0b09 80%;
+    padding: 0;
+    align: center middle;
+}
+
+OrphanDialog #dialog,
+LiveDialog #dialog {
+    width: 96;
+    max-width: 100%;
+    height: auto;
+    max-height: 100%;
+    border: double $error;
+    background: $background;
+    padding: 1 4;
+    scrollbar-size-vertical: 1;
+}
+
+.dialog Static {
+    margin-top: 1;
+    height: auto;
+}
+
+.dialog .dialog-title {
+    margin-top: 0;
+    border-bottom: solid $error;
+}
+
+.dialog #copies {
+    margin-top: 1;
+}
+
+.dialog #typed-box {
+    height: 3;
+    margin-top: 1;
+    border: solid $foreground;
+    padding: 0 1;
+}
+
+.dialog #typed-box Input,
+.dialog #typed-box Input:focus {
+    width: 1fr;
+    background: $background;
+    background-tint: $foreground 0%;
+    border: none;
+    padding: 0;
+}
+
+.dialog #typed-box #to-go {
+    width: auto;
+    margin: 0 0 0 2;
+}
+
+.dialog #error {
+    color: $error;
+}
+
+.dialog #buttons {
+    height: auto;
+    margin-top: 1;
+    padding-top: 1;
+    border-top: solid $foreground;
+    align-horizontal: right;
+}
+
+.dialog Button {
+    height: 3;
+    min-width: 16;
+    margin-left: 3;
+    text-style: bold;
+}
+
+.dialog Button.keep {
+    background: $foreground;
+    color: $background;
+    border: none;
+    content-align: center middle;
+}
+
+.dialog Button.danger {
+    background: $background;
+    color: $error;
+    border: solid $error;
+}
+
+/* Not yet: the name is not typed in full. Still pressable, to be told why not. */
+.dialog Button.danger.-waiting {
+    color: $text-muted;
+    border: dashed $panel;
+}
+
+.dialog Button:focus {
+    text-style: bold underline;
+}
+
+.dialog Button:hover {
+    text-style: bold underline;
+}
