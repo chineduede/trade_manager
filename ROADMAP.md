@@ -1145,7 +1145,7 @@ favour of making the TUI simpler and better-looking.
 model; `AppConfig`'s one-master rule and `Engine._reconcile()`'s single `self._cfg.master` read
 are the design, not a limitation waiting to be lifted.
 
-- **Terminal detail page — planned and built 2026-10-02; needs a demo run.** More detail per terminal, so it can be
+- **Terminal detail page — planned and built 2026-10-02, demo-verified 2026-10-03 by the user.** More detail per terminal, so it can be
   shown visually. The user's choices: live per-position P/L, risk/margin gauges, and copy-health
   stats (equity history was not picked). They live on **a new per-terminal page** (Enter on a
   terminal row opens it; Esc goes back), and the history is **kept for the session only**, in
