@@ -994,3 +994,86 @@ async def test_the_settings_form_names_the_copiers_mode_not_the_accounts(
         said = plain(app.screen.query_one("#st-mode", Static).content)
         assert said.startswith("LIVE COPYING · orders are being sent.")
         assert "next trade the master opens" in said
+
+
+async def test_g_opens_the_copiers_settings_and_saves_the_timing(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    from textual.widgets import Input
+
+    from mt5copier.tui_v2.general import GeneralForm
+
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.press("g")
+        await pilot.pause()
+        form = app.screen
+        assert isinstance(form, GeneralForm)
+        form.query_one("#f-poll_interval_ms", Input).value = "500"
+        form.query_one("#f-join_grace_seconds", Input).value = "9"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert isinstance(app.screen, GeneralForm), "a bad value keeps the form open"
+        assert "at most 5" in plain(form.query_one("#e-join_grace_seconds", Static).content)
+        assert cfg.poll_interval_ms == 250, "nothing is saved while anything is wrong"
+
+        form.query_one("#f-join_grace_seconds", Input).value = "3"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert not isinstance(app.screen, GeneralForm)
+        assert (cfg.poll_interval_ms, cfg.join_grace_seconds) == (500, 3.0)
+
+
+async def test_going_live_needs_copying_stopped_and_live_typed(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    from mt5copier.tui_v2.dialogs import GoLiveDialog
+    from mt5copier.tui_v2.general import GeneralForm
+    from mt5copier.tui_v2.settings import Choice
+
+    cfg.copying_enabled = True
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.press("g")
+        await pilot.pause()
+        form = app.screen
+        assert isinstance(form, GeneralForm)
+        form.query_one("#f-dry_run", Choice).value = "live"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert isinstance(app.screen, GeneralForm), "refused while copying runs"
+        assert "stop it with d" in plain(form.query_one("#e-dry_run", Static).content)
+        assert cfg.dry_run
+
+        cfg.copying_enabled = False
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert isinstance(app.screen, GoLiveDialog)
+        await pilot.press(*"LIV", "enter")
+        await pilot.pause()
+        assert isinstance(app.screen, GoLiveDialog), "half the word does nothing"
+        await pilot.press("escape")
+        await pilot.pause()
+        assert isinstance(app.screen, GeneralForm) and cfg.dry_run, "esc keeps the dry run"
+
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        await pilot.press(*"live", "enter")
+        await pilot.pause()
+        assert not isinstance(app.screen, GeneralForm | GoLiveDialog)
+        assert cfg.dry_run is False
+        assert not cfg.copying_enabled, "going live does not start copying"
+
+
+async def test_going_back_to_a_dry_run_is_one_save(app: NewCopierApp, cfg: AppConfig) -> None:
+    from mt5copier.tui_v2.general import GeneralForm
+    from mt5copier.tui_v2.settings import Choice
+
+    cfg.dry_run = False
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.press("g")
+        await pilot.pause()
+        form = app.screen
+        assert isinstance(form, GeneralForm)
+        form.query_one("#f-dry_run", Choice).value = "dry"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert cfg.dry_run

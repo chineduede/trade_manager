@@ -163,18 +163,27 @@ class Choice(Widget, can_focus=True):
         self.refresh()
 
 
-def _words(text: str) -> Static:
+def words(text: str) -> Static:
     """Words between two values, a space either side of them."""
     return Static(f" {text} ", classes="w")
 
 
-def _lead(text: str) -> Static:
+def lead(text: str) -> Static:
     """The words a line starts with."""
     return Static(f"{text} ", classes="w")
 
 
-def _rows(*parts: Widget, classes: str = "") -> Horizontal:
+def rows(*parts: Widget, classes: str = "") -> Horizontal:
     return Horizontal(*parts, classes=f"line {classes}".strip())
+
+
+def section(title: str, *body: Widget) -> Horizontal:
+    """A ruled-off section: its name on the left, its sentences beside it."""
+    return Horizontal(
+        Static(title.upper(), classes="sect-name"),
+        Vertical(*body, classes="sect-body"),
+        classes="sect",
+    )
 
 
 def _trades(master_positions: list[MasterTrade], events_: list[MasterEvent]) -> list[MasterTrade]:
@@ -199,6 +208,8 @@ def _trades(master_positions: list[MasterTrade], events_: list[MasterEvent]) -> 
 
 class SettingsForm(SettingsScreen):
     """One slave's settings, written out as sentences."""
+
+    DEFAULT_CLASSES = "form-screen"
 
     @property
     def copier(self) -> NewCopierApp:
@@ -305,13 +316,6 @@ class SettingsForm(SettingsScreen):
         right.append_text(kind)
         return Horizontal(Static(title, id="st-title"), Static(right, id="st-where"), id="st-head")
 
-    def _section(self, title: str, *body: Widget) -> Horizontal:
-        return Horizontal(
-            Static(title.upper(), classes="sect-name"),
-            Vertical(*body, classes="sect-body"),
-            classes="sect",
-        )
-
     def compose(self) -> ComposeResult:
         cfg = self._current()
         self._gather(cfg)
@@ -338,30 +342,30 @@ class SettingsForm(SettingsScreen):
             yield self._header(cfg)
             yield Static(mode, id="st-mode")
 
-            yield self._section(
+            yield section(
                 "size",
-                _rows(
-                    _lead("Risk"),
+                rows(
+                    lead("Risk"),
                     self._input("risk_percent", v["risk_percent"], "n6"),
                     self._input("risk_cash", v["risk_cash"], "n10"),
                     self._select("sizing_mode", _SIZING, str(v["sizing_mode"])),
-                    _words("on each trade, over the master's stop distance."),
+                    words("on each trade, over the master's stop distance."),
                 ),
-                _rows(
-                    _lead("Allow"),
+                rows(
+                    lead("Allow"),
                     self._input(
                         "commission_per_lot_round_turn", v["commission_per_lot_round_turn"], "n8"
                     ),
-                    _words("commission per lot, in and out, and"),
+                    words("commission per lot, in and out, and"),
                     self._input("slippage_buffer_points", v["slippage_buffer_points"], "n5"),
-                    _words("points of slippage."),
+                    words("points of slippage."),
                 ),
-                _rows(
-                    _lead("Open at most"),
+                rows(
+                    lead("Open at most"),
                     self._input("max_lot", v["max_lot"], "n12"),
-                    _words("lots. Accept a fill up to"),
+                    words("lots. Accept a fill up to"),
                     self._input("max_deviation_points", v["max_deviation_points"], "n5"),
-                    _words("points off the quote."),
+                    words("points off the quote."),
                 ),
                 *self._errors(
                     "sizing_mode",
@@ -373,24 +377,24 @@ class SettingsForm(SettingsScreen):
                     "max_deviation_points",
                 ),
             )
-            yield self._section(
+            yield section(
                 "no stop",
-                _rows(
-                    _lead("When the master's trade has no stop:"),
+                rows(
+                    lead("When the master's trade has no stop:"),
                     self._select("no_stop_policy", _NO_STOP, str(v["no_stop_policy"])),
                     Horizontal(
                         self._input("no_stop_lot_multiple", v["no_stop_lot_multiple"], "n6"),
-                        _words("× the master's lots, unprotected."),
+                        words("× the master's lots, unprotected."),
                         id="multiple-part",
                         classes="part",
                     ),
                 ),
                 *self._errors("no_stop_policy", "no_stop_lot_multiple"),
             )
-            yield self._section(
+            yield section(
                 "follow",
-                _rows(
-                    _lead("Also copy the master's"),
+                rows(
+                    lead("Also copy the master's"),
                     Tick(
                         "stop and target moves",
                         value=bool(v["copy_sltp"]),
@@ -412,36 +416,36 @@ class SettingsForm(SettingsScreen):
                 ),
                 *self._errors("copy_sltp", "copy_partials", "copy_pending"),
             )
-            yield self._section(
+            yield section(
                 "direction",
-                _rows(
-                    _lead("Trade"),
+                rows(
+                    lead("Trade"),
                     self._select("invert", _DIRECTION, "opposite" if cfg.invert else "same"),
                 ),
                 *self._errors("invert"),
             )
-            yield self._section(
+            yield section(
                 "breakeven",
-                _rows(
-                    _lead("Move the stop past entry:"),
+                rows(
+                    lead("Move the stop past entry:"),
                     self._select("breakeven_mode", _BREAKEVEN, str(v["breakeven_mode"])),
                     Horizontal(
                         self._input("breakeven_trigger_r", v["breakeven_trigger_r"], "n5"),
-                        _words("R in profit."),
+                        words("R in profit."),
                         id="trigger-part",
                         classes="part",
                     ),
                 ),
                 *self._errors("breakeven_mode", "breakeven_trigger_r"),
             )
-            yield self._section(
+            yield section(
                 "symbols",
-                _rows(
-                    _lead("Prefix"),
+                rows(
+                    lead("Prefix"),
                     self._input("symbol_prefix", v["symbol_prefix"], "n6"),
-                    _words("suffix"),
+                    words("suffix"),
                     self._input("symbol_suffix", v["symbol_suffix"], "n6"),
-                    _words("renamed"),
+                    words("renamed"),
                     Input(
                         value=renames,
                         id=f"{_F}symbol_map",
@@ -450,10 +454,10 @@ class SettingsForm(SettingsScreen):
                         classes="grow",
                     ),
                 ),
-                _rows(
-                    _lead("Only copy"),
+                rows(
+                    lead("Only copy"),
                     self._input("symbol_whitelist", v["symbol_whitelist"], "grow"),
-                    _words("never copy"),
+                    words("never copy"),
                     self._input("symbol_blacklist", v["symbol_blacklist"], "grow"),
                 ),
                 *self._errors(

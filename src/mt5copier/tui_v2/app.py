@@ -47,6 +47,7 @@ from ..tui.app import CopierApp
 from . import cards
 from .detail import DetailScreen
 from .dialogs import LiveDialog, OrphanDialog
+from .general import GeneralForm
 from .menu import ActionMenu, terminal_actions
 from .settings import SettingsForm
 from .style import (
@@ -98,6 +99,7 @@ class NewCopierApp(CopierApp):
         Binding("enter", "open_terminal", "Details", show=False),
         Binding("f", "log_problems", "Problems only", show=False),
         Binding("space", "menu", "Actions", show=False),
+        Binding("g", "general_settings", "Copier settings", show=False),
         Binding("a", "jump(0)", "Master card", show=False),
         *(Binding(str(n), f"jump({n})", f"Slave {n}", show=False) for n in range(1, 10)),
     ]
@@ -175,6 +177,10 @@ class NewCopierApp(CopierApp):
         pass
 
     # --- pages ------------------------------------------------------------------------------
+
+    def action_general_settings(self) -> None:
+        """The copier's own settings: its mode, connection timing and join grace."""
+        self.push_screen(GeneralForm(), lambda _saved: self._refresh())
 
     def action_show_page(self, page: str) -> None:
         self._page = page
@@ -563,6 +569,7 @@ class NewCopierApp(CopierApp):
             keys.append(
                 key_hint("d", "stop copying" if self._cfg.copying_enabled else "start copying")
             )
+            keys.append(key_hint("g", "copier settings"))
         else:
             keys.append(key_hint("↑↓", "line"))
             keys.append(key_hint("f", "everything" if self._log_problems else "problems only"))

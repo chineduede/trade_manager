@@ -1,24 +1,28 @@
-"""The two questions that guard money, in the new look: giving up open copies (unassigning, or
-a settings change), and lifting the demo-only guard.
+"""The questions that guard money, in the new look: giving up open copies (unassigning, or a
+settings change), lifting the demo-only guard, and switching the copier from a dry run to live.
 
-Each is the classic dialog with its drawing replaced. What is asked, what has to be typed, and
-what is done with the answer all stay the classic screen's -- the buttons, the text box and the
-error line keep their ids, so its handlers find them -- and only ``compose`` is new here.
+The first two are the classic dialogs with their drawing replaced. What is asked, what has to
+be typed, and what is done with the answer all stay the classic screen's -- the buttons, the
+text box and the error line keep their ids, so its handlers find them -- and only ``compose`` is
+new here. The last is new: the classic UI has no way to change the mode at all.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 from rich.table import Table
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
+from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Static
 
 from ..config import Role, SizingMode, TerminalConfig
+from ..general_edit import LIVE_WORD
 from ..protocol import ACCOUNT_TRADE_MODE_DEMO, PositionType, Snapshot
 from ..reconcile import OpenCopy
 from ..settings_edit import live_override_phrase
@@ -283,3 +287,97 @@ class LiveDialog(LiveOverrideScreen):
         matches = event.value.strip().casefold() == phrase.casefold()
         self.query_one("#go", Button).set_class(not matches, "-waiting")
         self._show_error("")
+
+
+# --- the copier going live -----------------------------------------------------------------------
+
+
+class GoLiveDialog(ModalScreen[str | None]):
+    """Before the copier is switched from a dry run to sending real orders.
+
+    Dismisses with what was typed when it is ``LIVE``, which the form then saves with, or None
+    when the person backs out. Copying is stopped by the time this opens -- the form refuses a
+    change of mode otherwise -- so nothing is sent until ``d`` is pressed.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Keep the dry run"),
+        Binding("f9", "panic", "PANIC halt"),
+    ]
+
+    def __init__(self, slaves: Sequence[str], halt: Callable[[], None]) -> None:
+        super().__init__()
+        self._slaves = list(slaves)
+        self._halt = halt
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="dialog", classes="dialog", can_focus=False):
+            yield Static(Text("SEND REAL ORDERS?", style="bold"), classes="dialog-title")
+            if self._slaves:
+                who = ", ".join(self._slaves)
+                to = f"to each connected slave ({who})"
+            else:
+                to = "to each slave, once there are some"
+            yield Static(
+                f"Live, every trade the master opens is sent as a real order {to}: opens, "
+                "closes, and stop or target moves. A slave on a real-money account stays held "
+                "back unless live trading is allowed on it (l)."
+            )
+            yield Static(
+                Text(
+                    "Copying is stopped, and stays stopped: nothing is sent until you press d. "
+                    "Going back to a dry run is one choice in these settings.",
+                    style=MUTED,
+                )
+            )
+            prompt = Text("Type ", style="bold")
+            prompt.append(LIVE_WORD, style=f"bold {RED}")
+            prompt.append(" to switch:", style="bold")
+            yield Static(prompt, id="prompt")
+            with Horizontal(id="typed-box"):
+                yield Input(placeholder=LIVE_WORD, id="typed", compact=True)
+                yield Static(letters_to_go("", LIVE_WORD), id="to-go")
+            yield Static("", id="error")
+            with Horizontal(id="buttons"):
+                yield Button("Keep the dry run  esc", id="cancel", classes="keep")
+                yield Button("Go live  enter", id="go", classes="danger -waiting")
+
+    def on_mount(self) -> None:
+        self.query_one("#typed", Input).focus()
+
+    def _typed(self) -> str:
+        return self.query_one("#typed", Input).value
+
+    @on(Input.Changed, "#typed")
+    def _on_typed(self, event: Input.Changed) -> None:
+        self.query_one("#to-go", Static).update(letters_to_go(event.value, LIVE_WORD))
+        matches = event.value.strip().upper() == LIVE_WORD
+        self.query_one("#go", Button).set_class(not matches, "-waiting")
+        self.query_one("#error", Static).update("")
+
+    def _go(self) -> None:
+        if self._typed().strip().upper() != LIVE_WORD:
+            self.query_one("#error", Static).update(
+                Text(f"Type {LIVE_WORD} in full to go live.", style=RED)
+            )
+            return
+        self.dismiss(self._typed())
+
+    @on(Input.Submitted, "#typed")
+    def _on_submit(self) -> None:
+        self._go()
+
+    @on(Button.Pressed, "#go")
+    def _on_go(self) -> None:
+        self._go()
+
+    @on(Button.Pressed, "#cancel")
+    def _on_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_panic(self) -> None:
+        self._halt()
+        self.dismiss(None)

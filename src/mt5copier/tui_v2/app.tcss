@@ -303,14 +303,16 @@ ActionMenu OptionList:focus > .option-list--option-highlighted {
 /* Screens of their own, so they would take the Screen rule at the top: solid and padded. They
    dim what is under them instead, and sit in the middle of it. */
 OrphanDialog,
-LiveDialog {
+LiveDialog,
+GoLiveDialog {
     background: #0c0b09 80%;
     padding: 0;
     align: center middle;
 }
 
 OrphanDialog #dialog,
-LiveDialog #dialog {
+LiveDialog #dialog,
+GoLiveDialog #dialog {
     width: 96;
     max-width: 100%;
     height: auto;
@@ -421,17 +423,18 @@ LiveDialog #dialog {
     background: $error 15%;
 }
 
-/* --- the settings form ---------------------------------------------------------------------- */
+/* --- the settings forms --------------------------------------------------------------------- */
 
-/* The classic form's own rules still reach this one (it is a subclass), so the ones that would
-   show through are put back here: its error indent, its help panel, its fixed field widths. */
-SettingsForm {
+/* A slave's settings and the copier's own, both written as sentences. The slave's form is the
+   classic one underneath, whose own rules still reach it, so the ones that would show through
+   are put back here: its error indent, its help panel, its fixed field widths. */
+.form-screen {
     background: #0c0b09 80%;
     padding: 0;
     align: center middle;
 }
 
-SettingsForm #dialog {
+.form-screen #dialog {
     width: 116;
     max-width: 100%;
     height: auto;
@@ -442,57 +445,57 @@ SettingsForm #dialog {
     scrollbar-size-vertical: 1;
 }
 
-SettingsForm #st-head {
+.form-screen #st-head {
     height: 2;
     border-bottom: double $foreground;
 }
 
-SettingsForm #st-title {
+.form-screen #st-title {
     width: 1fr;
 }
 
-SettingsForm #st-where {
+.form-screen #st-where {
     width: auto;
 }
 
-SettingsForm #st-mode {
+.form-screen #st-mode {
     margin-bottom: 1;
 }
 
 
-SettingsForm .sect {
+.form-screen .sect {
     height: auto;
     border-top: solid $panel;
 }
 
-SettingsForm .sect-name {
+.form-screen .sect-name {
     width: 12;
     text-style: bold;
 }
 
-SettingsForm .sect-body {
+.form-screen .sect-body {
     width: 1fr;
     height: auto;
 }
 
 /* A blank row under every line of a section, as the design spaces them, so nothing in one
    line sits hard against the next. The last line's is the section's bottom margin. */
-SettingsForm .line {
+.form-screen .line {
     height: 1;
     margin-bottom: 1;
 }
 
-SettingsForm .part {
+.form-screen .part {
     width: auto;
     height: 1;
 }
 
-SettingsForm .w {
+.form-screen .w {
     width: auto;
 }
 
-SettingsForm Input,
-SettingsForm Input:focus {
+.form-screen Input,
+.form-screen Input:focus {
     height: 1;
     padding: 0 1;
     border: none;
@@ -501,65 +504,65 @@ SettingsForm Input:focus {
     text-style: bold;
 }
 
-SettingsForm Input:focus {
+.form-screen Input:focus {
     background: $foreground 30%;
     color: $foreground;
 }
 
-SettingsForm Input > .input--placeholder {
+.form-screen Input > .input--placeholder {
     color: $text-muted;
     text-style: not bold;
 }
 
-SettingsForm Input.n5 { width: 7; }
-SettingsForm Input.n6 { width: 8; }
-SettingsForm Input.n8 { width: 10; }
-SettingsForm Input.n10 { width: 12; }
-SettingsForm Input.n12 { width: 14; }
-SettingsForm Input.grow { width: 1fr; min-width: 12; }
+.form-screen Input.n5 { width: 7; }
+.form-screen Input.n6 { width: 8; }
+.form-screen Input.n8 { width: 10; }
+.form-screen Input.n10 { width: 12; }
+.form-screen Input.n12 { width: 14; }
+.form-screen Input.grow { width: 1fr; min-width: 12; }
 
 
-SettingsForm Tick {
+.form-screen Tick {
     width: auto;
     margin-right: 2;
     background: $background;
     padding: 0;
 }
 
-SettingsForm Tick:focus {
+.form-screen Tick:focus {
     background: $foreground 30%;
 }
 
-SettingsForm Tick:focus > .toggle--label {
+.form-screen Tick:focus > .toggle--label {
     background: transparent;
     color: $foreground;
     text-style: bold;
 }
 
-SettingsForm .err {
+.form-screen .err {
     display: none;
     height: auto;
     color: $error;
 }
 
-SettingsForm #example {
+.form-screen #example {
     height: auto;
     border: solid $panel;
     padding: 0 1;
 }
 
-SettingsForm #ex-name {
+.form-screen #ex-name {
     width: 10;
     color: $text-muted;
     text-style: bold;
 }
 
-SettingsForm #ex-body {
+.form-screen #ex-body {
     width: 1fr;
     height: auto;
 }
 
-SettingsForm #help {
+.form-screen #help {
     height: auto;
     min-height: 1;
     margin: 1 0 0 0;
@@ -568,26 +571,26 @@ SettingsForm #help {
     background: $background;
 }
 
-SettingsForm #general-error {
+.form-screen #general-error {
     display: none;
     height: auto;
     color: $error;
     text-style: bold;
 }
 
-SettingsForm #st-foot {
+.form-screen #st-foot {
     height: auto;
     padding: 1 0;
     border-top: solid $foreground;
     align-vertical: middle;
 }
 
-SettingsForm #st-stake {
+.form-screen #st-stake {
     width: 1fr;
     margin-top: 1;
 }
 
-SettingsForm Button {
+.form-screen Button {
     height: 3;
     min-width: 16;
     margin-left: 2;
@@ -597,24 +600,24 @@ SettingsForm Button {
 /* Save is filled cream, as the design has it; cancel is a dim block. Whichever has focus turns
    blue, the colour of the copier doing its job. No borders: a block border leaves a sliver of
    its edge beside the button in most terminal fonts. */
-SettingsForm Button.keep,
-SettingsForm Button.keep:hover {
+.form-screen Button.keep,
+.form-screen Button.keep:hover {
     background: $foreground;
     color: $background;
     border: none;
     content-align: center middle;
 }
 
-SettingsForm Button.plain,
-SettingsForm Button.plain:hover {
+.form-screen Button.plain,
+.form-screen Button.plain:hover {
     background: $panel 60%;
     color: $foreground;
     border: none;
     content-align: center middle;
 }
 
-SettingsForm Button.keep:focus,
-SettingsForm Button.plain:focus {
+.form-screen Button.keep:focus,
+.form-screen Button.plain:focus {
     background: $accent;
     color: $background;
 }
