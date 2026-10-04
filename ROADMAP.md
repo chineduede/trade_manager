@@ -1401,13 +1401,14 @@ are the design, not a limitation waiting to be lifted.
   - **A Guards page per slave** (from the card's action menu, its own key, and the details
     page): one row per rule with its bar, room left, state and verdict on breach. On it: add,
     edit, remove a rule (the form generated from the rule's declared parameters, in the
-    settings form's sentence style), apply a firm preset, switch the whole set on/off, and
+    settings form's sentence style), save the set as a named template or apply one, copy the
+    set from another slave, switch the whole set on/off, and
     clear a latched breach.
   - **A badge on the slave's Map card**: nothing when healthy; amber `GUARD 82%` inside the
     buffer; red `BREACHED · blocked` / `FLATTENED` after.
   - **Stored in `guards.json`**, separate from `config.json`, so a slip editing rules cannot
-    disturb copy settings. A firm preset is a named list of rules in the same format, and
-    copying guards from another terminal falls out of it.
+    disturb copy settings. A template is a named list of rules in the same format, saved by
+    the user, and copying guards from another terminal falls out of it.
 
   *Build order:*
   1. Framework, account view, server time and deal history in the worker, `guard_state`, the
@@ -1417,10 +1418,17 @@ are the design, not a limitation waiting to be lifted.
      `warn`, `decline`, `shrink`, `block_new`.
   3. `close_worst` and `flatten`, after step 2's numbers are demo-verified.
   4. More rules (trailing drawdown, max positions, weekend, news, consistency as `warn` only)
-     and firm presets.
+     and user templates.
 
-  *Open questions for the user:* which firms the first presets follow (and so the exact
-  definitions: start balance vs. start equity vs. the higher; reset time); the default buffer;
+  **Firm-neutral — the user's call, 2026-10-04.** The user trades many firms and wants no
+  firm baked in: nothing is named after a firm and nothing ships preset. Wherever firms
+  differ in a definition, it is a parameter of the rule, never a choice made in code — e.g.
+  daily loss's basis (start balance, start equity, or the higher), its reset time and
+  timezone, limits in money or %, drawdown measured from initial balance, peak balance or
+  peak equity, and whether a trailing floor stops at the initial balance. Reusing a setup
+  across accounts is the user's own templates, and copying from another slave.
+
+  *Open questions for the user:* the default buffer;
   whether a copy with no stop (unknown risk) passes a risk cap, is declined, or counts as
   risking the whole room; and the Guards page's key.
 
