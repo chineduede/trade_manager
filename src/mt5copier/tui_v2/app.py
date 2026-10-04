@@ -13,6 +13,7 @@ keys jump to slave cards.
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 
 from rich.table import Table
 from rich.text import Text
@@ -63,9 +64,10 @@ from .style import (
     RULED,
     THEME,
     YELLOW,
+    Fitted,
+    Piece,
     badge,
     key_hint,
-    left_right,
     spaced,
 )
 from .widgets import Card, ChipItem, Chips, KeyBar, Picked, QuickInput, Rail, TopBar, Trunk
@@ -517,35 +519,48 @@ class NewCopierApp(CopierApp):
     def _refresh_topbar(self) -> None:
         self.query_one("#topbar", TopBar).update(self.topbar())
 
-    def topbar(self, crumb: str | None = None) -> Table:
+    def topbar(self, crumb: str | None = None) -> Fitted:
         """MT5 COPIER, the page tabs, and what the copier is doing. ``crumb`` is the terminal
-        whose details page is open, shown after the Map tab it was opened from."""
-        left = Text()
-        left.append(spaced("MT5") + "   " + spaced("Copier"), style=f"bold {FG}")
-        left.append("    ")
-        for page, label in (("map", "Map"), ("log", "Log")):
-            if (page == "map") if crumb is not None else (page == self._page):
-                left.append(f" {label} ", style=f"bold {BG} on {FG}")
-            else:
-                left.append(f" {label} ", style=MUTED)
-            left.append(" ")
-            if page == "map" and crumb is not None:
-                left.append(f"› {crumb}", style=f"bold {FG}")
-                left.append("   ")
+        whose details page is open, shown after the Map tab it was opened from.
 
-        right = Text()
-        for alert in self._alerts():
-            right.append(alert, style=f"bold {RED}")
-            right.append("   ")
+        On a narrow terminal the clock goes first, then the words shorten; the alerts and the
+        LIVE / DRY RUN badge are always shown."""
+
+        def tabs(crumb: str | None) -> Text:
+            out = Text()
+            for page, label in (("map", "Map"), ("log", "Log")):
+                if (page == "map") if crumb is not None else (page == self._page):
+                    out.append(f" {label} ", style=f"bold {BG} on {FG}")
+                else:
+                    out.append(f" {label} ", style=MUTED)
+                out.append(" ")
+                if page == "map" and crumb is not None:
+                    out.append(f"› {crumb}", style=f"bold {FG}")
+                    out.append("   ")
+            out.rstrip()
+            return out
+
+        title = Text(spaced("MT5") + "   " + spaced("Copier"), style=f"bold {FG}")
+        left = [
+            Piece(title, short=Text("MT5 COPIER", style=f"bold {FG}")),
+            Piece(
+                tabs(crumb),
+                short=tabs(crumb[:14] + "…" if crumb and len(crumb) > 15 else crumb),
+            ),
+        ]
+
+        right = [Piece(Text(alert, style=f"bold {RED}")) for alert in self._alerts()]
         slaves = len(self._cfg.slaves)
         if self._cfg.copying_enabled:
             verb = "Dry run to" if self._cfg.dry_run else "Copying to"
-            right.append(f"{verb} {self._copying_to} of {slaves} slaves")
+            doing = Text(f"{verb} {self._copying_to} of {slaves} slaves")
+            short = Text(f"{'dry' if self._cfg.dry_run else 'copying'} {self._copying_to}/{slaves}")
+            right.append(Piece(doing, short=short))
         else:
-            right.append("Not copying", style=MUTED)
-        right.append(f"   {time.strftime('%H:%M:%S')}   ", style=MUTED)
-        right.append_text(badge("DRY RUN", YELLOW) if self._cfg.dry_run else badge("LIVE", RED))
-        return left_right(left, right)
+            right.append(Piece(Text("Not copying", style=MUTED)))
+        right.append(Piece(Text(time.strftime("%H:%M:%S"), style=MUTED), drop=1))
+        right.append(Piece(badge("DRY RUN", YELLOW) if self._cfg.dry_run else badge("LIVE", RED)))
+        return Fitted(left, right, joiner="   ")
 
     def _alerts(self) -> list[str]:
         """What the classic status bar shouts about, kept: none of it may go unsaid."""
@@ -570,42 +585,79 @@ class NewCopierApp(CopierApp):
         return out
 
     def _refresh_keybar(self) -> None:
-        keys: list[Text] = []
+        # Each key's ``drop`` says how soon it goes when the terminal is too narrow for them
+        # all: the highest first. What is never dropped -- the first key, ``?`` (which lists
+        # every key), panic and quit -- is what a person cannot do without.
+        keys: list[Piece] = []
         if self._page == "map":
             # What can be done to one terminal is in its action menu, so the bar keeps to the
             # keys that find a terminal and those that act on the whole copier -- and leads
             # with the key that opens the menu, named for the terminal it will act on.
             sel = self._sel if self._sel in self._cfg.terminals else None
             what = f"actions for {self._cfg.display_name(sel)}" if sel else "actions"
-            keys.append(key_hint("space", what, primary=True))
-            keys.append(key_hint("←→", "choose"))
+            keys.append(
+                Piece(
+                    key_hint("space", what, primary=True),
+                    short=key_hint("space", "actions", primary=True),
+                    shorten=10,
+                )
+            )
+            keys.append(Piece(key_hint("←→", "choose"), drop=4))
             if self._cfg.slaves:
                 count = min(len(self._cfg.slaves), 9)
-                keys.append(key_hint("a 1" if count == 1 else f"a 1-{count}", "go to"))
-            keys.append(key_hint("tab", "log"))
+                go = key_hint("a 1" if count == 1 else f"a 1-{count}", "go to")
+                keys.append(Piece(go, drop=3))
+            keys.append(Piece(key_hint("tab", "log"), drop=5))
+            copying = self._cfg.copying_enabled
             keys.append(
-                key_hint("d", "stop copying" if self._cfg.copying_enabled else "start copying")
+                Piece(
+                    key_hint("d", "stop copying" if copying else "start copying"),
+                    drop=1,
+                    short=key_hint("d", "stop" if copying else "start"),
+                )
             )
-            keys.append(key_hint("g", "copier settings"))
+            keys.append(
+                Piece(key_hint("g", "copier settings"), drop=6, short=key_hint("g", "settings"))
+            )
         else:
-            keys.append(key_hint("↑↓", "line"))
-            keys.append(key_hint("f", "everything" if self._log_problems else "problems only"))
+            keys.append(Piece(key_hint("↑↓", "line"), drop=7))
+            problems = "everything" if self._log_problems else "problems only"
+            keys.append(
+                Piece(key_hint("f", problems), drop=2, short=key_hint("f", problems.split()[0]))
+            )
             count = min(len(self._cfg.slaves), 9)
             which = "a" + ("" if not count else " 1" if count == 1 else f" 1-{count}")
-            keys.append(key_hint(which, "one terminal"))
-            keys.append(key_hint("/", "search"))
-            keys.append(key_hint("end", "newest"))
-            keys.append(key_hint("enter", "open that terminal"))
-            keys.append(key_hint("tab", "map"))
-        keys.append(key_hint("?", "all keys"))
+            keys.append(
+                Piece(key_hint(which, "one terminal"), drop=3, short=key_hint(which, "one"))
+            )
+            keys.append(Piece(key_hint("/", "search"), drop=4))
+            keys.append(Piece(key_hint("end", "newest"), drop=6))
+            keys.append(
+                Piece(
+                    key_hint("enter", "open that terminal"), drop=5, short=key_hint("enter", "open")
+                )
+            )
+            keys.append(Piece(key_hint("tab", "map"), drop=1))
+        keys.append(Piece(key_hint("?", "all keys")))
         self.query_one("#keybar", KeyBar).update(self.keybar(keys))
 
     @staticmethod
-    def keybar(keys: list[Text]) -> Table:
-        """A page's keys on the left, with panic and quit kept to the right on every page."""
-        left = Text("  ").join(keys)
-        right = Text("  ").join([key_hint("F9", "panic halt", color=RED), key_hint("q", "quit")])
-        return left_right(left, right)
+    def keybar(keys: Sequence[Piece | Text]) -> Fitted:
+        """A page's keys on the left, with panic and quit kept to the right on every page. A
+        key given as plain text keeps its place by order: the first and the last (``?``) are
+        never dropped, and the others go from the right."""
+        last = len(keys) - 1
+        pieces = [
+            k if isinstance(k, Piece) else Piece(k, drop=0 if i in (0, last) else i)
+            for i, k in enumerate(keys)
+        ]
+        right = [
+            Piece(
+                key_hint("F9", "panic halt", color=RED), short=key_hint("F9", "panic", color=RED)
+            ),
+            Piece(key_hint("q", "quit")),
+        ]
+        return Fitted(pieces, right)
 
     def _refresh_daybook(self) -> None:
         """The master's newest trades, newest first, each with what every slave made of it.
@@ -838,23 +890,40 @@ class NewCopierApp(CopierApp):
         return when, level, who, text
 
     def _refresh_logbar(self, problems: int, following: bool) -> None:
-        bar = Text()
-        bar.append("Show  ", style=MUTED)
-        bar.append_text(_choice("everything", not self._log_problems))
-        bar.append(" ")
-        bar.append_text(_choice(f"problems only · {problems}", self._log_problems))
-        bar.append("     From  ", style=MUTED)
-        bar.append_text(_choice("all", self._log_from is None))
-        numbers = self._terminal_numbers()
-        for tid in sorted(numbers, key=lambda t: (numbers[t] != "A", numbers[t].zfill(2))):
-            bar.append(" ")
-            bar.append_text(_choice(numbers[tid], self._log_from == tid))
-        if self._log_query.strip():
-            bar.append("     Search  ", style=MUTED)
-            bar.append_text(_choice(self._log_query.strip(), True))
-        where = "following the newest line" if following else "end for the newest line"
-        right = Text(f"copier.log · {where}", style=MUTED)
-        self.query_one("#logbar", Static).update(left_right(bar, right))
+        """The filters, which are always shown, and where the page is in the file, which
+        shortens and then goes when the terminal is narrow."""
+
+        def show(label: str) -> Text:
+            out = Text(label, style=MUTED)
+            out.append_text(_choice("everything", not self._log_problems))
+            out.append(" ")
+            out.append_text(_choice(f"problems only · {problems}", self._log_problems))
+            return out
+
+        def where(label: str) -> Text:
+            out = Text(label, style=MUTED)
+            out.append_text(_choice("all", self._log_from is None))
+            numbers = self._terminal_numbers()
+            for tid in sorted(numbers, key=lambda t: (numbers[t] != "A", numbers[t].zfill(2))):
+                out.append(" ")
+                out.append_text(_choice(numbers[tid], self._log_from == tid))
+            return out
+
+        left = [Piece(show("Show  "), short=show("")), Piece(where("From  "), short=where(""))]
+        query = self._log_query.strip()
+        if query:
+            found = Text("Search  ", style=MUTED)
+            found.append_text(_choice(query, True))
+            left.append(Piece(found, short=_choice(query[:12], True)))
+        spot = "following the newest line" if following else "end for the newest line"
+        right = [
+            Piece(
+                Text(f"copier.log · {spot}", style=MUTED),
+                drop=1,
+                short=Text("following" if following else "end: newest", style=MUTED),
+            )
+        ]
+        self.query_one("#logbar", Static).update(Fitted(left, right, joiner="     "))
 
     def _refresh_chips(self, unassigned: list[TerminalView] | None = None) -> None:
         if unassigned is None:

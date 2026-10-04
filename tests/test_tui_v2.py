@@ -1257,3 +1257,51 @@ async def test_shift_b_types_a_breakeven_price_in_place(app: NewCopierApp, cfg: 
         await pilot.pause()
         assert isinstance(app.screen, DetailScreen), "esc leaves the box, not the page"
         assert not screen.query_one("#td-be").display
+
+
+def test_a_fitted_line_shortens_then_drops_and_keeps_what_it_must() -> None:
+    from mt5copier.tui_v2.style import Fitted, Piece
+
+    line = Fitted(
+        [
+            Piece(Text("space actions for Beta"), short=Text("space actions"), shorten=10),
+            Piece(Text("<- choose"), drop=2),
+            Piece(Text("d start copying"), drop=1, short=Text("d start")),
+            Piece(Text("? all keys")),
+        ],
+        [Piece(Text("F9 panic halt"), short=Text("F9 panic")), Piece(Text("q quit"))],
+    )
+
+    def said(width: int) -> str:
+        left, right = line.fit(width)
+        return f"{left.plain} | {right.plain}"
+
+    full = said(200)
+    assert full == (
+        "space actions for Beta  <- choose  d start copying  ? all keys | F9 panic halt  q quit"
+    )
+    assert (
+        said(80) == "space actions  <- choose  d start copying  ? all keys | F9 panic halt  q quit"
+    )
+    assert said(70) == "space actions  d start copying  ? all keys | F9 panic halt  q quit", (
+        "a key is dropped before another is shortened"
+    )
+    assert said(45) == "space actions  ? all keys | F9 panic  q quit"
+    assert said(10).endswith("| F9 panic  q quit"), "panic and quit are never dropped"
+
+
+@pytest.mark.parametrize("width", [80, 110, 140])
+async def test_panic_quit_and_the_mode_show_at_any_width(
+    app: NewCopierApp, cfg: AppConfig, width: int
+) -> None:
+    cfg.terminals[TID_MASTER].role = Role.MASTER
+    cfg.terminals[TID_SLAVE].role = Role.SLAVE
+    async with app.run_test(size=(width, 30)) as pilot:
+        for _ in ("map", "log"):
+            await pilot.pause()
+            keys = plain(app.query_one(KeyBar).content, width=width)
+            top = plain(app.query_one(TopBar).content, width=width)
+            assert "panic" in keys and "quit" in keys and "all keys" in keys
+            assert "DRY RUN" in top
+            assert all(len(line) <= width for line in keys.splitlines())
+            await pilot.press("tab")

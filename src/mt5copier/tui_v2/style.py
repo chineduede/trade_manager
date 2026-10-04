@@ -8,7 +8,11 @@ here once and the Textual theme is built from the same values.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
+
 from rich.box import Box
+from rich.console import Console, ConsoleOptions, RenderResult
 from rich.table import Table
 from rich.text import Text
 from textual.theme import Theme
@@ -95,6 +99,83 @@ def left_right(left: Text | str, right: Text | str) -> Table:
     grid.add_column(justify="right", no_wrap=True)
     grid.add_row(left, right)
     return grid
+
+
+@dataclass(frozen=True)
+class Piece:
+    """One part of a :class:`Fitted` line: what it says, and what may be done to it when the
+    line is too narrow to say everything."""
+
+    text: Text
+    drop: int = 0
+    """0: always kept. Otherwise it may be left out, the highest number first."""
+    short: Text | None = None
+    """A shorter way to say it."""
+    shorten: float | None = None
+    """When the short form is used, on the same scale as :attr:`drop`. By default just before
+    the part would be dropped; for a part that is never dropped, only once everything that
+    can be has been."""
+
+
+class Fitted:
+    """A line with parts flush left and flush right, that fits itself to the width it is
+    drawn at, on every redraw -- so a narrower terminal gets a shorter line rather than one
+    cut off at the end, where panic and quit are.
+
+    Too wide, it shortens and leaves out parts by their :attr:`Piece.shorten` and
+    :attr:`Piece.drop`, highest first, and past that lets the left side end in an ellipsis."""
+
+    def __init__(
+        self,
+        left: Sequence[Piece | Text],
+        right: Sequence[Piece | Text] = (),
+        *,
+        joiner: str = "  ",
+    ) -> None:
+        self.left = [p if isinstance(p, Piece) else Piece(p) for p in left]
+        self.right = [p if isinstance(p, Piece) else Piece(p) for p in right]
+        self.joiner = joiner
+
+    def _join(self, pieces: Iterable[tuple[Piece, bool]]) -> Text:
+        texts = [p.short if short and p.short is not None else p.text for p, short in pieces]
+        return Text(self.joiner).join(texts)
+
+    def fit(self, width: int) -> tuple[Text, Text]:
+        everything = [*self.left, *self.right]
+        kept = {id(p) for p in everything}
+        shortened: set[int] = set()
+
+        def line() -> tuple[Text, Text]:
+            def side(pieces: list[Piece]) -> Text:
+                return self._join((p, id(p) in shortened) for p in pieces if id(p) in kept)
+
+            return side(self.left), side(self.right)
+
+        def fits() -> bool:
+            left, right = line()
+            gap = 2 if left.cell_len and right.cell_len else 0
+            return left.cell_len + gap + right.cell_len <= width
+
+        steps: list[tuple[float, int, str, Piece]] = []
+        for i, p in enumerate(everything):
+            if p.drop:
+                steps.append((p.drop, i, "drop", p))
+            if p.short is not None:
+                when = p.shorten if p.shorten is not None else (p.drop + 0.5 if p.drop else 0.5)
+                steps.append((when, i, "short", p))
+        # Highest first; among equals, the rightmost.
+        steps.sort(key=lambda step: (step[0], step[1]), reverse=True)
+        for _, _, kind, piece in steps:
+            if fits():
+                break
+            if kind == "short":
+                shortened.add(id(piece))
+            else:
+                kept.discard(id(piece))
+        return line()
+
+    def __rich_console__(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        yield left_right(*self.fit(options.max_width))
 
 
 def badge(text: str, color: str) -> Text:

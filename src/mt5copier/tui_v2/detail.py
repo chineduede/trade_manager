@@ -525,7 +525,8 @@ def position_cells(
     ]
     if role is Role.SLAVE:
         cells.append(breakeven_cell(r, copy, cfg) if cfg is not None else Text(""))
-    cells.append(Text(r.link, style=link_color))
+    # The column is headed "Copy of", so the cell need not say it again.
+    cells.append(Text(r.link.removeprefix("copy of "), style=link_color))
     return cells
 
 
