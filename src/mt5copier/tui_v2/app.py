@@ -21,8 +21,9 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.geometry import Region
+from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import ContentSwitcher, DataTable, Static
+from textual.widgets import ContentSwitcher, DataTable, Input, Static
 
 from .. import config as config_mod
 from ..config import AppConfig, Role
@@ -36,6 +37,8 @@ from ..log_entries import (
     event_entries,
     file_entries,
     merge,
+    search,
+    search_words,
     select,
     terminal_names,
 )
@@ -98,6 +101,7 @@ class NewCopierApp(CopierApp):
         Binding("down", "step(1)", "Next card", show=False),
         Binding("enter", "open_terminal", "Details", show=False),
         Binding("f", "log_problems", "Problems only", show=False),
+        Binding("slash", "log_search", "Search the log", show=False),
         Binding("space", "menu", "Actions", show=False),
         Binding("g", "general_settings", "Copier settings", show=False),
         Binding("a", "jump(0)", "Master card", show=False),
@@ -127,6 +131,10 @@ class NewCopierApp(CopierApp):
         self._log_file: tuple[object, list[LogEntry]] = (None, [])
         """``copier.log`` as entries, with what the file looked like when it was read."""
         self._log_shown: list[LogEntry] | None = None
+        self._log_query = ""
+        """The log page's search, as typed: only lines holding all of its words are shown."""
+        self._log_drawn: tuple[list[LogEntry], tuple[str, ...]] | None = None
+        """What the table holds: the lines, and the words lit up in them."""
 
     # --- composition ------------------------------------------------------------------------
 
@@ -146,6 +154,12 @@ class NewCopierApp(CopierApp):
                         yield Static("", id="notyet-hint")
             with Vertical(id="page-log"):
                 yield Static("", id="logbar")
+                with Horizontal(id="searchbar"):
+                    yield Static(Text("Search  ", style=MUTED), classes="w")
+                    yield SearchBox(
+                        placeholder="words a line must hold", id="log-search", compact=True
+                    )
+                    yield Static(Text("  enter keep it · esc clear it", style=MUTED), classes="w")
                 yield DataTable(id="log", cursor_type="row")
         yield KeyBar("", id="keybar")
 
@@ -187,6 +201,7 @@ class NewCopierApp(CopierApp):
         self.query_one("#pages", ContentSwitcher).current = f"page-{page}"
         if page == "log":
             self._log_shown = None
+            self._log_drawn = None
             self._refresh_log()
             self.query_one("#log", DataTable).focus()
         else:
@@ -576,6 +591,7 @@ class NewCopierApp(CopierApp):
             count = min(len(self._cfg.slaves), 9)
             which = "a" + ("" if not count else " 1" if count == 1 else f" 1-{count}")
             keys.append(key_hint(which, "one terminal"))
+            keys.append(key_hint("/", "search"))
             keys.append(key_hint("end", "newest"))
             keys.append(key_hint("enter", "open that terminal"))
             keys.append(key_hint("tab", "map"))
@@ -662,6 +678,39 @@ class NewCopierApp(CopierApp):
         self._refresh_log()
         self._refresh_keybar()
 
+    def action_log_search(self) -> None:
+        """Open the search line under the filters, holding what was searched for last."""
+        if self._page != "log" or self._detail() is not None:
+            return
+        self.query_one("#searchbar").display = True
+        box = self.query_one("#log-search", SearchBox)
+        box.focus()
+        box.cursor_position = len(box.value)
+
+    @on(Input.Changed, "#log-search")
+    def _on_search_typed(self, event: Input.Changed) -> None:
+        """The lines narrow as each letter is typed."""
+        self._log_query = event.value
+        self._refresh_log()
+
+    @on(Input.Submitted, "#log-search")
+    def _on_search_kept(self, event: Input.Submitted) -> None:
+        """Enter keeps the search and goes back to the lines; the bar above still says what
+        is being searched for."""
+        event.stop()
+        self._close_search()
+
+    def on_search_box_cleared(self, _message: SearchBox.Cleared) -> None:
+        self.query_one("#log-search", SearchBox).value = ""
+        self._log_query = ""
+        self._close_search()
+
+    def _close_search(self) -> None:
+        self.query_one("#searchbar").display = False
+        self.query_one("#log", DataTable).focus()
+        self._refresh_log()
+        self._refresh_keybar()
+
     def _filter_log_to(self, number: int) -> None:
         """0 is the master, 1-9 the slaves by their card numbers. Picking the terminal already
         shown goes back to showing all of them."""
@@ -718,19 +767,23 @@ class NewCopierApp(CopierApp):
         if self._page != "log":
             return
         scoped = select(self._log_entries(), problems_only=False, terminal_id=self._log_from)
+        numbers = self._terminal_numbers()
+        words = search_words(self._log_query)
+        scoped = search(scoped, words, lambda e: self._who(e, numbers))
         shown = select(scoped, problems_only=self._log_problems, terminal_id=None)
         table = self.query_one("#log", DataTable)
         following = table.row_count == 0 or table.cursor_row >= table.row_count - 1
         self._refresh_logbar(sum(1 for e in scoped if e.level.problem), following)
-        if shown == self._log_shown:
+        drawn = (shown, tuple(words))
+        if drawn == self._log_drawn:
             return
         old = self._log_shown or []
         at = old[table.cursor_row] if 0 <= table.cursor_row < len(old) else None
         self._log_shown = shown
-        numbers = self._terminal_numbers()
+        self._log_drawn = drawn
         table.clear()
         for entry in shown:
-            table.add_row(*self._log_cells(entry, numbers))
+            table.add_row(*self._log_cells(entry, numbers, words))
         if not shown:
             return
         target = len(shown) - 1
@@ -746,27 +799,37 @@ class NewCopierApp(CopierApp):
             out[master.terminal_id] = "A"
         return out
 
-    def _log_cells(self, entry: LogEntry, numbers: dict[str, str]) -> tuple[Text, ...]:
+    def _who(self, entry: LogEntry, numbers: dict[str, str]) -> str:
+        """The Terminal column, as the day book names them: "Master (name)", "Slave 2 (name)"."""
+        if entry.terminal_id is None:
+            return "copier"
+        number = numbers.get(entry.terminal_id)
+        if number == "A":
+            role = "Master"
+        elif number:
+            role = f"Slave {number}"
+        else:
+            role = "Terminal"
+        return f"{role} ({self._cfg.display_name(entry.terminal_id)[:24]})"
+
+    def _log_cells(
+        self, entry: LogEntry, numbers: dict[str, str], words: list[str] | None = None
+    ) -> tuple[Text, ...]:
         when = Text(time.strftime("%H:%M:%S", time.localtime(entry.ts)), style=MUTED)
         level = Text(entry.level.value, style=_LEVEL_STYLE[entry.level])
         if entry.terminal_id is None:
             who = Text("copier", style=MUTED)
         else:
             style = f"bold {FG}" if entry.tone is Tone.MASTER else FG
-            # As the day book names them: "Master (name)", "Slave 2 (name)".
-            number = numbers.get(entry.terminal_id)
-            if number == "A":
-                role = "Master"
-            elif number:
-                role = f"Slave {number}"
-            else:
-                role = "Terminal"
-            name = self._cfg.display_name(entry.terminal_id)[:24]
-            who = Text(f"{role} ({name})", style=style)
+            who = Text(self._who(entry, numbers), style=style)
         first, *rest = entry.text.splitlines() or [""]
         text = Text(first, style=_TONE_STYLE[entry.tone])
         if rest:
             text.append(f"  (+{len(rest)} more lines in copier.log)", style=FAINT)
+        if words:
+            # What was searched for, lit up where it is in the line.
+            for cell in (level, who, text):
+                cell.highlight_words(words, style=_FOUND, case_sensitive=False)
         return when, level, who, text
 
     def _refresh_logbar(self, problems: int, following: bool) -> None:
@@ -781,6 +844,9 @@ class NewCopierApp(CopierApp):
         for tid in sorted(numbers, key=lambda t: (numbers[t] != "A", numbers[t].zfill(2))):
             bar.append(" ")
             bar.append_text(_choice(numbers[tid], self._log_from == tid))
+        if self._log_query.strip():
+            bar.append("     Search  ", style=MUTED)
+            bar.append_text(_choice(self._log_query.strip(), True))
         where = "following the newest line" if following else "end for the newest line"
         right = Text(f"copier.log · {where}", style=MUTED)
         self.query_one("#logbar", Static).update(left_right(bar, right))
@@ -828,6 +894,9 @@ _LEVEL_STYLE = {
     Level.ERROR: f"bold {RED}",
 }
 
+_FOUND = f"bold {BG} on {YELLOW}"
+"""A searched-for word, where it is in a line."""
+
 _TONE_STYLE = {
     Tone.PLAIN: MUTED,
     Tone.MASTER: f"bold {FG}",
@@ -836,6 +905,18 @@ _TONE_STYLE = {
     Tone.WARN: YELLOW,
     Tone.ERROR: RED,
 }
+
+
+class SearchBox(Input):
+    """The log page's search. Esc here clears the search, rather than reaching the app."""
+
+    BINDINGS = [Binding("escape", "clear", "Clear the search", show=False)]
+
+    class Cleared(Message):
+        pass
+
+    def action_clear(self) -> None:
+        self.post_message(self.Cleared())
 
 
 def _choice(label: str, chosen: bool) -> Text:

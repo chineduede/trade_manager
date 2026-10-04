@@ -621,3 +621,23 @@ GoLiveDialog #dialog {
     background: $accent;
     color: $background;
 }
+
+/* --- the log's search ---------------------------------------------------------------------- */
+
+#searchbar {
+    height: 1;
+    margin-bottom: 1;
+    display: none;
+}
+
+#log-search {
+    width: 1fr;
+}
+
+#searchbar > Static {
+    width: auto;
+}
+
+#log-search:focus {
+    background: $foreground 30%;
+}

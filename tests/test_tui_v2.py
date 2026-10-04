@@ -15,7 +15,7 @@ import pytest
 from rich.console import Console
 from rich.text import Text
 from test_tui import TID_BROKEN, TID_MASTER, TID_SLAVE, StubEngine, _wire_copying
-from textual.widgets import Static
+from textual.widgets import DataTable, Static
 
 from mt5copier.config import AppConfig, Role
 from mt5copier.day_book import MasterEvent, Outcome, SlaveOutcome
@@ -417,6 +417,49 @@ async def test_the_log_page_merges_the_file_and_the_day_book_and_filters_them(
         await pilot.pause()
         assert isinstance(app.screen, TerminalScreen)
         assert app._selected_id() == TID_SLAVE
+
+
+async def test_slash_searches_the_log_as_it_is_typed(app: NewCopierApp) -> None:
+    from mt5copier.paths import log_dir
+
+    log_dir().mkdir(parents=True, exist_ok=True)
+    (log_dir() / "copier.log").write_text(
+        "2020-01-01 10:00:00 INFO    [MainProcess] mt5copier.engine: spawned worker pid=1 "
+        "for Beta Broker\n"
+        "2020-01-01 10:00:01 WARNING [MainProcess] mt5copier.config: something odd\n"
+        "2020-01-01 10:00:02 INFO    [MainProcess] mt5copier.config: Something else\n",
+        encoding="utf-8",
+    )
+    async with app.run_test(size=(160, 50)) as pilot:
+        await pilot.press("tab", "slash")
+        await pilot.pause()
+        assert app.query_one("#searchbar").display
+        await pilot.press(*"SOMETHING", "space", "f", "q")
+        await pilot.pause()
+        assert app.is_running, "q is typed into the search, not taken as quit"
+        assert not app._log_problems, "f is typed into the search, not taken as the filter"
+        assert [e.text for e in app._log_shown or []] == []
+        await pilot.press("backspace", "backspace", "backspace")
+        await pilot.pause()
+        assert [e.text for e in app._log_shown or []] == ["something odd", "Something else"]
+        table = app.query_one("#log", DataTable)
+        lit = app._log_cells(app._log_shown[0], {}, ["something"])[3]  # type: ignore[index]
+        assert lit.spans, "the word found is lit up"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not app.query_one("#searchbar").display
+        assert app.focused is table, "enter goes back to the lines, keeping the search"
+        assert len(app._log_shown or []) == 2
+        assert "Search" in plain(app.query_one("#logbar", Static).content)
+
+        await pilot.press("f")
+        assert [e.text for e in app._log_shown or []] == ["something odd"]
+        await pilot.press("f", "slash", "escape")
+        await pilot.pause()
+        assert len(app._log_shown or []) == 3, "esc clears the search"
+        assert app.focused is table
+        assert "Search" not in plain(app.query_one("#logbar", Static).content)
 
 
 def test_the_big_balance_is_drawn_in_solid_digits() -> None:

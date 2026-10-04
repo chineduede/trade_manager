@@ -13,7 +13,7 @@ a single terminal. Pure: no Textual, no engine.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -218,3 +218,24 @@ def select(
         if (not problems_only or e.level.problem)
         and (terminal_id is None or e.terminal_id == terminal_id)
     ]
+
+
+def search_words(query: str) -> list[str]:
+    """What was typed into the page's search, as the words a line must all contain."""
+    return query.casefold().split()
+
+
+def search(
+    entries: Sequence[LogEntry], words: Sequence[str], said: Callable[[LogEntry], str]
+) -> list[LogEntry]:
+    """The entries holding every one of ``words``, in any order and any case. ``said`` is all
+    that a line shows of an entry -- its level and terminal as well as its text -- so a search
+    for a terminal's name finds its lines too. No words lets every entry through."""
+    if not words:
+        return list(entries)
+    out: list[LogEntry] = []
+    for e in entries:
+        hay = f"{e.level.value} {said(e)} {e.text}".casefold()
+        if all(w in hay for w in words):
+            out.append(e)
+    return out

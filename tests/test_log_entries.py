@@ -14,6 +14,8 @@ from mt5copier.log_entries import (
     merge,
     outcome_text,
     parse_log,
+    search,
+    search_words,
     select,
     terminal_names,
 )
@@ -145,3 +147,22 @@ def test_filters() -> None:
         "fine",
         "bad",
     ]
+
+
+def test_search_wants_every_word_in_any_case_and_order() -> None:
+    a = LogEntry(1.0, Level.INFO, "s1", "Opened 3.11 lots in 360 ms")
+    b = LogEntry(2.0, Level.ERROR, "s2", "Refused: account is not a demo")
+    c = LogEntry(3.0, Level.WARN, None, "Something odd")
+    names = {"s1": "Slave 1 (BlackBull)", "s2": "Slave 2 (VT Markets)"}
+
+    def said(e: LogEntry) -> str:
+        return names.get(e.terminal_id or "", "copier")
+
+    entries = [a, b, c]
+    assert search_words("  LOTS  opened ") == ["lots", "opened"]
+    assert search(entries, search_words("LOTS opened"), said) == [a]
+    assert search(entries, search_words("opened refused"), said) == []
+    assert search(entries, search_words("vt markets"), said) == [b], "the terminal's name"
+    assert search(entries, search_words("error"), said) == [b], "the level"
+    assert search(entries, search_words("copier odd"), said) == [c]
+    assert search(entries, [], said) == entries
