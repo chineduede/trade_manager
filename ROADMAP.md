@@ -1332,7 +1332,7 @@ are the design, not a limitation waiting to be lifted.
   Then a demo run: open on the master, let a slave copy cross the trigger, see its stop move
   to entry + buffer while the master's stays put, and move the master's stop back to see it
   ignored.
-- **Prop-firm guards — designed 2026-10-04, not built; design below awaiting the user's review.**
+- **Prop-firm guards — designed 2026-10-04 and accepted by the user; not built.**
   Prop firms' rules are many and differ from firm to firm (daily loss, static or trailing
   drawdown, max floating loss, margin or risk per trade, max lots or positions, weekend and
   news bans, consistency), and more will be wanted later. **The user's call: a plug-and-play
@@ -1428,9 +1428,10 @@ are the design, not a limitation waiting to be lifted.
   peak equity, and whether a trailing floor stops at the initial balance. Reusing a setup
   across accounts is the user's own templates, and copying from another slave.
 
-  *Open questions for the user:* the default buffer;
-  whether a copy with no stop (unknown risk) passes a risk cap, is declined, or counts as
-  risking the whole room; and the Guards page's key.
+  *Settled with the user 2026-10-04:* the default buffer is **80%** of a limit. **A required
+  stop loss is its own rule** (`gate`, declining a new trade with no stop), since some firms
+  mandate one and others do not; without that rule a copy with no stop is not refused, and a
+  risk cap cannot measure it, so it passes the cap. The Guards page opens with **`r`**.
 
   **Margin checks belong here (parked 2026-10-02).** MT5 can price a trade's margin before it
   is sent (`order_calc_margin(action, symbol, volume, price)`, in the account currency), and
