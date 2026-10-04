@@ -318,11 +318,20 @@ class SettingsForm(SettingsScreen):
         v = initial_values(cfg)
         mode = Text()
         if self._live:
-            mode.append("LIVE", style=f"bold {RED}")
-            mode.append(" A saved change applies to the next trade copied.", style=MUTED)
+            # The copier's mode, not the account's: the header says demo or not, and "LIVE"
+            # beside "demo account" read as a contradiction.
+            mode.append("LIVE COPYING", style=f"bold {RED}")
+            mode.append(
+                " · orders are being sent. A saved change applies to the next trade the master "
+                "opens.",
+                style=MUTED,
+            )
         else:
             mode.append("DRY RUN", style=f"bold {FG}")
-            mode.append(" Nothing is sent either way.", style=MUTED)
+            mode.append(
+                " · copies are only simulated, so no order is sent, before or after a change.",
+                style=MUTED,
+            )
         renames = ", ".join(f"{k}={t}" for k, t in sorted(cfg.symbol_map.items()))
 
         with VerticalScroll(id="dialog", classes="settings", can_focus=False):

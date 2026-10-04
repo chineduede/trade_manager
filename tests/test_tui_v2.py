@@ -975,3 +975,22 @@ async def test_enter_in_a_symbol_list_starts_the_next_entry_instead_of_saving(
         await pilot.press("enter")
         await pilot.pause()
         assert not isinstance(app.screen, SettingsForm), "enter in a number still saves"
+
+
+async def test_the_settings_form_names_the_copiers_mode_not_the_accounts(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    cfg.terminals[TID_MASTER].role = Role.MASTER
+    cfg.terminals[TID_SLAVE].role = Role.SLAVE
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.press("1", "e")
+        await pilot.pause()
+        said = plain(app.screen.query_one("#st-mode", Static).content)
+        assert said.startswith("DRY RUN · copies are only simulated")
+        await pilot.press("escape")
+        cfg.dry_run = False
+        await pilot.press("e")
+        await pilot.pause()
+        said = plain(app.screen.query_one("#st-mode", Static).content)
+        assert said.startswith("LIVE COPYING · orders are being sent.")
+        assert "next trade the master opens" in said
