@@ -1,4 +1,4 @@
-"""The new UI's palette and the small text helpers every screen of it shares.
+"""The UI's palette and the small text helpers every screen of it shares.
 
 Cream on a warm near-black, with three accents that each mean one thing: red is a loss, a
 refusal or anything that can cost money; blue is the copier doing its job (copying, fills);

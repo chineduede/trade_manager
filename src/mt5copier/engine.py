@@ -211,7 +211,7 @@ class Engine:
         self._stats = StatsBook()
         """Copy-health numbers for the detail page. Display only; nothing here decides."""
         self._day = DayBook()
-        """Each master trade with what became of it on every slave, for the new UI's day
+        """Each master trade with what became of it on every slave, for the map's day
         book. Display only, like the statistics."""
 
         self._dryrun_path = state_path if state_path is not None else dryrun_store_path()

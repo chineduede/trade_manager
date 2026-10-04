@@ -1,19 +1,30 @@
-"""The settings form in the new look: each section a sentence with its values written into it,
-and a worked example of what the sizing settings would open.
+"""A slave's settings form: each section a sentence with its values written into it, and a
+worked example of what the sizing settings would open.
 
-It is the classic :class:`~mt5copier.tui.settings_screen.SettingsScreen` with its drawing
-replaced. Saving, validating, the open-copies question and the panic key all stay the classic
-screen's: every field keeps its ``f-`` id and every error line its ``e-`` id, so its handlers
-find them. What is read back differently is what is drawn differently: a choice is every option
-side by side with the chosen one filled (a dropdown would open over the sentences below it),
-reversing trades is a choice of direction rather than a switch, and the symbol renames are one
-line rather than a box. Help follows focus as a line under the example, not a panel.
+A form and nothing else. Every decision about what a value means -- parsing, bounds, what counts
+as a change, what deserves a warning -- is in :mod:`mt5copier.settings_edit`, where it can be
+tested without a terminal emulator. This module lays the fields out, reads them back, and shows
+the messages that module returns. Every field has an ``f-`` id and every error line an ``e-``
+id. A choice is every option side by side with the chosen one filled (a dropdown would open
+over the sentences below it), reversing trades is a choice of direction rather than a switch,
+and the symbol renames are one line rather than a box. Help follows focus, as a line under the
+example.
+
+The form is handed callables rather than a config object. ``current`` returns the terminal's
+*live* settings and is called at the moment of saving, so an edit is built on what is true then
+and not on what was true when the form opened. ``apply`` receives the validated result and a
+callback, and reports through the callback how it ended -- None for applied, or a reason it was
+refused after all. It reports later, not by returning, because an edit to a terminal that holds
+open copies has to ask first. The form stays open until it hears, and if the person declines, it
+never does: they are back at the form, with nothing changed.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from rich.markup import escape
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
@@ -23,20 +34,27 @@ from textual.content import Content
 from textual.geometry import Size
 from textual.message import Message
 from textual.reactive import reactive
+from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, Checkbox, Input, Static
 
 from ..config import BreakevenMode, NoStopPolicy, Role, SizingMode, TerminalConfig
 from ..day_book import MasterEvent
 from ..protocol import ACCOUNT_TRADE_MODE_DEMO, ActionKind, PositionType
-from ..settings_edit import BY_NAME, apply_edits, copies_word, initial_values
+from ..settings_edit import (
+    BY_NAME,
+    EDITABLE,
+    EditOutcome,
+    apply_edits,
+    copies_word,
+    initial_values,
+)
 from ..settings_example import Example, MasterTrade, PriceValue, pick, work
-from ..tui.settings_screen import SettingsScreen
 from .flow import Flow, Word, flow_words
 from .style import BG, BLUE, CHIP_BG, FG, MUTED, RED, spaced
 
 if TYPE_CHECKING:
-    from .app import NewCopierApp
+    from .app import CopierApp
 
 _F = "f-"
 _E = "e-"
@@ -61,7 +79,7 @@ _HELP = {
     "cannot express: US30=US30.cash, GER40=DE40. A name the broker does not list is refused, "
     "not guessed at.",
 }
-"""Help the classic form's words do not fit here, where a box of lines has become one line."""
+"""Help that says more than the field's own words, where a list is typed on one line."""
 
 _BREAKEVEN = (
     ("never", BreakevenMode.OFF.value),
@@ -257,13 +275,35 @@ def _trades(master_positions: list[MasterTrade], events_: list[MasterEvent]) -> 
     return out
 
 
-class SettingsForm(SettingsScreen):
-    """One slave's settings, written out as sentences."""
+class SettingsForm(ModalScreen[bool]):
+    """One slave's settings, written out as sentences. Dismisses with True if something was
+    saved."""
 
     DEFAULT_CLASSES = "form-screen"
 
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        Binding("ctrl+s", "save", "Save"),
+        # A modal hides the app's own keys, and the panic key must not be one of them: copying
+        # can be live while this form is open.
+        Binding("f9", "panic", "PANIC halt"),
+    ]
+
+    def __init__(
+        self,
+        current: Callable[[], TerminalConfig],
+        apply: Callable[[EditOutcome, Callable[[str | None], None]], None],
+        halt: Callable[[], None],
+        live: bool,
+    ) -> None:
+        super().__init__()
+        self._current = current
+        self._apply = apply
+        self._halt = halt
+        self._live = live
+
     @property
-    def copier(self) -> NewCopierApp:
+    def copier(self) -> CopierApp:
         return self.app  # type: ignore[return-value]
 
     # --- what the example is worked on ------------------------------------------------------
@@ -547,10 +587,7 @@ class SettingsForm(SettingsScreen):
         out.append(" A breakeven change keeps them.", style=MUTED)
         return out
 
-    def on_mount(self, event: events.Mount | None = None) -> None:
-        # Not the classic form's too: it would put focus on the sizing mode instead.
-        if event is not None:
-            event.prevent_default()
+    def on_mount(self) -> None:
         self._show_parts()
         self.query_one(
             f"#{_F}risk_percent"
@@ -561,11 +598,30 @@ class SettingsForm(SettingsScreen):
     # --- reading back -----------------------------------------------------------------------
 
     def _collect(self) -> dict[str, str | bool]:
-        raw = super()._collect()
+        raw: dict[str, str | bool] = {}
+        for spec in EDITABLE:
+            widget = self.query_one(f"#{_F}{spec.name}")
+            if isinstance(widget, Input):
+                raw[spec.name] = widget.value
+            elif isinstance(widget, Checkbox):
+                raw[spec.name] = bool(widget.value)
         for choice in self.query(Choice):
             raw[(choice.id or "").removeprefix(_F)] = choice.value
         raw["invert"] = raw["invert"] == "opposite"
         return raw
+
+    def _show_errors(self, errors: dict[str, str]) -> None:
+        for spec in EDITABLE:
+            message = errors.get(spec.name, "")
+            line = self.query_one(f"#{_E}{spec.name}", Static)
+            line.update(f"[red]{escape(message)}[/red]" if message else "")
+            line.display = bool(message)
+        self._show_general(errors.get(""))
+
+    def _show_general(self, message: str | None) -> None:
+        line = self.query_one("#general-error", Static)
+        line.update(f"[bold red]{escape(message)}[/]" if message else "")
+        line.display = bool(message)
 
     def _mode(self) -> SizingMode:
         return SizingMode(self.query_one(f"#{_F}sizing_mode", Choice).value)
@@ -607,8 +663,6 @@ class SettingsForm(SettingsScreen):
     @on(events.DescendantFocus)
     def _on_descendant_focus(self, event: events.DescendantFocus) -> None:
         widget_id = event.widget.id or ""
-        # Not the classic form's too: it would put the bare help back, in a panel this has not.
-        event.prevent_default()
         if not widget_id.startswith(_F):
             return
         spec = BY_NAME.get(widget_id.removeprefix(_F))
@@ -623,15 +677,54 @@ class SettingsForm(SettingsScreen):
             line.append(f" · {help_text}", style=MUTED)
         self.query_one("#help", Static).update(line)
 
+    # --- actions ----------------------------------------------------------------------------
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def action_panic(self) -> None:
+        """Halt copying, then leave the form so the app's real state is what is on screen.
+
+        Anything typed and unsaved is dropped. That is the right trade in an emergency stop: a
+        form left open over a halted copier says nothing about being halted.
+        """
+        self._halt()
+        self.dismiss(False)
+
+    def action_save(self) -> None:
+        outcome = apply_edits(self._current(), self._collect())
+        self._show_errors(outcome.errors)
+        if not outcome.ok:
+            first = next((s for s in EDITABLE if s.name in outcome.errors), None)
+            if first is not None:
+                self.query_one(f"#{_F}{first.name}").focus()
+            return
+        self._apply(outcome, self._applied)
+
+    def _applied(self, refusal: str | None) -> None:
+        if refusal is not None:
+            # The engine checks again under its own lock, so it can refuse something the form
+            # let through a moment earlier. The form stays open and says so.
+            self._show_general(refusal)
+            return
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#save")
+    def _on_save(self) -> None:
+        self.action_save()
+
+    @on(Button.Pressed, "#cancel")
+    def _on_cancel(self) -> None:
+        self.action_cancel()
+
     @on(Input.Submitted)
     def _on_submit(self, event: Input.Submitted) -> None:
-        """Enter in a list starts the next entry, as a new line did in the classic form's box;
-        anywhere else it saves, as there."""
+        """Enter in a list starts the next entry; anywhere else it saves."""
+        event.stop()
         name = (event.input.id or "").removeprefix(_F)
         if name not in _LISTS:
+            self.action_save()
             return
-        event.prevent_default()
-        event.stop()
         box = event.input
         text = box.value.rstrip()
         if text and not text.endswith(","):

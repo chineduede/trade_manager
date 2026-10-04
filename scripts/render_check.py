@@ -1,7 +1,7 @@
 """Render the TUI headlessly against real discovery output and dump what it draws.
 
 Safety: the Engine is replaced with a non-spawning stub, so this launches no MT5 terminal and
-opens no connection even though roles are assigned to exercise the M/S columns. Assigning a
+opens no connection even though roles are assigned to draw master and slave cards. Assigning a
 role with the real engine would call initialize() and cold-start those terminals.
 
 Usage:  uv run python scripts/render_check.py
@@ -14,6 +14,7 @@ from pathlib import Path
 
 from mt5copier import config as config_mod
 from mt5copier.config import AppConfig, Role
+from mt5copier.copy_stats import TerminalStats
 from mt5copier.discovery import discover_terminals
 from mt5copier.engine import TerminalView
 from mt5copier.protocol import Snapshot, WorkerState
@@ -59,6 +60,22 @@ class NoSpawnEngine:
         views.sort(key=lambda v: (v.cfg.label.lower(), v.cfg.terminal_id))
         return views
 
+    def holds(self) -> dict[str, str]:
+        return {}
+
+    def orphans(self, terminal_id: str | None = None) -> list[object]:
+        return []
+
+    def terminal_stats(self, terminal_id: str) -> TerminalStats:
+        return TerminalStats()
+
+    def day_book(self, limit: int | None = None) -> list[object]:
+        return []
+
+    day_book_since = 0.0
+    blocked_reason = None
+    failed_total = 0
+
     def health(self) -> dict[str, int]:
         views = self.views()
         return {
@@ -87,18 +104,14 @@ async def main() -> None:
         await pilot.pause()
         svg = Path("scripts/render_check.svg")
         app.save_screenshot(str(svg))
-        print(f"rendered ok -> {svg}   rows={len(app._row_ids)}\n")
+        print(f"rendered ok -> {svg}   terminals={len(app._order)}\n")
 
-        table = app.query_one("#terminals")
-        widths = (3, 3, 24, 12, 26, 12, 5, 14)
-        for row in range(len(app._row_ids)):
-            cells = [str(table.get_cell_at((row, c))) for c in range(8)]
-            print("  " + " ".join(c[:w].ljust(w) for c, w in zip(cells, widths, strict=True)))
+        from rich.console import Console
 
-        from textual.widgets import Static
-
-        print("\nstatusbar:", str(app.query_one("#statusbar", Static).render()))
-        print("detail:   ", str(app.query_one("#detail", Static).render()).replace("\n", " / "))
+        console = Console(width=110)
+        console.print(app.topbar())
+        for card in app._cards.values():
+            console.print(card.content)
 
 
 if __name__ == "__main__":

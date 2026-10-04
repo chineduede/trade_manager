@@ -1,4 +1,4 @@
-"""The new UI's log page: copier.log and the day book as one filtered list."""
+"""The log page: copier.log and the day book as one filtered list."""
 
 from __future__ import annotations
 

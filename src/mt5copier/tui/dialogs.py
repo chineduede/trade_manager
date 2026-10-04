@@ -1,17 +1,27 @@
-"""The questions that guard money, in the new look: giving up open copies (unassigning, or a
-settings change), lifting the demo-only guard, and switching the copier from a dry run to live.
+"""The questions that guard money: giving up open copies (unassigning, or a settings change),
+lifting the demo-only guard, and switching the copier from a dry run to live.
 
-The first two are the classic dialogs with their drawing replaced. What is asked, what has to
-be typed, and what is done with the answer all stay the classic screen's -- the buttons, the
-text box and the error line keep their ids, so its handlers find them -- and only ``compose`` is
-new here. The last is new: the classic UI has no way to change the mode at all.
+Giving up copies: every change is treated alike. One that stops the copier managing open
+copies is only made once the person has been shown what they are giving up and agrees. Which
+edits *would* have been safe under an open copy is a question nobody has to answer. It rests
+on keeping everything: confirming abandons real positions -- they stay open, and nothing closes
+or moves them any more -- so the resting choice is the one that changes nothing.
+
+The demo-only guard has its own key and its own dialog, not a row in the settings form: that
+form is saved with ``ctrl+s`` or Enter, and a guard that a stray keypress on a checkbox can lift
+is not a guard. The two directions are deliberately unequal. **On** is the dangerous one, and
+asks for the terminal's name typed out -- the name, not a fixed word, because the mistake being
+guarded against is the wrong terminal. **Off** takes one press. What each direction *means* is
+decided in :func:`mt5copier.settings_edit.set_live_override`, where it can be tested without a
+terminal emulator; this module lays out the dialog and shows what that function says.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING
 
+from rich.markup import escape
 from rich.table import Table
 from rich.text import Text
 from textual import on
@@ -25,13 +35,15 @@ from ..config import Role, SizingMode, TerminalConfig
 from ..general_edit import LIVE_WORD
 from ..protocol import ACCOUNT_TRADE_MODE_DEMO, PositionType, Snapshot
 from ..reconcile import OpenCopy
-from ..settings_edit import live_override_phrase
-from ..tui.live_override_screen import LiveOverrideScreen
-from ..tui.orphan_screen import _LISTED, OrphanConfirmScreen
+from ..settings_edit import EditOutcome, live_override_phrase, set_live_override
 from .style import FG, MUTED, RED, RULED, amount
 
 if TYPE_CHECKING:
-    from .app import NewCopierApp
+    from .app import CopierApp
+
+_LISTED = 8
+"""Copies named on screen. A long list would push the buttons off a small terminal; the log
+carries every one, and the count in the title is always the whole number."""
 
 
 def _count_word(n: int) -> str:
@@ -80,11 +92,38 @@ def copies_table(rows: Sequence[tuple[str, str, str]]) -> Table:
     return table
 
 
-class OrphanDialog(OrphanConfirmScreen):
-    """Before open copies are given up. Esc, and the button that rests focused, keep them."""
+class OrphanDialog(ModalScreen[bool]):
+    """Before open copies are given up. Esc, and the button that rests focused, keep them.
+    Dismisses with True if agreed.
+
+    ``copies`` is keyed by the name of the slave that holds them. ``unassigning`` words the
+    screen for a role being taken away rather than a settings edit.
+    """
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        # A modal hides the app's own keys, and the panic key must not be one of them.
+        Binding("f9", "panic", "PANIC halt"),
+    ]
+
+    def __init__(
+        self,
+        copies: Mapping[str, Sequence[OpenCopy]],
+        changes: str,
+        live: bool,
+        halt: Callable[[], None],
+        *,
+        unassigning: bool = False,
+    ) -> None:
+        super().__init__()
+        self._copies = {name: list(held) for name, held in copies.items() if held}
+        self._changes = changes
+        self._live = live
+        self._halt = halt
+        self._unassigning = unassigning
 
     @property
-    def copier(self) -> NewCopierApp:
+    def copier(self) -> CopierApp:
         return self.app  # type: ignore[return-value]
 
     def _sides(self) -> dict[int, str]:
@@ -163,6 +202,26 @@ class OrphanDialog(OrphanConfirmScreen):
                 yield Button("Keep everything  esc", id="cancel", classes="keep")
                 yield Button(go, id="go", classes="danger")
 
+    def on_mount(self) -> None:
+        # Keeping everything is where focus rests: giving up has to be a deliberate move off it.
+        self.query_one("#cancel").focus()
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def action_panic(self) -> None:
+        """Halt copying, and leave without agreeing to anything."""
+        self._halt()
+        self.dismiss(False)
+
+    @on(Button.Pressed, "#go")
+    def _on_go(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#cancel")
+    def _on_cancel(self) -> None:
+        self.dismiss(False)
+
 
 # --- the demo-only guard -------------------------------------------------------------------------
 
@@ -198,12 +257,29 @@ def letters_to_go(typed: str, phrase: str) -> Text:
     return Text(f"{left} letter{'s' if left != 1 else ''} to go", style=MUTED)
 
 
-class LiveDialog(LiveOverrideScreen):
+class LiveDialog(ModalScreen[bool]):
     """Lifting, or putting back, the demo-only guard on one terminal. On needs its name typed;
-    off is one press."""
+    off is one press. Dismisses with True if it changed."""
+
+    BINDINGS = [
+        Binding("escape", "cancel", "Cancel"),
+        # A modal hides the app's own keys, and the panic key must not be one of them.
+        Binding("f9", "panic", "PANIC halt"),
+    ]
+
+    def __init__(
+        self,
+        current: Callable[[], TerminalConfig],
+        apply: Callable[[EditOutcome, Callable[[str | None], None]], None],
+        halt: Callable[[], None],
+    ) -> None:
+        super().__init__()
+        self._current = current
+        self._apply = apply
+        self._halt = halt
 
     @property
-    def copier(self) -> NewCopierApp:
+    def copier(self) -> CopierApp:
         return self.app  # type: ignore[return-value]
 
     def compose(self) -> ComposeResult:
@@ -280,6 +356,12 @@ class LiveDialog(LiveOverrideScreen):
                     yield Button("Keep it held back  esc", id="cancel", classes="keep")
                     yield Button("Allow live trading  enter", id="go", classes="danger -waiting")
 
+    def on_mount(self) -> None:
+        # Turning it on starts in the text box. Turning it off has no box, and the button is the
+        # safe direction, so it is where focus rests.
+        box = self.query("#typed")
+        (box.first() if box else self.query_one("#go")).focus()
+
     @on(Input.Changed, "#typed")
     def _on_typed(self, event: Input.Changed) -> None:
         phrase = live_override_phrase(self._current())
@@ -287,6 +369,53 @@ class LiveDialog(LiveOverrideScreen):
         matches = event.value.strip().casefold() == phrase.casefold()
         self.query_one("#go", Button).set_class(not matches, "-waiting")
         self._show_error("")
+
+    def _show_error(self, message: str) -> None:
+        line = self.query_one("#error", Static)
+        line.update(f"[bold red]{escape(message)}[/]" if message else "")
+        line.display = bool(message)
+
+    def action_cancel(self) -> None:
+        self.dismiss(False)
+
+    def action_panic(self) -> None:
+        """Halt copying, then leave the dialog so the app's real state is what is on screen."""
+        self._halt()
+        self.dismiss(False)
+
+    def action_go(self) -> None:
+        # Read at the moment of pressing, not at compose time: the direction is whatever is true
+        # now, and the typed text is only asked for -- and only looked at -- when turning it on.
+        current = self._current()
+        enabled = not current.allow_live_trading
+        box = self.query("#typed")
+        typed = (box.first(Input).value if box else "") if enabled else None
+        outcome = set_live_override(current, enabled, typed=typed)
+        if not outcome.ok:
+            self._show_error("; ".join(outcome.errors.values()))
+            return
+        self._apply(outcome, self._applied)
+
+    def _applied(self, refusal: str | None) -> None:
+        # Told later, not returned: a terminal that holds copies is asked about first, and if the
+        # person declines this is never called and the dialog is simply still there.
+        if refusal is not None:
+            self._show_error(refusal)
+            return
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#go")
+    def _on_go(self) -> None:
+        self.action_go()
+
+    @on(Button.Pressed, "#cancel")
+    def _on_cancel(self) -> None:
+        self.action_cancel()
+
+    @on(Input.Submitted)
+    def _on_submit(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.action_go()
 
 
 # --- the copier going live -----------------------------------------------------------------------

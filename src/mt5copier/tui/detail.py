@@ -1,13 +1,11 @@
-"""The terminal details page, in the new look: ``enter`` on a card or chip opens it.
+"""The terminal details page: ``enter`` on a card or chip opens it.
 
 A cream band says which terminal it is and how it is connected; under it three ruled columns
 -- its ACCOUNT, the RULE it is copied by (on the master: the slaves it feeds), and how COPYING
 to it has gone this session -- and then its open positions.
 
-Every number comes from the same place the classic page reads it (:mod:`mt5copier.terminal_detail`
-and the engine), and the breakeven keys and settings are the classic page's own: this is that
-page, drawn again. The functions here only decide what each line says, so the tests can read
-them without starting the app.
+Every number comes from :mod:`mt5copier.terminal_detail` and the engine. The functions here
+only decide what each line says, so the tests can read them without starting the app.
 """
 
 from __future__ import annotations
@@ -18,12 +16,13 @@ from typing import TYPE_CHECKING
 from rich.console import Group, RenderableType
 from rich.table import Table
 from rich.text import Text
-from textual import events, on
+from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.geometry import Region
+from textual.screen import Screen
 from textual.widgets import DataTable, Input, Sparkline, Static
 
 from ..config import AppConfig, BreakevenMode, NoStopPolicy, Role, SizingMode, TerminalConfig
@@ -43,14 +42,13 @@ from ..terminal_detail import (
     margin_gauge,
     position_rows,
 )
-from ..tui.terminal_screen import TerminalScreen
 from . import cards
 from .cards import big_amount
 from .style import BLUE, FG, MUTED, RED, RULED, TIER_COLOR, YELLOW, amount, key_hint, left_right
 from .widgets import KeyBar, QuickInput, TopBar
 
 if TYPE_CHECKING:
-    from .app import NewCopierApp
+    from .app import CopierApp
 
 # On the cream band the page's own colours would wash out, so it has darker inks of them.
 INK = "#1b1813"
@@ -430,7 +428,7 @@ def columns(role: Role) -> list[tuple[str, str, bool]]:
 
 
 def price(value: float | None, digits: int) -> str:
-    """A price as the new UI shows one: no thousands commas, which are kept for money."""
+    """A price as the UI shows one: no thousands commas, which are kept for money."""
     if not value:
         return "—"
     return f"{value:.{digits}f}"
@@ -567,18 +565,29 @@ def total_cells(rows: Sequence[PositionRow], role: Role) -> list[Text]:
 # --- the screen --------------------------------------------------------------------------------
 
 
-class DetailScreen(TerminalScreen):
-    """One terminal, in full. The classic page's actions (breakeven, settings) are inherited;
-    the keys that act on a terminal from the Map -- p, u, l and the rest -- reach the app, which
-    acts on the terminal shown here, since showing one selects it."""
+class DetailScreen(Screen[None]):
+    """One terminal, in full. Holds only the terminal id; everything else is read each tick.
+
+    Breakeven and settings are this page's own keys; the keys that act on a terminal from the
+    Map -- p, u, l and the rest -- reach the app, which acts on the terminal shown here, since
+    showing one selects it. It polls the engine on a timer of its own, which goes with it."""
 
     BINDINGS = [
+        Binding("escape", "app.pop_screen", "Back"),
+        Binding("backspace", "app.pop_screen", "Back", show=False),
+        Binding("e", "edit_settings", "Settings"),
+        Binding("b", "toggle_breakeven_exempt", "Exempt from BE"),
+        Binding("B", "breakeven_price", "BE price"),
         Binding("left", "app.step(-1)", "Other terminal", show=False, priority=True),
         Binding("right", "app.step(1)", "Other terminal", show=False, priority=True),
     ]
 
     def __init__(self, engine: Engine, cfg: AppConfig, terminal_id: str) -> None:
-        super().__init__(engine, cfg, terminal_id)
+        super().__init__()
+        self._engine = engine
+        self._cfg = cfg
+        self.terminal_id = terminal_id
+        self._rows: list[PositionRow] = []
         self._shape: tuple[Role, tuple[int, ...]] | None = None
         """The role and the columns the positions table was laid out for."""
         self._copies: dict[int, OpenCopy] = {}
@@ -587,7 +596,7 @@ class DetailScreen(TerminalScreen):
         """The copy whose breakeven price is being typed, by its master ticket."""
 
     @property
-    def copier(self) -> NewCopierApp:
+    def copier(self) -> CopierApp:
         return self.app  # type: ignore[return-value]
 
     def compose(self) -> ComposeResult:
@@ -623,10 +632,7 @@ class DetailScreen(TerminalScreen):
             yield Static("", id="td-be-error")
         yield KeyBar("", id="keybar")
 
-    def on_mount(self, event: events.Mount | None = None) -> None:
-        # Textual runs ``on_mount`` up the class tree; the classic page's builds its own widgets.
-        if event is not None:
-            event.prevent_default()
+    def on_mount(self) -> None:
         self.set_interval(0.5, self._on_timer)
         self.refresh_page()
         self.query_one("#td-positions", DataTable).focus()
@@ -824,7 +830,45 @@ class DetailScreen(TerminalScreen):
             table.move_cursor(row=min(cursor, len(self._rows) - 1), animate=False)
         table.display = bool(self._rows)
 
-    # --- a copy's breakeven price, typed in place ---------------------------------------------
+    # --- a copy's breakeven -------------------------------------------------------------------
+
+    def action_edit_settings(self) -> None:
+        """This terminal's settings form, on top of this page; closing it comes back here."""
+        self.copier.open_settings(self.terminal_id)
+
+    def _selected_copy(self) -> PositionRow | None:
+        """The copy under the cursor, or None (with a word to say why) if it is not one."""
+        row = next((r for r in self._rows if str(r.ticket) == self._cursor_key()), None)
+        if row is None or row.master_ticket is None:
+            self.notify("select one of this slave's copies first", severity="warning")
+            return None
+        return row
+
+    def _cursor_key(self) -> str | None:
+        table = self.query_one("#td-positions", DataTable)
+        if not table.row_count:
+            return None
+        try:
+            key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+        except Exception:
+            return None
+        return key.value
+
+    def action_toggle_breakeven_exempt(self) -> None:
+        """Exempt the selected copy from breakeven, or lift that. Exempting a copy whose
+        breakeven already fired lets it follow the master's stop again."""
+        row = self._selected_copy()
+        if row is None or row.master_ticket is None:
+            return
+        exempt = row.breakeven != "exempt"
+        if not self._engine.set_breakeven_exempt(self.terminal_id, row.master_ticket, exempt):
+            self.notify("that copy is no longer tracked", severity="error")
+            return
+        self.notify(
+            f"{row.symbol} #{row.ticket}: "
+            + ("exempt from breakeven" if exempt else "breakeven back on")
+        )
+        self.refresh_page()
 
     def action_breakeven_price(self) -> None:
         """Open the line under the table for the selected copy's breakeven price. No dialog:

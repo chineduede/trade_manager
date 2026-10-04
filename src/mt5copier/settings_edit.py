@@ -22,8 +22,8 @@ a ``MASTER=BROKER`` map out of free text.
 * ``label`` is owned by discovery, which overwrites it on every rescan and at every start. An
   edit would revert silently the next time the app ran.
 * ``role`` has its own keys, and ``terminal_id`` and ``exe_path`` are not the user's to set.
-* ``paused`` is a switch on the slave's row in the terminal list, not a setting: it is flipped
-  far more often than anything here, and gives nothing up (see ``Engine.set_paused``).
+* ``paused`` has its own key (``p``), not a setting: it is flipped far more often than anything
+  here, and gives nothing up (see ``Engine.set_paused``).
 * ``enabled`` is no longer offered at all. Pausing replaced it.
 
 **Nothing here knows which edits are safe under an open copy, and nothing needs to.** An edit to
@@ -53,7 +53,6 @@ from .config import (
     TerminalConfig,
     account_key,
 )
-from .reconcile import OpenCopy
 
 
 class Kind(StrEnum):
@@ -425,14 +424,6 @@ def copies_word(count: int) -> str:
     return f"{count} open {'copy' if count == 1 else 'copies'}"
 
 
-def describe_copy(copy: OpenCopy) -> str:
-    """One line naming an open copy, for the orphan-confirm screen in either UI."""
-    ticket = f"#{copy.slave_ticket}" if copy.slave_ticket is not None else "(no ticket)"
-    kind = "  resting order" if copy.resting else ""
-    volume = f"{copy.volume:g} lots" if copy.volume is not None else "lots unknown"
-    return f"{ticket}  {copy.symbol}  {volume}{kind}"
-
-
 def apply_edits(current: TerminalConfig, raw: Mapping[str, str | bool]) -> EditOutcome:
     """Apply what the form holds to ``current``, or say what is wrong with it.
 
@@ -592,50 +583,6 @@ def describe_changes(changes: tuple[Change, ...], limit: int | None = None) -> s
     if limit is not None and len(text) > limit:
         return text[: limit - 3] + "..."
     return text
-
-
-def summarize_slave(cfg: TerminalConfig) -> str:
-    """One sentence describing what this slave's settings actually do, for the detail panel.
-
-    A generator with a fixed priority. What this picks is, in order, the single
-    most behaviour-changing fact after sizing -- the one thing that, if someone only read this
-    line, they would most need to know:
-
-    1. Sizing (always first -- every slave has one).
-    2. ``invert``, if set -- it flips every trade's direction, the largest possible surprise.
-    3. ``no_stop_policy`` widening risk (LOT_MULTIPLE), if set -- trades it cannot bound.
-    4. Otherwise, what it mirrors (stop/target moves, partial closes) or that it mirrors nothing.
-
-    Returns "" for anything that is not a slave -- a master or an unassigned terminal has no
-    copy settings to summarise.
-    """
-    if cfg.role is not Role.SLAVE:
-        return ""
-    if cfg.sizing_mode is SizingMode.FIXED_CASH_RISK:
-        sizing = f"Risks {_number(cfg.risk_cash)} per trade."
-    else:
-        sizing = f"Risks {_number(cfg.risk_percent)}% of its balance per trade."
-
-    if cfg.invert:
-        detail = "Trades in the opposite direction."
-    elif cfg.no_stop_policy is NoStopPolicy.LOT_MULTIPLE:
-        detail = (
-            f"Copies trades with no stop at {_number(cfg.no_stop_lot_multiple)}x the "
-            "master's lots, unprotected."
-        )
-    else:
-        mirrors = []
-        if cfg.copy_sltp:
-            mirrors.append("stops and targets")
-        if cfg.copy_partials:
-            mirrors.append("partial closes")
-        if not mirrors:
-            detail = "Does not mirror stop, target or partial-close changes."
-        elif len(mirrors) == 1:
-            detail = f"Mirrors {mirrors[0]}."
-        else:
-            detail = f"Mirrors {mirrors[0]} and {mirrors[1]}."
-    return f"{sizing} {detail}"
 
 
 def advisories(outcome: EditOutcome) -> list[str]:

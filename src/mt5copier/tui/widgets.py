@@ -1,4 +1,4 @@
-"""Widgets of the new UI's frame and Map page: the top bar, the key bar, terminal cards and
+"""Widgets of the UI's frame and Map page: the top bar, the key bar, terminal cards and
 chips, and the lines that join the master to its slaves."""
 
 from __future__ import annotations

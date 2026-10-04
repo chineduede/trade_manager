@@ -44,39 +44,54 @@ dist/mt5copier.exe
 
 ### Keys
 
+On the Map, select a terminal (its card, or its chip under **NOT YET OPENED**) and press `space`
+for everything that can be done to it; the keys below do the same without the menu.
+
 | Key | Action |
 |---|---|
+| `space` | The selected terminal's action menu. A click on a card or chip selects it; a second click opens the menu |
+| `←` / `→` | Select the previous / next terminal |
+| `a`, `1`–`9` | Jump to the master's card, or to a slave's by the number on its card |
+| `enter` | Open the selected terminal's details page |
+| `tab` | Switch between the Map and Log pages |
 | `m` | Make the selected terminal the Master. Refused while another terminal is the master: unassign that one first |
 | `s` | Make the selected terminal a Slave (needs a master) |
 | `u` | Unassign. Unassigning the master also unassigns its slaves. **If that leaves open copies unmanaged, it asks first** and lists them per slave; agreeing orphans them (they stay open, for you to close by hand) |
-| `e` | Edit the selected terminal's settings: sizing, the no-stop policy, the copy flags, `invert`, and its symbol prefix, suffix, map and filters. **Saving any change to a slave that has open copies first asks, and if you agree those copies are orphaned:** they stay open on the slave, but the copier stops managing them (no closes, stop moves or partials), and the master's trades for them are not copied again. In the form `ctrl+s` saves, `esc` cancels, and `F9` still halts copying |
-| `l` | Turn the selected slave's live-trading override on or off — the demo-only guard's override. **On** needs the terminal's name typed out in full; off takes one press. While any terminal has it on, the status bar says `NON-DEMO ALLOWED` |
+| `e` | Edit the selected slave's settings: sizing, the no-stop policy, what it follows, its direction, breakeven, and its symbol prefix, suffix, renames and filters, with a worked example of what a trade would open. **Saving any change to a slave that has open copies first asks, and if you agree those copies are orphaned:** they stay open on the slave, but the copier stops managing them (no closes, stop moves or partials), and the master's trades for them are not copied again. In the form `ctrl+s` saves, `esc` cancels, and `F9` still halts copying |
+| `p` | Pause or resume the selected slave: paused, it takes no new trades, and its open copies are still managed |
+| `l` | Turn the selected slave's live-trading override on or off — the demo-only guard's override. **On** needs the terminal's name typed out in full; off takes one press. While any terminal has it on, the top bar says `NON-DEMO ALLOWED` |
+| `o` | Acknowledge the selected slave's untracked positions, so it copies again |
+| `g` | The copier's own settings: dry run or live (going live asks you to type `LIVE`), connection timing, join grace, and which terminals are closed on quit or unassign |
+| `d` | Start/stop copying. Needs a master and at least one slave. |
 | `r` | Rescan for terminals |
 | `c` | Ask the worker to drop and re-establish its MT5 session |
-| `d` | Start/stop detection — the dry-run diff. Needs a master and at least one slave. |
 | `ctrl+r` | Restart the worker process entirely |
 | `ctrl+l` | Clear the detection ledger (forget every believed copy) |
 | `F9` | **PANIC** — halt copying. Never closes or modifies a position. |
+| `?` | Show every key; `?` again or `esc` closes the list |
 | `q` | Quit |
 
-| `?` | Show every key; `?` again or `esc` closes the list |
-| `1` / `2` | Switch between the Terminals and Log pages (or click them in the sidebar) |
+On a slave's details page, `b` exempts the selected copy from breakeven (again lifts it), `B`
+types the copy's own breakeven price under the table, and `esc` goes back to the Map. On the Log
+page, `f` shows problems only, `a` / `1`–`9` show one terminal's lines (again shows them all),
+`/` searches, and `enter` opens the terminal a line is about.
 
-Only the everyday keys are listed in the footer; `?` shows the rest.
+The bar at the bottom lists the keys that fit; `?` shows the rest.
 
 ### The screen
 
-The terminal table is grouped into **MASTER**, **SLAVES** and **UNASSIGNED**, with each row's
-status badge (`[OK]` / `[WARN]` / `[ERR]` / `[DEAD]` / `[OFF]`), balance, equity and
-account-level floating P/L (`equity − balance`). An empty group says what to press to fill it.
-Each row ends in two buttons. The first offers the one role step that can come next: **👑 Master**
-on every unassigned terminal while there is no master, **🔗 Slave** once there is one, and a
-**Unassign** on a master or slave. The **⚙️** gear opens the terminal's settings. Roles are set
-explicitly, never toggled, so replacing the master is two steps: unassign it, then pick the new
-one. Below the table, **ACTIVITY** shows what the
-copier decided and the next panel shows the selected terminal's account and settings. The
-sidebar (hidden below 110 columns) shows whether this is a dry run or live, and links to the
-**LOG** page, a coloured tail of `copier.log`.
+The **Map** shows the master's card with a card per slave joined beneath it, each with its
+balance, equity, floating P/L and state (copying, dry run, paused, held, held back by the
+demo-only guard, or down). Under them, the **DAY BOOK** lists the master's latest trades with what
+each slave made of them, skips and refusals included with their reason, and **NOT YET OPENED**
+lists the terminals with no role yet: none of them is launched until it is given one. An empty
+map says what to do next. Roles are set explicitly, never toggled, so replacing the master is two
+steps: unassign it, then pick the new one. The top bar always says whether this is a **DRY RUN**
+or **LIVE**, and shouts about anything held, stale, failed or allowed off-demo.
+
+The **Log** page is `copier.log` merged with the day book, filterable and searchable. A
+terminal's **details page** has its account, the rule it is copied by, how copying to it has gone
+this session, and its open positions.
 
 ## How it works
 
@@ -321,8 +336,8 @@ src/mt5copier/
   executor.py        the ONLY module that can create an order
   store.py           SQLite ownership: which slave position is whose copy
   engine.py          supervisor: spawn, aggregate, diff, reconcile, dispatch
-  presentation.py    view-model for the UI: status tiers, money formatting, log tail
-  tui/app.py         Textual UI
+  presentation.py    view-model for the UI: status tiers, log tail
+  tui/               Textual UI: the map, the log, a page per terminal, dialogs, forms
 launcher.py          frozen entry point (see note below)
 copier.spec          PyInstaller spec
 ```

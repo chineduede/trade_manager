@@ -121,8 +121,8 @@ def risk_text(cfg: TerminalConfig, currency: str | None) -> str:
 
 
 def slave_state(info: RowInfo, *, dry_run: bool, copying: bool) -> SlaveState:
-    """The same priority order as the classic UI's :func:`slave_badge`: a link that is down
-    outranks the demo guard, which outranks a hold, which outranks a pause."""
+    """A link that is down outranks the demo guard, which outranks a hold, which outranks a
+    pause."""
     # ``info.tier`` is the link's own state, raised from "good" to "warning" only by a hold: so
     # a "warning" with no hold is a link still coming up.
     if info.tier in ("serious", "critical", "muted") or (

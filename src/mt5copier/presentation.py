@@ -1,4 +1,4 @@
-"""Pure view-model logic for the TUI: status tiers, row data, money formatting, log tails.
+"""Pure view-model logic for the TUI: status tiers, per-terminal display data, log tails.
 
 Kept separate from ``tui/app.py`` so the mapping from engine state to a display tier, and the
 log-tail arithmetic, can be unit tested without running Textual -- the same reason ``sizing.py``
@@ -11,12 +11,11 @@ parallel one.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Role
-from .engine import Engine, TerminalView
+from .engine import TerminalView
 from .protocol import ACCOUNT_TRADE_MODE_DEMO
 
 Tier = str
@@ -36,16 +35,6 @@ _TIER_BY_STATUS: dict[str, Tier] = {
     "stopped": "muted",
 }
 
-STATUS_BADGE: dict[Tier, str] = {
-    "good": "[OK]",
-    "warning": "[WARN]",
-    "serious": "[ERR]",
-    "critical": "[DEAD]",
-    "muted": "[OFF]",
-}
-"""Bracketed text badges. A status color never appears without a non-color cue, so the tier
-still reads on a monochrome terminal or to someone who cannot tell the colors apart."""
-
 
 def tier_for_status(status_text: str) -> Tier:
     """A held slave overrides this to "warning" at the call site (see :func:`row_info`) --
@@ -53,13 +42,9 @@ def tier_for_status(status_text: str) -> Tier:
     return _TIER_BY_STATUS.get(status_text, "muted")
 
 
-def badge_for_tier(tier: Tier) -> str:
-    return STATUS_BADGE.get(tier, "[??]")
-
-
 @dataclass(frozen=True, slots=True)
 class RowInfo:
-    """Everything one table row needs to render, already derived from a ``TerminalView``."""
+    """Everything a terminal's card needs to render, already derived from a ``TerminalView``."""
 
     terminal_id: str
     label: str
@@ -166,88 +151,6 @@ def slave_badge(row: RowInfo, dry_run: bool) -> tuple[str, Tier]:
     return ("Dry run" if dry_run else "Live"), ("warning" if dry_run else "good")
 
 
-# ---------- money formatting ----------
-
-_CURRENCY_SYMBOLS: dict[str, str] = {
-    "USD": "$",
-    "EUR": "€",
-    "GBP": "£",
-    "JPY": "¥",
-    "CNY": "¥",
-    "AUD": "$",
-    "CAD": "$",
-    "NZD": "$",
-    "CHF": "Fr",
-    "HKD": "$",
-    "SGD": "$",
-    "ZAR": "R",
-}
-"""Symbols for the currencies this project's brokers actually report. Not exhaustive on
-purpose -- an ISO code this table doesn't know falls back to showing itself (see
-:func:`format_money`) rather than guessing a symbol, or worse, a wrong one."""
-
-
-def format_money(amount: float | None, currency: str | None, *, force_sign: bool = False) -> str:
-    """Thousands-separated, two decimals, with a currency mark when the account's currency is
-    known -- and **never** a fabricated one when it isn't. An unlabelled "$" on an account that
-    might just as easily be EUR or GBP would be a wrong answer dressed as a right-looking one;
-    showing the bare number, or the ISO code if that much is known, is honest instead.
-
-    ``force_sign`` always shows a leading "+"/"-" even on a non-negative amount -- what floating
-    P/L needs (so a gain never reads as "just a number") and balance/equity don't.
-    """
-    if amount is None:
-        return "—"
-    text = f"{'+' if force_sign and amount >= 0 else ''}{amount:,.2f}"
-    if not currency:
-        return text
-    symbol = _CURRENCY_SYMBOLS.get(currency.upper())
-    if symbol is None:
-        return f"{text} {currency.upper()}"
-    sign, digits = (text[0], text[1:]) if text[:1] in "+-" else ("", text)
-    return f"{sign}{symbol}{digits}"
-
-
-def all_rows(engine: Engine) -> list[RowInfo]:
-    """One :class:`RowInfo` per terminal, in the same order ``engine.views()`` already sorts."""
-    timeout = engine.config.heartbeat_timeout_s
-    holds = engine.holds()
-    return [
-        row_info(
-            v,
-            timeout_s=timeout,
-            hold_reason=holds.get(v.cfg.terminal_id),
-            display_name=engine.config.display_name(v.cfg.terminal_id),
-        )
-        for v in engine.views()
-    ]
-
-
-@dataclass(frozen=True, slots=True)
-class GroupedRows:
-    """The same rows ``all_rows`` returns, partitioned by role for the terminal table: the
-    master (if any) with its slaves, then everything unassigned.
-
-    Partitioning, not a tree: ``config.py``'s one-master rule plus ``role_actions.py``'s
-    no-master-no-slave rule mean there is at most one master and every slave belongs to it, so a
-    flat "master" + "slaves" + "unassigned" grouping already says everything a deeper tree would
-    -- and it stays this simple on purpose until multi-master actually exists (see ROADMAP.md's
-    "Future features" section).
-    """
-
-    master: RowInfo | None
-    slaves: list[RowInfo]
-    unassigned: list[RowInfo]
-
-
-def group_rows(rows: list[RowInfo]) -> GroupedRows:
-    return GroupedRows(
-        master=next((r for r in rows if r.role == "master"), None),
-        slaves=[r for r in rows if r.role == "slave"],
-        unassigned=[r for r in rows if r.role == "unassigned"],
-    )
-
-
 def read_log_tail(path: Path, *, max_lines: int = 200) -> str:
     """The last ``max_lines`` of the log file, as plain text.
 
@@ -260,22 +163,3 @@ def read_log_tail(path: Path, *, max_lines: int = 200) -> str:
         return ""
     lines = data.decode("utf-8", errors="replace").splitlines()
     return "\n".join(lines[-max_lines:])
-
-
-_LOG_LEVEL_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} (\S+)")
-_LOG_LEVEL_TIER: dict[str, Tier] = {
-    "DEBUG": "muted",
-    "INFO": "good",
-    "WARNING": "warning",
-    "ERROR": "serious",
-    "CRITICAL": "critical",
-}
-
-
-def log_line_tier(line: str) -> Tier | None:
-    """The tier to color one log line by, from its level -- otherwise an INFO heartbeat and a
-    WARNING worth noticing are the same gray text. None for a line with no recognised level (a
-    traceback continuation, for instance), which is shown plain rather than guessed at.
-    """
-    match = _LOG_LEVEL_RE.match(line)
-    return _LOG_LEVEL_TIER.get(match.group(1)) if match else None

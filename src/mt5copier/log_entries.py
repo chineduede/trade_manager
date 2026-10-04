@@ -1,4 +1,4 @@
-"""The new UI's log page: ``copier.log`` and the day book, merged into one list of entries.
+"""The log page: ``copier.log`` and the day book, merged into one list of entries.
 
 The file says everything, in the words a developer wrote; the day book says the part that
 matters most -- what each slave made of each master trade -- in the words a person would use.

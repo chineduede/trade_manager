@@ -1,9 +1,9 @@
-"""The copier's own settings, in the new look: its mode, its connection timing and its join grace,
+"""The copier's own settings: its mode, its connection timing and its join grace,
 written as sentences like a slave's settings. Opened with ``g``.
 
 What a value means and whether it may change is :mod:`mt5copier.general_edit`'s; this lays the
 fields out, reads them back and shows its messages. Going live opens
-:class:`~mt5copier.tui_v2.dialogs.GoLiveDialog` before anything is saved.
+:class:`~mt5copier.tui.dialogs.GoLiveDialog` before anything is saved.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from .settings import Choice, lead, rows, section, words
 from .style import FG, MUTED, RED, YELLOW, spaced
 
 if TYPE_CHECKING:
-    from .app import NewCopierApp
+    from .app import CopierApp
 
 log = get_logger(__name__)
 
@@ -69,7 +69,7 @@ class GeneralForm(ModalScreen[bool]):
     ]
 
     @property
-    def copier(self) -> NewCopierApp:
+    def copier(self) -> CopierApp:
         return self.app  # type: ignore[return-value]
 
     # --- composition ------------------------------------------------------------------------
