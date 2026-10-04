@@ -1332,10 +1332,97 @@ are the design, not a limitation waiting to be lifted.
   Then a demo run: open on the master, let a slave copy cross the trigger, see its stop move
   to entry + buffer while the master's stays put, and move the master's stop back to see it
   ignored.
-- **Prop-firm guards.** Daily loss limit, max drawdown, consistency-rule-style caps that halt
-  copying account-wide rather than acting on one position. Needs its own semantics settled
-  (per-slave? what each trigger actually does — pause new copies, or close everything) before
-  anything is built.
+- **Prop-firm guards — designed 2026-10-04, not built; design below awaiting the user's review.**
+  Prop firms' rules are many and differ from firm to firm (daily loss, static or trailing
+  drawdown, max floating loss, margin or risk per trade, max lots or positions, weekend and
+  news bans, consistency), and more will be wanted later. **The user's call: a plug-and-play
+  rule system, chosen per terminal**, not a fixed set of settings fields. Rules apply to
+  slaves only; the master is just the source of trades.
+
+  **The rule that shapes it: rules decide, the engine acts.** A rule never sends anything. It
+  returns a verdict from a fixed vocabulary the engine already knows how to carry out, and the
+  most severe verdict among a slave's rules wins:
+
+  | Verdict | Effect | Built on |
+  |---|---|---|
+  | `allow` | nothing | — |
+  | `warn` | logged, shown on the card; copying carries on | log + toast |
+  | `decline` | this one new trade is refused, final like every decline | `SkipReason` |
+  | `shrink` | the new trade is sent smaller, down to a cap | `max_lot` capping |
+  | `block_new` | the slave takes no new trades; upkeep of held ones carries on | pause |
+  | `close_worst` | close the copy with the largest floating loss; re-checked next snapshot | **new** |
+  | `flatten` | close every copy on the slave, then `block_new` | **new** |
+
+  Adding a rule therefore never adds a new way to trade: a wrong rule can at worst stop
+  trading or close what it holds, both of which are reviewed once, in the engine. The two
+  closing verdicts are the only new sending paths and go through the existing CLOSE dispatch.
+
+  *The four checks — a rule implements only the ones it needs:*
+  - **`gate(trade)`** — before a new trade, on what is known without sizing: symbol, side,
+    time, open position count, whether it carries a stop. Max positions, weekend and news
+    windows, stop required. Runs in `reconcile.py`, beside `_paused_reason` and
+    `_filter_reason`, so it stays pure and dry-run shows it.
+  - **`caps(account)`** — after sizing, but **without rule code in the worker**: the engine
+    asks each rule for numeric caps and sends the tightest on the command, as `max_lot`
+    already travels (`protocol.py`, `engine.py`). Caps: `max_lot`, `max_risk_money` (what the
+    stop would lose), `max_margin` (from `order_calc_margin`), each with `decline` or `shrink`.
+    The executor enforces numbers and knows nothing of rules. Max risk per trade, max margin
+    per trade, and "a stop-out here must not cross the daily floor" (cap = room left) all
+    reduce to these.
+  - **`watch(account)`** — on every snapshot: daily loss, drawdown, max floating loss. This is
+    where `block_new`, `close_worst` and `flatten` come from.
+  - **`status(account)`** — what to show: "daily room $412 of $500", a bar, the state.
+
+  *The account view*, built once per snapshot and read-only to every rule: balance, equity,
+  margin, free margin, open positions with floating P/L, broker server time, today's start
+  balance and equity, and that rule's own saved state. **New worker reads needed:** server
+  time (the last tick's time) and today's closed deals (`history_deals_get`). Today's start
+  balance is rebuilt from history — current balance minus today's closed profit, commission
+  and swap — so it is right however late the copier was started; start-of-day equity can only
+  be recorded if the copier is running at the reset, so rules based on it say so when it is
+  missing. Each rule's reset time and timezone is its own parameter (firms differ).
+
+  *Saved rule state* (peak equity for trailing drawdown, a breach latch, today's start
+  equity) goes in a `guard_state` table in `mapping.db`. **A breach latches:** once tripped it
+  holds until that rule's next reset, or until cleared by hand behind a red confirm dialog —
+  otherwise a block would lift the moment equity bounced.
+
+  *Rules are built in, not loaded from user files*: each is one module in
+  `mt5copier/rules/`, registered by type name, declaring its parameters (name, kind, unit,
+  default, bounds). Adding a rule = one file plus its tests; nothing else changes. Every rule
+  that can produce `block_new` or stronger also takes a **buffer** (act at e.g. 80% of the
+  limit), because the firm checks every tick on its own server, the copier only sees a
+  snapshot per poll and nothing while it is off, and gaps jump thresholds. The guards are a
+  safety net, never a guarantee, and the page says so.
+
+  *Where they live — not in settings.* Settings say how to copy and change only when edited;
+  guards say how much harm an account may take, change state by themselves, and can close
+  trades, so they need watching as much as editing.
+  - **A Guards page per slave** (from the card's action menu, its own key, and the details
+    page): one row per rule with its bar, room left, state and verdict on breach. On it: add,
+    edit, remove a rule (the form generated from the rule's declared parameters, in the
+    settings form's sentence style), apply a firm preset, switch the whole set on/off, and
+    clear a latched breach.
+  - **A badge on the slave's Map card**: nothing when healthy; amber `GUARD 82%` inside the
+    buffer; red `BREACHED · blocked` / `FLATTENED` after.
+  - **Stored in `guards.json`**, separate from `config.json`, so a slip editing rules cannot
+    disturb copy settings. A firm preset is a named list of rules in the same format, and
+    copying guards from another terminal falls out of it.
+
+  *Build order:*
+  1. Framework, account view, server time and deal history in the worker, `guard_state`, the
+     Guards page and badge with **`status` only, enforcing nothing** — so the numbers can be
+     checked against a firm's dashboard on a demo first.
+  2. Daily loss, static drawdown, max floating loss, margin per trade, risk per trade — with
+     `warn`, `decline`, `shrink`, `block_new`.
+  3. `close_worst` and `flatten`, after step 2's numbers are demo-verified.
+  4. More rules (trailing drawdown, max positions, weekend, news, consistency as `warn` only)
+     and firm presets.
+
+  *Open questions for the user:* which firms the first presets follow (and so the exact
+  definitions: start balance vs. start equity vs. the higher; reset time); the default buffer;
+  whether a copy with no stop (unknown risk) passes a risk cap, is declined, or counts as
+  risking the whole room; and the Guards page's key.
 
   **Margin checks belong here (parked 2026-10-02).** MT5 can price a trade's margin before it
   is sent (`order_calc_margin(action, symbol, volume, price)`, in the account currency), and
