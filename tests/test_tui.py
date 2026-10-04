@@ -1913,11 +1913,20 @@ async def test_agreeing_unassigns_the_slave_and_says_what_to_close(
         await _press_unassign_on(app, pilot, TID_SLAVE)
 
         app.screen.query_one("#go", Button).press()
-        await pilot.pause()
+
+        def told() -> bool:
+            return any("#900" in t and "close them by hand" in t for t in _toasts(app))
+
+        # The toast follows the dialog's dismissal by a message or two; one pause was not
+        # always enough on a busy machine.
+        for _ in range(20):
+            await pilot.pause(0.05)
+            if told():
+                break
 
         assert cfg.terminals[TID_SLAVE].role is Role.UNASSIGNED
         assert app._engine.given_up == [(TID_SLAVE, [11])]  # type: ignore[attr-defined]
-        assert any("#900" in t and "close them by hand" in t for t in _toasts(app))
+        assert told()
 
 
 async def test_unassigning_the_master_asks_about_every_slaves_copies(
