@@ -69,6 +69,7 @@ def terminal_actions(
         items.append(
             MenuItem("p", "resume" if cfg.paused else "pause: take no new trades", "toggle_pause")
         )
+        items.append(MenuItem("k", "guards: prop-firm rules", "guards"))
     # The demo-only guard stops orders, so it only ever holds back a slave on a real account.
     # Where it has been lifted, the way to put it back is offered on any terminal.
     if cfg.allow_live_trading:

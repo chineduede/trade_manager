@@ -34,6 +34,11 @@ class Param:
     """For a NUMBER: the value must be greater than this."""
     maximum: float | None = None
     """For a NUMBER: the value must be at most this."""
+    after: str = ""
+    """Words the form puts after the value, such as a unit."""
+    only_if: tuple[str, str] | None = None
+    """``(other, value)``: this parameter means something only while ``other`` is ``value``,
+    and the form hides it otherwise -- what a percent is of, while the limit is in money."""
 
     def check(self, value: object) -> tuple[ParamValue | None, str | None]:
         """``(value, None)`` when acceptable, normalised; ``(None, why)`` when not."""
@@ -103,6 +108,7 @@ BUFFER = Param(
     80.0,
     minimum=0,
     maximum=100,
+    after="% of the limit",
 )
 """How much of the limit may be used before the rule acts, in percent. The firm checks every
 tick on its own server; the copier sees a snapshot a few times a second, nothing while it is

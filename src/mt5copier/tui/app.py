@@ -42,6 +42,8 @@ from ..config import AppConfig, Role, TerminalConfig
 from ..day_book import MasterEvent, Outcome, SlaveOutcome, describe_master, describe_outcome
 from ..discovery import discover_terminals
 from ..engine import Engine, TerminalView
+from ..guards import AccountGuards, GuardRule, GuardsDoc
+from ..guards import model as guards_mod
 from ..log_entries import (
     Level,
     LogEntry,
@@ -55,7 +57,7 @@ from ..log_entries import (
     terminal_names,
 )
 from ..logging_setup import get_logger
-from ..paths import config_path, log_dir
+from ..paths import config_path, guards_path, log_dir
 from ..presentation import RowInfo, read_log_tail, row_info
 from ..protocol import WorkerState
 from ..reconcile import OpenCopy
@@ -70,6 +72,7 @@ from . import cards
 from .detail import DetailScreen
 from .dialogs import LiveDialog, OrphanDialog
 from .general import GeneralForm
+from .guards import GuardsScreen
 from .menu import ActionMenu, terminal_actions
 from .settings import SettingsForm
 from .style import (
@@ -134,6 +137,7 @@ class CopierApp(App[None]):
         Binding("ctrl+l", "clear_detection", "Clear ledger", show=False),
         Binding("o", "acknowledge_orphans", "Ack orphans", show=False),
         Binding("p", "toggle_pause", "Pause/resume slave", show=False),
+        Binding("k", "guards", "Guards (prop-firm rules)", show=False),
         Binding("tab", "next_page", "Map / Log", show=False, priority=True),
         Binding("shift+tab", "next_page", "Map / Log", show=False, priority=True),
         Binding("left", "step(-1)", "Previous card", show=False),
@@ -149,10 +153,12 @@ class CopierApp(App[None]):
         *(Binding(str(n), f"jump({n})", f"Slave {n}", show=False) for n in range(1, 10)),
     ]
 
-    def __init__(self, cfg: AppConfig) -> None:
+    def __init__(self, cfg: AppConfig, guards: GuardsDoc | None = None) -> None:
         super().__init__()
         self._cfg = cfg
-        self._engine = Engine(cfg)
+        self._guards = guards if guards is not None else GuardsDoc()
+        """Every account's guard rules: edited by the guards page, read by the engine."""
+        self._engine = Engine(cfg, guards=self._guards)
         self._page = "map"
         self._sel: str | None = None
         self._order: list[str] = []
@@ -505,6 +511,35 @@ class CopierApp(App[None]):
                     "They stay open and are no longer managed: close them by hand."
                 )
             self.notify(f"{name}: {said}", severity="warning", timeout=20)
+
+    def action_guards(self) -> None:
+        """Open the selected slave's guards page: its account's prop-firm rules."""
+        tid = self._selected_id()
+        if tid is None:
+            return
+        if self._cfg.terminals[tid].role is not Role.SLAVE:
+            self.notify("Guards are for slaves: the rules a prop account copied to is held to.")
+            return
+        self.push_screen(GuardsScreen(tid))
+
+    def save_guards(self, key: str, guards: AccountGuards) -> bool:
+        """Put one account's guards in place and write the file. False if it could not be
+        written, which is said; the change then holds until the copier closes."""
+        self._guards.set_account(key, guards)
+        return self._write_guards()
+
+    def save_template(self, name: str, rules: tuple[GuardRule, ...]) -> bool:
+        self._guards.templates[name] = rules
+        return self._write_guards()
+
+    def _write_guards(self) -> bool:
+        try:
+            guards_mod.save(self._guards, guards_path())
+        except OSError as exc:
+            self.notify(f"could not save the guards: {exc}", severity="error", timeout=8)
+            log.exception("guards save failed")
+            return False
+        return True
 
     def action_edit_settings(self) -> None:
         """Open the settings form for the selected terminal."""
@@ -905,7 +940,13 @@ class CopierApp(App[None]):
             refused = self._engine.terminal_stats(v.cfg.terminal_id).refused
             card.update(
                 cards.slave_card(
-                    number, v, info, state, refused=refused, width=card.content_size.width
+                    number,
+                    v,
+                    info,
+                    state,
+                    refused=refused,
+                    width=card.content_size.width,
+                    guards=self._engine.guard_report(v.cfg.terminal_id),
                 )
             )
             card.set_classes(f"card slave -{state.kind}" + (" -selected" if selected else ""))
@@ -1485,10 +1526,11 @@ def _tone(out: SlaveOutcome) -> str:
 def run() -> None:
     """Entry point: load config, fold in a discovery sweep, then hand over to the UI."""
     cfg = config_mod.load()
+    guards = guards_mod.load(guards_path())
     try:
         config_mod.merge_discovery(cfg, discover_terminals())
         config_mod.save(cfg)
     except Exception:
         log.exception("initial discovery failed; starting with saved config only")
     log.info("config at %s", config_path())
-    CopierApp(cfg).run()
+    CopierApp(cfg, guards).run()

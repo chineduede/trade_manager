@@ -1332,7 +1332,8 @@ are the design, not a limitation waiting to be lifted.
   Then a demo run: open on the master, let a slave copy cross the trigger, see its stop move
   to entry + buffer while the master's stays put, and move the master's stop back to see it
   ignored.
-- **Prop-firm guards — designed 2026-10-04 and accepted by the user; not built.**
+- **Prop-firm guards — designed 2026-10-04 and accepted by the user; step 1 (display only)
+  built 2026-10-04 on branch `guards`, unit- and Pilot-tested, awaiting its demo check.**
   Prop firms' rules are many and differ from firm to firm (daily loss, static or trailing
   drawdown, max floating loss, margin or risk per trade, max lots or positions, weekend and
   news bans, consistency), and more will be wanted later. **The user's call: a plug-and-play
@@ -1431,7 +1432,41 @@ are the design, not a limitation waiting to be lifted.
   *Settled with the user 2026-10-04:* the default buffer is **80%** of a limit. **A required
   stop loss is its own rule** (`gate`, declining a new trade with no stop), since some firms
   mandate one and others do not; without that rule a copy with no stop is not refused, and a
-  risk cap cannot measure it, so it passes the cap. The Guards page opens with **`r`**.
+  risk cap cannot measure it, so it passes the cap. The Guards page opens with **`k`** (`r`
+  was already rescan). **Guards belong to the account** (`login@server`, as account names
+  do), not the terminal: a terminal logged into a new challenge starts with none.
+
+  *Step 1 as built (2026-10-04)* — where it differs from the design above, this wins:
+  - **Worker:** `_ServerClock` finds the broker's offset from UTC off a tick that has *just
+    changed* (a closed market's stale tick never sets it), probing open positions' symbols and
+    three Market Watch ones. `history_deals_get` is read every 5s and whenever the balance
+    moves, over the last 50h, every deal kind included (a deposit moves the balance too). On
+    the snapshot as `server_offset_s`, `deals` (times in real UTC; None = unknown) and
+    `deals_since`.
+  - **`mt5copier/guards/`** (not `mt5copier/rules/`): `params.py` (a rule's declared
+    parameters, checked and defaulted from the declaration, `only_if` to hide one beside
+    another's value), `account.py` (`AccountView`, `balance_at`, `last_reset` in an IANA zone,
+    `tzdata` now a dependency), `base.py` (`Rule`, `Measure`, `Level`, registry), `rules/` (six
+    rules: daily loss, max drawdown static, floating loss net-or-losers, margin per trade, risk
+    per trade — measured against the slave's own sizing — and stop loss required), `model.py`
+    (`guards.json`: accounts and templates; an unknown rule type is kept, never dropped),
+    `book.py` (`GuardBook`: records equity at a watched reset, reports each rule's level).
+  - **Saved state is `guard_state.json`, not a `mapping.db` table:** the store is swapped
+    between live and dry-run files, and guard state is about the account, not either mode. It
+    holds only the equity at a reset, written once a day; peaks and latches arrive with step 2+.
+  - **No `gate`/`caps`/`watch` yet** — step 1 has only `measure`. They are added with the
+    step that enforces, so nothing unused ships.
+  - **UI:** `tui/guards.py` — the page (`k` on a slave, from the map, the action menu or a
+    details page), a form per rule generated from its parameters with a live "reads as"
+    sentence, initial balance and template name typed in place, templates and copying from
+    another slave (rules get fresh ids; the initial balance stays the account's own), remove
+    behind a confirm. The card's badge sits on its margin line, so no card grows taller:
+    `GUARD 82%` yellow past a rule's buffer, `GUARD BREACHED` red at its limit.
+
+  *Step 1's demo check:* set up a slave's rules to match a prop account's real limits, then
+  compare the page with the firm's dashboard — the day's starting balance after a loss and a
+  deposit, the drawdown floor, floating loss — and leave the copier running across the
+  daily reset to see the equity recorded.
 
   **Margin checks belong here (parked 2026-10-02).** MT5 can price a trade's margin before it
   is sent (`order_calc_margin(action, symbol, volume, price)`, in the account currency), and

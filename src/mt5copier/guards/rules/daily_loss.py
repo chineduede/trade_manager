@@ -23,6 +23,7 @@ class DailyLoss(Rule):
                 ("initial_balance", "the initial balance"),
                 ("day_start", "where the day started"),
             ),
+            only_if=("unit", "percent"),
         ),
         Param(
             "basis",

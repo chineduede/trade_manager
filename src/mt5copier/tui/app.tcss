@@ -298,13 +298,83 @@ ActionMenu OptionList:focus > .option-list--option-highlighted {
     background: $foreground 10%;
 }
 
+/* --- an account's guards ------------------------------------------------------------------ */
+
+#gd-page {
+    padding-top: 1;
+    scrollbar-size-vertical: 1;
+}
+
+/* The same cream band as a terminal's details. */
+#gd-band {
+    background: $foreground;
+    color: $background;
+    padding: 1 2;
+    height: auto;
+}
+
+#gd-note, #gd-account, #gd-empty, #gd-said {
+    height: auto;
+    margin-top: 1;
+}
+
+#gd-rules-head {
+    margin-top: 2;
+}
+
+#gd-rules {
+    background: $background;
+    border: none;
+    height: auto;
+}
+
+#gd-rules:focus {
+    background-tint: $foreground 0%;
+}
+
+#gd-rules > .datatable--header {
+    background: $background;
+}
+
+#gd-rules > .datatable--cursor {
+    background: $foreground 18%;
+}
+
+#gd-rules > .datatable--hover {
+    background: $foreground 10%;
+}
+
+#gd-ask {
+    display: none;
+    height: 1;
+    margin-top: 1;
+}
+
+#gd-ask-what, #gd-ask .w {
+    width: auto;
+}
+
+#gd-ask-box {
+    width: 24;
+}
+
+#gd-ask-box:focus {
+    background: $foreground 30%;
+}
+
+#gd-ask-error {
+    display: none;
+    height: auto;
+}
+
 /* --- the questions that guard money -------------------------------------------------------- */
 
 /* Screens of their own, so they would take the Screen rule at the top: solid and padded. They
    dim what is under them instead, and sit in the middle of it. */
 OrphanDialog,
 LiveDialog,
-GoLiveDialog {
+GoLiveDialog,
+GuardConfirm {
     background: #0c0b09 80%;
     padding: 0;
     align: center middle;
@@ -312,7 +382,8 @@ GoLiveDialog {
 
 OrphanDialog #dialog,
 LiveDialog #dialog,
-GoLiveDialog #dialog {
+GoLiveDialog #dialog,
+GuardConfirm #dialog {
     width: 96;
     max-width: 100%;
     height: auto;

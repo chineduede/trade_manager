@@ -55,6 +55,7 @@ class RiskPerTrade(Rule):
             ParamKind.CHOICE,
             "initial_balance",
             choices=(("initial_balance", "the initial balance"), ("balance", "the balance")),
+            only_if=("unit", "percent"),
         ),
         on_breach("decline", "warn", "decline", "shrink"),
     )

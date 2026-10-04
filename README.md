@@ -272,6 +272,11 @@ explanations live in this README instead. The file is indented and perfectly han
 A corrupt config is renamed aside (`config.bad-<pid>.json`) rather than deleted, and defaults
 are used, so a bad write can never stop the app from starting.
 
+Prop-firm guards live beside it in `guards.json` (each account's rules, keyed `login@server`,
+and saved templates), with what they recorded — the equity at a daily reset — in
+`guard_state.json`. Both are edited from the guards page (`k` on a slave); see ROADMAP.md,
+"Prop-firm guards".
+
 The filtering, inversion and no-stop-policy fields (`no_stop_policy`, `invert`, `copy_sltp`,
 `copy_partials`, `symbol_prefix`/`symbol_suffix`, `symbol_whitelist`/`symbol_blacklist`) are
 read by the diff engine as of Stage 2a, as is `join_grace_seconds`.

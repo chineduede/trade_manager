@@ -6,6 +6,7 @@ The Engine is stubbed out, so the tests spawn no processes and touch no MT5 term
 from __future__ import annotations
 
 import io
+import time
 from collections.abc import Collection, Mapping
 from dataclasses import replace
 from pathlib import Path
@@ -13,10 +14,11 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from mt5copier.config import BREAKEVEN_FIELDS, AppConfig, Role, TerminalConfig
+from mt5copier.config import BREAKEVEN_FIELDS, AppConfig, Role, TerminalConfig, account_key
 from mt5copier.copy_stats import TerminalStats
 from mt5copier.day_book import MasterEvent
 from mt5copier.engine import RecordedAction, RecordedResult, TerminalView
+from mt5copier.guards import GuardBook, GuardReport, GuardsDoc
 from mt5copier.protocol import (
     COPIER_MAGIC,
     Position,
@@ -38,8 +40,12 @@ TID_BROKEN = "C" * 32
 class StubEngine:
     """Engine stand-in: records calls, spawns nothing."""
 
-    def __init__(self, cfg: AppConfig, state_path: Path | None = None) -> None:
+    def __init__(
+        self, cfg: AppConfig, state_path: Path | None = None, guards: GuardsDoc | None = None
+    ) -> None:
         self._cfg = cfg
+        # A state file that never exists: the stub records nothing at a reset.
+        self.guard_book = GuardBook(guards or GuardsDoc(), Path("no-such-dir/guard_state.json"))
         self.sync_calls = 0
         self.restarted: list[str] = []
         self.reconnected: list[str] = []
@@ -135,6 +141,15 @@ class StubEngine:
         return sum(1 for r in self.results if not r.result.ok)
 
     # --- the settings editor ----------------------------------------------------------------
+
+    def guard_report(self, terminal_id: str) -> GuardReport:
+        snap = self.snapshots.get(terminal_id)
+        cfg = self._cfg.terminals.get(terminal_id)
+        if snap is not None and snap.login is not None:
+            key = account_key(snap.login, snap.server)
+        else:
+            key = account_key(cfg.last_login, cfg.last_server) if cfg else None
+        return self.guard_book.report(key, snap, time.time())
 
     def terminal_stats(self, terminal_id: str) -> TerminalStats:
         return self.stats.get(terminal_id, TerminalStats())
@@ -259,6 +274,7 @@ def make_app(cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     saved = tmp_path / "config.json"
     monkeypatch.setattr("mt5copier.config.config_path", lambda: saved)
     monkeypatch.setattr("mt5copier.tui.app.config_path", lambda: saved)
+    monkeypatch.setattr("mt5copier.tui.app.guards_path", lambda: tmp_path / "guards.json")
     instance = CopierApp(cfg)
     instance._saved_to = saved  # type: ignore[attr-defined]
     return instance

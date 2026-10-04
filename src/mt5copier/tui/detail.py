@@ -939,6 +939,7 @@ class DetailScreen(Screen[None]):
             keys.append(key_hint("e", "settings"))
         if cfg.role is Role.SLAVE:
             keys.append(key_hint("p", "resume" if cfg.paused else "pause"))
+            keys.append(key_hint("k", "guards"))
             if any(r.master_ticket is not None for r in self._rows):
                 keys.append(key_hint("B", "breakeven price"))
                 keys.append(key_hint("b", "exempt"))
