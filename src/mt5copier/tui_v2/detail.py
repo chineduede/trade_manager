@@ -530,6 +530,31 @@ def position_cells(
     return cells
 
 
+_DROPS = ("swap", "link", "now", "lots", "target", "open")
+"""The positions table's columns a narrow page leaves out, first to last. What is left says
+what each trade is, where it stands and what will move its stop; the target is last but one
+to go, as the R column still says where it is."""
+
+
+def fit_columns(
+    cols: Sequence[tuple[str, str, bool]], rows: Sequence[Sequence[Text]], width: int
+) -> list[int]:
+    """The indexes of the columns that fit in ``width`` cells, leaving out those in
+    :data:`_DROPS` in turn until the rest fit (or none of them is left to leave out)."""
+    sizes = [
+        max([len(label), *(row[i].cell_len for row in rows)]) + 2
+        for i, (_, label, _) in enumerate(cols)
+    ]
+    kept = list(range(len(cols)))
+    keys = [k for k, _, _ in cols]
+    for key in _DROPS:
+        if sum(sizes[i] for i in kept) <= width:
+            break
+        if key in keys:
+            kept.remove(keys.index(key))
+    return kept
+
+
 def total_cells(rows: Sequence[PositionRow], role: Role) -> list[Text]:
     total = sum(r.profit for r in rows if r.profit is not None)
     cells = [Text("") for _ in columns(role)]
@@ -554,8 +579,8 @@ class DetailScreen(TerminalScreen):
 
     def __init__(self, engine: Engine, cfg: AppConfig, terminal_id: str) -> None:
         super().__init__(engine, cfg, terminal_id)
-        self._role: Role | None = None
-        """The role the positions table's columns were laid out for."""
+        self._shape: tuple[Role, tuple[int, ...]] | None = None
+        """The role and the columns the positions table was laid out for."""
         self._copies: dict[int, OpenCopy] = {}
         """This slave's copies by their ticket on it, as of the last redraw."""
         self._be_ticket: int | None = None
@@ -611,7 +636,7 @@ class DetailScreen(TerminalScreen):
         if terminal_id == self.terminal_id:
             return
         self.terminal_id = terminal_id
-        self._role = None
+        self._shape = None
         self.refresh_page()
 
     def menu_anchor(self) -> Region:
@@ -729,13 +754,6 @@ class DetailScreen(TerminalScreen):
 
     def _fill(self, cfg: TerminalConfig, snap: Snapshot | None, views: list[TerminalView]) -> None:
         table = self.query_one("#td-positions", DataTable)
-        if self._role is not cfg.role:
-            self._role = cfg.role
-            table.clear(columns=True)
-            for key, label, right in columns(cfg.role):
-                table.add_column(
-                    Text(label, style=f"bold {FG}", justify="right" if right else "left"), key=key
-                )
 
         rows: list[PositionRow] | None = None
         if snap is not None:
@@ -776,14 +794,33 @@ class DetailScreen(TerminalScreen):
             left_right(Text(heading, style="bold"), exposure_text(snap))
         )
 
-        cursor = table.cursor_row
-        table.clear()
         self._rows = rows or []
+        cells = []
         for r in self._rows:
             copy = self._copies.get(r.ticket) if cfg.role is Role.SLAVE else None
-            table.add_row(*position_cells(r, cfg.role, copy, cfg), key=str(r.ticket))
+            cells.append(position_cells(r, cfg.role, copy, cfg))
         if self._rows:
-            table.add_row(*total_cells(self._rows, cfg.role), key="total")
+            cells.append(total_cells(self._rows, cfg.role))
+        cols = columns(cfg.role)
+        # A narrow page leaves columns out, rather than hiding the last ones off its edge.
+        width = (table.size.width or self.size.width) - 2
+        kept = fit_columns(cols, cells, width)
+        shape = (cfg.role, tuple(kept))
+        if shape != self._shape:
+            self._shape = shape
+            table.clear(columns=True)
+            for i in kept:
+                key, label, right = cols[i]
+                table.add_column(
+                    Text(label, style=f"bold {FG}", justify="right" if right else "left"), key=key
+                )
+
+        cursor = table.cursor_row
+        table.clear()
+        keys = [str(r.ticket) for r in self._rows] + ["total"]
+        for row, key in zip(cells, keys, strict=False):
+            table.add_row(*(row[i] for i in kept), key=key)
+        if self._rows:
             table.move_cursor(row=min(cursor, len(self._rows) - 1), animate=False)
         table.display = bool(self._rows)
 

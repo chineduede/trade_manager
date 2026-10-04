@@ -1305,3 +1305,53 @@ async def test_panic_quit_and_the_mode_show_at_any_width(
             assert "DRY RUN" in top
             assert all(len(line) <= width for line in keys.splitlines())
             await pilot.press("tab")
+
+
+def test_the_log_columns_give_way_on_a_narrow_terminal() -> None:
+    from mt5copier.tui_v2.app import log_layout
+
+    who = ["Slave 1 (Beta Broker)", "copier"]
+    wide = log_layout(170, who)
+    assert (wide.level, wide.short_names, wide.who) == (True, False, len(who[0]))
+    assert sum(size + 2 for _, _, size in wide.columns()) == 170 - 2, "Entry takes the rest"
+    middle = log_layout(90, who)
+    assert (middle.level, middle.short_names) == (True, True), "names go first"
+    narrow = log_layout(80, who)
+    assert (narrow.level, narrow.short_names) == (False, True), "then the level"
+    assert [k for k, _, _ in narrow.columns()] == ["time", "terminal", "entry"]
+
+
+async def test_a_long_log_line_wraps_instead_of_running_off(app: NewCopierApp) -> None:
+    from mt5copier.paths import log_dir
+
+    log_dir().mkdir(parents=True, exist_ok=True)
+    long = "word " * 60
+    (log_dir() / "copier.log").write_text(
+        f"2020-01-01 10:00:01 WARNING [MainProcess] mt5copier.config: {long}\n", encoding="utf-8"
+    )
+    async with app.run_test(size=(80, 30)) as pilot:
+        await pilot.press("tab")
+        await pilot.pause()
+        table = app.query_one("#log", DataTable)
+        assert [str(c.label) for c in table.columns.values()] == ["Time", "Terminal", "Entry"]
+        assert table.rows[next(iter(table.rows))].height > 1
+        assert table.virtual_size.width <= table.size.width
+
+
+def test_a_narrow_positions_table_leaves_out_the_least_needed_columns() -> None:
+    from mt5copier.tui_v2.detail import columns, fit_columns, position_cells
+
+    cols = columns(Role.MASTER)
+    rows = [position_cells(_row(), Role.MASTER)]
+    keys = [k for k, _, _ in cols]
+
+    def kept(width: int) -> list[str]:
+        return [keys[i] for i in fit_columns(cols, rows, width)]
+
+    assert kept(400) == keys
+    full = kept(400)
+    least = next(w for w in range(400, 0, -1) if kept(w - 1) != full)
+    assert kept(least - 1) == [k for k in full if k != "swap"], "swap goes first"
+    tight = kept(50)
+    assert {"symbol", "side", "stop", "r", "pl"} <= set(tight)
+    assert not {"swap", "link", "now", "lots", "target", "open"} & set(tight)

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from rich.table import Table
 from rich.text import Text
@@ -134,8 +135,9 @@ class NewCopierApp(CopierApp):
         self._log_shown: list[LogEntry] | None = None
         self._log_query = ""
         """The log page's search, as typed: only lines holding all of its words are shown."""
-        self._log_drawn: tuple[list[LogEntry], tuple[str, ...]] | None = None
-        """What the table holds: the lines, and the words lit up in them."""
+        self._log_drawn: tuple[list[LogEntry], tuple[str, ...], LogLayout] | None = None
+        """What the table holds: the lines, the words lit up in them, and its columns."""
+        self._log_layout: LogLayout | None = None
 
     # --- composition ------------------------------------------------------------------------
 
@@ -170,9 +172,6 @@ class NewCopierApp(CopierApp):
             event.prevent_default()
         self.register_theme(THEME)
         self.theme = THEME.name
-        log_table = self.query_one("#log", DataTable)
-        for label in ("Time", "Level", "Terminal", "Entry"):
-            log_table.add_column(Text(label, style=f"bold {FG}"), key=label.lower())
         self._engine.start()
         self._rebuild_rows()
         self.set_interval(0.5, self._on_timer)
@@ -831,16 +830,31 @@ class NewCopierApp(CopierApp):
         table = self.query_one("#log", DataTable)
         following = table.row_count == 0 or table.cursor_row >= table.row_count - 1
         self._refresh_logbar(sum(1 for e in scoped if e.level.problem), following)
-        drawn = (shown, tuple(words))
+        if not table.size.width:
+            # Not laid out yet: its columns are cut to its width, so wait until it has one.
+            self.call_after_refresh(self._refresh_log)
+            return
+        layout = log_layout(table.size.width, [self._who(e, numbers) for e in shown])
+        drawn = (shown, tuple(words), layout)
         if drawn == self._log_drawn:
             return
         old = self._log_shown or []
         at = old[table.cursor_row] if 0 <= table.cursor_row < len(old) else None
         self._log_shown = shown
         self._log_drawn = drawn
-        table.clear()
+        if layout != self._log_layout:
+            self._log_layout = layout
+            table.clear(columns=True)
+            for key, label, size in layout.columns():
+                table.add_column(Text(label, style=f"bold {FG}"), key=key, width=size)
+        else:
+            table.clear()
         for entry in shown:
-            table.add_row(*self._log_cells(entry, numbers, words))
+            cells = self._log_cells(entry, numbers, words, layout)
+            # A line longer than the Entry column wraps onto more rows, rather than running
+            # off the right edge; most lines fit, and are not measured.
+            tall = cells[-1].cell_len > layout.entry
+            table.add_row(*cells, height=None if tall else 1)
         if not shown:
             return
         target = len(shown) - 1
@@ -856,8 +870,9 @@ class NewCopierApp(CopierApp):
             out[master.terminal_id] = "A"
         return out
 
-    def _who(self, entry: LogEntry, numbers: dict[str, str]) -> str:
-        """The Terminal column, as the day book names them: "Master (name)", "Slave 2 (name)"."""
+    def _who(self, entry: LogEntry, numbers: dict[str, str], *, short: bool = False) -> str:
+        """The Terminal column, as the day book names them: "Master (name)", "Slave 2 (name)";
+        ``short`` leaves the name out, for a narrow terminal."""
         if entry.terminal_id is None:
             return "copier"
         number = numbers.get(entry.terminal_id)
@@ -867,10 +882,16 @@ class NewCopierApp(CopierApp):
             role = f"Slave {number}"
         else:
             role = "Terminal"
+        if short:
+            return role
         return f"{role} ({self._cfg.display_name(entry.terminal_id)[:24]})"
 
     def _log_cells(
-        self, entry: LogEntry, numbers: dict[str, str], words: list[str] | None = None
+        self,
+        entry: LogEntry,
+        numbers: dict[str, str],
+        words: list[str] | None = None,
+        layout: LogLayout | None = None,
     ) -> tuple[Text, ...]:
         when = Text(time.strftime("%H:%M:%S", time.localtime(entry.ts)), style=MUTED)
         level = Text(entry.level.value, style=_LEVEL_STYLE[entry.level])
@@ -878,7 +899,8 @@ class NewCopierApp(CopierApp):
             who = Text("copier", style=MUTED)
         else:
             style = f"bold {FG}" if entry.tone is Tone.MASTER else FG
-            who = Text(self._who(entry, numbers), style=style)
+            short = layout is not None and layout.short_names
+            who = Text(self._who(entry, numbers, short=short), style=style)
         first, *rest = entry.text.splitlines() or [""]
         text = Text(first, style=_TONE_STYLE[entry.tone])
         if rest:
@@ -887,6 +909,8 @@ class NewCopierApp(CopierApp):
             # What was searched for, lit up where it is in the line.
             for cell in (level, who, text):
                 cell.highlight_words(words, style=_FOUND, case_sensitive=False)
+        if layout is not None and not layout.level:
+            return when, who, text
         return when, level, who, text
 
     def _refresh_logbar(self, problems: int, following: bool) -> None:
@@ -959,6 +983,46 @@ class NewCopierApp(CopierApp):
             style=MUTED,
         )
         return out
+
+
+@dataclass(frozen=True)
+class LogLayout:
+    """The log table's columns at one width: the Entry column takes what the others leave,
+    and on a narrow terminal the Terminal column drops the names and then Level goes (an
+    entry's colour still says it)."""
+
+    level: bool
+    short_names: bool
+    who: int
+    entry: int
+
+    def columns(self) -> list[tuple[str, str, int]]:
+        out = [("time", "Time", 8)]
+        if self.level:
+            out.append(("level", "Level", 5))
+        out += [("terminal", "Terminal", self.who), ("entry", "Entry", self.entry)]
+        return out
+
+
+_LOG_PAD = 2
+"""Each column's cell padding, one each side."""
+_LOG_SCROLLBAR = 2
+_SHORT_WHO = 8
+"""The widest Terminal cell without names: "Terminal"."""
+
+
+def log_layout(width: int, who: Sequence[str]) -> LogLayout:
+    """The columns for a table ``width`` cells wide, whose Terminal cells would read ``who``."""
+    room = width - _LOG_SCROLLBAR
+    full = min(max((len(w) for w in who), default=_SHORT_WHO), 34)
+    full = max(full, len("Terminal"))
+    for level, short in ((True, False), (True, True), (False, True)):
+        who_width = _SHORT_WHO if short else full
+        used = 8 + _LOG_PAD + who_width + _LOG_PAD + (5 + _LOG_PAD if level else 0)
+        entry = room - used - _LOG_PAD
+        if entry >= (50 if (level, short) != (False, True) else 0):
+            break
+    return LogLayout(level, short, who_width, max(entry, 20))
 
 
 _LEVEL_STYLE = {
