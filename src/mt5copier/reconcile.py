@@ -996,6 +996,9 @@ class OpenCopy:
     point: float = 0.0
     """What a 1.0 price move is worth on one lot, and the symbol's point, from the fill; 0 when
     unknown. For the settings form's worked example."""
+    risk_distance: float = 0.0
+    """One R: the price distance from the copy's fill to the stop it opened with, 0 when it
+    opened with none. Kept when the stop later moves, so R still means the risk taken."""
 
 
 class CopyLedger:
@@ -1075,6 +1078,7 @@ class CopyLedger:
                 breakeven_at=p.breakeven_at,
                 price_value=p.price_value,
                 point=p.point,
+                risk_distance=p.risk_distance,
             )
             for p in self._store.positions(terminal_id)
         ]

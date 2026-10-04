@@ -9,12 +9,32 @@ from dataclasses import dataclass
 from rich.console import RenderableType
 from rich.style import Style
 from rich.text import Text
+from textual.binding import Binding
 from textual.geometry import Region, Size
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import Input, Static
 
 from .style import FAINT, FG, GREEN, MUTED, RED, SELECTED_BG
+
+
+class QuickInput(Input):
+    """A one-line entry typed into in place, with no dialog: the log's search, a copy's
+    breakeven price. Esc backs out of it, rather than reaching the page under it."""
+
+    BINDINGS = [Binding("escape", "back_out", "Back out", show=False)]
+
+    class Escaped(Message):
+        def __init__(self, box: QuickInput) -> None:
+            super().__init__()
+            self.box = box
+
+        @property
+        def control(self) -> QuickInput:
+            return self.box
+
+    def action_back_out(self) -> None:
+        self.post_message(self.Escaped(self))
 
 
 class Picked(Message):

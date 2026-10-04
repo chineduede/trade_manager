@@ -641,3 +641,27 @@ GoLiveDialog #dialog {
 #log-search:focus {
     background: $foreground 30%;
 }
+
+/* --- a copy's breakeven price, typed in place ----------------------------------------------- */
+
+#td-be {
+    height: 1;
+    margin-top: 1;
+    display: none;
+}
+
+#td-be > Static {
+    width: auto;
+}
+
+#td-be-price {
+    width: 16;
+}
+
+#td-be-price:focus {
+    background: $foreground 30%;
+}
+
+#td-be-error {
+    display: none;
+}

@@ -21,7 +21,6 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.geometry import Region
-from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, DataTable, Input, Static
 
@@ -69,7 +68,7 @@ from .style import (
     left_right,
     spaced,
 )
-from .widgets import Card, ChipItem, Chips, KeyBar, Picked, Rail, TopBar, Trunk
+from .widgets import Card, ChipItem, Chips, KeyBar, Picked, QuickInput, Rail, TopBar, Trunk
 
 log = get_logger(__name__)
 
@@ -156,7 +155,7 @@ class NewCopierApp(CopierApp):
                 yield Static("", id="logbar")
                 with Horizontal(id="searchbar"):
                     yield Static(Text("Search  ", style=MUTED), classes="w")
-                    yield SearchBox(
+                    yield QuickInput(
                         placeholder="words a line must hold", id="log-search", compact=True
                     )
                     yield Static(Text("  enter keep it · esc clear it", style=MUTED), classes="w")
@@ -213,6 +212,9 @@ class NewCopierApp(CopierApp):
         it is theirs, to move between fields and buttons."""
         if action == "next_page":
             return self.screen is self.screen_stack[0] or self._detail() is not None
+        if action == "step" and isinstance(self.focused, Input):
+            # The arrows move the cursor in a box being typed into, not to another terminal.
+            return False
         return True
 
     def action_next_page(self) -> None:
@@ -683,7 +685,7 @@ class NewCopierApp(CopierApp):
         if self._page != "log" or self._detail() is not None:
             return
         self.query_one("#searchbar").display = True
-        box = self.query_one("#log-search", SearchBox)
+        box = self.query_one("#log-search", QuickInput)
         box.focus()
         box.cursor_position = len(box.value)
 
@@ -700,8 +702,11 @@ class NewCopierApp(CopierApp):
         event.stop()
         self._close_search()
 
-    def on_search_box_cleared(self, _message: SearchBox.Cleared) -> None:
-        self.query_one("#log-search", SearchBox).value = ""
+    @on(QuickInput.Escaped, "#log-search")
+    def _on_search_cleared(self, event: QuickInput.Escaped) -> None:
+        """Esc in the search clears it."""
+        event.stop()
+        self.query_one("#log-search", QuickInput).value = ""
         self._log_query = ""
         self._close_search()
 
@@ -905,18 +910,6 @@ _TONE_STYLE = {
     Tone.WARN: YELLOW,
     Tone.ERROR: RED,
 }
-
-
-class SearchBox(Input):
-    """The log page's search. Esc here clears the search, rather than reaching the app."""
-
-    BINDINGS = [Binding("escape", "clear", "Clear the search", show=False)]
-
-    class Cleared(Message):
-        pass
-
-    def action_clear(self) -> None:
-        self.post_message(self.Cleared())
 
 
 def _choice(label: str, chosen: bool) -> Text:

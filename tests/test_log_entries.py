@@ -115,7 +115,7 @@ def test_day_book_entries_read_as_the_design_has_them() -> None:
     master, filled, refused = event_entries([event()], TID_M)
     assert master.terminal_id == TID_M
     assert master.tone is Tone.MASTER
-    assert master.text == "Opened BTCUSD buy 0.78 at 84,854, stop 84,532.7, target 85,165.81"
+    assert master.text == "Opened BTCUSD buy 0.78 at 84854, stop 84532.7, target 85165.81"
     assert filled.text == ("Opened 3.11 lots in 360 ms, filled 1,175 points worse than the master")
     assert filled.ts == ts("15:41:08"), "at the time it was settled"
     assert refused.level is Level.ERROR

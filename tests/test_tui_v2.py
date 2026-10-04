@@ -22,6 +22,7 @@ from mt5copier.day_book import MasterEvent, Outcome, SlaveOutcome
 from mt5copier.engine import TerminalView
 from mt5copier.presentation import RowInfo
 from mt5copier.protocol import ActionKind
+from mt5copier.terminal_detail import PositionRow
 from mt5copier.tui_v2 import NewCopierApp
 from mt5copier.tui_v2.cards import margin_bar, slave_state
 from mt5copier.tui_v2.style import FAINT, GREEN, RED
@@ -361,7 +362,7 @@ async def test_the_day_book_lists_each_master_trade_with_every_slaves_outcome(
         app._refresh()
         await pilot.pause()
         said = plain(app.query_one("#daybook", Static).content)
-        assert "Master (Alpha Broker) opened BTCUSD buy 0.78 at 84,854" in said
+        assert "Master (Alpha Broker) opened BTCUSD buy 0.78 at 84854" in said
         assert "Slave 1 (Beta Broker)" in said and "opened 3.11 lots in 360 ms" in said
         assert "refused: not a demo account" in said
 
@@ -1142,3 +1143,117 @@ async def test_the_copiers_settings_choose_what_happens_to_terminals(
         await pilot.press("ctrl+s")
         await pilot.pause()
         assert cfg.close_terminals is TerminalClosing.ALL
+
+
+def _row(**over: object) -> PositionRow:
+    base: dict[str, object] = {
+        "ticket": 501,
+        "symbol": "BTCUSD",
+        "side": "BUY",
+        "volume": 0.77,
+        "price_open": 85345.18,
+        "price_current": 85330.15,
+        "sl": 85024.76,
+        "tp": 85665.95,
+        "sl_room": 305.39,
+        "tp_room": 335.80,
+        "swap": 0.0,
+        "profit": -11.57,
+        "link": "copy of #11",
+        "link_tier": "good",
+        "digits": 2,
+        "master_ticket": 11,
+    }
+    return PositionRow(**{**base, **over})  # type: ignore[arg-type]
+
+
+def test_prices_have_no_commas_and_stops_no_distance() -> None:
+    from mt5copier.tui_v2.detail import position_cells, price
+
+    assert price(85345.18, 2) == "85345.18"
+    cells = [c.plain for c in position_cells(_row(), Role.MASTER)]
+    assert "85345.18" in cells and "85024.76" in cells and "85665.95" in cells
+    assert not any("away" in c or "," in c for c in cells[:8])
+
+
+def test_r_reads_now_over_target_and_is_red_while_losing() -> None:
+    from mt5copier.tui_v2.detail import one_r, r_cell
+
+    row = _row()
+    cell = r_cell(row, one_r(row, None))
+    assert cell.plain == "-0.05R/1.00R"
+    assert cell.spans[0].style == RED
+    sell = _row(side="SELL", price_open=100.0, price_current=98.0, sl=104.0, tp=90.0)
+    assert r_cell(sell, one_r(sell, None)).plain == "+0.50R/2.50R"
+    assert r_cell(_row(tp=0.0), 320.42).plain == "-0.05R", "no target, no second part"
+    assert r_cell(_row(sl=0.0), 0.0).plain == "—", "no stop, no R"
+
+
+def test_r_on_a_copy_is_measured_by_its_stop_as_it_opened() -> None:
+    """After breakeven the stop sits at entry; R still means the risk the copy opened with."""
+    from mt5copier.reconcile import OpenCopy
+    from mt5copier.tui_v2.detail import one_r
+
+    moved = _row(sl=85345.18)
+    copy = OpenCopy(11, 501, "BTCUSD", 0.77, resting=False, risk_distance=320.42)
+    assert one_r(moved, copy) == 320.42
+    assert one_r(moved, None) == 0.0
+
+
+def test_the_breakeven_column_says_where_it_fires() -> None:
+    from test_settings_example import slave as slave_cfg
+
+    from mt5copier.config import BreakevenMode
+    from mt5copier.reconcile import OpenCopy
+    from mt5copier.tui_v2.detail import breakeven_cell
+
+    copy = OpenCopy(11, 501, "BTCUSD", 0.77, resting=False, risk_distance=300.0)
+    row = _row()
+    off = slave_cfg()
+    assert breakeven_cell(row, copy, off).plain == "off · B to set a price"
+    on = slave_cfg(breakeven_mode=BreakevenMode.R, breakeven_trigger_r=1.5)
+    assert breakeven_cell(row, copy, on).plain == "1.5R at 85795.18"
+    no_stop = OpenCopy(11, 501, "BTCUSD", 0.77, resting=False)
+    assert breakeven_cell(row, no_stop, on).plain == "1.5R · opened with no stop"
+    by_hand = OpenCopy(11, 501, "BTCUSD", 0.77, resting=False, breakeven_at=85500.0)
+    assert breakeven_cell(row, by_hand, on).plain == "at 85500.00"
+    fired = OpenCopy(11, 501, "BTCUSD", 0.77, resting=False, breakeven_sl=85348.7)
+    assert breakeven_cell(row, fired, on).plain == "✓ stop at 85348.70"
+
+
+async def test_shift_b_types_a_breakeven_price_in_place(app: NewCopierApp, cfg: AppConfig) -> None:
+    from mt5copier.tui_v2.detail import DetailScreen
+
+    _wire_copying(app, cfg)  # type: ignore[arg-type]
+    async with app.run_test(size=(200, 50)) as pilot:
+        await pilot.press("1", "enter")
+        await pilot.pause()
+        screen = app.screen
+        assert isinstance(screen, DetailScreen)
+        table = screen.query_one("#td-positions", DataTable)
+        assert table.get_row_at(0)[7].plain == "+0.23R", "now 1.08620 on a 1.08504 open, stop 1.08"
+
+        await pilot.press("B")
+        await pilot.pause()
+        assert screen.query_one("#td-be").display
+        assert app.screen is screen, "no dialog: the price is typed on the page"
+        await pilot.press(*"1.0840", "left")
+        assert screen.terminal_id == TID_SLAVE, "the arrows stay in the box"
+        await pilot.press("enter")
+        await pilot.pause()
+        error = screen.query_one("#td-be-error", Static)
+        assert error.display and "above 1.0851" in plain(error.content)
+        assert screen.query_one("#td-be").display, "a refused price stays open to fix"
+
+        box = screen.query_one("#td-be-price")
+        box.value = "1.0900"  # type: ignore[attr-defined]
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not screen.query_one("#td-be").display
+        assert app.focused is table
+        assert table.get_row_at(0)[10].plain == "at 1.09000"
+
+        await pilot.press("B", "escape")
+        await pilot.pause()
+        assert isinstance(app.screen, DetailScreen), "esc leaves the box, not the page"
+        assert not screen.query_one("#td-be").display

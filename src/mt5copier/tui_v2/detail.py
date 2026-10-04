@@ -18,19 +18,20 @@ from typing import TYPE_CHECKING
 from rich.console import Group, RenderableType
 from rich.table import Table
 from rich.text import Text
-from textual import events
+from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.geometry import Region
-from textual.widgets import DataTable, Sparkline, Static
+from textual.widgets import DataTable, Input, Sparkline, Static
 
-from ..config import AppConfig, NoStopPolicy, Role, SizingMode, TerminalConfig
+from ..config import AppConfig, BreakevenMode, NoStopPolicy, Role, SizingMode, TerminalConfig
 from ..copy_stats import TerminalStats
 from ..engine import Engine, TerminalView
 from ..presentation import RowInfo
 from ..protocol import ACCOUNT_TRADE_MODE_DEMO, Snapshot
+from ..reconcile import OpenCopy
 from ..terminal_detail import (
     PositionRow,
     bar,
@@ -38,7 +39,6 @@ from ..terminal_detail import (
     exposure,
     format_duration,
     format_ping,
-    format_price,
     held_by_counts,
     margin_gauge,
     position_rows,
@@ -47,7 +47,7 @@ from ..tui.terminal_screen import TerminalScreen
 from . import cards
 from .cards import big_amount
 from .style import BLUE, FG, MUTED, RED, RULED, TIER_COLOR, YELLOW, amount, key_hint, left_right
-from .widgets import KeyBar, TopBar
+from .widgets import KeyBar, QuickInput, TopBar
 
 if TYPE_CHECKING:
     from .app import NewCopierApp
@@ -417,8 +417,9 @@ def columns(role: Role) -> list[tuple[str, str, bool]]:
         ("lots", "Lots", True),
         ("open", "Open", True),
         ("now", "Now", True),
-        ("stop", "Stop", False),
-        ("target", "Target", False),
+        ("stop", "Stop", True),
+        ("target", "Target", True),
+        ("r", "R", True),
         ("swap", "Swap", True),
         ("pl", "P/L", True),
     ]
@@ -428,16 +429,73 @@ def columns(role: Role) -> list[tuple[str, str, bool]]:
     return out
 
 
-def _level(price: float, room: float | None, digits: int) -> Text:
-    """``84,532.70 309.30 away``; red, and how far past, once the price has gone through it."""
-    if not price:
-        return _v("—", MUTED)
-    out = Text(format_price(price, digits))
-    if room is not None:
-        if room > 0:
-            out.append(f" {room:,.{digits}f} away", style=MUTED)
-        else:
-            out.append(f" {-room:,.{digits}f} past", style=RED)
+def price(value: float | None, digits: int) -> str:
+    """A price as the new UI shows one: no thousands commas, which are kept for money."""
+    if not value:
+        return "—"
+    return f"{value:.{digits}f}"
+
+
+def _level(level: float, room: float | None, digits: int) -> Text:
+    """A stop or target, red once the price has gone through it."""
+    if not level:
+        return _right("—", MUTED)
+    return _right(price(level, digits), RED if room is not None and room <= 0 else "")
+
+
+def _sign(r: PositionRow) -> float:
+    return 1.0 if r.side == "BUY" else -1.0
+
+
+def one_r(r: PositionRow, copy: OpenCopy | None) -> float:
+    """The price distance that is one R: a copy's stop as it opened, which a breakeven move
+    does not change; otherwise the stop as it is now, while it is still on the losing side.
+    0 when there is no risk to measure by."""
+    if copy is not None and copy.risk_distance > 0:
+        return copy.risk_distance
+    if not r.sl:
+        return 0.0
+    return max((r.price_open - r.sl) * _sign(r), 0.0)
+
+
+def r_cell(r: PositionRow, risk: float) -> Text:
+    """``-0.06R/1.02R``: how far the price is from entry now, and where the target is, both
+    in R. The first part is red while losing and blue while winning."""
+    if risk <= 0 or r.price_current is None:
+        return _right("—", MUTED)
+    now = (r.price_current - r.price_open) * _sign(r) / risk
+    shown = round(now, 2)
+    out = Text()
+    out.append(f"{shown:+.2f}R", style=RED if shown < 0 else BLUE if shown > 0 else MUTED)
+    if r.tp:
+        out.append(f"/{(r.tp - r.price_open) * _sign(r) / risk:.2f}R", style=MUTED)
+    out.justify = "right"
+    return out
+
+
+def breakeven_cell(r: PositionRow, copy: OpenCopy | None, cfg: TerminalConfig) -> Text:
+    """What will move this copy's stop to breakeven, and where: the slave's R with the price it
+    fires at, a price set by hand, or that it already has. Off says how to set a price."""
+    if copy is None:
+        return Text("")
+    digits = r.digits
+    if copy.breakeven_exempt:
+        return Text("exempt", style=MUTED)
+    if copy.breakeven_sl:
+        return Text(f"✓ stop at {price(copy.breakeven_sl, digits)}", style=TIER_COLOR["good"])
+    if copy.breakeven_at:
+        return Text(f"at {price(copy.breakeven_at, digits)}", style=FG)
+    if cfg.breakeven_mode is BreakevenMode.R:
+        times = f"{cfg.breakeven_trigger_r:g}R"
+        if copy.risk_distance <= 0:
+            return Text(f"{times} · opened with no stop", style=MUTED)
+        at = r.price_open + _sign(r) * cfg.breakeven_trigger_r * copy.risk_distance
+        out = Text(f"{times} ", style=MUTED)
+        out.append(f"at {price(at, digits)}", style=FG)
+        return out
+    out = Text("off · ", style=MUTED)
+    out.append("B", style=f"bold {FG}")
+    out.append(" to set a price", style=MUTED)
     return out
 
 
@@ -445,22 +503,28 @@ def _right(text: str, style: str = "") -> Text:
     return Text(text, style=style, justify="right")
 
 
-def position_cells(r: PositionRow, role: Role) -> list[Text]:
+def position_cells(
+    r: PositionRow,
+    role: Role,
+    copy: OpenCopy | None = None,
+    cfg: TerminalConfig | None = None,
+) -> list[Text]:
     pl = r.profit
     link_color = FG if r.link_tier == "good" else TIER_COLOR[r.link_tier]
     cells = [
         Text(r.symbol, style="bold"),
         Text(r.side.lower(), style=BLUE if r.side == "BUY" else RED),
         _right(f"{r.volume:g}"),
-        _right(format_price(r.price_open, r.digits)),
-        _right(format_price(r.price_current, r.digits)),
+        _right(price(r.price_open, r.digits)),
+        _right(price(r.price_current, r.digits)),
         _level(r.sl, r.sl_room, r.digits),
         _level(r.tp, r.tp_room, r.digits),
+        r_cell(r, one_r(r, copy)),
         _right(amount(r.swap), MUTED),
         _right(amount(pl), RED if pl is not None and pl < 0 else ""),
     ]
     if role is Role.SLAVE:
-        cells.append(Text(r.breakeven, style=TIER_COLOR[r.breakeven_tier]))
+        cells.append(breakeven_cell(r, copy, cfg) if cfg is not None else Text(""))
     cells.append(Text(r.link, style=link_color))
     return cells
 
@@ -491,6 +555,10 @@ class DetailScreen(TerminalScreen):
         super().__init__(engine, cfg, terminal_id)
         self._role: Role | None = None
         """The role the positions table's columns were laid out for."""
+        self._copies: dict[int, OpenCopy] = {}
+        """This slave's copies by their ticket on it, as of the last redraw."""
+        self._be_ticket: int | None = None
+        """The copy whose breakeven price is being typed, by its master ticket."""
 
     @property
     def copier(self) -> NewCopierApp:
@@ -514,6 +582,19 @@ class DetailScreen(TerminalScreen):
                     yield Sparkline([], id="td-latency")
             yield Static("", id="td-positions-head", classes="heading")
             yield DataTable(id="td-positions", cursor_type="row")
+            with Horizontal(id="td-be"):
+                yield Static("", id="td-be-what")
+                yield QuickInput(
+                    placeholder="price",
+                    id="td-be-price",
+                    compact=True,
+                    restrict=r"[0-9.,]*",
+                )
+                yield Static(
+                    Text("  enter set it · empty enter clears it · esc leave it", style=MUTED),
+                    classes="w",
+                )
+            yield Static("", id="td-be-error")
         yield KeyBar("", id="keybar")
 
     def on_mount(self, event: events.Mount | None = None) -> None:
@@ -671,10 +752,16 @@ class DetailScreen(TerminalScreen):
                 master = next((v for v in views if v.cfg.role is Role.MASTER), None)
                 master_snap = master.snapshot if master is not None else None
                 is_slave = cfg.role is Role.SLAVE
+                copies = self._engine.open_copies(self.terminal_id) if is_slave else None
+                self._copies = {
+                    c.slave_ticket: c
+                    for c in copies or ()
+                    if c.slave_ticket is not None and not c.resting
+                }
                 rows = position_rows(
                     snap,
                     is_master=False,
-                    copies=self._engine.open_copies(self.terminal_id) if is_slave else None,
+                    copies=copies,
                     breakeven=breakeven_rule(cfg),
                     master_positions=master_snap.open_positions if master_snap else None,
                     orphan_tickets=(o.slave_ticket for o in self._engine.orphans(self.terminal_id)),
@@ -692,11 +779,75 @@ class DetailScreen(TerminalScreen):
         table.clear()
         self._rows = rows or []
         for r in self._rows:
-            table.add_row(*position_cells(r, cfg.role), key=str(r.ticket))
+            copy = self._copies.get(r.ticket) if cfg.role is Role.SLAVE else None
+            table.add_row(*position_cells(r, cfg.role, copy, cfg), key=str(r.ticket))
         if self._rows:
             table.add_row(*total_cells(self._rows, cfg.role), key="total")
             table.move_cursor(row=min(cursor, len(self._rows) - 1), animate=False)
         table.display = bool(self._rows)
+
+    # --- a copy's breakeven price, typed in place ---------------------------------------------
+
+    def action_breakeven_price(self) -> None:
+        """Open the line under the table for the selected copy's breakeven price. No dialog:
+        enter sets it, and a price the copy cannot use is said there, in red."""
+        row = self._selected_copy()
+        if row is None or row.master_ticket is None:
+            return
+        self._be_ticket = row.master_ticket
+        copy = self._copies.get(row.ticket)
+        what = Text("Breakeven for ", style=MUTED)
+        what.append(f"{row.symbol} {row.side.lower()} #{row.ticket}", style=f"bold {FG}")
+        what.append(f", opened at {price(row.price_open, row.digits)}:  ", style=MUTED)
+        self.query_one("#td-be-what", Static).update(what)
+        box = self.query_one("#td-be-price", QuickInput)
+        box.value = (
+            price(copy.breakeven_at, row.digits) if copy is not None and copy.breakeven_at else ""
+        )
+        self._be_error("")
+        line = self.query_one("#td-be")
+        line.display = True
+        box.focus()
+        box.cursor_position = len(box.value)
+        self.call_after_refresh(line.scroll_visible, animate=False)
+
+    @on(QuickInput.Escaped, "#td-be-price")
+    def _on_be_left(self, event: QuickInput.Escaped) -> None:
+        event.stop()
+        self._close_be()
+
+    @on(Input.Submitted, "#td-be-price")
+    def _on_be_set(self, event: Input.Submitted) -> None:
+        event.stop()
+        ticket = self._be_ticket
+        if ticket is None:
+            self._close_be()
+            return
+        text = event.value.replace(",", "").strip()
+        try:
+            value = float(text) if text else 0.0
+        except ValueError:
+            self._be_error("not a price")
+            return
+        problem = self._engine.set_breakeven_at(self.terminal_id, ticket, value)
+        if problem is not None:
+            self._be_error(problem)
+            return
+        self._close_be()
+
+    def _be_error(self, message: str) -> None:
+        line = self.query_one("#td-be-error", Static)
+        line.update(Text(message, style=RED))
+        line.display = bool(message)
+        if message:
+            self.call_after_refresh(line.scroll_visible, animate=False)
+
+    def _close_be(self) -> None:
+        self._be_ticket = None
+        self.query_one("#td-be").display = False
+        self._be_error("")
+        self.query_one("#td-positions", DataTable).focus()
+        self.refresh_page()
 
     def _refresh_keybar(self, cfg: TerminalConfig) -> None:
         app = self.copier
@@ -707,7 +858,8 @@ class DetailScreen(TerminalScreen):
         if cfg.role is Role.SLAVE:
             keys.append(key_hint("p", "resume" if cfg.paused else "pause"))
             if any(r.master_ticket is not None for r in self._rows):
-                keys.append(key_hint("b B", "breakeven"))
+                keys.append(key_hint("B", "breakeven price"))
+                keys.append(key_hint("b", "exempt"))
         if cfg.role is not Role.UNASSIGNED:
             keys.append(key_hint("u", "unassign"))
         keys.append(key_hint("tab", "log"))

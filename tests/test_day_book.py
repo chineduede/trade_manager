@@ -96,7 +96,7 @@ def test_one_tick_groups_every_slave_under_the_masters_trade() -> None:
 
     [event] = book.events()
     assert event.kind is ActionKind.OPEN
-    assert describe_master(event) == "opened BTCUSD buy 0.78 at 84,854"
+    assert describe_master(event) == "opened BTCUSD buy 0.78 at 84854"
     assert [(o.terminal_id, o.outcome) for o in event.outcomes] == [
         (TID_S1, Outcome.SENDING),
         (TID_S2, Outcome.SKIPPED),
@@ -287,7 +287,7 @@ def test_full_description_adds_stop_and_target() -> None:
         tp=85133.5,
     )
     assert describe_master_full(event) == (
-        "opened BTCUSD buy 0.69 at 84,767.3, stop 84,417.6, target 85,133.5"
+        "opened BTCUSD buy 0.69 at 84767.3, stop 84417.6, target 85133.5"
     )
 
 
@@ -433,5 +433,5 @@ def test_a_stop_move_says_what_was_set_and_on_which_trade() -> None:
     book.add(action(kind=ActionKind.MODIFY_SLTP), Outcome.DRY_RUN)
     book.end_tick([], {})
     assert describe_master(book.events()[0]) == (
-        "set stop 84,532.7, target 85,165.81 on BTCUSD sell 0.78"
+        "set stop 84532.7, target 85165.81 on BTCUSD sell 0.78"
     )

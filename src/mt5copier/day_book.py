@@ -438,7 +438,7 @@ _LOTS_KINDS = frozenset({ActionKind.OPEN, ActionKind.CLOSE, ActionKind.REDUCE, A
 
 
 def _price(value: float) -> str:
-    return f"{value:,.5f}".rstrip("0").rstrip(".") if value else "none"
+    return f"{value:.5f}".rstrip("0").rstrip(".") if value else "none"
 
 
 def _num(value: float) -> str:
