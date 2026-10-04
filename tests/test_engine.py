@@ -436,3 +436,35 @@ def test_a_restart_closes_nothing_whatever_the_setting(engine: Engine, cfg: AppC
     engine.restart(TID_A)
     sent = worker.cmd_q.sent[-1]  # type: ignore[attr-defined]
     assert (sent.close_terminal, sent.close_any) == (False, False)
+
+
+# --- guards -------------------------------------------------------------------------------------
+
+
+def test_guard_report_follows_the_account_logged_in(cfg: AppConfig, tmp_path: Path) -> None:
+    from mt5copier.guards import AccountGuards, GuardRule, GuardsDoc, Level
+
+    doc = GuardsDoc(
+        accounts={
+            "7@Prop": AccountGuards(
+                initial_balance=10_000.0,
+                rules=(GuardRule(type="max_drawdown", params={"limit": 10}),),
+            )
+        }
+    )
+    eng = Engine(cfg, guards=doc, guard_state_path=tmp_path / "state.json")
+    assert eng.guard_report(TID_B).rules == (), "no account known yet"
+
+    cfg.terminals[TID_B].last_login, cfg.terminals[TID_B].last_server = 7, "Prop"
+    assert eng.guard_report(TID_B).rules[0].level is Level.UNKNOWN, "set up, not connected"
+
+    eng._snapshots[TID_B] = Snapshot(
+        terminal_id=TID_B,
+        state=WorkerState.CONNECTED,
+        login=7,
+        server="Prop",
+        balance=9_500.0,
+        equity=9_400.0,
+    )
+    status = eng.guard_report(TID_B).rules[0]
+    assert status.used == pytest.approx(600.0) and status.level is Level.OK

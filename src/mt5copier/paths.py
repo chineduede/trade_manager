@@ -62,6 +62,17 @@ def mapping_db_path() -> Path:
     return user_data_dir() / "mapping.db"
 
 
+def guards_path() -> Path:
+    """Each account's guard rules, and the person's saved templates of them. Apart from
+    ``config.json`` so that a slip editing rules cannot disturb copy settings."""
+    return user_data_dir() / "guards.json"
+
+
+def guard_state_path() -> Path:
+    """What the guards have recorded from earlier snapshots, such as the equity at a reset."""
+    return user_data_dir() / "guard_state.json"
+
+
 def dryrun_store_path() -> Path:
     """Believed copies for a dry run -- simulated, and kept well away from the real thing.
 

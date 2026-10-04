@@ -34,9 +34,11 @@ from .config import (
     SizingMode,
     TerminalClosing,
     TerminalConfig,
+    account_key,
 )
 from .copy_stats import StatsBook, TerminalStats
 from .day_book import DayBook, MasterEvent, Outcome
+from .guards import GuardBook, GuardReport, GuardsDoc
 from .logging_setup import get_logger
 from .paths import dryrun_store_path, log_dir, mapping_db_path
 from .protocol import (
@@ -162,6 +164,8 @@ class Engine:
         cfg: AppConfig,
         state_path: Path | None = None,
         mapping_path: Path | None = None,
+        guards: GuardsDoc | None = None,
+        guard_state_path: Path | None = None,
     ) -> None:
         # Windows only offers the spawn start method; request it explicitly so behaviour is
         # identical if this ever runs on Linux for testing.
@@ -213,6 +217,9 @@ class Engine:
         self._day = DayBook()
         """Each master trade with what became of it on every slave, for the map's day
         book. Display only, like the statistics."""
+        self._guards = GuardBook(guards if guards is not None else GuardsDoc(), guard_state_path)
+        """Each account's prop-firm rules and how they stand. Display only, for now: nothing
+        the reconciler or the executor reads."""
 
         self._dryrun_path = state_path if state_path is not None else dryrun_store_path()
         self._mapping_path = mapping_path if mapping_path is not None else mapping_db_path()
@@ -445,6 +452,7 @@ class Engine:
                 self._snapshots[snap.terminal_id] = snap
                 self._received_at[snap.terminal_id] = time.monotonic()
                 self._stats.on_state(snap.terminal_id, snap.state, now=time.monotonic())
+                self._guards.observe(account_key(snap.login, snap.server), snap, time.time())
                 self._reconcile(snap)
 
     def _from_live_worker(self, snap: Snapshot) -> bool:
@@ -916,6 +924,26 @@ class Engine:
         """This terminal's copy-health numbers for the session, as a read-only copy."""
         with self._lock:
             return self._stats.snapshot(terminal_id, now=time.monotonic())
+
+    def guard_report(self, terminal_id: str) -> GuardReport:
+        """How the guards of the account logged into this terminal stand right now.
+
+        The account is the one the latest snapshot names, else the one the terminal was last
+        known to be logged into -- so the page can be set up before connecting.
+        """
+        with self._lock:
+            snap = self._snapshots.get(terminal_id)
+            cfg = self._cfg.terminals.get(terminal_id)
+            if snap is not None and snap.login is not None:
+                key = account_key(snap.login, snap.server)
+            elif cfg is not None:
+                key = account_key(cfg.last_login, cfg.last_server)
+            else:
+                key = None
+            risk = None
+            if snap is not None and cfg is not None and cfg.role is Role.SLAVE:
+                risk = self._risk_amount(cfg, snap)
+            return self._guards.report(key, snap, time.time(), sizing_risk=risk)
 
     @property
     def failed_total(self) -> int:

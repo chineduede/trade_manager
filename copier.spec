@@ -28,6 +28,9 @@ textual_datas = collect_data_files("textual")
 
 datas = [
     *textual_datas,
+    # The IANA time zones a guard's daily reset is set in. Windows has no system zone
+    # database, so zoneinfo reads this package's files; without them every zone fails to load.
+    *collect_data_files("tzdata"),
     # Our own stylesheet, at the path CSS_PATH resolves to inside the bundle.
     ("src/mt5copier/tui/app.tcss", "mt5copier/tui"),
 ]
