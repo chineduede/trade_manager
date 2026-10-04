@@ -243,7 +243,8 @@ class GuardsScreen(Screen[None]):
         self._ids = [s.rule_id for s in report.rules]
         for status in report.rules:
             cells = rule_cells(status, report.currency)
-            table.add_row(*cells[: 3 if wide else 2], key=status.rule_id, height=2)
+            # Two lines of a rule and a blank one, so where one rule ends is plain to see.
+            table.add_row(*cells[: 3 if wide else 2], key=status.rule_id, height=3)
         if self._ids:
             table.move_cursor(row=min(cursor, len(self._ids) - 1), animate=False)
         table.display = bool(self._ids)

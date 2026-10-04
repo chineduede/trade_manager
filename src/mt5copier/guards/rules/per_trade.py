@@ -85,7 +85,10 @@ class RiskPerTrade(Rule):
         return Measure(
             used=view.sizing_risk,
             limit=limit,
-            detail=f"this slave's sizing risks {money(view.sizing_risk)} a trade",
+            detail=(
+                f"this slave's settings risk {money(view.sizing_risk)} a trade · "
+                f"this rule allows up to {money(limit)}"
+            ),
         )
 
 
