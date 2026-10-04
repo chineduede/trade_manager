@@ -2,7 +2,8 @@
 
 The settings here belong to the copier rather than to one terminal: whether it sends real
 orders, how its connections are timed, and how long a lapse in watching the master still counts
-as unbroken, and whether it closes the terminals it is done with. As in :mod:`mt5copier.settings_edit`, the bounds are the model's own, so the form
+as unbroken, whether it closes the terminals it is done with, and how long it keeps
+history. As in :mod:`mt5copier.settings_edit`, the bounds are the model's own, so the form
 cannot let through something the next start would read as a corrupt config.
 
 **The mode is guarded twice.** Changing it in either direction needs copying stopped: going
@@ -34,6 +35,7 @@ GENERAL: tuple[str, ...] = (
     "reconnect_backoff_s",
     "join_grace_seconds",
     "close_terminals",
+    "history_days",
 )
 """The :class:`AppConfig` fields the form edits. ``copying_enabled`` is not one: it has its own
 key, ``d``, and is flipped far more often than anything here."""
@@ -68,6 +70,11 @@ HELP: dict[str, tuple[str, str]] = {
         "What happens to a terminal's window when the copier quits or the terminal is "
         "unassigned. A restart or reconnect never closes one. Closing is immediate, not "
         "MT5's own exit: anything unsaved in that terminal, such as a chart, is lost.",
+    ),
+    "history_days": (
+        "History kept",
+        "How many days of each trade's history to keep: every step the copier took with it "
+        "on each slave, shown with h. Older steps are deleted. 1 to 365.",
     ),
     "join_grace_seconds": (
         "Join grace",
@@ -106,6 +113,7 @@ def initial_general(cfg: AppConfig) -> dict[str, str | bool]:
         "reconnect_backoff_s": ", ".join(_number(s) for s in cfg.reconnect_backoff_s),
         "join_grace_seconds": _number(cfg.join_grace_seconds),
         "close_terminals": cfg.close_terminals.value,
+        "history_days": str(cfg.history_days),
     }
 
 
@@ -146,7 +154,7 @@ def _parse(name: str, raw: str | bool) -> object:
         return steps
     if text == "":
         raise _EntryError("required")
-    if name == "poll_interval_ms":
+    if name in ("poll_interval_ms", "history_days"):
         try:
             return int(text)
         except ValueError:

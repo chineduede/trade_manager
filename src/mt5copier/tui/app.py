@@ -73,6 +73,7 @@ from .detail import DetailScreen
 from .dialogs import LiveDialog, OrphanDialog
 from .general import GeneralForm
 from .guards import GuardsScreen
+from .history import HistoryScreen
 from .menu import ActionMenu, terminal_actions
 from .settings import SettingsForm
 from .style import (
@@ -138,6 +139,7 @@ class CopierApp(App[None]):
         Binding("o", "acknowledge_orphans", "Ack orphans", show=False),
         Binding("p", "toggle_pause", "Pause/resume slave", show=False),
         Binding("k", "guards", "Guards (prop-firm rules)", show=False),
+        Binding("h", "history", "Trade history", show=False),
         Binding("tab", "next_page", "Map / Log", show=False, priority=True),
         Binding("shift+tab", "next_page", "Map / Log", show=False, priority=True),
         Binding("left", "step(-1)", "Previous card", show=False),
@@ -521,6 +523,18 @@ class CopierApp(App[None]):
             self.notify("Guards are for slaves: the rules a prop account copied to is held to.")
             return
         self.push_screen(GuardsScreen(tid))
+
+    def action_history(self) -> None:
+        """Open the selected slave's trade history: every step taken with each trade."""
+        self.open_history(self._selected_id())
+
+    def open_history(self, tid: str | None) -> None:
+        if tid is None:
+            return
+        if self._cfg.terminals[tid].role is not Role.SLAVE:
+            self.notify("History is kept per slave: what was done with each trade copied to it.")
+            return
+        self.push_screen(HistoryScreen(tid))
 
     def save_guards(self, key: str, guards: AccountGuards) -> bool:
         """Put one account's guards in place and write the file. False if it could not be

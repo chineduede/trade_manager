@@ -1531,13 +1531,27 @@ are the design, not a limitation waiting to be lifted.
   usual save, so the orphan-on-settings-edit rule still applies) — the expected answer.
 - **Revert unsaved changes in the settings form — asked for 2026-10-04.** One key that puts
   every field back to its saved value without leaving the form.
-- **A trade's history, per copy — asked for 2026-10-04.** Each copy's life on a slave as a
-  timeline beside its master's: opened (lots, fill against the master's entry), stop and
-  target moves, breakeven, partial closes, guard decisions, closed. Today the day book shows
-  each master event with its outcome per slave, but nothing groups them by trade, the moves
-  the copier makes by itself (breakeven, guards) reach only `copier.log`, and it is session
-  only. Proposed: kept beside the copy records so it survives a restart, and shown on the
-  details page for the selected copy. Needs its own design pass.
+- **A trade's history, per slave — asked for 2026-10-04, built 2026-10-04 on `guards-enforce`,
+  awaiting its demo check.** The user's words: each trade copied to a slave as one timeline —
+  copied with x lots, a volume reduced, a stop moved, a trade blocked and why — kept for x days.
+  - `history.py`: `history.db` (SQLite, WAL), one row per step. The day book hands each slave's
+    outcome to `DayBook.listener` as it settles (sent and answered, skipped, not copied, refused,
+    no answer); the engine writes it with the master's side and the slave's own levels, so a
+    reversed copy or a breakeven stop reads as it is on the slave. Breakeven reached, and
+    breakeven exempted or priced by hand, are written as the copier's own steps. A step equal to
+    the trade's last one is not written again (a pre-existing trade is announced every start).
+  - Kept for `history_days` (general settings, `g`; default 30, 1–365), pruned on the first write
+    and hourly after. Display only; a failed write is logged and dropped, never reaching copying.
+  - Shown on **`h` on a slave** (map, details page, or the actions menu), revised the same day
+    at the user's ask ("repeats too much info"): **a card per trade copied to the slave**, newest
+    copy first — titled with its symbol, side, lots and master ticket, with where it stands —
+    and under it one line per step, the slave's own: copied (the master's lots and price beside
+    it), partial closes, stop/target moves, breakeven, a change skipped or refused and why,
+    closed. Trades the slave never took (declined, held back, pre-existing) are not listed;
+    they stay in the log. Green while open, red dashed when a step failed; `f` shows only
+    those.
+  - *Demo check:* copy a trade, partially close it, move its stop, let it reach breakeven, close
+    it; see one card with each step once; restart and see it still there.
 
 ---
 

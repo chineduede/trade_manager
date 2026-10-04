@@ -367,6 +367,53 @@ ActionMenu OptionList:focus > .option-list--option-highlighted {
     height: auto;
 }
 
+/* --- a slave's trade history -------------------------------------------------------------- */
+
+#hs-page {
+    padding-top: 1;
+    scrollbar-size-vertical: 1;
+}
+
+#hs-band {
+    background: $foreground;
+    color: $background;
+    padding: 1 2;
+    height: auto;
+}
+
+#hs-head {
+    margin-top: 1;
+}
+
+#hs-empty {
+    height: auto;
+    margin-top: 1;
+}
+
+#hs-cards {
+    height: auto;
+}
+
+/* A card per copied trade, in the map's card language: green while it is open on the slave,
+   red dashed when a step with it failed. */
+.hs-card {
+    border: solid $foreground 40%;
+    border-title-color: $foreground;
+    border-title-style: bold;
+    border-subtitle-color: $text-muted;
+    padding: 0 1;
+    margin-top: 1;
+    height: auto;
+}
+
+.hs-card.-open {
+    border: solid #7fbf6e;
+}
+
+.hs-card.-failed {
+    border: dashed $error;
+}
+
 /* --- the questions that guard money -------------------------------------------------------- */
 
 /* Screens of their own, so they would take the Screen rule at the top: solid and padded. They

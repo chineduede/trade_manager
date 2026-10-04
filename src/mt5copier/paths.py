@@ -62,6 +62,12 @@ def mapping_db_path() -> Path:
     return user_data_dir() / "mapping.db"
 
 
+def history_db_path() -> Path:
+    """SQLite store of each trade's history on each slave, kept for ``history_days``. Display
+    only: losing it loses nothing the copier needs."""
+    return user_data_dir() / "history.db"
+
+
 def guards_path() -> Path:
     """Each account's guard rules, and the person's saved templates of them. Apart from
     ``config.json`` so that a slip editing rules cannot disturb copy settings."""

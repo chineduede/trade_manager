@@ -377,6 +377,10 @@ class AppConfig(BaseModel):
     to go live. Turning it off has to be a deliberate act, taken after the dry-run log has been
     read and believed."""
 
+    history_days: int = Field(default=30, ge=1, le=365)
+    """How many days of each trade's history to keep: what every slave did with every master
+    trade. Older steps are deleted from ``history.db``."""
+
     terminals: dict[str, TerminalConfig] = Field(default_factory=dict)
 
     account_names: dict[str, str] = Field(default_factory=dict)

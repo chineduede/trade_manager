@@ -37,10 +37,11 @@ from .config import (
     account_key,
 )
 from .copy_stats import StatsBook, TerminalStats
-from .day_book import DayBook, MasterEvent, Outcome
+from .day_book import DayBook, MasterEvent, Outcome, SlaveOutcome
 from .guards import NO_VERDICT, GuardBook, GuardReport, GuardsDoc, Verdict
+from .history import HistoryStore, Trade, step_for
 from .logging_setup import get_logger
-from .paths import dryrun_store_path, log_dir, mapping_db_path
+from .paths import dryrun_store_path, history_db_path, log_dir, mapping_db_path
 from .protocol import (
     COPIER_MAGIC,
     DISPATCHABLE_KINDS,
@@ -166,6 +167,7 @@ class Engine:
         mapping_path: Path | None = None,
         guards: GuardsDoc | None = None,
         guard_state_path: Path | None = None,
+        history_path: Path | None = None,
     ) -> None:
         # Windows only offers the spawn start method; request it explicitly so behaviour is
         # identical if this ever runs on Linux for testing.
@@ -217,6 +219,13 @@ class Engine:
         self._day = DayBook()
         """Each master trade with what became of it on every slave, for the map's day
         book. Display only, like the statistics."""
+        self._history = HistoryStore(
+            history_path if history_path is not None else history_db_path(),
+            keep_days=cfg.history_days,
+        )
+        """Every step taken with each trade on each slave, kept for days. Fed by the day book
+        as each outcome settles; display only."""
+        self._day.listener = self._on_step
         self._guards = GuardBook(guards if guards is not None else GuardsDoc(), guard_state_path)
         """Each account's prop-firm rules and how they stand."""
         self._verdicts: dict[str, Verdict] = {}
@@ -258,6 +267,7 @@ class Engine:
         if thread is not None:
             thread.join(timeout=2.0)
             self._drain_thread = None
+        self._history.close()
 
     def __enter__(self) -> Engine:
         self.start()
@@ -643,6 +653,15 @@ class Engine:
                     continue
                 self._be_room[key] = room
                 self._ledger.set_breakeven(cfg.terminal_id, copy.master_ticket, level)
+                self._history.note(
+                    cfg.terminal_id,
+                    copy.master_ticket,
+                    copy.slave_symbol,
+                    copy.type.name.lower(),
+                    "breakeven",
+                    f"reached at {price:g} (fill {opened[ticket]:g}): the stop moves to "
+                    f"{level:g} and from now on only tightens",
+                )
                 log.info(
                     "%s: breakeven reached on #%s %s (fill %s, now %s); stop moves to %s and "
                     "from now on only tightens: the master's stop is copied only when tighter, "
@@ -683,6 +702,16 @@ class Engine:
         """
         with self._lock:
             done = self._ledger.set_breakeven_exempt(terminal_id, master_ticket, exempt)
+            copy = self._ledger.get_position(terminal_id, master_ticket) if done else None
+        if copy is not None:
+            self._history.note(
+                terminal_id,
+                master_ticket,
+                copy.slave_symbol,
+                copy.type.name.lower(),
+                "breakeven",
+                "exempted by hand" if exempt else "re-enabled by hand",
+            )
         if done:
             log.info(
                 "#%s on %s: breakeven %s by hand",
@@ -714,6 +743,14 @@ class Engine:
                 if problem is not None:
                     return problem
             self._ledger.set_breakeven_at(terminal_id, master_ticket, price)
+        self._history.note(
+            terminal_id,
+            master_ticket,
+            copy.slave_symbol,
+            copy.type.name.lower(),
+            "breakeven",
+            f"price set to {price:g} by hand" if price else "price cleared by hand",
+        )
         log.info(
             "#%s on %s: breakeven price %s by hand",
             master_ticket,
@@ -958,6 +995,20 @@ class Engine:
         """The master's most recent trades with each slave's outcome, oldest first."""
         with self._lock:
             return self._day.events(limit)
+
+    def trade_history(self, terminal_id: str, *, since: float | None = None) -> list[Trade]:
+        """The slave's trades with every step taken with each, the most recently active
+        first. Read from disk, so it reaches back past this session."""
+        return self._history.trades(terminal_id, since=since)
+
+    def _on_step(self, head: MasterEvent, outcome: SlaveOutcome, action: Action | None) -> None:
+        """The day book settled one slave's outcome: keep it in the trade's history. Called
+        under the engine's lock; a failure here must never reach the copying."""
+        try:
+            self._history.keep_days = self._cfg.history_days
+            self._history.record(step_for(head, outcome, action))
+        except Exception:
+            log.exception("could not record a step in the trade history")
 
     @property
     def day_book_since(self) -> float:

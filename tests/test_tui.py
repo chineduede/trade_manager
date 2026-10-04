@@ -522,7 +522,7 @@ def test_menu_for_a_slave_and_the_master() -> None:
 
     slave = TerminalConfig(terminal_id=TID_SLAVE, role=Role.SLAVE, paused=True)
     items = terminal_actions(slave, has_master=True, orphans_waiting=True)
-    assert [i.key for i in items] == ["enter", "o", "e", "p", "k", "u"]
+    assert [i.key for i in items] == ["enter", "o", "e", "p", "k", "h", "u"]
     assert next(i for i in items if i.key == "p").label == "resume"
     master = TerminalConfig(terminal_id=TID_MASTER, role=Role.MASTER)
     keys = [i.key for i in terminal_actions(master, has_master=True, orphans_waiting=False)]

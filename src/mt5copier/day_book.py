@@ -10,14 +10,16 @@ The master's side is read from its own snapshot rather than from the actions, wh
 the *slave's* copy: a reversed slave's action carries the opposite direction and swapped
 levels, and a close carries the slave's symbol name.
 
-Nothing here is persisted. A restart starts an empty book, the same as the session statistics.
+Nothing here is persisted. A restart starts an empty book, the same as the session statistics;
+each outcome is handed to :attr:`DayBook.listener` as it settles, which is how
+:mod:`mt5copier.history` keeps it.
 """
 
 from __future__ import annotations
 
 import time
 from collections import deque
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
@@ -92,6 +94,8 @@ class SlaveOutcome:
     Positive is against us, as in :func:`~mt5copier.copy_stats.slippage_in_points`."""
     ts: float | None = None
     """Wall-clock time it was settled, or None while it is still waiting for an answer."""
+    price: float | None = None
+    """What the broker filled at, when it says."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,10 +140,14 @@ class _Slot:
     target_gone: bool = False
     slippage_points: float | None = None
     ts: float | None = None
+    price: float | None = None
     sent_at: float | None = None
     master_ticket: int = 0
     direction: PositionType = PositionType.BUY
     entry: float = 0.0
+    head: MasterEvent | None = None
+    """The event it belongs to, for :attr:`DayBook.listener`."""
+    action: Action | None = None
 
     def frozen(self) -> SlaveOutcome:
         return SlaveOutcome(
@@ -152,6 +160,7 @@ class _Slot:
             self.target_gone,
             self.slippage_points,
             self.ts,
+            self.price,
         )
 
 
@@ -162,6 +171,10 @@ class _Event:
 
 
 _Master = Position | PendingOrder
+
+Listener = Callable[[MasterEvent, SlaveOutcome, "Action | None"], None]
+"""Told of each slave's outcome once it is settled: the event (its master side), the outcome,
+and the slave's action when there was one."""
 
 
 @dataclass
@@ -180,6 +193,7 @@ class DayBook:
     _tick: dict[tuple[int, ActionKind, bool], _Event] = field(default_factory=dict)
     _tick_ts: float = 0.0
     _since: float = field(default_factory=time.time)
+    listener: Listener | None = None
 
     # --- recording --------------------------------------------------------------------------
 
@@ -221,7 +235,7 @@ class DayBook:
         if event is None:
             event = self._open_event(action, preexisting, invert)
             self._tick[key] = event
-        event.slots[action.terminal_id] = _Slot(
+        slot = _Slot(
             action.terminal_id,
             outcome,
             reason,
@@ -229,7 +243,12 @@ class DayBook:
             master_ticket=action.master_ticket,
             direction=action.type,
             entry=action.entry,
+            head=event.head,
+            action=action,
         )
+        event.slots[action.terminal_id] = slot
+        if outcome.settled:
+            self._tell(slot)
 
     def end_tick(self, links: Iterable[SlaveLink], holds: Mapping[str, str]) -> None:
         """Say which slaves an entry passed by: held back or not connected while the master
@@ -243,13 +262,16 @@ class DayBook:
                 if link.connected or tid in event.slots:
                     continue
                 reason = holds.get(tid) or "it was not connected"
-                event.slots[tid] = _Slot(
+                slot = _Slot(
                     tid,
                     Outcome.NOT_COPIED,
                     reason,
                     ts=self._tick_ts,
                     master_ticket=event.head.master_ticket,
+                    head=event.head,
                 )
+                event.slots[tid] = slot
+                self._tell(slot)
         self._tick = {}
 
     def settle(self, action: Action, outcome: Outcome, reason: str) -> None:
@@ -257,6 +279,7 @@ class DayBook:
         slot = self._tick_slot(action)
         if slot is not None and not slot.outcome.settled:
             slot.outcome, slot.reason, slot.ts = outcome, reason, self._tick_ts
+            self._tell(slot)
 
     def on_sent(self, action: Action, command_id: int, *, sent_at: float) -> None:
         slot = self._tick_slot(action)
@@ -280,6 +303,7 @@ class DayBook:
         if result.ok:
             slot.outcome = Outcome.DONE
             slot.lots = result.filled_volume
+            slot.price = result.price or None
             slot.target_gone = result.target_gone
             if result.op is ActionKind.OPEN and result.price and result.point:
                 slot.slippage_points = slippage_in_points(
@@ -288,6 +312,7 @@ class DayBook:
         else:
             slot.outcome = Outcome.FAILED if result.retryable else Outcome.REFUSED
             slot.reason = result.error or result.outcome or None
+        self._tell(slot)
 
     def on_expired(self, terminal_id: str, master_ticket: int, *, ts: float) -> None:
         """The ledger gave up waiting on this slave and ticket. It does not say which op, so
@@ -298,6 +323,7 @@ class DayBook:
                 slot.reason = "the slave never answered, so the copier gave up waiting"
                 slot.ts = ts
                 del self._pending[cid]
+                self._tell(slot)
 
     def forget_sent_before(self, cutoff: float) -> None:
         """Drop commands too old to be answered, alongside the engine's own sweep."""
@@ -326,6 +352,12 @@ class DayBook:
         return [self._frozen(e) for e in items]
 
     # --- internals --------------------------------------------------------------------------
+
+    def _tell(self, slot: _Slot) -> None:
+        if self.listener is None or slot.head is None:
+            return
+        # The head as it stands: its outcomes are the listener's own to read off the slot.
+        self.listener(slot.head, slot.frozen(), slot.action)
 
     def _tick_slot(self, action: Action) -> _Slot | None:
         key = (action.master_ticket, action.kind, action.skip_reason is SkipReason.PREEXISTING)

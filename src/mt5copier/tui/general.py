@@ -136,6 +136,15 @@ class GeneralForm(ModalScreen[bool]):
                 rows(Choice(_CLOSING, str(v["close_terminals"]), id=f"{_F}close_terminals")),
                 *self._errors("close_terminals"),
             )
+            yield section(
+                "history",
+                rows(
+                    lead("Keep each trade's history for"),
+                    self._input("history_days", v["history_days"], "n5"),
+                    words("days."),
+                ),
+                *self._errors("history_days"),
+            )
             yield Static(
                 Text(
                     "The check interval and the retry schedule reach a terminal the next time "
