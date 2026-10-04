@@ -51,6 +51,16 @@ _DIRECTION = (
     ("the same way as the master", "same"),
     ("the opposite way: buy becomes sell", "opposite"),
 )
+_LISTS = ("symbol_map", "symbol_whitelist", "symbol_blacklist")
+"""One-line lists, where enter starts the next entry instead of saving the form."""
+
+_HELP = {
+    "symbol_map": "MASTER=BROKER pairs separated by commas, for symbols the prefix and suffix "
+    "cannot express: US30=US30.cash, GER40=DE40. A name the broker does not list is refused, "
+    "not guessed at.",
+}
+"""Help the classic form's words do not fit here, where a box of lines has become one line."""
+
 _BREAKEVEN = (
     ("never", BreakevenMode.OFF.value),
     ("once it is", BreakevenMode.R.value),
@@ -544,6 +554,24 @@ class SettingsForm(SettingsScreen):
             return
         line = Text()
         line.append(spec.label, style=f"bold {FG}")
-        if spec.help:
-            line.append(f" · {spec.help}", style=MUTED)
+        help_text = _HELP.get(spec.name, spec.help)
+        if spec.name in _LISTS:
+            help_text += " Enter starts the next one; ctrl+s saves."
+        if help_text:
+            line.append(f" · {help_text}", style=MUTED)
         self.query_one("#help", Static).update(line)
+
+    @on(Input.Submitted)
+    def _on_submit(self, event: Input.Submitted) -> None:
+        """Enter in a list starts the next entry, as a new line did in the classic form's box;
+        anywhere else it saves, as there."""
+        name = (event.input.id or "").removeprefix(_F)
+        if name not in _LISTS:
+            return
+        event.prevent_default()
+        event.stop()
+        box = event.input
+        text = box.value.rstrip()
+        if text and not text.endswith(","):
+            box.value = text + ", "
+        box.cursor_position = len(box.value)

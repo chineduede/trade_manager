@@ -941,3 +941,37 @@ def test_every_editable_setting_is_drawn_into_the_new_form() -> None:
     source = inspect.getsource(settings.SettingsForm.compose)
     missing = [f.name for f in EDITABLE if f'"{f.name}"' not in source]
     assert not missing
+
+
+async def test_enter_in_a_symbol_list_starts_the_next_entry_instead_of_saving(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    from textual.widgets import Input
+
+    from mt5copier.tui_v2.settings import SettingsForm
+
+    cfg.terminals[TID_MASTER].role = Role.MASTER
+    cfg.terminals[TID_SLAVE].role = Role.SLAVE
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.press("1", "e")
+        await pilot.pause()
+        form = app.screen
+        assert isinstance(form, SettingsForm)
+        renamed = form.query_one("#f-symbol_map", Input)
+        renamed.focus()
+        await pilot.press(*"US30=US30.cash", "enter", *"GER40=DE40")
+        await pilot.pause()
+        assert isinstance(app.screen, SettingsForm), "enter did not save and close"
+        assert renamed.value == "US30=US30.cash, GER40=DE40"
+        assert "Enter starts the next one" in plain(form.query_one("#help", Static).content)
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert cfg.terminals[TID_SLAVE].symbol_map == {"US30": "US30.cash", "GER40": "DE40"}
+
+        await pilot.press("e")
+        await pilot.pause()
+        form = app.screen
+        assert isinstance(form, SettingsForm)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not isinstance(app.screen, SettingsForm), "enter in a number still saves"
