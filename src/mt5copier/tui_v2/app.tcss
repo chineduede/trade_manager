@@ -362,12 +362,30 @@ GoLiveDialog #dialog {
     color: $error;
 }
 
+/* Docked, so on a short terminal the question scrolls and its answers stay in sight. */
 .dialog #buttons {
+    dock: bottom;
     height: auto;
     margin-top: 1;
     padding-top: 1;
     border-top: solid $foreground;
     align-horizontal: right;
+    background: $background;
+}
+
+/* Short: less room around the question, so more of it shows. */
+.-short OrphanDialog #dialog,
+.-short LiveDialog #dialog,
+.-short GoLiveDialog #dialog,
+OrphanDialog.-short #dialog,
+LiveDialog.-short #dialog,
+GoLiveDialog.-short #dialog {
+    padding: 0 2;
+}
+
+.-short .dialog #buttons,
+.dialog.-short #buttons {
+    padding-top: 0;
 }
 
 .dialog Button {
@@ -481,13 +499,25 @@ GoLiveDialog #dialog {
 /* A blank row under every line of a section, as the design spaces them, so nothing in one
    line sits hard against the next. The last line's is the section's bottom margin. */
 .form-screen .line {
-    height: 1;
+    height: auto;
     margin-bottom: 1;
 }
 
 .form-screen .part {
     width: auto;
-    height: 1;
+    height: auto;
+}
+
+/* Narrow: a section's name goes above its sentences, which then have the whole width. */
+.-narrow .form-screen .sect,
+.form-screen.-narrow .sect {
+    layout: vertical;
+}
+
+.-narrow .form-screen .sect-name,
+.form-screen.-narrow .sect-name {
+    width: 1fr;
+    margin-bottom: 1;
 }
 
 .form-screen .w {
@@ -578,11 +608,19 @@ GoLiveDialog #dialog {
     text-style: bold;
 }
 
+/* Docked, so Save and Cancel stay in sight while a short terminal scrolls the form. */
 .form-screen #st-foot {
+    dock: bottom;
     height: auto;
     padding: 1 0;
     border-top: solid $foreground;
     align-vertical: middle;
+    background: $background;
+}
+
+.-short .form-screen #st-foot,
+.form-screen.-short #st-foot {
+    padding: 0;
 }
 
 .form-screen #st-stake {

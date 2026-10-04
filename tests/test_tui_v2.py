@@ -15,6 +15,7 @@ import pytest
 from rich.console import Console
 from rich.text import Text
 from test_tui import TID_BROKEN, TID_MASTER, TID_SLAVE, StubEngine, _wire_copying
+from textual.widget import Widget
 from textual.widgets import DataTable, Static
 
 from mt5copier.config import AppConfig, Role
@@ -1355,3 +1356,48 @@ def test_a_narrow_positions_table_leaves_out_the_least_needed_columns() -> None:
     tight = kept(50)
     assert {"symbol", "side", "stop", "r", "pl"} <= set(tight)
     assert not {"swap", "link", "now", "lots", "target", "open"} & set(tight)
+
+
+def _inside(widget: Widget, screen: Widget) -> bool:
+    """Whether the widget is drawn wholly on the screen, not cut off or scrolled away."""
+    region = widget.region
+    return bool(region) and screen.region.contains_region(region)
+
+
+@pytest.mark.parametrize("size", [(80, 24), (160, 45)])
+async def test_the_copier_settings_fit_a_small_terminal(
+    app: NewCopierApp, size: tuple[int, int]
+) -> None:
+    from mt5copier.tui_v2.flow import Flow
+    from mt5copier.tui_v2.general import GeneralForm
+    from mt5copier.tui_v2.settings import Choice
+
+    async with app.run_test(size=size) as pilot:
+        await pilot.press("g")
+        await pilot.pause()
+        form = app.screen
+        assert isinstance(form, GeneralForm)
+        for name in ("#save", "#cancel"):
+            assert _inside(form.query_one(name), form), f"{name} stays in sight"
+        body = form.query_one("#dialog")
+        for line in form.query(Flow):
+            assert line.region.right <= body.region.right, "a sentence wraps, not runs off"
+        closing = form.query_one("#f-close_terminals", Choice)
+        stacked = closing.region.height > 1
+        assert stacked == (size[0] == 80), "the choices stack only when they do not fit"
+
+
+async def test_a_go_live_question_keeps_its_answers_in_sight(app: NewCopierApp) -> None:
+    from mt5copier.tui_v2.dialogs import GoLiveDialog
+    from mt5copier.tui_v2.settings import Choice
+
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.press("g")
+        await pilot.pause()
+        app.screen.query_one("#f-dry_run", Choice).value = "live"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        question = app.screen
+        assert isinstance(question, GoLiveDialog)
+        for name in ("#go", "#cancel"):
+            assert _inside(question.query_one(name), question)

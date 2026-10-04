@@ -20,6 +20,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
+from textual.geometry import Size
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widget import Widget
@@ -31,6 +32,7 @@ from ..protocol import ACCOUNT_TRADE_MODE_DEMO, ActionKind, PositionType
 from ..settings_edit import BY_NAME, apply_edits, copies_word, initial_values
 from ..settings_example import Example, MasterTrade, PriceValue, pick, work
 from ..tui.settings_screen import SettingsScreen
+from .flow import Flow, Word, flow_words
 from .style import BG, BLUE, CHIP_BG, FG, MUTED, RED, spaced
 
 if TYPE_CHECKING:
@@ -91,7 +93,7 @@ class Choice(Widget, can_focus=True):
     DEFAULT_CSS = """
     Choice {
         width: auto;
-        height: 1;
+        height: auto;
     }
     """
 
@@ -125,10 +127,35 @@ class Choice(Widget, can_focus=True):
             out.append((f" {label} ", style))
         return out
 
+    def _side_by_side(self) -> int:
+        """The width the options take in one line, with the arrows either side."""
+        spans = self._spans()
+        return sum(len(text) for text, _ in spans) + len(spans) - 1 + 4
+
+    def _stacked(self) -> int:
+        """The width the options take one above another."""
+        return max(len(text) for text, _ in self._spans()) + 4
+
+    def _stacks(self, width: int) -> bool:
+        return 0 < width < self._side_by_side()
+
     def render(self) -> Content:
         # Arrows either side while it has focus, saying left and right choose. Their room is
         # kept when it has not, so focusing it does not shift the sentence.
         arrow = (f"bold {FG}", "◂ ", " ▸") if self.has_focus else ("", "  ", "  ")
+        if self._stacks(self.size.width):
+            # Too narrow for them side by side: one above another, the arrows on the chosen.
+            lines = []
+            for (text, style), (_, value) in zip(self._spans(), self._options, strict=True):
+                mark = value == self.value
+                lines.append(
+                    Content.assemble(
+                        (arrow[1] if mark else "  ", arrow[0]),
+                        (text, style),
+                        (arrow[2] if mark else "", arrow[0]),
+                    )
+                )
+            return Content("\n").join(lines)
         parts: list[tuple[str, str] | str] = [(arrow[1], arrow[0])]
         for i, span in enumerate(self._spans()):
             if i:
@@ -137,9 +164,12 @@ class Choice(Widget, can_focus=True):
         parts.append((arrow[2], arrow[0]))
         return Content.assemble(*parts)
 
-    def get_content_width(self, container: object, viewport: object) -> int:
-        spans = self._spans()
-        return sum(len(text) for text, _ in spans) + len(spans) - 1 + 4
+    def get_content_width(self, container: Size, viewport: Size) -> int:
+        full = self._side_by_side()
+        return self._stacked() if self._stacks(container.width) else full
+
+    def get_content_height(self, container: Size, viewport: Size, width: int) -> int:
+        return len(self._options) if self._stacks(container.width) else 1
 
     def watch_value(self, value: str) -> None:
         self.post_message(self.Changed(self, value))
@@ -149,6 +179,10 @@ class Choice(Widget, can_focus=True):
         self.value = values[(values.index(self.value) + step) % len(values)]
 
     def on_click(self, event: events.Click) -> None:
+        if self._stacks(self.size.width):
+            if 0 <= event.y < len(self._options):
+                self.value = self._options[event.y][1]
+            return
         x = 2
         for (text, _), (_, value) in zip(self._spans(), self._options, strict=True):
             if x <= event.x < x + len(text):
@@ -163,18 +197,35 @@ class Choice(Widget, can_focus=True):
         self.refresh()
 
 
-def words(text: str) -> Static:
+Part = Widget | list[Word]
+"""A field, or a run of words."""
+
+
+def words(text: str) -> list[Word]:
     """Words between two values, a space either side of them."""
-    return Static(f" {text} ", classes="w")
+    return flow_words(text, before=True)
 
 
-def lead(text: str) -> Static:
+def lead(text: str) -> list[Word]:
     """The words a line starts with."""
-    return Static(f"{text} ", classes="w")
+    return flow_words(text)
 
 
-def rows(*parts: Widget, classes: str = "") -> Horizontal:
-    return Horizontal(*parts, classes=f"line {classes}".strip())
+def _flat(parts: tuple[Part, ...]) -> list[Widget]:
+    out: list[Widget] = []
+    for part in parts:
+        out += part if isinstance(part, list) else [part]
+    return out
+
+
+def rows(*parts: Part, classes: str = "") -> Flow:
+    """One sentence of a form, wrapped onto more lines when the terminal is too narrow."""
+    return Flow(*_flat(parts), classes=f"line {classes}".strip())
+
+
+def part(*parts: Part, id: str) -> Flow:
+    """A stretch of a sentence that is shown only with one choice, such as the multiple."""
+    return Flow(*_flat(parts), id=id, classes="part")
 
 
 def section(title: str, *body: Widget) -> Horizontal:
@@ -382,11 +433,10 @@ class SettingsForm(SettingsScreen):
                 rows(
                     lead("When the master's trade has no stop:"),
                     self._select("no_stop_policy", _NO_STOP, str(v["no_stop_policy"])),
-                    Horizontal(
+                    part(
                         self._input("no_stop_lot_multiple", v["no_stop_lot_multiple"], "n6"),
                         words("× the master's lots, unprotected."),
                         id="multiple-part",
-                        classes="part",
                     ),
                 ),
                 *self._errors("no_stop_policy", "no_stop_lot_multiple"),
@@ -429,11 +479,10 @@ class SettingsForm(SettingsScreen):
                 rows(
                     lead("Move the stop past entry:"),
                     self._select("breakeven_mode", _BREAKEVEN, str(v["breakeven_mode"])),
-                    Horizontal(
+                    part(
                         self._input("breakeven_trigger_r", v["breakeven_trigger_r"], "n5"),
                         words("R in profit."),
                         id="trigger-part",
-                        classes="part",
                     ),
                 ),
                 *self._errors("breakeven_mode", "breakeven_trigger_r"),

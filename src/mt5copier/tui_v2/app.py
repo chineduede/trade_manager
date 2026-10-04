@@ -93,6 +93,7 @@ class NewCopierApp(CopierApp):
     LIVE_OVERRIDE_SCREEN = LiveDialog
     SETTINGS_SCREEN = SettingsForm
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (120, "-wide")]
+    VERTICAL_BREAKPOINTS = [(0, "-short"), (32, "-tall")]
 
     BINDINGS = [
         Binding("tab", "next_page", "Map / Log", show=False, priority=True),
