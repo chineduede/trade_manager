@@ -3,19 +3,22 @@
 Stage 1 (discovery, designation, supervision) is complete and user-accepted. It contains no
 trading logic. This document is the plan for everything that does.
 
-## Where the project is — 2026-10-01
+## Where the project is — 2026-10-04
 
-**An order has left this machine, for real.** On 2026-09-21 a demo OPEN (EURGBPp, 13.77 lots)
-and its CLOSE both filled on a real demo account (IC Markets Global master → BlackBull Markets
-slave). `dry_run` is **false** in the live config; the executor's demo-only guard sits
-underneath every send. Since then the per-terminal settings editor, the `l` live-override
-dialog, the orphan-on-settings-edit rule, and closing a terminal the copier itself launched (on
-`stop()`/unassign) have all landed and are committed (`master`, 872 tests as of 2026-10-02).
+**Everything built so far has been seen working against a real broker.** The live
+verification backlog below is closed, and so are the features built after it: the terminal
+detail page (demo-verified 2026-10-03), pausing a slave (accepted 2026-10-03) and breakeven
+(demo-verified 2026-10-04). The TUI was redesigned and the classic UI removed on 2026-10-04;
+the redesign is now the only UI (`master`, 1046 tests as of 2026-10-04).
 
-**Most of the trading logic beyond that first OPEN/CLOSE pair is still unverified against a
-broker** — built and unit-tested, not yet seen filling or refusing for real. "Live verification
-backlog" below is the single trackable list of what's left; the step-by-step procedures it
-points into still live in "Verifying the wiring" (Stage 2c) and "Verifying the sync" (Stage 3).
+**What's left is unscoped.** "Future features — not yet scoped" at the end holds the parked
+ideas — prop-firm guards (with margin checks), posting trades to Telegram — each of which
+needs its policy settled before anything is built.
+
+**An order first left this machine on 2026-09-21:** a demo OPEN (EURGBPp, 13.77 lots) and its
+CLOSE both filled on a real demo account (IC Markets Global master → BlackBull Markets slave).
+`dry_run` is **false** in the live config; the executor's demo-only guard sits underneath every
+send.
 
 | Stage | State |
 |---|---|
@@ -1231,7 +1234,7 @@ are the design, not a limitation waiting to be lifted.
   worker's last snapshots were drained after it was reaped, and its high `seq` made the
   out-of-order check refuse every snapshot from the replacement, which counts from 0. Snapshots
   now carry `worker_pid`, and the drain drops any not from the terminal's current worker.
-- **Breakeven — planned and built 2026-10-03; unit- and Pilot-tested, awaiting its demo run.** Move a copy's stop to entry (± buffer) once price has
+- **Breakeven — planned and built 2026-10-03; unit- and Pilot-tested, demo-verified 2026-10-04 by the user.** Move a copy's stop to entry (± buffer) once price has
   moved some distance. The user's choices: the trigger is **per slave, either a distance in
   pips or a multiple of R**; the stop goes to **entry plus a buffer in pips**; both are
   measured on **the slave's own position** (its own fill and current price, so slippage and
