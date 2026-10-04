@@ -116,6 +116,9 @@ class Verdict:
     """Why the slave takes no new trades, one line per rule; empty when it takes them."""
     warnings: tuple[str, ...] = ()
     """Rules past their point that are set only to warn."""
+    warned_by: tuple[str, ...] = ()
+    """The rule behind each warning, in step: the lines carry live numbers, so the engine
+    tells a new warning from the same one moving by its rule."""
     stop_required: str | None = None
     """The rule refusing new trades with no stop, when one is set to refuse."""
     stop_warning: str | None = None
@@ -202,14 +205,21 @@ class GuardBook:
     # --- latches ---------------------------------------------------------------------------
 
     def _latch_until(self, key: str, given: GuardRule, now: float) -> str | None:
-        """The breach this rule is holding, if it still holds: ``"reset"`` or ``"hand"``."""
+        """The breach this rule is holding, if it still holds: ``"reset"`` or ``"hand"``.
+
+        A breach is held against the rule as it was set when it tripped. Once the rule is
+        changed -- a limit raised, say -- the hold is let go and the rule is measured afresh,
+        tripping again at once if it is still past its point.
+        """
         entry = self._latched.get(key, {}).get(given.id)
         if entry is None:
+            return None
+        params, _ = given.resolved()
+        if "params" in entry and entry["params"] != params:
             return None
         until = entry.get("until")
         if until == "hand":
             return "hand"
-        params, _ = given.resolved()
         if "reset" in params and "zone" in params:
             _, day = last_reset(now, str(params["reset"]), str(params["zone"]))
             if until == day:
@@ -228,6 +238,7 @@ class GuardBook:
             "until": until,
             "at": now,
             "detail": status.detail,
+            "params": given.resolved()[0],
         }
         log.warning(
             "guard %s on %s tripped and holds %s: %s",
@@ -283,6 +294,7 @@ class GuardBook:
         rules = {r.id: r for r in self.doc.for_account(key).rules}
         held: list[str] = []
         warnings: list[str] = []
+        warned_by: list[str] = []
         stop_required = stop_warning = None
         caps: dict[str, Cap] = {}
         for status in report.rules:
@@ -313,9 +325,11 @@ class GuardBook:
                 held.append(line)
             else:
                 warnings.append(line)
+                warned_by.append(status.rule_id)
         return Verdict(
             held_back=tuple(held),
             warnings=tuple(warnings),
+            warned_by=tuple(warned_by),
             stop_required=stop_required,
             stop_warning=stop_warning,
             max_risk=caps.get("risk"),

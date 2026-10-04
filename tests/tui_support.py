@@ -44,8 +44,9 @@ class StubEngine:
         self, cfg: AppConfig, state_path: Path | None = None, guards: GuardsDoc | None = None
     ) -> None:
         self._cfg = cfg
-        # A state file that never exists: the stub records nothing at a reset.
-        self.guard_book = GuardBook(guards or GuardsDoc(), Path("no-such-dir/guard_state.json"))
+        # The default state file, under the test's own %APPDATA% (see conftest): a latch the
+        # stub records must not land in the working directory.
+        self.guard_book = GuardBook(guards or GuardsDoc(), None)
         self.sync_calls = 0
         self.restarted: list[str] = []
         self.reconnected: list[str] = []

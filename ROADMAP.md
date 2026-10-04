@@ -1478,7 +1478,11 @@ are the design, not a limitation waiting to be lifted.
     `flatten` holds back too until step 3 can close; set to `warn`, it is logged once.
   - **Latches**, in `guard_state.json`: a daily-loss breach that acted holds until that
     rule's next reset; a drawdown breach until cleared by hand (`r` on the guards page,
-    behind a red confirm); floating loss is not held — it lets go as trades close.
+    behind a red confirm); floating loss is not held — it lets go as trades close. A hold is
+    kept against the rule as it was set when it tripped: changing the rule (a limit raised)
+    lets it go and measures afresh, tripping again at once if still past its point — found in
+    the demo, 2026-10-04, when raising a breached daily limit left the slave held. A hold
+    written before that (no settings recorded with it) still needs `r`.
   - **Stop loss required** (decline) refuses a new trade whose copy would carry no stop
     (`GUARD_NEEDS_STOP`).
   - **Risk per trade:** the slave's risk budget is the same for every trade sized from its

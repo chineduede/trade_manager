@@ -7,6 +7,7 @@ exercises the ordering and error-retention logic without a child.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from dataclasses import replace
@@ -522,3 +523,41 @@ def test_a_guard_holds_a_slave_back_and_caps_its_risk(cfg: AppConfig, tmp_path: 
     )
     verdict = eng._verdicts[TID_B]
     assert eng._capped_risk(action, cfg.terminals[TID_B], 100.0, verdict) == 40.0
+
+
+def test_a_moving_loss_is_announced_once(
+    cfg: AppConfig, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from mt5copier.guards import AccountGuards, GuardRule, GuardsDoc
+
+    doc = GuardsDoc(
+        accounts={
+            "7@Prop": AccountGuards(
+                initial_balance=10_000.0,
+                rules=(
+                    GuardRule(type="max_drawdown", params={"limit": 500, "unit": "money"}),
+                    GuardRule(
+                        type="max_drawdown",
+                        params={"limit": 400, "unit": "money", "on_breach": "warn"},
+                    ),
+                ),
+            )
+        }
+    )
+    eng = Engine(cfg, guards=doc, guard_state_path=tmp_path / "state.json")
+    snap = Snapshot(
+        terminal_id=TID_B,
+        state=WorkerState.CONNECTED,
+        login=7,
+        server="Prop",
+        balance=10_000.0,
+        equity=9_550.0,
+        open_positions=(),
+        pending_orders=(),
+    )
+    with caplog.at_level(logging.WARNING, logger="mt5copier.engine"):
+        for equity in (9_550.0, 9_540.0, 9_520.0, 9_545.0):
+            eng._judge(replace(snap, equity=equity))
+    said = [r.getMessage() for r in caplog.records]
+    assert sum("takes no new trades" in m for m in said) == 1
+    assert sum(m.startswith("guards: Beta: ") for m in said) == 1

@@ -50,6 +50,20 @@ def test_a_daily_breach_holds_after_recovery_until_the_reset(tmp_path: Path) -> 
     assert again.verdict(KEY, snap(), tomorrow).hold is None
 
 
+def test_changing_a_held_rule_lets_go_of_its_hold(tmp_path: Path) -> None:
+    rule = daily(limit=1000, unit="money")
+    b = book(rule, tmp=tmp_path)
+    b.verdict(KEY, snap(equity=99_100.0), NOW)
+    assert b.verdict(KEY, snap(equity=99_500.0), NOW + 60).hold is not None
+
+    raised = rule.model_copy(update={"params": {**rule.params, "limit": 5000}})
+    b.doc.set_account(KEY, b.doc.for_account(KEY).model_copy(update={"rules": (raised,)}))
+    assert b.verdict(KEY, snap(equity=99_500.0), NOW + 120).hold is None
+
+    # Still past the new limit: it trips again at once.
+    assert b.verdict(KEY, snap(equity=95_500.0), NOW + 180).hold is not None
+
+
 def test_a_drawdown_breach_holds_until_cleared_by_hand(tmp_path: Path) -> None:
     rule = GuardRule(id="dd", type="max_drawdown", params={"limit": 1000, "unit": "money"})
     b = book(rule, tmp=tmp_path)

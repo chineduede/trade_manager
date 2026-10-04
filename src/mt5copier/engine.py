@@ -988,13 +988,16 @@ class Engine:
         before = self._verdicts.get(tid, NO_VERDICT)
         self._verdicts[tid] = verdict
         name = self._cfg.display_name(tid)
-        if verdict.hold != before.hold:
+        # The hold's text carries the live measurement, which moves with every tick of a
+        # floating loss; only the slave being held back or let go is news.
+        if (verdict.hold is None) != (before.hold is None):
             if verdict.hold is None:
                 log.info("guards: %s takes new trades again (was: %s)", name, before.hold)
             else:
                 log.warning("guards: %s takes no new trades: %s", name, verdict.hold)
-        for line in set(verdict.warnings) - set(before.warnings):
-            log.warning("guards: %s: %s", name, line)
+        for rule_id, line in zip(verdict.warned_by, verdict.warnings, strict=True):
+            if rule_id not in before.warned_by:
+                log.warning("guards: %s: %s", name, line)
 
     def _gate(self, terminal_id: str, snap: Snapshot | None) -> GuardGate | None:
         verdict = self._verdicts.get(terminal_id)
