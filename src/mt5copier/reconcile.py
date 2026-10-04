@@ -992,6 +992,10 @@ class OpenCopy:
     breakeven_exempt: bool = False
     breakeven_at: float = 0.0
     """The copy's breakeven state, for the detail page. See :class:`CopiedPosition`."""
+    price_value: float = 0.0
+    point: float = 0.0
+    """What a 1.0 price move is worth on one lot, and the symbol's point, from the fill; 0 when
+    unknown. For the settings form's worked example."""
 
 
 class CopyLedger:
@@ -1069,11 +1073,21 @@ class CopyLedger:
                 breakeven_sl=p.breakeven_sl,
                 breakeven_exempt=p.breakeven_exempt,
                 breakeven_at=p.breakeven_at,
+                price_value=p.price_value,
+                point=p.point,
             )
             for p in self._store.positions(terminal_id)
         ]
         copies += [
-            OpenCopy(o.master_ticket, o.slave_ticket, o.slave_symbol, o.volume, resting=True)
+            OpenCopy(
+                o.master_ticket,
+                o.slave_ticket,
+                o.slave_symbol,
+                o.volume,
+                resting=True,
+                price_value=o.price_value,
+                point=o.point,
+            )
             for o in self._store.orders(terminal_id)
         ]
         return sorted(copies, key=lambda c: c.master_ticket)

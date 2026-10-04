@@ -834,3 +834,111 @@ async def test_tab_inside_a_dialog_moves_between_its_buttons_not_the_pages(
         await pilot.pause()
         await pilot.press("tab")
         assert app._page == "log", "and on the page itself it still turns the page"
+
+
+async def test_settings_are_written_as_sentences_with_a_worked_example(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    from mt5copier.protocol import Position, PositionType, Snapshot, WorkerState
+    from mt5copier.reconcile import OpenCopy
+    from mt5copier.tui_v2.settings import SettingsForm
+
+    cfg.terminals[TID_MASTER].role = Role.MASTER
+    cfg.terminals[TID_SLAVE].role = Role.SLAVE
+    cfg.terminals[TID_SLAVE].commission_per_lot_round_turn = 3.5
+    buy = Position(11, "BTCUSD", PositionType.BUY, 0.78, 84854.0, sl=84554.0)
+    async with app.run_test(size=(140, 50)) as pilot:
+        engine = app._engine
+        engine.snapshots[TID_MASTER] = Snapshot(  # type: ignore[attr-defined]
+            terminal_id=TID_MASTER, state=WorkerState.CONNECTED, open_positions=(buy,)
+        )
+        engine.snapshots[TID_SLAVE] = Snapshot(  # type: ignore[attr-defined]
+            terminal_id=TID_SLAVE, state=WorkerState.CONNECTED, balance=97512.61, trade_mode=0
+        )
+        engine.copies[TID_SLAVE] = [  # type: ignore[attr-defined]
+            OpenCopy(11, 501, "BTCUSD", 3.11, resting=False, price_value=1.0, point=0.01)
+        ]
+        await pilot.press("1", "e")
+        await pilot.pause()
+        form = app.screen
+        assert isinstance(form, SettingsForm)
+        assert form.focused is not None and form.focused.id == "f-risk_percent"
+
+        def example() -> str:
+            return plain(form.query_one("#ex-body", Static).content)
+
+        assert "Master buys BTCUSD with its stop 300.00 away." in example()
+        assert "this slave buys about 3.21 lots" in example()
+        said = " ".join(plain(s.content, width=200) for s in form.query(Static))
+        assert "slave 1 of A · demo account" in said
+        assert "1 open copy on this slave is orphaned" in said
+
+        await pilot.press("backspace", "2")
+        await pilot.pause()
+        assert "1,950.25 risk" in example() and "about 6.42 lots" in example(), "follows typing"
+        await pilot.press("backspace", "x")
+        await pilot.pause()
+        assert "Correct the settings" in example()
+
+
+async def test_the_settings_form_saves_direction_and_symbol_renames(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    from textual.widgets import Input, Select
+
+    from mt5copier.tui_v2.settings import SettingsForm
+
+    cfg.terminals[TID_MASTER].role = Role.MASTER
+    cfg.terminals[TID_SLAVE].role = Role.SLAVE
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.press("1", "e")
+        await pilot.pause()
+        form = app.screen
+        assert isinstance(form, SettingsForm)
+        form.query_one("#f-invert", Select).value = "opposite"
+        form.query_one("#f-symbol_map", Input).value = "US30=US30.cash, ger40 = DE40"
+        await pilot.pause()
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert not isinstance(app.screen, SettingsForm)
+        saved = cfg.terminals[TID_SLAVE]
+        assert saved.invert
+        assert saved.symbol_map == {"US30": "US30.cash", "GER40": "DE40"}
+
+
+async def test_the_settings_form_shows_only_the_values_its_choices_use(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    from textual.widgets import Select
+
+    from mt5copier.config import SizingMode
+    from mt5copier.tui_v2.settings import SettingsForm
+
+    cfg.terminals[TID_MASTER].role = Role.MASTER
+    cfg.terminals[TID_SLAVE].role = Role.SLAVE
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.press("1", "e")
+        await pilot.pause()
+        form = app.screen
+        assert isinstance(form, SettingsForm)
+        assert form.query_one("#f-risk_percent").display
+        assert not form.query_one("#f-risk_cash").display
+        assert not form.query_one("#multiple-part").display
+        form.query_one("#f-sizing_mode", Select).value = SizingMode.FIXED_CASH_RISK.value
+        form.query_one("#f-no_stop_policy", Select).value = "lot_multiple"
+        await pilot.pause()
+        assert form.query_one("#f-risk_cash").display
+        assert not form.query_one("#f-risk_percent").display
+        assert form.query_one("#multiple-part").display
+
+
+def test_every_editable_setting_is_drawn_into_the_new_form() -> None:
+    """A setting added to the editor has to be given a place in a sentence here too."""
+    import inspect
+
+    from mt5copier.settings_edit import EDITABLE
+    from mt5copier.tui_v2 import settings
+
+    source = inspect.getsource(settings.SettingsForm.compose)
+    missing = [f.name for f in EDITABLE if f'"{f.name}"' not in source]
+    assert not missing

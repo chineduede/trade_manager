@@ -238,10 +238,12 @@ class CopierApp(App[None]):
     TITLE = "MT5 Trade Copier"
     SUB_TITLE = "Stage 2c - live copying"
 
-    # The dialogs that guard open copies and the demo-only guard. Named here so the new UI can
-    # draw them its own way; what they ask, and what is done with the answer, stays theirs.
+    # The dialogs that guard open copies and the demo-only guard, and the settings form. Named
+    # here so the new UI can draw them its own way; what they ask, and what is done with the
+    # answer, stays theirs.
     ORPHAN_SCREEN: type[OrphanConfirmScreen] = OrphanConfirmScreen
     LIVE_OVERRIDE_SCREEN: type[LiveOverrideScreen] = LiveOverrideScreen
+    SETTINGS_SCREEN: type[SettingsScreen] = SettingsScreen
 
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (110, "-wide")]
     """Below 110 columns the sidebar goes, so the table keeps the width."""
@@ -878,7 +880,7 @@ class CopierApp(App[None]):
             )
             return
         self.push_screen(
-            SettingsScreen(
+            self.SETTINGS_SCREEN(
                 # The live object, looked up when asked: an edit is built on what is true at the
                 # moment of saving, not on what was true when the form opened.
                 current=lambda: self._cfg.terminals[tid],

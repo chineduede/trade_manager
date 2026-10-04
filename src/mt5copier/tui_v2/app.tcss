@@ -420,3 +420,204 @@ LiveDialog #dialog {
 .dialog Button.danger:hover {
     background: $error 15%;
 }
+
+/* --- the settings form ---------------------------------------------------------------------- */
+
+/* The classic form's own rules still reach this one (it is a subclass), so the ones that would
+   show through are put back here: its error indent, its help panel, its fixed field widths. */
+SettingsForm {
+    background: #0c0b09 80%;
+    padding: 0;
+    align: center middle;
+}
+
+SettingsForm #dialog {
+    width: 116;
+    max-width: 100%;
+    height: auto;
+    max-height: 100%;
+    border: thick $foreground;
+    background: $background;
+    padding: 0 2;
+    scrollbar-size-vertical: 1;
+}
+
+SettingsForm #st-head {
+    height: 2;
+    border-bottom: double $foreground;
+}
+
+SettingsForm #st-title {
+    width: 1fr;
+}
+
+SettingsForm #st-where {
+    width: auto;
+}
+
+SettingsForm #st-mode {
+    margin-bottom: 1;
+}
+
+SettingsForm .sect {
+    height: auto;
+    border-top: solid $panel;
+}
+
+SettingsForm .sect-name {
+    width: 12;
+    text-style: bold;
+}
+
+SettingsForm .sect-body {
+    width: 1fr;
+    height: auto;
+}
+
+SettingsForm .line {
+    height: 1;
+}
+
+SettingsForm .part {
+    width: auto;
+    height: 1;
+}
+
+SettingsForm .w {
+    width: auto;
+}
+
+SettingsForm Input,
+SettingsForm Input:focus {
+    height: 1;
+    padding: 0 1;
+    border: none;
+    background: $panel 45%;
+    color: $foreground;
+    text-style: bold;
+}
+
+SettingsForm Input:focus {
+    background: $foreground;
+    color: $background;
+}
+
+SettingsForm Input > .input--placeholder {
+    color: $text-muted;
+    text-style: not bold;
+}
+
+SettingsForm Input.n5 { width: 7; }
+SettingsForm Input.n6 { width: 8; }
+SettingsForm Input.n8 { width: 10; }
+SettingsForm Input.n10 { width: 12; }
+SettingsForm Input.n12 { width: 14; }
+SettingsForm Input.grow { width: 1fr; min-width: 12; }
+
+
+SettingsForm Select > SelectCurrent {
+    background: $panel 45%;
+    text-style: bold;
+}
+
+SettingsForm Select:focus > SelectCurrent {
+    background: $foreground;
+    color: $background;
+}
+
+SettingsForm Tick {
+    width: auto;
+    margin-right: 3;
+    background: $background;
+    padding: 0;
+}
+
+SettingsForm Tick:focus {
+    background: $foreground 20%;
+}
+
+SettingsForm Tick:focus > .toggle--label {
+    background: transparent;
+    color: $foreground;
+    text-style: bold;
+}
+
+SettingsForm .err {
+    display: none;
+    height: auto;
+    color: $error;
+}
+
+SettingsForm #example {
+    height: auto;
+    border: solid $panel;
+    padding: 0 1;
+}
+
+SettingsForm #ex-name {
+    width: 10;
+    color: $text-muted;
+    text-style: bold;
+}
+
+SettingsForm #ex-body {
+    width: 1fr;
+    height: auto;
+}
+
+SettingsForm #help {
+    height: auto;
+    min-height: 1;
+    margin: 0;
+    padding: 0;
+    border: none;
+    background: $background;
+}
+
+SettingsForm #general-error {
+    display: none;
+    height: auto;
+    color: $error;
+    text-style: bold;
+}
+
+SettingsForm #st-foot {
+    height: auto;
+    padding-top: 1;
+    border-top: solid $foreground;
+    align-vertical: middle;
+}
+
+SettingsForm #st-stake {
+    width: 1fr;
+    margin-top: 1;
+}
+
+SettingsForm Button {
+    height: 3;
+    min-width: 16;
+    margin-left: 3;
+    text-style: bold;
+}
+
+SettingsForm Button.keep {
+    background: $foreground 55%;
+    color: $background;
+    border: none;
+}
+
+SettingsForm Button.keep:focus,
+SettingsForm Button.keep:hover {
+    background: $foreground;
+}
+
+SettingsForm Button.plain {
+    background: $background;
+    color: $foreground;
+    border: solid $foreground;
+}
+
+SettingsForm Button.plain:focus,
+SettingsForm Button.plain:hover {
+    background: $foreground 20%;
+}

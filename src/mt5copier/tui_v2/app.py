@@ -48,6 +48,7 @@ from . import cards
 from .detail import DetailScreen
 from .dialogs import LiveDialog, OrphanDialog
 from .menu import ActionMenu, terminal_actions
+from .settings import SettingsForm
 from .style import (
     BG,
     BLUE,
@@ -84,6 +85,7 @@ class NewCopierApp(CopierApp):
     CSS_PATH = "app.tcss"
     ORPHAN_SCREEN = OrphanDialog
     LIVE_OVERRIDE_SCREEN = LiveDialog
+    SETTINGS_SCREEN = SettingsForm
     HORIZONTAL_BREAKPOINTS = [(0, "-narrow"), (120, "-wide")]
 
     BINDINGS = [
