@@ -97,9 +97,10 @@ class _Session:
         self._launched_pid = None if already_running else find_terminal_pid(self._exe_path)
         return True, None
 
-    def disconnect(self, *, close_terminal: bool = False) -> None:
+    def disconnect(self, *, close_terminal: bool = False, close_any: bool = False) -> None:
         """Close the MT5 session. With ``close_terminal=True``, also close the terminal
-        process itself -- but only the one this session launched.
+        process itself -- but only the one this session launched, unless ``close_any`` says to
+        close whichever is running from this exe, the person's own included.
 
         Plain disconnect (the reconnect path) must never close the terminal: it would kill the
         very instance a moment before reconnecting to it. Only a caller that is done with this
@@ -113,11 +114,14 @@ class _Session:
             finally:
                 self.connected = False
         if close_terminal:
-            self._close_launched_terminal()
+            self._close_terminal(close_any=close_any)
 
-    def _close_launched_terminal(self) -> None:
+    def _close_terminal(self, *, close_any: bool) -> None:
         pid = self._launched_pid
         self._launched_pid = None
+        ours = pid is not None
+        if pid is None and close_any:
+            pid = find_terminal_pid(self._exe_path)
         if pid is None:
             return
         try:
@@ -127,7 +131,11 @@ class _Session:
                 log.warning("pid %s is no longer the terminal; not closing", pid)
                 return
             proc.terminate()
-            log.info("closed terminal pid=%s (we launched it)", pid)
+            log.info(
+                "closed terminal pid=%s (%s)",
+                pid,
+                "we launched it" if ours else "it was open already",
+            )
         except psutil.NoSuchProcess:
             pass  # already gone
         except Exception as exc:
@@ -562,6 +570,7 @@ def run_worker(
     next_retry_at = 0.0
     running = True
     close_terminal = False
+    close_any = False
     """Set from a STOP command's own flag. Stays False for every other way this loop can end
     (a crash, the queue breaking, an unflagged STOP) -- an unplanned exit must never surprise
     the user by closing a terminal they are still looking at."""
@@ -604,7 +613,12 @@ def run_worker(
                     break
                 if cmd is None or getattr(cmd, "kind", None) is CommandKind.STOP:
                     close_terminal = bool(getattr(cmd, "close_terminal", False))
-                    wlog.info("stop requested (close_terminal=%s)", close_terminal)
+                    close_any = bool(getattr(cmd, "close_any", False))
+                    wlog.info(
+                        "stop requested (close_terminal=%s, close_any=%s)",
+                        close_terminal,
+                        close_any,
+                    )
                     running = False
                     break
                 if isinstance(cmd, OrderCommand):
@@ -708,7 +722,7 @@ def run_worker(
             )
         )
     finally:
-        session.disconnect(close_terminal=close_terminal)
+        session.disconnect(close_terminal=close_terminal, close_any=close_any)
         seq += 1
         publish(Snapshot(terminal_id=terminal_id, state=WorkerState.STOPPED, seq=seq))
         wlog.info("worker stopped")

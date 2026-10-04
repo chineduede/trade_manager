@@ -880,3 +880,41 @@ def test_a_raising_symbol_select_leaves_facts_unreadable() -> None:
 
     mt5 = Exploding(symbol_info_data={"EURUSD": FakeSymbolInfo(name="EURUSD", visible=False)})
     assert _Session(mt5, Path("x.exe")).symbol_facts("EURUSD") is None
+
+
+def test_close_any_closes_a_terminal_that_was_already_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ``close_terminals`` setting's "all": the person's own terminal is closed too."""
+    monkeypatch.setattr("mt5copier.worker.find_terminal_pid", lambda path: 4242)  # already up
+    proc = FakeProcess(4242, exe="x.exe")
+    monkeypatch.setattr("mt5copier.worker.psutil.Process", lambda pid: proc)
+    session = _Session(FakeMT5(), Path("x.exe"))
+    session.connect()
+    session.disconnect(close_terminal=True, close_any=True)
+    assert proc.terminated
+
+
+def test_close_any_still_needs_close_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plain disconnect is the reconnect path, whatever the setting."""
+    monkeypatch.setattr("mt5copier.worker.find_terminal_pid", lambda path: 4242)
+    proc = FakeProcess(4242, exe="x.exe")
+    monkeypatch.setattr("mt5copier.worker.psutil.Process", lambda pid: proc)
+    session = _Session(FakeMT5(), Path("x.exe"))
+    session.connect()
+    session.disconnect(close_any=True)
+    assert not proc.terminated
+
+
+def test_the_worker_passes_close_any_through_from_its_stop_command(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr("mt5copier.worker.find_terminal_pid", lambda path: 4242)
+    proc = FakeProcess(4242, exe="x.exe")
+    monkeypatch.setattr("mt5copier.worker.psutil.Process", lambda pid: proc)
+    run_until_stopped(
+        FakeMT5(),
+        tmp_path,
+        stop_command=Command(kind=CommandKind.STOP, close_terminal=True, close_any=True),
+    )
+    assert proc.terminated

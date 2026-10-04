@@ -258,7 +258,12 @@ class Command:
     Only ever true when the supervisor is done with this terminal for good (the whole app is
     stopping, or the terminal was unassigned) -- never for a restart, which wants the same
     terminal back a moment later. The worker only acts on this if it is also the one that
-    launched the terminal in the first place; see :mod:`mt5copier.worker`."""
+    launched the terminal in the first place, unless ``close_any`` is set too; see
+    :mod:`mt5copier.worker`."""
+
+    close_any: bool = False
+    """STOP with ``close_terminal`` only: close the terminal even if it was already running when
+    the worker connected -- the person's own. The ``close_terminals`` setting's "all"."""
 
 
 @dataclass(frozen=True, slots=True)

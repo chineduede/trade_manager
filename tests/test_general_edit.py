@@ -96,3 +96,15 @@ def test_timing_can_change_while_copying_runs() -> None:
 def test_a_field_that_is_not_here_is_a_bug() -> None:
     with pytest.raises(ValueError):
         apply_general(AppConfig(), {"copying_enabled": True})
+
+
+def test_closing_terminals_is_a_choice_of_three_and_can_change_while_copying() -> None:
+    from mt5copier.config import TerminalClosing
+
+    cfg = AppConfig(copying_enabled=True)
+    assert cfg.close_terminals is TerminalClosing.LAUNCHED, "today's behaviour by default"
+    outcome = apply_general(cfg, {"close_terminals": "all"})
+    assert outcome.ok
+    commit_general(cfg, outcome)
+    assert cfg.close_terminals is TerminalClosing.ALL
+    assert not apply_general(cfg, {"close_terminals": "sometimes"}).ok

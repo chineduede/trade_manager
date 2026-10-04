@@ -92,6 +92,21 @@ class SizingMode(StrEnum):
     # becomes what the account can actually lose, not what it would lose in a frictionless fill.
 
 
+class TerminalClosing(StrEnum):
+    """What becomes of a terminal's process when the copier is done with it: the app quitting,
+    or the terminal being unassigned. A restart or a reconnect never closes one."""
+
+    NEVER = "never"
+    """Leave every terminal running, even one the copier launched."""
+
+    LAUNCHED = "launched"
+    """Close a terminal only if the copier launched it; one that was already running is the
+    person's own. The default, and what the copier always did before this was a setting."""
+
+    ALL = "all"
+    """Close every terminal the copier was connected to, including ones the person opened."""
+
+
 class NoStopPolicy(StrEnum):
     """What to do when the master opens a position with no stop loss.
 
@@ -350,6 +365,9 @@ class AppConfig(BaseModel):
     seconds ago fills within a whisker of the master's price. Capped at 5 seconds on purpose --
     a larger window would quietly reintroduce the problem it exists to avoid. Zero disables the
     grace entirely, so any disconnection at all excludes what was open."""
+
+    close_terminals: TerminalClosing = TerminalClosing.LAUNCHED
+    """Whether a terminal's process is closed when the copier quits or it is unassigned."""
 
     dry_run: bool = True
     """Detect and report intended actions, but send nothing to any broker.

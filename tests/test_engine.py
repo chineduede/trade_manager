@@ -404,3 +404,35 @@ def test_pausing_a_slave_keeps_it_connected_and_closes_nothing(
 def test_only_a_slave_can_be_paused_by_the_engine(engine: Engine) -> None:
     with pytest.raises(ValueError, match="only a slave"):
         engine.set_paused(TID_A, True)
+
+
+@pytest.mark.parametrize(
+    ("closing", "close", "close_any"),
+    [("never", False, False), ("launched", True, False), ("all", True, True)],
+)
+def test_the_closing_setting_decides_what_quitting_and_unassigning_close(
+    engine: Engine, cfg: AppConfig, closing: str, close: bool, close_any: bool
+) -> None:
+    from mt5copier.config import TerminalClosing
+
+    cfg.close_terminals = TerminalClosing(closing)
+    engine.sync()
+    unassigned = engine._workers[TID_B]
+    cfg.set_role(TID_B, Role.UNASSIGNED)
+    engine.sync()
+    quitting = engine._workers[TID_A]
+    engine.stop()
+    for worker in (unassigned, quitting):
+        sent = worker.cmd_q.sent[-1]  # type: ignore[attr-defined]
+        assert (sent.close_terminal, sent.close_any) == (close, close_any)
+
+
+def test_a_restart_closes_nothing_whatever_the_setting(engine: Engine, cfg: AppConfig) -> None:
+    from mt5copier.config import TerminalClosing
+
+    cfg.close_terminals = TerminalClosing.ALL
+    engine.sync()
+    worker = engine._workers[TID_A]
+    engine.restart(TID_A)
+    sent = worker.cmd_q.sent[-1]  # type: ignore[attr-defined]
+    assert (sent.close_terminal, sent.close_any) == (False, False)

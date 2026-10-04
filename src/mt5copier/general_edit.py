@@ -2,7 +2,7 @@
 
 The settings here belong to the copier rather than to one terminal: whether it sends real
 orders, how its connections are timed, and how long a lapse in watching the master still counts
-as unbroken. As in :mod:`mt5copier.settings_edit`, the bounds are the model's own, so the form
+as unbroken, and whether it closes the terminals it is done with. As in :mod:`mt5copier.settings_edit`, the bounds are the model's own, so the form
 cannot let through something the next start would read as a corrupt config.
 
 **The mode is guarded twice.** Changing it in either direction needs copying stopped: going
@@ -33,6 +33,7 @@ GENERAL: tuple[str, ...] = (
     "heartbeat_timeout_s",
     "reconnect_backoff_s",
     "join_grace_seconds",
+    "close_terminals",
 )
 """The :class:`AppConfig` fields the form edits. ``copying_enabled`` is not one: it has its own
 key, ``d``, and is flipped far more often than anything here."""
@@ -61,6 +62,12 @@ HELP: dict[str, tuple[str, str]] = {
         "Retry schedule",
         "Seconds to wait before each attempt to reconnect a lost terminal, separated by commas. "
         "The last one repeats for as long as it takes.",
+    ),
+    "close_terminals": (
+        "Closing terminals",
+        "What happens to a terminal's window when the copier quits or the terminal is "
+        "unassigned. A restart or reconnect never closes one. Closing is immediate, not "
+        "MT5's own exit: anything unsaved in that terminal, such as a chart, is lost.",
     ),
     "join_grace_seconds": (
         "Join grace",
@@ -98,6 +105,7 @@ def initial_general(cfg: AppConfig) -> dict[str, str | bool]:
         "heartbeat_timeout_s": _number(cfg.heartbeat_timeout_s),
         "reconnect_backoff_s": ", ".join(_number(s) for s in cfg.reconnect_backoff_s),
         "join_grace_seconds": _number(cfg.join_grace_seconds),
+        "close_terminals": cfg.close_terminals.value,
     }
 
 
@@ -127,6 +135,8 @@ def _parse(name: str, raw: str | bool) -> object:
     if not isinstance(raw, str):
         raise _EntryError("expected text")
     text = raw.strip()
+    if name == "close_terminals":
+        return text
     if name == "reconnect_backoff_s":
         steps = [_float(t) for t in _SEPARATORS.split(text) if t]
         if not steps:

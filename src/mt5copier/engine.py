@@ -26,7 +26,15 @@ from pathlib import Path
 
 from . import role_actions
 from .breakeven import breakeven_level, buffer_distance, check_breakeven_price
-from .config import BREAKEVEN_FIELDS, AppConfig, BreakevenMode, Role, SizingMode, TerminalConfig
+from .config import (
+    BREAKEVEN_FIELDS,
+    AppConfig,
+    BreakevenMode,
+    Role,
+    SizingMode,
+    TerminalClosing,
+    TerminalConfig,
+)
 from .copy_stats import StatsBook, TerminalStats
 from .day_book import DayBook, MasterEvent, Outcome
 from .logging_setup import get_logger
@@ -229,8 +237,8 @@ class Engine:
     def stop(self) -> None:
         """Stop every worker and the drain thread. Safe to call more than once.
 
-        Closes every terminal this engine launched, symmetrically with how starting a worker
-        can launch one: nothing should be left behind that only exists because we opened it.
+        Closes the terminals the ``close_terminals`` setting says to: by default every one this
+        engine launched, symmetrically with how starting a worker can launch one.
         """
         with self._lock:
             terminal_ids = list(self._workers)
@@ -342,17 +350,27 @@ class Engine:
         exit. That is an accepted gap, not a new one: a forced kill already skips the clean
         ``mt5.shutdown()`` the same way.
 
-        ``close_terminal`` asks the worker to also close the terminal process, if and only if
-        it was the one that launched it (see :mod:`mt5copier.worker`). True only when we are
-        done with this terminal for good -- stopping the app, or the terminal being
-        unassigned -- never for a restart, which wants it straight back.
+        ``close_terminal`` says we are done with this terminal for good -- stopping the app, or
+        the terminal being unassigned -- never a restart, which wants it straight back. What is
+        then closed is the ``close_terminals`` setting's call: nothing, only a terminal the
+        worker launched (see :mod:`mt5copier.worker`), or whichever is running.
         """
         worker = self._workers.get(terminal_id)
         if worker is None:
             return
-        log.info("stopping worker for %s (close_terminal=%s)", terminal_id[:8], close_terminal)
+        closing = self._cfg.close_terminals
+        close = close_terminal and closing is not TerminalClosing.NEVER
+        close_any = close and closing is TerminalClosing.ALL
+        log.info(
+            "stopping worker for %s (close_terminal=%s, close_any=%s)",
+            terminal_id[:8],
+            close,
+            close_any,
+        )
         try:
-            worker.cmd_q.put_nowait(Command(kind=CommandKind.STOP, close_terminal=close_terminal))
+            worker.cmd_q.put_nowait(
+                Command(kind=CommandKind.STOP, close_terminal=close, close_any=close_any)
+            )
         except Exception:
             pass
         worker.process.join(timeout=_STOP_JOIN_TIMEOUT_S)

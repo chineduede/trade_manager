@@ -19,6 +19,7 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, Input, Static
 
+from ..config import TerminalClosing
 from ..general_edit import (
     APPLIES_ON_CONNECT,
     DRY_RUN,
@@ -42,6 +43,12 @@ log = get_logger(__name__)
 
 _F = "f-"
 _E = "e-"
+
+_CLOSING = (
+    ("leave it running", TerminalClosing.NEVER.value),
+    ("close it if the copier opened it", TerminalClosing.LAUNCHED.value),
+    ("close it, even if you opened it", TerminalClosing.ALL.value),
+)
 
 _MODE = (
     ("simulates every copy: dry run", "dry"),
@@ -123,6 +130,12 @@ class GeneralForm(ModalScreen[bool]):
                 ),
                 *self._errors("join_grace_seconds"),
             )
+            yield section(
+                "terminals",
+                rows(lead("When the copier quits, or a terminal is unassigned:")),
+                rows(Choice(_CLOSING, str(v["close_terminals"]), id=f"{_F}close_terminals")),
+                *self._errors("close_terminals"),
+            )
             yield Static(
                 Text(
                     "The check interval and the retry schedule reach a terminal the next time "
@@ -166,7 +179,7 @@ class GeneralForm(ModalScreen[bool]):
         for name in GENERAL:
             widget = self.query_one(f"#{_F}{name}")
             if isinstance(widget, Choice):
-                raw[name] = widget.value == "dry"
+                raw[name] = widget.value == "dry" if name == DRY_RUN else widget.value
             elif isinstance(widget, Input):
                 raw[name] = widget.value
         return raw

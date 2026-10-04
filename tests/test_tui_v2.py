@@ -1077,3 +1077,25 @@ async def test_going_back_to_a_dry_run_is_one_save(app: NewCopierApp, cfg: AppCo
         await pilot.press("ctrl+s")
         await pilot.pause()
         assert cfg.dry_run
+
+
+async def test_the_copiers_settings_choose_what_happens_to_terminals(
+    app: NewCopierApp, cfg: AppConfig
+) -> None:
+    from mt5copier.config import TerminalClosing
+    from mt5copier.tui_v2.general import GeneralForm
+    from mt5copier.tui_v2.settings import Choice
+
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.press("g")
+        await pilot.pause()
+        form = app.screen
+        assert isinstance(form, GeneralForm)
+        closing = form.query_one("#f-close_terminals", Choice)
+        assert closing.value == "launched"
+        closing.focus()
+        await pilot.press("right")
+        assert closing.value == "all"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert cfg.close_terminals is TerminalClosing.ALL
