@@ -459,6 +459,7 @@ SettingsForm #st-mode {
     margin-bottom: 1;
 }
 
+
 SettingsForm .sect {
     height: auto;
     border-top: solid $panel;
@@ -474,8 +475,11 @@ SettingsForm .sect-body {
     height: auto;
 }
 
+/* A blank row under every line of a section, as the design spaces them, so nothing in one
+   line sits hard against the next. The last line's is the section's bottom margin. */
 SettingsForm .line {
     height: 1;
+    margin-bottom: 1;
 }
 
 SettingsForm .part {
@@ -498,8 +502,8 @@ SettingsForm Input:focus {
 }
 
 SettingsForm Input:focus {
-    background: $foreground;
-    color: $background;
+    background: $foreground 30%;
+    color: $foreground;
 }
 
 SettingsForm Input > .input--placeholder {
@@ -515,25 +519,15 @@ SettingsForm Input.n12 { width: 14; }
 SettingsForm Input.grow { width: 1fr; min-width: 12; }
 
 
-SettingsForm Select > SelectCurrent {
-    background: $panel 45%;
-    text-style: bold;
-}
-
-SettingsForm Select:focus > SelectCurrent {
-    background: $foreground;
-    color: $background;
-}
-
 SettingsForm Tick {
     width: auto;
-    margin-right: 3;
+    margin-right: 2;
     background: $background;
     padding: 0;
 }
 
 SettingsForm Tick:focus {
-    background: $foreground 20%;
+    background: $foreground 30%;
 }
 
 SettingsForm Tick:focus > .toggle--label {
@@ -568,7 +562,7 @@ SettingsForm #ex-body {
 SettingsForm #help {
     height: auto;
     min-height: 1;
-    margin: 0;
+    margin: 1 0 0 0;
     padding: 0;
     border: none;
     background: $background;
@@ -583,7 +577,7 @@ SettingsForm #general-error {
 
 SettingsForm #st-foot {
     height: auto;
-    padding-top: 1;
+    padding: 1 0;
     border-top: solid $foreground;
     align-vertical: middle;
 }
@@ -596,28 +590,31 @@ SettingsForm #st-stake {
 SettingsForm Button {
     height: 3;
     min-width: 16;
-    margin-left: 3;
+    margin-left: 2;
     text-style: bold;
 }
 
-SettingsForm Button.keep {
-    background: $foreground 55%;
+/* Save is filled cream, as the design has it; cancel is a dim block. Whichever has focus turns
+   blue, the colour of the copier doing its job. No borders: a block border leaves a sliver of
+   its edge beside the button in most terminal fonts. */
+SettingsForm Button.keep,
+SettingsForm Button.keep:hover {
+    background: $foreground;
     color: $background;
     border: none;
+    content-align: center middle;
+}
+
+SettingsForm Button.plain,
+SettingsForm Button.plain:hover {
+    background: $panel 60%;
+    color: $foreground;
+    border: none;
+    content-align: center middle;
 }
 
 SettingsForm Button.keep:focus,
-SettingsForm Button.keep:hover {
-    background: $foreground;
-}
-
-SettingsForm Button.plain {
-    background: $background;
-    color: $foreground;
-    border: solid $foreground;
-}
-
-SettingsForm Button.plain:focus,
-SettingsForm Button.plain:hover {
-    background: $foreground 20%;
+SettingsForm Button.plain:focus {
+    background: $accent;
+    color: $background;
 }

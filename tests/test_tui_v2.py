@@ -884,9 +884,9 @@ async def test_settings_are_written_as_sentences_with_a_worked_example(
 async def test_the_settings_form_saves_direction_and_symbol_renames(
     app: NewCopierApp, cfg: AppConfig
 ) -> None:
-    from textual.widgets import Input, Select
+    from textual.widgets import Input
 
-    from mt5copier.tui_v2.settings import SettingsForm
+    from mt5copier.tui_v2.settings import Choice, SettingsForm
 
     cfg.terminals[TID_MASTER].role = Role.MASTER
     cfg.terminals[TID_SLAVE].role = Role.SLAVE
@@ -895,7 +895,7 @@ async def test_the_settings_form_saves_direction_and_symbol_renames(
         await pilot.pause()
         form = app.screen
         assert isinstance(form, SettingsForm)
-        form.query_one("#f-invert", Select).value = "opposite"
+        form.query_one("#f-invert", Choice).value = "opposite"
         form.query_one("#f-symbol_map", Input).value = "US30=US30.cash, ger40 = DE40"
         await pilot.pause()
         await pilot.press("ctrl+s")
@@ -909,10 +909,9 @@ async def test_the_settings_form_saves_direction_and_symbol_renames(
 async def test_the_settings_form_shows_only_the_values_its_choices_use(
     app: NewCopierApp, cfg: AppConfig
 ) -> None:
-    from textual.widgets import Select
 
     from mt5copier.config import SizingMode
-    from mt5copier.tui_v2.settings import SettingsForm
+    from mt5copier.tui_v2.settings import Choice, SettingsForm
 
     cfg.terminals[TID_MASTER].role = Role.MASTER
     cfg.terminals[TID_SLAVE].role = Role.SLAVE
@@ -924,8 +923,8 @@ async def test_the_settings_form_shows_only_the_values_its_choices_use(
         assert form.query_one("#f-risk_percent").display
         assert not form.query_one("#f-risk_cash").display
         assert not form.query_one("#multiple-part").display
-        form.query_one("#f-sizing_mode", Select).value = SizingMode.FIXED_CASH_RISK.value
-        form.query_one("#f-no_stop_policy", Select).value = "lot_multiple"
+        form.query_one("#f-sizing_mode", Choice).value = SizingMode.FIXED_CASH_RISK.value
+        form.query_one("#f-no_stop_policy", Choice).value = "lot_multiple"
         await pilot.pause()
         assert form.query_one("#f-risk_cash").display
         assert not form.query_one("#f-risk_percent").display

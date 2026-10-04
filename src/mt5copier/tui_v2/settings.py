@@ -4,9 +4,10 @@ and a worked example of what the sizing settings would open.
 It is the classic :class:`~mt5copier.tui.settings_screen.SettingsScreen` with its drawing
 replaced. Saving, validating, the open-copies question and the panic key all stay the classic
 screen's: every field keeps its ``f-`` id and every error line its ``e-`` id, so its handlers
-find them. Two things are read back differently, because they are drawn differently -- reversing
-trades is a choice of direction here rather than a switch, and the symbol renames are one line
-rather than a box -- and help follows focus as a line under the example, not a panel.
+find them. What is read back differently is what is drawn differently: a choice is every option
+side by side with the chosen one filled (a dropdown would open over the sentences below it),
+reversing trades is a choice of direction rather than a switch, and the symbol renames are one
+line rather than a box. Help follows focus as a line under the example, not a panel.
 """
 
 from __future__ import annotations
@@ -16,10 +17,13 @@ from typing import TYPE_CHECKING
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
+from textual.message import Message
+from textual.reactive import reactive
 from textual.widget import Widget
-from textual.widgets import Button, Checkbox, Input, Select, Static
+from textual.widgets import Button, Checkbox, Input, Static
 
 from ..config import BreakevenMode, NoStopPolicy, Role, SizingMode, TerminalConfig
 from ..day_book import MasterEvent
@@ -27,7 +31,7 @@ from ..protocol import ACCOUNT_TRADE_MODE_DEMO, ActionKind, PositionType
 from ..settings_edit import BY_NAME, apply_edits, copies_word, initial_values
 from ..settings_example import Example, MasterTrade, PriceValue, pick, work
 from ..tui.settings_screen import SettingsScreen
-from .style import BLUE, FG, MUTED, RED, spaced
+from .style import BG, BLUE, CHIP_BG, FG, MUTED, RED, spaced
 
 if TYPE_CHECKING:
     from .app import NewCopierApp
@@ -54,11 +58,99 @@ _BREAKEVEN = (
 
 
 class Tick(Checkbox):
-    """``[x] label``, as the design draws a switch."""
+    """``[x] label``, as the design draws a switch: ticked is bold and cream, unticked is dim, so
+    which are on reads at a glance."""
 
     @property
     def _button(self) -> Content:
-        return Content.styled("[x]" if self.value else "[ ]", f"bold {FG}")
+        if self.value:
+            return Content.styled("[x]", f"bold {FG}")
+        return Content.styled("[ ]", MUTED)
+
+
+class Choice(Widget, can_focus=True):
+    """Every option side by side, the chosen one filled. Left and right (or space) choose; so
+    does a click on an option. Nothing opens over the text around it, which a dropdown does."""
+
+    BINDINGS = [
+        Binding("left", "move(-1)", "Previous", show=False),
+        Binding("right", "move(1)", "Next", show=False),
+        Binding("space", "move(1)", "Next", show=False),
+    ]
+
+    DEFAULT_CSS = """
+    Choice {
+        width: auto;
+        height: 1;
+    }
+    """
+
+    value: reactive[str] = reactive("")
+
+    class Changed(Message):
+        def __init__(self, choice: Choice, value: str) -> None:
+            super().__init__()
+            self.choice = choice
+            self.value = value
+
+        @property
+        def control(self) -> Choice:
+            return self.choice
+
+    def __init__(self, options: tuple[tuple[str, str], ...], value: str, *, id: str) -> None:
+        super().__init__(id=id)
+        self._options = options
+        self.set_reactive(Choice.value, value)
+
+    def _spans(self) -> list[tuple[str, str]]:
+        """Each option's text and style, in order."""
+        out = []
+        for label, value in self._options:
+            if value == self.value:
+                style = f"bold {BG} on {FG}"
+            elif self.has_focus:
+                style = f"{FG} on {CHIP_BG}"
+            else:
+                style = f"{MUTED} on {CHIP_BG}"
+            out.append((f" {label} ", style))
+        return out
+
+    def render(self) -> Content:
+        # Arrows either side while it has focus, saying left and right choose. Their room is
+        # kept when it has not, so focusing it does not shift the sentence.
+        arrow = (f"bold {FG}", "◂ ", " ▸") if self.has_focus else ("", "  ", "  ")
+        parts: list[tuple[str, str] | str] = [(arrow[1], arrow[0])]
+        for i, span in enumerate(self._spans()):
+            if i:
+                parts.append(" ")
+            parts.append(span)
+        parts.append((arrow[2], arrow[0]))
+        return Content.assemble(*parts)
+
+    def get_content_width(self, container: object, viewport: object) -> int:
+        spans = self._spans()
+        return sum(len(text) for text, _ in spans) + len(spans) - 1 + 4
+
+    def watch_value(self, value: str) -> None:
+        self.post_message(self.Changed(self, value))
+
+    def action_move(self, step: int) -> None:
+        values = [v for _, v in self._options]
+        self.value = values[(values.index(self.value) + step) % len(values)]
+
+    def on_click(self, event: events.Click) -> None:
+        x = 2
+        for (text, _), (_, value) in zip(self._spans(), self._options, strict=True):
+            if x <= event.x < x + len(text):
+                self.value = value
+                return
+            x += len(text) + 1
+
+    def on_focus(self) -> None:
+        self.refresh()
+
+    def on_blur(self) -> None:
+        self.refresh()
 
 
 def _words(text: str) -> Static:
@@ -174,13 +266,8 @@ class SettingsForm(SettingsScreen):
         )
 
     @staticmethod
-    def _select(name: str, choices: tuple[tuple[str, str], ...], value: str) -> Select[str]:
-        select: Select[str] = Select(
-            choices, value=value, allow_blank=False, id=f"{_F}{name}", compact=True
-        )
-        # As wide as its longest choice and the arrow, so a sentence reads on past it.
-        select.styles.width = max(len(label) for label, _ in choices) + 4
-        return select
+    def _select(name: str, choices: tuple[tuple[str, str], ...], value: str) -> Choice:
+        return Choice(choices, value, id=f"{_F}{name}")
 
     @staticmethod
     def _errors(*names: str) -> ComposeResult:
@@ -284,6 +371,7 @@ class SettingsForm(SettingsScreen):
             yield self._section(
                 "follow",
                 _rows(
+                    _lead("Also copy the master's"),
                     Tick(
                         "stop and target moves",
                         value=bool(v["copy_sltp"]),
@@ -402,11 +490,13 @@ class SettingsForm(SettingsScreen):
 
     def _collect(self) -> dict[str, str | bool]:
         raw = super()._collect()
-        raw["invert"] = str(self.query_one(f"#{_F}invert", Select).value) == "opposite"
+        for choice in self.query(Choice):
+            raw[(choice.id or "").removeprefix(_F)] = choice.value
+        raw["invert"] = raw["invert"] == "opposite"
         return raw
 
     def _mode(self) -> SizingMode:
-        return SizingMode(str(self.query_one(f"#{_F}sizing_mode", Select).value))
+        return SizingMode(self.query_one(f"#{_F}sizing_mode", Choice).value)
 
     def _show_parts(self) -> None:
         """Only the values the choices beside them use: the risk the sizing mode reads, the
@@ -414,17 +504,17 @@ class SettingsForm(SettingsScreen):
         percent = self._mode() is SizingMode.PERCENT_OF_BALANCE
         self.query_one(f"#{_F}risk_percent").display = percent
         self.query_one(f"#{_F}risk_cash").display = not percent
-        policy = str(self.query_one(f"#{_F}no_stop_policy", Select).value)
+        policy = self.query_one(f"#{_F}no_stop_policy", Choice).value
         self.query_one("#multiple-part").display = policy == NoStopPolicy.LOT_MULTIPLE.value
-        be = str(self.query_one(f"#{_F}breakeven_mode", Select).value)
+        be = self.query_one(f"#{_F}breakeven_mode", Choice).value
         self.query_one("#trigger-part").display = be == BreakevenMode.R.value
 
     def _rework(self) -> None:
         outcome = apply_edits(self._current(), self._collect())
         self.query_one("#ex-body", Static).update(self._example(outcome.config))
 
-    @on(Select.Changed)
-    def _on_choice(self, event: Select.Changed) -> None:
+    @on(Choice.Changed)
+    def _on_choice(self) -> None:
         if not self.is_mounted:
             return
         self._show_parts()
