@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -468,3 +469,56 @@ def test_guard_report_follows_the_account_logged_in(cfg: AppConfig, tmp_path: Pa
     )
     status = eng.guard_report(TID_B).rules[0]
     assert status.used == pytest.approx(600.0) and status.level is Level.OK
+
+
+def test_a_guard_holds_a_slave_back_and_caps_its_risk(cfg: AppConfig, tmp_path: Path) -> None:
+    from mt5copier.guards import AccountGuards, GuardRule, GuardsDoc
+    from mt5copier.protocol import PositionType
+    from mt5copier.reconcile import Action
+
+    doc = GuardsDoc(
+        accounts={
+            "7@Prop": AccountGuards(
+                initial_balance=10_000.0,
+                rules=(
+                    GuardRule(type="max_drawdown", params={"limit": 500, "unit": "money"}),
+                    GuardRule(
+                        type="risk_per_trade",
+                        params={"limit": 40, "unit": "money", "on_breach": "shrink"},
+                    ),
+                ),
+            )
+        }
+    )
+    eng = Engine(cfg, guards=doc, guard_state_path=tmp_path / "state.json")
+    snap = Snapshot(
+        terminal_id=TID_B,
+        state=WorkerState.CONNECTED,
+        login=7,
+        server="Prop",
+        balance=10_000.0,
+        equity=9_700.0,
+        open_positions=(),
+        pending_orders=(),
+    )
+    eng._judge(snap)
+    assert eng._verdicts[TID_B].hold is None
+    assert eng._gate(TID_B, snap) is not None
+
+    eng._judge(replace(snap, equity=9_550.0))
+    gate = eng._gate(TID_B, snap)
+    assert gate is not None and gate.hold
+
+    action = Action(
+        kind=ActionKind.OPEN,
+        terminal_id=TID_B,
+        master_ticket=1,
+        master_symbol="EURUSD",
+        slave_symbol="EURUSD",
+        type=PositionType.BUY,
+        master_volume=1.0,
+        entry=1.1,
+        sl=1.09,
+    )
+    verdict = eng._verdicts[TID_B]
+    assert eng._capped_risk(action, cfg.terminals[TID_B], 100.0, verdict) == 40.0

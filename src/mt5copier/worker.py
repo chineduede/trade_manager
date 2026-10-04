@@ -286,6 +286,21 @@ class _Session:
         except (TypeError, ValueError):
             return None
 
+    def margin_for(
+        self, direction: PositionType, symbol: str, volume: float, price: float
+    ) -> float | None:
+        """The margin ``volume`` lots would take, in the account currency, via
+        ``order_calc_margin``. None if the terminal cannot say."""
+        try:
+            margin = self._mt5.order_calc_margin(int(direction), symbol, volume, price)
+        except Exception as exc:
+            log.debug("order_calc_margin(%r) raised: %r", symbol, exc)
+            return None
+        try:
+            return None if margin is None else float(margin)
+        except (TypeError, ValueError):
+            return None
+
     def position(self, ticket: int) -> LivePosition | None | ReadFailure:
         """``(symbol, direction, volume)`` for one open position, read live.
 

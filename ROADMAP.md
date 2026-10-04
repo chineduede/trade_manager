@@ -1333,7 +1333,8 @@ are the design, not a limitation waiting to be lifted.
   to entry + buffer while the master's stays put, and move the master's stop back to see it
   ignored.
 - **Prop-firm guards — designed 2026-10-04 and accepted by the user; step 1 (display only)
-  built 2026-10-04 on branch `guards`, unit- and Pilot-tested, awaiting its demo check.**
+  built 2026-10-04 on branch `guards`; step 2 (acting on new trades) built 2026-10-04 on
+  branch `guards-enforce`. Both unit- and Pilot-tested, both awaiting their demo check.**
   Prop firms' rules are many and differ from firm to firm (daily loss, static or trailing
   drawdown, max floating loss, margin or risk per trade, max lots or positions, weekend and
   news bans, consistency), and more will be wanted later. **The user's call: a plug-and-play
@@ -1468,6 +1469,37 @@ are the design, not a limitation waiting to be lifted.
   deposit, the drawdown floor, floating loss — and leave the copier running across the
   daily reset to see the equity recorded.
 
+  *Step 2 as built (2026-10-04)* — the guards act, on **new trades only**; everything a slave
+  already holds goes on being managed, as under a pause:
+  - **The verdict** (`GuardBook.verdict`, asked on each slave snapshot by `Engine._judge`):
+    an account rule (daily loss, drawdown, floating loss) past its buffer and set to
+    `block_new` **holds the slave back** — every new OPEN/PLACE declined with
+    `SkipReason.GUARD_HOLDS`, final like every decline. A rule set to `close_worst` or
+    `flatten` holds back too until step 3 can close; set to `warn`, it is logged once.
+  - **Latches**, in `guard_state.json`: a daily-loss breach that acted holds until that
+    rule's next reset; a drawdown breach until cleared by hand (`r` on the guards page,
+    behind a red confirm); floating loss is not held — it lets go as trades close.
+  - **Stop loss required** (decline) refuses a new trade whose copy would carry no stop
+    (`GUARD_NEEDS_STOP`).
+  - **Risk per trade:** the slave's risk budget is the same for every trade sized from its
+    stop, so a cap set to decline is checked in the gate (`GUARD_RISK`, visible in a dry
+    run); set to shrink, `_capped_risk` lowers the budget at dispatch, which sizes the trade
+    to fit. A trade sized as a multiple of the master's lots has no known risk and passes.
+  - **Margin per trade** travels on the command (`max_margin`, `margin_cap`), the way
+    `max_lot` does; the executor prices it with `order_calc_margin` after sizing and declines,
+    shrinks (down to the step, never under the minimum) or warns. A margin it cannot price is
+    refused unless the rule only warns. Live only: a dry run sends no command to check.
+  - **Shown:** the card's badge reads `GUARD: NO NEW TRADES` while a rule holds the slave
+    back; on the page that rule's row says so, and a held breach says until when.
+  - Unknown measurements never act: a rule that cannot measure (history unread, equity at the
+    reset not recorded) holds nothing back.
+
+  *Step 2's demo check:* on a demo slave, set a daily loss low enough to cross with one
+  trade; see new master trades declined with the guard's reason while the open copy is still
+  closed by the master; confirm the hold survives a restart and lifts at the reset. Set a
+  risk cap to shrink and see a smaller fill; set a margin cap below one trade's margin and see
+  it declined, then shrunk.
+
   **Margin checks belong here (parked 2026-10-02).** MT5 can price a trade's margin before it
   is sent (`order_calc_margin(action, symbol, volume, price)`, in the account currency), and
   every snapshot already carries `margin_free` (unused so far; `account_info()` also gives
@@ -1495,6 +1527,13 @@ are the design, not a limitation waiting to be lifted.
   usual save, so the orphan-on-settings-edit rule still applies) — the expected answer.
 - **Revert unsaved changes in the settings form — asked for 2026-10-04.** One key that puts
   every field back to its saved value without leaving the form.
+- **A trade's history, per copy — asked for 2026-10-04.** Each copy's life on a slave as a
+  timeline beside its master's: opened (lots, fill against the master's entry), stop and
+  target moves, breakeven, partial closes, guard decisions, closed. Today the day book shows
+  each master event with its outcome per slave, but nothing groups them by trade, the moves
+  the copier makes by itself (breakeven, guards) reach only `copier.log`, and it is session
+  only. Proposed: kept beside the copy records so it survives a restart, and shown on the
+  details page for the selected copy. Needs its own design pass.
 
 ---
 

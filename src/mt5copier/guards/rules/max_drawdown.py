@@ -11,6 +11,7 @@ from ..params import BUFFER, UNIT, Param, ParamKind, ParamValue, on_breach
 class MaxDrawdown(Rule):
     type = "max_drawdown"
     title = "Max drawdown"
+    latch = "hand"
     params = (
         Param("limit", "Limit", ParamKind.NUMBER, 10.0, minimum=0),
         UNIT,

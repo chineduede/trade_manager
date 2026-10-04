@@ -88,6 +88,9 @@ class SkipReason(StrEnum):
     STOP_LIMIT_UNSUPPORTED = "stop-limit orders carry two prices and are not mirrored"
     NOTHING_TO_SEND = "the slave's own order fills by itself"
     PAUSED = "this slave is paused: it takes no new trades"
+    GUARD_HOLDS = "a guard is holding this slave back: it takes no new trades"
+    GUARD_NEEDS_STOP = "a guard requires a stop loss, and this trade has none"
+    GUARD_RISK = "this slave risks more on a trade than a guard allows"
     BREAKEVEN_HOLDS = (
         "the copy is at breakeven, so its stop only tightens; a looser one is not copied"
     )
@@ -329,6 +332,38 @@ def protective_sl(sl: float, floor: float, ptype: PositionType) -> float:
     return max(sl, floor) if ptype is PositionType.BUY else min(sl, floor)
 
 
+@dataclass(frozen=True, slots=True)
+class GuardGate:
+    """What the slave's guards say about new trades, decided by the engine from its account.
+
+    Only new trades: like a pause, a guard never stops the upkeep of what the slave holds --
+    closes, partials and stop moves carry on, since cutting those off is what turns a loss
+    limit into a bigger loss."""
+
+    hold: bool = False
+    """Take no new trades at all."""
+    needs_stop: bool = False
+    """Refuse a new trade that would carry no stop loss."""
+    over_risk: bool = False
+    """Refuse a new trade sized from its stop: the slave's risk budget, the same for every such
+    trade, is over what a guard allows. A trade sized as a multiple of the master's lots has no
+    known risk, so this cannot apply to it."""
+
+
+def _guard_reason(
+    gate: GuardGate | None, slave_sl: float, sizing: _SizingChoice
+) -> SkipReason | None:
+    if gate is None:
+        return None
+    if gate.hold:
+        return SkipReason.GUARD_HOLDS
+    if gate.needs_stop and slave_sl == 0.0:
+        return SkipReason.GUARD_NEEDS_STOP
+    if gate.over_risk and sizing.basis is SizingBasis.RISK_FROM_STOP:
+        return SkipReason.GUARD_RISK
+    return None
+
+
 def _paused_reason(cfg: TerminalConfig) -> SkipReason | None:
     """Checked first, and only for something new: a pause stops the slave *taking on* trades,
     never the upkeep of the ones it holds."""
@@ -426,6 +461,7 @@ def reconcile_slave(
     copied: Sequence[CopiedPosition],
     cfg: TerminalConfig,
     excluded: Collection[int] = (),
+    gate: GuardGate | None = None,
 ) -> list[Action]:
     """Derive the intended actions for one slave. Pure and order-deterministic.
 
@@ -479,7 +515,12 @@ def reconcile_slave(
             sizing = _choose_sizing(slave_sl, cfg)
             # A filter is the user's own explicit decision, so it is the more useful thing to
             # report when both apply.
-            reason = _paused_reason(cfg) or _filter_reason(p.symbol, cfg) or sizing.skip_reason
+            reason = (
+                _paused_reason(cfg)
+                or _guard_reason(gate, slave_sl, sizing)
+                or _filter_reason(p.symbol, cfg)
+                or sizing.skip_reason
+            )
             out.append(
                 Action(
                     kind=ActionKind.OPEN,
@@ -600,6 +641,7 @@ def reconcile_slave_orders(
     copied: Sequence[CopiedOrder],
     cfg: TerminalConfig,
     excluded: Collection[int] = (),
+    gate: GuardGate | None = None,
 ) -> list[Action]:
     """Derive the intended pending-order actions for one slave. Pure, like its sibling.
 
@@ -657,6 +699,7 @@ def reconcile_slave_orders(
             reason = (
                 _paused_reason(cfg)
                 or (None if cfg.copy_pending else SkipReason.PENDING_DISABLED)
+                or _guard_reason(gate, slave_sl, sizing)
                 or _filter_reason(o.symbol, cfg)
                 # Rejected whether or not this slave inverts: a stop-limit carries an entry
                 # *and* a trigger, and mirroring only one of them is worse than not mirroring.
@@ -971,6 +1014,8 @@ class SlaveLink:
 
     cfg: TerminalConfig
     connected: bool = True
+    gate: GuardGate | None = None
+    """What its guards allow in new trades; None when it has none."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1289,6 +1334,7 @@ class CopyLedger:
                 self.believed_orders(tid),
                 link.cfg,
                 excluded=excluded_orders,
+                gate=link.gate,
             )
             for action in self._emit(
                 order_actions, fresh, simulate=simulate, dispatchable=dispatchable
@@ -1299,7 +1345,13 @@ class CopyLedger:
                     excluded_orders.add(action.master_ticket)
 
             for action in self._emit(
-                reconcile_slave(master_positions, self.believed(tid), link.cfg, excluded=excluded),
+                reconcile_slave(
+                    master_positions,
+                    self.believed(tid),
+                    link.cfg,
+                    excluded=excluded,
+                    gate=link.gate,
+                ),
                 fresh,
                 simulate=simulate,
                 dispatchable=dispatchable,

@@ -1,8 +1,10 @@
-"""The engine's side of the guards: what they record as snapshots arrive, and how each rule
-stands right now.
+"""The engine's side of the guards: what they record as snapshots arrive, how each rule stands,
+and what the rules together tell the engine to do about one slave -- its :class:`Verdict`.
 
-Display only in this stage: nothing here is read by the reconciler or the executor, and no
-verdict is acted on.
+A rule never acts itself. The verdict only says which of a few things the engine already knows
+how to do applies now: hold the slave back from new trades, refuse a trade with no stop, cap a
+new trade's risk or margin. Closing anything is not among them yet; a rule set to close copies
+holds the slave back from new trades until it can.
 """
 
 from __future__ import annotations
@@ -24,6 +26,11 @@ _CONTINUITY_S = 60.0
 """The longest gap between two snapshots across which a reset still counts as watched. Longer,
 and the equity seen after it is not the equity at the reset."""
 
+_HOLDS_BACK = frozenset({"block_new", "close_worst", "flatten"})
+"""What a rule may be set to do on breach that stops new trades. Closing copies comes in a
+later stage; until then a rule set to close holds the slave back, the part of it already
+built, rather than doing nothing."""
+
 
 @dataclass(frozen=True, slots=True)
 class RuleStatus:
@@ -36,15 +43,36 @@ class RuleStatus:
     limit: float | None = None
     detail: str = ""
     on_breach: str = ""
+    """What it does when reached, in words."""
     act_at: float | None = None
     """The fraction of the limit at which the rule acts (its buffer), if it has one."""
     enabled: bool = True
+    action: str = ""
+    """What it does when reached: the ``on_breach`` value itself."""
+    latched: str | None = None
+    """When a breach is being held: ``"reset"`` until the next reset, ``"hand"`` until
+    cleared. None when nothing is held."""
 
     @property
     def fraction(self) -> float | None:
         if self.used is None or not self.limit:
             return None
         return self.used / self.limit
+
+    @property
+    def acting(self) -> bool:
+        """Past the point it acts at, or holding a breach that already did."""
+        if not self.enabled:
+            return False
+        return self.latched is not None or self.level in (Level.NEAR, Level.BREACHED)
+
+    @property
+    def holds_back(self) -> bool:
+        """Whether this rule is keeping the slave from new trades right now."""
+        rule = REGISTRY.get(self.type)
+        if rule is None or rule.per_trade():
+            return False
+        return self.acting and self.action in _HOLDS_BACK
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +92,44 @@ class GuardReport:
             return None
         return max(live, key=lambda r: (SEVERITY[r.level], r.fraction or 0.0))
 
+    @property
+    def holding_back(self) -> tuple[RuleStatus, ...]:
+        return tuple(r for r in self.rules if r.holds_back)
+
+
+@dataclass(frozen=True, slots=True)
+class Cap:
+    """A limit on one new trade, in the account's money."""
+
+    amount: float
+    mode: str
+    """``"decline"``, ``"shrink"`` or ``"warn"``."""
+    rule: str
+    """The rule's title, for the log."""
+
+
+@dataclass(frozen=True, slots=True)
+class Verdict:
+    """What the guards tell the engine to do about one slave right now."""
+
+    held_back: tuple[str, ...] = ()
+    """Why the slave takes no new trades, one line per rule; empty when it takes them."""
+    warnings: tuple[str, ...] = ()
+    """Rules past their point that are set only to warn."""
+    stop_required: str | None = None
+    """The rule refusing new trades with no stop, when one is set to refuse."""
+    stop_warning: str | None = None
+    """The rule set only to warn about a new trade with no stop."""
+    max_risk: Cap | None = None
+    max_margin: Cap | None = None
+
+    @property
+    def hold(self) -> str | None:
+        return "; ".join(self.held_back) or None
+
+
+NO_VERDICT = Verdict()
+
 
 class _Recall:
     def __init__(self, book: GuardBook, key: str) -> None:
@@ -81,16 +147,20 @@ class GuardBook:
     def __init__(self, doc: GuardsDoc, state_path: Path | None = None) -> None:
         self.doc = doc
         self._path = state_path if state_path is not None else guard_state_path()
-        self._day_equity: dict[str, dict[str, dict[str, object]]] = self._load()
+        state = self._load()
+        self._day_equity: dict[str, dict[str, dict[str, object]]] = _section(state, "day_equity")
+        self._latched: dict[str, dict[str, dict[str, object]]] = _section(state, "latched")
+        """Per account and rule: a breach being held, with ``until`` -- the reset day it lasts
+        through, or ``"hand"`` -- and what it was when it tripped. On disk, so a restart does
+        not lift a block the account earned."""
         self._seen: dict[str, float] = {}
         """Per account, when its previous snapshot arrived: what tells a reset that was watched
         from one that happened while the copier was off."""
 
-    def _load(self) -> dict[str, dict[str, dict[str, object]]]:
+    def _load(self) -> dict[str, object]:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
-            day_equity = raw.get("day_equity", {})
-            return day_equity if isinstance(day_equity, dict) else {}
+            return raw if isinstance(raw, dict) else {}
         except FileNotFoundError:
             return {}
         except Exception as exc:
@@ -99,7 +169,7 @@ class GuardBook:
 
     def _save(self) -> None:
         try:
-            write_json(self._path, {"day_equity": self._day_equity})
+            write_json(self._path, {"day_equity": self._day_equity, "latched": self._latched})
         except OSError:
             log.exception("could not save guard state to %s", self._path)
 
@@ -129,6 +199,53 @@ class GuardBook:
         if changed:
             self._save()
 
+    # --- latches ---------------------------------------------------------------------------
+
+    def _latch_until(self, key: str, given: GuardRule, now: float) -> str | None:
+        """The breach this rule is holding, if it still holds: ``"reset"`` or ``"hand"``."""
+        entry = self._latched.get(key, {}).get(given.id)
+        if entry is None:
+            return None
+        until = entry.get("until")
+        if until == "hand":
+            return "hand"
+        params, _ = given.resolved()
+        if "reset" in params and "zone" in params:
+            _, day = last_reset(now, str(params["reset"]), str(params["zone"]))
+            if until == day:
+                return "reset"
+        return None
+
+    def _latch(self, key: str, given: GuardRule, status: RuleStatus, now: float) -> None:
+        rule = REGISTRY.get(given.type)
+        if rule is None or rule.latch is None:
+            return
+        until = "hand"
+        if rule.latch == "reset":
+            params, _ = given.resolved()
+            _, until = last_reset(now, str(params["reset"]), str(params["zone"]))
+        self._latched.setdefault(key, {})[given.id] = {
+            "until": until,
+            "at": now,
+            "detail": status.detail,
+        }
+        log.warning(
+            "guard %s on %s tripped and holds %s: %s",
+            status.title,
+            key,
+            "until it is cleared on the guards page" if until == "hand" else "until the reset",
+            status.detail,
+        )
+        self._save()
+
+    def clear_latch(self, key: str, rule_id: str) -> bool:
+        """Let go of a held breach by hand. False if there was none."""
+        if self._latched.get(key, {}).pop(rule_id, None) is None:
+            return False
+        log.warning("guard breach on %s cleared by hand (rule %s)", key, rule_id)
+        self._save()
+        return True
+
     # --- reporting ------------------------------------------------------------------------
 
     def report(
@@ -145,9 +262,83 @@ class GuardBook:
         )
         recall = _Recall(self, key or "")
         statuses = tuple(
-            _status(rule, guards.enabled, view, recall, currency) for rule in guards.rules
+            replace(
+                _status(rule, guards.enabled, view, recall, currency),
+                latched=self._latch_until(key, rule, now) if key else None,
+            )
+            for rule in guards.rules
         )
         return GuardReport(key, guards.enabled, guards.initial_balance, currency, statuses)
+
+    def verdict(
+        self, key: str | None, snap: Snapshot | None, now: float, sizing_risk: float | None = None
+    ) -> Verdict:
+        """What the guards tell the engine to do about this account now -- latching any breach
+        that has just acted, so it holds even once the numbers recover."""
+        if key is None:
+            return NO_VERDICT
+        report = self.report(key, snap, now, sizing_risk)
+        if not report.enabled:
+            return NO_VERDICT
+        rules = {r.id: r for r in self.doc.for_account(key).rules}
+        held: list[str] = []
+        warnings: list[str] = []
+        stop_required = stop_warning = None
+        caps: dict[str, Cap] = {}
+        for status in report.rules:
+            rule = REGISTRY.get(status.type)
+            if rule is None or not status.enabled:
+                continue
+            if rule.needs_stop:
+                if status.action == "warn":
+                    stop_warning = status.title
+                else:
+                    stop_required = status.title
+                continue
+            if rule.cap is not None:
+                if status.limit is not None:
+                    cap = Cap(status.limit, status.action, status.title)
+                    current = caps.get(rule.cap)
+                    if current is None or cap.amount < current.amount:
+                        caps[rule.cap] = cap
+                continue
+            if not status.acting:
+                continue
+            if status.latched is None and rule.latch is not None and status.action != "warn":
+                given = rules.get(status.rule_id)
+                if given is not None:
+                    self._latch(key, given, status, now)
+            line = _why(status)
+            if status.action in _HOLDS_BACK:
+                held.append(line)
+            else:
+                warnings.append(line)
+        return Verdict(
+            held_back=tuple(held),
+            warnings=tuple(warnings),
+            stop_required=stop_required,
+            stop_warning=stop_warning,
+            max_risk=caps.get("risk"),
+            max_margin=caps.get("margin"),
+        )
+
+
+def _why(status: RuleStatus) -> str:
+    """``Daily loss at 84% of its limit``, or that a breach is being held."""
+    fraction = status.fraction
+    said = status.title
+    if fraction is not None:
+        said += f" at {fraction:.0%} of its limit"
+    if status.latched == "reset" and (fraction is None or fraction < (status.act_at or 1.0)):
+        said += ", held until the reset"
+    elif status.latched == "hand":
+        said += ", held until cleared"
+    return said
+
+
+def _section(state: dict[str, object], name: str) -> dict[str, dict[str, dict[str, object]]]:
+    value = state.get(name, {})
+    return value if isinstance(value, dict) else {}
 
 
 def _status(
@@ -172,6 +363,7 @@ def _status(
         on_breach=breach.words(params["on_breach"]) if breach else "",
         act_at=float(buffer) / 100 if buffer is not None else None,
         enabled=enabled,
+        action=str(params.get("on_breach", "")),
     )
     if not enabled:
         return replace(status, level=Level.OFF)

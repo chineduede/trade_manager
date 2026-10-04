@@ -6,11 +6,13 @@ Importing this package registers every rule.
 
 from . import rules
 from .base import REGISTRY, Level
-from .book import GuardBook, GuardReport, RuleStatus
+from .book import NO_VERDICT, Cap, GuardBook, GuardReport, RuleStatus, Verdict
 from .model import AccountGuards, GuardRule, GuardsDoc
 
 __all__ = [
+    "NO_VERDICT",
     "REGISTRY",
+    "Cap",
     "AccountGuards",
     "GuardBook",
     "GuardReport",
@@ -18,5 +20,6 @@ __all__ = [
     "GuardsDoc",
     "Level",
     "RuleStatus",
+    "Verdict",
     "rules",
 ]

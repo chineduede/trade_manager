@@ -1,0 +1,12 @@
+{
+  "day_equity": {},
+  "latched": {
+    "222@FTMO-Demo": {
+      "d1": {
+        "until": "2026-10-04",
+        "at": 1791148233.1966,
+        "detail": "day started at 100,000.00 \u00b7 stops at 98,000.00 \u00b7 equity 98,150.00"
+      }
+    }
+  }
+}

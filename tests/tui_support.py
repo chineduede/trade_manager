@@ -142,6 +142,10 @@ class StubEngine:
 
     # --- the settings editor ----------------------------------------------------------------
 
+    def clear_guard_latch(self, terminal_id: str, rule_id: str) -> bool:
+        key = self.guard_report(terminal_id).account_key
+        return key is not None and self.guard_book.clear_latch(key, rule_id)
+
     def guard_report(self, terminal_id: str) -> GuardReport:
         snap = self.snapshots.get(terminal_id)
         cfg = self._cfg.terminals.get(terminal_id)

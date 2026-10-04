@@ -15,6 +15,7 @@ from ..params import UNIT, Param, ParamKind, ParamValue, on_breach
 class MarginPerTrade(Rule):
     type = "margin_per_trade"
     title = "Margin per trade"
+    cap = "margin"
     params = (
         Param("limit", "Limit", ParamKind.NUMBER, 20.0, minimum=0),
         UNIT,
@@ -46,6 +47,7 @@ class MarginPerTrade(Rule):
 class RiskPerTrade(Rule):
     type = "risk_per_trade"
     title = "Risk per trade"
+    cap = "risk"
     params = (
         Param("limit", "Limit", ParamKind.NUMBER, 1.0, minimum=0),
         UNIT,
@@ -96,6 +98,7 @@ class RiskPerTrade(Rule):
 class StopRequired(Rule):
     type = "stop_required"
     title = "Stop loss required"
+    needs_stop = True
     params = (on_breach("decline", "warn", "decline"),)
 
     def sentence(self, p: dict[str, ParamValue], currency: str) -> str:

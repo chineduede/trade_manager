@@ -11,6 +11,7 @@ from ..params import BUFFER, UNIT, Param, ParamKind, ParamValue, on_breach
 class DailyLoss(Rule):
     type = "daily_loss"
     title = "Daily loss"
+    latch = "reset"
     params = (
         Param("limit", "Limit", ParamKind.NUMBER, 5.0, minimum=0),
         UNIT,

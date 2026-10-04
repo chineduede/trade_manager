@@ -50,9 +50,13 @@ _COLUMNS = ("RULE · WHEN REACHED", "STANDING", "NOW")
 _WIDE = 120
 """The page width from which the table has room for what each rule found, NOW."""
 
-SHOWN_ONLY = (
-    "Shown only, for now: the guards measure and mark the card, but do not decline, shrink "
-    "or close anything yet. "
+ACTS = (
+    "The guards act on new trades: past the point a rule acts at, the slave takes no new "
+    "trades, or a new trade is declined or shrunk. What it already holds is still managed. "
+)
+CLOSING_LATER = (
+    "Closing copies comes later: until then, a rule set to close the worst copy or every copy "
+    "keeps the slave from new trades instead. "
 )
 SAFETY_NET = (
     "A firm checks every tick on its own server; the copier sees a few snapshots a second, and "
@@ -107,10 +111,19 @@ def rule_cells(status: RuleStatus, currency: str) -> list[Text]:
         if status.act_at is not None:
             title.append(f" at {status.act_at:.0%}", style=MUTED)
     stands = standing(status)
+    if status.holds_back:
+        stands.append("  NO NEW TRADES", style=f"bold {RED}")
     stands.append("\n")
     stands.append_text(used_of(status, currency))
     color = YELLOW if status.level is Level.UNKNOWN and status.enabled else MUTED
-    return [title, stands, Text(two_lines(status.detail), style=color)]
+    now = Text()
+    if status.latched is not None and status.enabled:
+        held = "held until the reset" if status.latched == "reset" else "held until cleared"
+        now.append(f"{held} · r clears it\n", style=f"bold {RED}")
+        now.append(status.detail.split(" · ")[0], style=color)
+    else:
+        now.append(two_lines(status.detail), style=color)
+    return [title, stands, now]
 
 
 def rule_summary(report: GuardReport) -> Text:
@@ -140,6 +153,7 @@ class GuardsScreen(Screen[None]):
         Binding("i", "initial_balance", "Initial balance"),
         Binding("t", "templates", "Templates"),
         Binding("c", "copy_from", "Copy from"),
+        Binding("r", "release", "Clear a held breach"),
     ]
 
     def __init__(self, terminal_id: str) -> None:
@@ -162,7 +176,7 @@ class GuardsScreen(Screen[None]):
         yield TopBar("", id="topbar")
         with VerticalScroll(id="gd-page"):
             yield Static("", id="gd-band")
-            yield Static(Text(SHOWN_ONLY + SAFETY_NET, style=MUTED), id="gd-note")
+            yield Static(Text(ACTS + CLOSING_LATER + SAFETY_NET, style=MUTED), id="gd-note")
             yield Static("", id="gd-account")
             yield Static("", id="gd-rules-head", classes="heading")
             yield DataTable(id="gd-rules", cursor_type="row", zebra_stripes=False)
@@ -297,6 +311,8 @@ class GuardsScreen(Screen[None]):
                 key_hint("o", "all on" if not report.enabled else "all off"),
             ]
         keys += [key_hint("i", "initial balance"), key_hint("t", "templates")]
+        if any(r.latched for r in report.rules):
+            keys.append(key_hint("r", "clear a held breach"))
         keys += [key_hint("c", "copy from"), key_hint("?", "all keys")]
         self.query_one("#keybar", KeyBar).update(self.copier.keybar(keys))
 
@@ -397,6 +413,34 @@ class GuardsScreen(Screen[None]):
         self._store(
             guards.model_copy(update={"rules": rules}),
             f"{title}: {'on' if flipped.enabled else 'off'}",
+        )
+
+    def action_release(self) -> None:
+        """Let go of the selected rule's held breach, after asking. A daily one lets go at the
+        reset by itself; one held until cleared stays until this."""
+        rule = self._selected_rule()
+        if rule is None or self._key() is None:
+            return
+        status = next((s for s in self._report().rules if s.rule_id == rule.id), None)
+        if status is None or status.latched is None:
+            self.notify("that rule is not holding a breach")
+            return
+        title = status.title
+
+        def answered(yes: bool | None) -> None:
+            if yes and self.copier._engine.clear_guard_latch(self.terminal_id, rule.id):
+                self.notify(f"{title}: breach cleared")
+                self.refresh_page()
+
+        self.app.push_screen(
+            GuardConfirm(
+                f"Clear {title}'s breach?",
+                "The slave may take new trades again as soon as the rule is back under the "
+                "point it acts at. Clear it only if the firm has reset this account, or the "
+                "breach was a mistake.",
+                "Clear it",
+            ),
+            answered,
         )
 
     def action_toggle_all(self) -> None:
@@ -695,7 +739,7 @@ class RuleForm(ModalScreen[GuardRule | None]):
                 Static(Text(self._terminal_name, style=MUTED), id="st-where"),
                 id="st-head",
             )
-            yield Static(Text(SHOWN_ONLY, style=MUTED), id="st-mode")
+            yield Static(Text(ACTS + CLOSING_LATER, style=MUTED), id="st-mode")
             yield section("rule", *lines)
             yield section(
                 "on",

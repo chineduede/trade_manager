@@ -147,7 +147,10 @@ def slave_state(info: RowInfo, *, dry_run: bool, copying: bool) -> SlaveState:
 
 def guard_badge(report: GuardReport | None) -> Text:
     """Nothing while every guard is comfortable; ``GUARD 82%`` in yellow once one is past the
-    point it acts at, ``GUARD BREACHED`` in red once one is at its limit."""
+    point it acts at, ``GUARD BREACHED`` in red once one is at its limit, and ``GUARD: NO NEW
+    TRADES`` in red while one is keeping the slave from new trades."""
+    if report is not None and report.holding_back:
+        return Text("GUARD: NO NEW TRADES", style=f"bold {RED}")
     worst = report.worst if report is not None else None
     if worst is None or worst.level is Level.OK:
         return Text("")

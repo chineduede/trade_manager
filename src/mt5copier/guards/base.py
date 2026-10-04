@@ -55,6 +55,20 @@ class Rule:
     title: ClassVar[str]
     params: ClassVar[tuple[Param, ...]]
 
+    latch: ClassVar[str | None] = None
+    """Whether a breach holds once it has acted: ``"reset"`` until the rule's next daily
+    reset, ``"hand"`` until cleared on the guards page, None for a rule that measures a live
+    state and lets go as soon as it recovers."""
+    cap: ClassVar[str | None] = None
+    """For a rule about one new trade: ``"risk"`` or ``"margin"``, the amount its limit caps.
+    A rule with a cap is checked as each trade is sent, never against the account."""
+    needs_stop: ClassVar[bool] = False
+    """For a rule that refuses a new trade with no stop loss."""
+
+    @classmethod
+    def per_trade(cls) -> bool:
+        return cls.cap is not None or cls.needs_stop
+
     def sentence(self, p: dict[str, ParamValue], currency: str) -> str:
         """The rule as it is set, in words, for the guards page."""
         raise NotImplementedError

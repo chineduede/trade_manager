@@ -38,7 +38,7 @@ from .config import (
 )
 from .copy_stats import StatsBook, TerminalStats
 from .day_book import DayBook, MasterEvent, Outcome
-from .guards import GuardBook, GuardReport, GuardsDoc
+from .guards import NO_VERDICT, GuardBook, GuardReport, GuardsDoc, Verdict
 from .logging_setup import get_logger
 from .paths import dryrun_store_path, log_dir, mapping_db_path
 from .protocol import (
@@ -52,7 +52,7 @@ from .protocol import (
     Snapshot,
     WorkerState,
 )
-from .reconcile import Action, CopiedPosition, CopyLedger, OpenCopy, SlaveLink
+from .reconcile import Action, CopiedPosition, CopyLedger, GuardGate, OpenCopy, SlaveLink
 from .settings_edit import copies_word
 from .sizing import risk_budget
 from .store import MappingStore, Orphan, find_missing, find_missing_orders, find_orphans
@@ -218,8 +218,10 @@ class Engine:
         """Each master trade with what became of it on every slave, for the map's day
         book. Display only, like the statistics."""
         self._guards = GuardBook(guards if guards is not None else GuardsDoc(), guard_state_path)
-        """Each account's prop-firm rules and how they stand. Display only, for now: nothing
-        the reconciler or the executor reads."""
+        """Each account's prop-firm rules and how they stand."""
+        self._verdicts: dict[str, Verdict] = {}
+        """Per slave: what its guards said on its latest snapshot. Read when the master's tick
+        derives new trades for it, and when a trade is sent."""
 
         self._dryrun_path = state_path if state_path is not None else dryrun_store_path()
         self._mapping_path = mapping_path if mapping_path is not None else mapping_db_path()
@@ -453,6 +455,7 @@ class Engine:
                 self._received_at[snap.terminal_id] = time.monotonic()
                 self._stats.on_state(snap.terminal_id, snap.state, now=time.monotonic())
                 self._guards.observe(account_key(snap.login, snap.server), snap, time.time())
+                self._judge(snap)
                 self._reconcile(snap)
 
     def _from_live_worker(self, snap: Snapshot) -> bool:
@@ -753,6 +756,10 @@ class Engine:
             )
             self._day.settle(action, Outcome.NOT_SENT, "its risk budget cannot be sized")
             return
+        verdict = self._verdicts.get(cfg.terminal_id, NO_VERDICT)
+        risk = self._capped_risk(action, cfg, risk, verdict)
+        margin = verdict.max_margin
+        opening = action.kind in (ActionKind.OPEN, ActionKind.PLACE)
 
         command_id = next(self._command_ids)
         cmd = OrderCommand(
@@ -786,6 +793,8 @@ class Engine:
             # on ownership. This is a hint for a human reading the terminal.
             comment=f"c{action.master_ticket}",
             allow_live=cfg.allow_live_trading,
+            max_margin=margin.amount if opening and margin is not None else None,
+            margin_cap=margin.mode if opening and margin is not None else "",
         )
 
         # Before sending, because an order that cannot be sent is answered on the spot.
@@ -815,6 +824,42 @@ class Engine:
             master_entry=action.entry,
         )
         log.info("-> %s %s #%s (cmd %s)", cfg.label, action.kind, action.master_ticket, command_id)
+
+    def _capped_risk(
+        self, action: Action, cfg: TerminalConfig, risk: float, verdict: Verdict
+    ) -> float:
+        """The risk budget to size a new trade from, after its guards' risk cap.
+
+        A cap set to decline never gets here: the slave's budget is the same for every trade
+        sized from its stop, so the gate refused the trade already, where a dry run shows it
+        too. Set to shrink, the budget comes down to the cap, which sizes the trade to fit; set
+        to warn, it is said and the trade goes as sized.
+        """
+        cap = verdict.max_risk
+        if cap is None or action.kind not in (ActionKind.OPEN, ActionKind.PLACE):
+            return risk
+        if risk <= cap.amount:
+            return risk
+        name = self._cfg.display_name(cfg.terminal_id)
+        if cap.mode == "shrink":
+            log.warning(
+                "guards: #%s on %s sized to risk %.2f, not %.2f: %s",
+                action.master_ticket,
+                name,
+                cap.amount,
+                risk,
+                cap.rule,
+            )
+            return cap.amount
+        log.warning(
+            "guards: #%s on %s risks %.2f, over the %.2f %s allows (set only to warn)",
+            action.master_ticket,
+            name,
+            risk,
+            cap.amount,
+            cap.rule,
+        )
+        return risk
 
     def _abandon(self, cmd: OrderCommand, terminal_id: str, error: str) -> None:
         """Fail a command we could not even send, immediately.
@@ -925,6 +970,63 @@ class Engine:
         with self._lock:
             return self._stats.snapshot(terminal_id, now=time.monotonic())
 
+    def _judge(self, snap: Snapshot) -> None:
+        """Ask a slave's guards what they say now, and announce it when that changes.
+
+        Announced on the transition, like a hold: a slave quietly declining every trade is
+        indistinguishable from a master that is not trading.
+        """
+        tid = snap.terminal_id
+        cfg = self._cfg.terminals.get(tid)
+        if cfg is None or cfg.role is not Role.SLAVE:
+            self._verdicts.pop(tid, None)
+            return
+        risk = self._risk_amount(cfg, snap)
+        verdict = self._guards.verdict(
+            account_key(snap.login, snap.server), snap, time.time(), sizing_risk=risk
+        )
+        before = self._verdicts.get(tid, NO_VERDICT)
+        self._verdicts[tid] = verdict
+        name = self._cfg.display_name(tid)
+        if verdict.hold != before.hold:
+            if verdict.hold is None:
+                log.info("guards: %s takes new trades again (was: %s)", name, before.hold)
+            else:
+                log.warning("guards: %s takes no new trades: %s", name, verdict.hold)
+        for line in set(verdict.warnings) - set(before.warnings):
+            log.warning("guards: %s: %s", name, line)
+
+    def _gate(self, terminal_id: str, snap: Snapshot | None) -> GuardGate | None:
+        verdict = self._verdicts.get(terminal_id)
+        if verdict is None or verdict == NO_VERDICT:
+            return None
+        cfg = self._cfg.terminals[terminal_id]
+        risk = self._risk_amount(cfg, snap) if snap is not None else None
+        cap = verdict.max_risk
+        over = cap is not None and cap.mode == "decline" and risk is not None and risk > cap.amount
+        return GuardGate(
+            hold=bool(verdict.held_back),
+            needs_stop=verdict.stop_required is not None,
+            over_risk=over,
+        )
+
+    def clear_guard_latch(self, terminal_id: str, rule_id: str) -> bool:
+        """Let go of a breach a guard is holding on this terminal's account, by hand."""
+        with self._lock:
+            key = self._account_of(terminal_id)
+            return key is not None and self._guards.clear_latch(key, rule_id)
+
+    def _account_of(self, terminal_id: str) -> str | None:
+        """The account logged into this terminal: the one its latest snapshot names, else the
+        one it was last known to be logged into."""
+        snap = self._snapshots.get(terminal_id)
+        cfg = self._cfg.terminals.get(terminal_id)
+        if snap is not None and snap.login is not None:
+            return account_key(snap.login, snap.server)
+        if cfg is not None:
+            return account_key(cfg.last_login, cfg.last_server)
+        return None
+
     def guard_report(self, terminal_id: str) -> GuardReport:
         """How the guards of the account logged into this terminal stand right now.
 
@@ -934,12 +1036,7 @@ class Engine:
         with self._lock:
             snap = self._snapshots.get(terminal_id)
             cfg = self._cfg.terminals.get(terminal_id)
-            if snap is not None and snap.login is not None:
-                key = account_key(snap.login, snap.server)
-            elif cfg is not None:
-                key = account_key(cfg.last_login, cfg.last_server)
-            else:
-                key = None
+            key = self._account_of(terminal_id)
             risk = None
             if snap is not None and cfg is not None and cfg.role is Role.SLAVE:
                 risk = self._risk_amount(cfg, snap)
@@ -1148,7 +1245,9 @@ class Engine:
                 self._set_hold(cfg.terminal_id, hold)
                 if hold is not None:
                     connected = False
-            links.append(SlaveLink(cfg=cfg, connected=connected))
+            links.append(
+                SlaveLink(cfg=cfg, connected=connected, gate=self._gate(cfg.terminal_id, snap))
+            )
         return links
 
     def orphans(self, terminal_id: str | None = None) -> list[Orphan]:

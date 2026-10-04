@@ -219,15 +219,20 @@ async def test_a_template_saved_and_applied_elsewhere(
         assert got.initial_balance is None
 
 
-async def test_the_card_carries_the_badge(app: CopierApp) -> None:
+@pytest.mark.parametrize(
+    ("on_breach", "badge"),
+    [("block_new", "GUARD: NO NEW TRADES"), ("warn", "GUARD BREACHED")],
+)
+async def test_the_card_carries_the_badge(app: CopierApp, on_breach: str, badge: str) -> None:
+    params = {"limit": 500, "unit": "money", "on_breach": on_breach}
     app._guards.set_account(
         KEY,
         AccountGuards(
             initial_balance=10_000.0,
-            rules=(GuardRule(type="max_drawdown", params={"limit": 500, "unit": "money"}),),
+            rules=(GuardRule(type="max_drawdown", params=params),),
         ),
     )
     async with app.run_test() as pilot:
         await pilot.pause()
         card = app._cards[TID_SLAVE]
-        assert "GUARD BREACHED" in plain(card.content, width=40)
+        assert badge in plain(card.content, width=40)

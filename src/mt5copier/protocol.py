@@ -361,6 +361,13 @@ class OrderCommand:
     allow_live: bool = False
     """Explicit per-slave override of the demo-only guard. Absent this, the worker refuses to
     trade any account that is not a demo -- see :mod:`mt5copier.executor`."""
+    max_margin: float | None = None
+    """OPEN / PLACE only: the most margin, in the account's money, a prop-firm guard lets this
+    trade use. Only the worker can price margin, so the engine sends the limit and the worker
+    holds the trade to it after sizing. None for no limit."""
+    margin_cap: str = ""
+    """What the worker does with a trade over ``max_margin``: ``"decline"`` it, ``"shrink"``
+    it to fit, or ``"warn"`` and send it as sized."""
 
 
 @dataclass(frozen=True, slots=True)
