@@ -508,7 +508,7 @@ def test_menu_offers_an_unassigned_terminal_only_the_role_it_can_take() -> None:
 
     cfg = TerminalConfig(terminal_id=TID_SLAVE, exe_path=Path("t.exe"))
     keys = [i.key for i in terminal_actions(cfg, has_master=False, orphans_waiting=False)]
-    assert keys == ["m", "enter", "e"]
+    assert keys == ["m", "i", "enter", "e"]
     keys = [i.key for i in terminal_actions(cfg, has_master=True, orphans_waiting=False)]
     assert keys[0] == "s"
     uninstalled = TerminalConfig(terminal_id=TID_SLAVE)
@@ -522,7 +522,7 @@ def test_menu_for_a_slave_and_the_master() -> None:
 
     slave = TerminalConfig(terminal_id=TID_SLAVE, role=Role.SLAVE, paused=True)
     items = terminal_actions(slave, has_master=True, orphans_waiting=True)
-    assert [i.key for i in items] == ["enter", "o", "e", "p", "u"]
+    assert [i.key for i in items] == ["enter", "o", "e", "p", "k", "h", "u"]
     assert next(i for i in items if i.key == "p").label == "resume"
     master = TerminalConfig(terminal_id=TID_MASTER, role=Role.MASTER)
     keys = [i.key for i in terminal_actions(master, has_master=True, orphans_waiting=False)]

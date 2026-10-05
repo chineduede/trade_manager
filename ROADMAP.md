@@ -1332,7 +1332,9 @@ are the design, not a limitation waiting to be lifted.
   Then a demo run: open on the master, let a slave copy cross the trigger, see its stop move
   to entry + buffer while the master's stays put, and move the master's stop back to see it
   ignored.
-- **Prop-firm guards — designed 2026-10-04 and accepted by the user; not built.**
+- **Prop-firm guards — designed 2026-10-04 and accepted by the user; step 1 (display only)
+  built 2026-10-04 on branch `guards`; step 2 (acting on new trades) built 2026-10-04 on
+  branch `guards-enforce`. Both unit- and Pilot-tested, both awaiting their demo check.**
   Prop firms' rules are many and differ from firm to firm (daily loss, static or trailing
   drawdown, max floating loss, margin or risk per trade, max lots or positions, weekend and
   news bans, consistency), and more will be wanted later. **The user's call: a plug-and-play
@@ -1431,7 +1433,76 @@ are the design, not a limitation waiting to be lifted.
   *Settled with the user 2026-10-04:* the default buffer is **80%** of a limit. **A required
   stop loss is its own rule** (`gate`, declining a new trade with no stop), since some firms
   mandate one and others do not; without that rule a copy with no stop is not refused, and a
-  risk cap cannot measure it, so it passes the cap. The Guards page opens with **`r`**.
+  risk cap cannot measure it, so it passes the cap. The Guards page opens with **`k`** (`r`
+  was already rescan). **Guards belong to the account** (`login@server`, as account names
+  do), not the terminal: a terminal logged into a new challenge starts with none.
+
+  *Step 1 as built (2026-10-04)* — where it differs from the design above, this wins:
+  - **Worker:** `_ServerClock` finds the broker's offset from UTC off a tick that has *just
+    changed* (a closed market's stale tick never sets it), probing open positions' symbols and
+    three Market Watch ones. `history_deals_get` is read every 5s and whenever the balance
+    moves, over the last 50h, every deal kind included (a deposit moves the balance too). On
+    the snapshot as `server_offset_s`, `deals` (times in real UTC; None = unknown) and
+    `deals_since`.
+  - **`mt5copier/guards/`** (not `mt5copier/rules/`): `params.py` (a rule's declared
+    parameters, checked and defaulted from the declaration, `only_if` to hide one beside
+    another's value), `account.py` (`AccountView`, `balance_at`, `last_reset` in an IANA zone,
+    `tzdata` now a dependency), `base.py` (`Rule`, `Measure`, `Level`, registry), `rules/` (six
+    rules: daily loss, max drawdown static, floating loss net-or-losers, margin per trade, risk
+    per trade — measured against the slave's own sizing — and stop loss required), `model.py`
+    (`guards.json`: accounts and templates; an unknown rule type is kept, never dropped),
+    `book.py` (`GuardBook`: records equity at a watched reset, reports each rule's level).
+  - **Saved state is `guard_state.json`, not a `mapping.db` table:** the store is swapped
+    between live and dry-run files, and guard state is about the account, not either mode. It
+    holds only the equity at a reset, written once a day; peaks and latches arrive with step 2+.
+  - **No `gate`/`caps`/`watch` yet** — step 1 has only `measure`. They are added with the
+    step that enforces, so nothing unused ships.
+  - **UI:** `tui/guards.py` — the page (`k` on a slave, from the map, the action menu or a
+    details page), a form per rule generated from its parameters with a live "reads as"
+    sentence, initial balance and template name typed in place, templates and copying from
+    another slave (rules get fresh ids; the initial balance stays the account's own), remove
+    behind a confirm. The card's badge sits on its margin line, so no card grows taller:
+    `GUARD 82%` yellow past a rule's buffer, `GUARD BREACHED` red at its limit.
+
+  *Step 1's demo check:* set up a slave's rules to match a prop account's real limits, then
+  compare the page with the firm's dashboard — the day's starting balance after a loss and a
+  deposit, the drawdown floor, floating loss — and leave the copier running across the
+  daily reset to see the equity recorded.
+
+  *Step 2 as built (2026-10-04)* — the guards act, on **new trades only**; everything a slave
+  already holds goes on being managed, as under a pause:
+  - **The verdict** (`GuardBook.verdict`, asked on each slave snapshot by `Engine._judge`):
+    an account rule (daily loss, drawdown, floating loss) past its buffer and set to
+    `block_new` **holds the slave back** — every new OPEN/PLACE declined with
+    `SkipReason.GUARD_HOLDS`, final like every decline. A rule set to `close_worst` or
+    `flatten` holds back too until step 3 can close; set to `warn`, it is logged once.
+  - **Latches**, in `guard_state.json`: a daily-loss breach that acted holds until that
+    rule's next reset; a drawdown breach until cleared by hand (`r` on the guards page,
+    behind a red confirm); floating loss is not held — it lets go as trades close. A hold is
+    kept against the rule as it was set when it tripped: changing the rule (a limit raised)
+    lets it go and measures afresh, tripping again at once if still past its point — found in
+    the demo, 2026-10-04, when raising a breached daily limit left the slave held. A hold
+    written before that (no settings recorded with it) still needs `r`.
+  - **Stop loss required** (decline) refuses a new trade whose copy would carry no stop
+    (`GUARD_NEEDS_STOP`).
+  - **Risk per trade:** the slave's risk budget is the same for every trade sized from its
+    stop, so a cap set to decline is checked in the gate (`GUARD_RISK`, visible in a dry
+    run); set to shrink, `_capped_risk` lowers the budget at dispatch, which sizes the trade
+    to fit. A trade sized as a multiple of the master's lots has no known risk and passes.
+  - **Margin per trade** travels on the command (`max_margin`, `margin_cap`), the way
+    `max_lot` does; the executor prices it with `order_calc_margin` after sizing and declines,
+    shrinks (down to the step, never under the minimum) or warns. A margin it cannot price is
+    refused unless the rule only warns. Live only: a dry run sends no command to check.
+  - **Shown:** the card's badge reads `GUARD: NO NEW TRADES` while a rule holds the slave
+    back; on the page that rule's row says so, and a held breach says until when.
+  - Unknown measurements never act: a rule that cannot measure (history unread, equity at the
+    reset not recorded) holds nothing back.
+
+  *Step 2's demo check:* on a demo slave, set a daily loss low enough to cross with one
+  trade; see new master trades declined with the guard's reason while the open copy is still
+  closed by the master; confirm the hold survives a restart and lifts at the reset. Set a
+  risk cap to shrink and see a smaller fill; set a margin cap below one trade's margin and see
+  it declined, then shrunk.
 
   **Margin checks belong here (parked 2026-10-02).** MT5 can price a trade's margin before it
   is sent (`order_calc_margin(action, symbol, volume, price)`, in the account currency), and
@@ -1460,6 +1531,99 @@ are the design, not a limitation waiting to be lifted.
   usual save, so the orphan-on-settings-edit rule still applies) — the expected answer.
 - **Revert unsaved changes in the settings form — asked for 2026-10-04.** One key that puts
   every field back to its saved value without leaving the form.
+- **A trade's history, per slave — asked for 2026-10-04, built 2026-10-04 on `guards-enforce`,
+  awaiting its demo check.** The user's words: each trade copied to a slave as one timeline —
+  copied with x lots, a volume reduced, a stop moved, a trade blocked and why — kept for x days.
+  - `history.py`: `history.db` (SQLite, WAL), one row per step. The day book hands each slave's
+    outcome to `DayBook.listener` as it settles (sent and answered, skipped, not copied, refused,
+    no answer); the engine writes it with the master's side and the slave's own levels, so a
+    reversed copy or a breakeven stop reads as it is on the slave. Breakeven reached, and
+    breakeven exempted or priced by hand, are written as the copier's own steps. A step equal to
+    the trade's last one is not written again (a pre-existing trade is announced every start).
+  - Kept for `history_days` (general settings, `g`; default 30, 1–365), pruned on the first write
+    and hourly after. Display only; a failed write is logged and dropped, never reaching copying.
+  - Shown on **`h` on a slave** (map, details page, or the actions menu), revised the same day
+    at the user's ask ("repeats too much info"): **a card per trade copied to the slave**, newest
+    copy first — titled with its symbol, side, lots and master ticket, with where it stands —
+    and under it one line per step, the slave's own: copied (the master's lots and price beside
+    it), partial closes, stop/target moves, breakeven, a change skipped or refused and why,
+    closed. Trades the slave never took (declined, held back, pre-existing) are not listed;
+    they stay in the log. Green while open, red dashed when a step failed; `f` shows only
+    those.
+  - *Demo check:* copy a trade, partially close it, move its stop, let it reach breakeven, close
+    it; see one card with each step once; restart and see it still there.
+- **Saved setups — asked for 2026-10-05 ahead of the demo checks above, built the same day on
+  `setups` (off `guards-enforce`), awaiting its demo check.** Save the copier's state under a
+  name and load another in its place. The user's decisions:
+  - **Roles only**: a setup is the master, its slaves and whether copying was on. Each
+    terminal's settings stay with the terminal, each account's guards with the account.
+  - **Open copies: ask, then give them up**, as unassigning does. A slave taken off its master,
+    or left on while the master changes, has its copies listed and orphaned on agreement; one
+    kept under the same master keeps them, still managed.
+  - **Copying comes back as it was saved**: a setup saved copying loads copying (live, if the
+    copier is live — the confirmation says so).
+  - **Its own page on `w`**: `a` save the roles in place now as a new setup, enter load, `u`
+    update the selected one with the roles now, `n` rename, `x` delete. The setup whose roles
+    are in place is marked ● and named in the top bar.
+  - `setups.py`, `setups.json` (apart from `config.json`, as the guards are). Keyed by
+    `terminal_id`. A setup naming a terminal that is gone or has no executable says so and
+    does not load. Loading is `Engine.load_setup`: check, give up, set roles under one lock.
+    A slave that stays a slave stays paused if it was.
+  - *Demo check:* save the current roles; assign a different master and slaves; load the saved
+    one back, with and without a copy open on a slave (the copy is listed, then orphaned).
+- **Logging a terminal into another of its accounts — asked for 2026-10-05, built the same day
+  on `account-switch` (off `setups`), awaiting its demo check.** A terminal can hold several
+  accounts; the person names them (account names, already in the settings form) and picks one.
+  A fuller design — switching under a role, asking about copies, setups remembering accounts —
+  was scoped and **dropped by the user for the simple version**:
+  - **Only an unassigned terminal is switched.** On one with a role, `i` says to unassign it
+    first; unassigning already asks about its copies, so switching never strands any.
+  - `i` (map, and the actions menu of an installed unassigned terminal) lists the accounts that
+    have connected in that terminal, read from disk without connecting
+    (`bases/<server>/trades/<login>`), with their names and the one logged in now marked.
+  - The login runs in a process of its own (`account_switch.py`): connect, `mt5.login(login,
+    server=...)` **with no password**, so MT5 uses the one saved in the terminal; read the
+    account back; disconnect, leaving the terminal running. A refused login says to save the
+    password from MT5. No role can be given the terminal, nor a setup loaded onto it, while it
+    logs in.
+  - *Demo check:* on an unassigned terminal with two saved accounts, `i` and pick the other;
+    MT5 shows it logged in, the card shows its name; assign it and see it copy. Also: an
+    account whose password is not saved fails with the message; rescan (`r`) afterwards keeps
+    the new account (it reads `common.ini`, which MT5 may only write on exit — unverified).
+- **High-impact news guard — asked for 2026-10-05, built the same day on `news-filter` (off
+  `account-switch`), awaiting its demo check.** A guard rule, `news`, added on the guards page
+  (`k`) like any other. The user chose the calendar source: **Forex Factory's weekly feed**
+  (`nfs.faireconomy.media/ff_calendar_thisweek.json`), free and unofficial.
+  - Parameters, firm-neutral: impact (high only, or high and medium); minutes before and after
+    (default 2 and 2); which new trades (only those in the news currency, or every one); if the
+    calendar cannot be read, take no new trades (default — not decided by the user, the
+    recommendation they did not object to) or copy as usual; decline or only warn.
+  - Like the other per-trade rules it declines new trades only: closes, partials and stop moves
+    go on through the news. Pending orders placed in the window are declined too.
+  - A symbol's currencies are read from its name (`news.symbol_currencies`): a pair's two codes
+    through broker prefixes and suffixes, metals (XAU, XAG), and a table of index, oil and coin
+    names (US30 → USD, GER40 → EUR, UK100 → GBP...). A name it cannot read is declined while any
+    news is on. News the feed files under "All" (an OPEC meeting) declines every new trade.
+  - `news.py`: fetched on its own thread, only while some account has a news rule, hourly
+    (5 minutes after a failure); kept in `news.json` so a restart offline still knows the week;
+    counts as known for a day. The feed refuses a client that names itself, so the request
+    reads as a browser; it also rate-limits, which hourly is well inside. Checked against the
+    live feed on 2026-10-05: all 79 events read.
+  - *Demo check:* add the rule to a slave's account; before a release, see "next: ..." on the
+    guards page; in the window, open a trade on the master in that currency (declined, logged,
+    in the slave's history as skipped) and one in another (copied); close a copy during the
+    window (closed). Pull the network: after a day the rule says the calendar cannot be read and
+    holds new trades.
+- **Not handled: an account switched by hand in MT5 while the terminal has a role — noted
+  2026-10-05, nothing built.** If a slave is switched to another account inside MT5 while
+  the copier is connected, nothing notices: its copies are filed by terminal, not account, so
+  the copier goes on believing in tickets the new account does not hold — what it then does
+  with them (treat them as gone, try to close or re-copy) has not been traced. A master switched
+  the same way would look to the slaves like every master trade closing and new ones opening.
+  Guards are unaffected (they follow the account the snapshot reports). The fix, if it is ever
+  wanted: when a terminal's snapshot reports a login other than the one its copies were made
+  on, hold it and say so, as an untracked-position hold does. Until then: switch accounts with
+  `i`, on an unassigned terminal.
 
 ---
 

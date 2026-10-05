@@ -25,6 +25,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import role_actions
+from . import setups as setups_mod
 from .breakeven import breakeven_level, buffer_distance, check_breakeven_price
 from .config import (
     BREAKEVEN_FIELDS,
@@ -34,11 +35,15 @@ from .config import (
     SizingMode,
     TerminalClosing,
     TerminalConfig,
+    account_key,
 )
 from .copy_stats import StatsBook, TerminalStats
-from .day_book import DayBook, MasterEvent, Outcome
+from .day_book import DayBook, MasterEvent, Outcome, SlaveOutcome
+from .guards import NO_VERDICT, GuardBook, GuardReport, GuardsDoc, Verdict
+from .history import HistoryStore, Trade, step_for
 from .logging_setup import get_logger
-from .paths import dryrun_store_path, log_dir, mapping_db_path
+from .news import NewsCalendar
+from .paths import dryrun_store_path, history_db_path, log_dir, mapping_db_path
 from .protocol import (
     COPIER_MAGIC,
     DISPATCHABLE_KINDS,
@@ -50,8 +55,9 @@ from .protocol import (
     Snapshot,
     WorkerState,
 )
-from .reconcile import Action, CopiedPosition, CopyLedger, OpenCopy, SlaveLink
+from .reconcile import Action, CopiedPosition, CopyLedger, GuardGate, OpenCopy, SlaveLink
 from .settings_edit import copies_word
+from .setups import Setup
 from .sizing import risk_budget
 from .store import MappingStore, Orphan, find_missing, find_missing_orders, find_orphans
 from .worker import run_worker
@@ -162,6 +168,10 @@ class Engine:
         cfg: AppConfig,
         state_path: Path | None = None,
         mapping_path: Path | None = None,
+        guards: GuardsDoc | None = None,
+        guard_state_path: Path | None = None,
+        history_path: Path | None = None,
+        calendar: NewsCalendar | None = None,
     ) -> None:
         # Windows only offers the spawn start method; request it explicitly so behaviour is
         # identical if this ever runs on Linux for testing.
@@ -213,6 +223,22 @@ class Engine:
         self._day = DayBook()
         """Each master trade with what became of it on every slave, for the map's day
         book. Display only, like the statistics."""
+        self._history = HistoryStore(
+            history_path if history_path is not None else history_db_path(),
+            keep_days=cfg.history_days,
+        )
+        """Every step taken with each trade on each slave, kept for days. Fed by the day book
+        as each outcome settles; display only."""
+        self._day.listener = self._on_step
+        self._calendar = calendar if calendar is not None else NewsCalendar()
+        """The news calendar: fetched on its own thread, and only once a news rule asks."""
+        self._guards = GuardBook(
+            guards if guards is not None else GuardsDoc(), guard_state_path, self._calendar
+        )
+        """Each account's prop-firm rules and how they stand."""
+        self._verdicts: dict[str, Verdict] = {}
+        """Per slave: what its guards said on its latest snapshot. Read when the master's tick
+        derives new trades for it, and when a trade is sent."""
 
         self._dryrun_path = state_path if state_path is not None else dryrun_store_path()
         self._mapping_path = mapping_path if mapping_path is not None else mapping_db_path()
@@ -232,6 +258,7 @@ class Engine:
                 target=self._drain_loop, name="engine-drain", daemon=True
             )
             self._drain_thread.start()
+        self._calendar.start()
         self.sync()
 
     def stop(self) -> None:
@@ -245,10 +272,12 @@ class Engine:
         for tid in terminal_ids:
             self._stop_worker(tid, close_terminal=True)
         self._stop_drain.set()
+        self._calendar.stop()
         thread = self._drain_thread
         if thread is not None:
             thread.join(timeout=2.0)
             self._drain_thread = None
+        self._history.close()
 
     def __enter__(self) -> Engine:
         self.start()
@@ -445,6 +474,8 @@ class Engine:
                 self._snapshots[snap.terminal_id] = snap
                 self._received_at[snap.terminal_id] = time.monotonic()
                 self._stats.on_state(snap.terminal_id, snap.state, now=time.monotonic())
+                self._guards.observe(account_key(snap.login, snap.server), snap, time.time())
+                self._judge(snap)
                 self._reconcile(snap)
 
     def _from_live_worker(self, snap: Snapshot) -> bool:
@@ -632,6 +663,15 @@ class Engine:
                     continue
                 self._be_room[key] = room
                 self._ledger.set_breakeven(cfg.terminal_id, copy.master_ticket, level)
+                self._history.note(
+                    cfg.terminal_id,
+                    copy.master_ticket,
+                    copy.slave_symbol,
+                    copy.type.name.lower(),
+                    "breakeven",
+                    f"reached at {price:g} (fill {opened[ticket]:g}): the stop moves to "
+                    f"{level:g} and from now on only tightens",
+                )
                 log.info(
                     "%s: breakeven reached on #%s %s (fill %s, now %s); stop moves to %s and "
                     "from now on only tightens: the master's stop is copied only when tighter, "
@@ -672,6 +712,16 @@ class Engine:
         """
         with self._lock:
             done = self._ledger.set_breakeven_exempt(terminal_id, master_ticket, exempt)
+            copy = self._ledger.get_position(terminal_id, master_ticket) if done else None
+        if copy is not None:
+            self._history.note(
+                terminal_id,
+                master_ticket,
+                copy.slave_symbol,
+                copy.type.name.lower(),
+                "breakeven",
+                "exempted by hand" if exempt else "re-enabled by hand",
+            )
         if done:
             log.info(
                 "#%s on %s: breakeven %s by hand",
@@ -703,6 +753,14 @@ class Engine:
                 if problem is not None:
                     return problem
             self._ledger.set_breakeven_at(terminal_id, master_ticket, price)
+        self._history.note(
+            terminal_id,
+            master_ticket,
+            copy.slave_symbol,
+            copy.type.name.lower(),
+            "breakeven",
+            f"price set to {price:g} by hand" if price else "price cleared by hand",
+        )
         log.info(
             "#%s on %s: breakeven price %s by hand",
             master_ticket,
@@ -745,6 +803,10 @@ class Engine:
             )
             self._day.settle(action, Outcome.NOT_SENT, "its risk budget cannot be sized")
             return
+        verdict = self._verdicts.get(cfg.terminal_id, NO_VERDICT)
+        risk = self._capped_risk(action, cfg, risk, verdict)
+        margin = verdict.max_margin
+        opening = action.kind in (ActionKind.OPEN, ActionKind.PLACE)
 
         command_id = next(self._command_ids)
         cmd = OrderCommand(
@@ -778,6 +840,8 @@ class Engine:
             # on ownership. This is a hint for a human reading the terminal.
             comment=f"c{action.master_ticket}",
             allow_live=cfg.allow_live_trading,
+            max_margin=margin.amount if opening and margin is not None else None,
+            margin_cap=margin.mode if opening and margin is not None else "",
         )
 
         # Before sending, because an order that cannot be sent is answered on the spot.
@@ -807,6 +871,42 @@ class Engine:
             master_entry=action.entry,
         )
         log.info("-> %s %s #%s (cmd %s)", cfg.label, action.kind, action.master_ticket, command_id)
+
+    def _capped_risk(
+        self, action: Action, cfg: TerminalConfig, risk: float, verdict: Verdict
+    ) -> float:
+        """The risk budget to size a new trade from, after its guards' risk cap.
+
+        A cap set to decline never gets here: the slave's budget is the same for every trade
+        sized from its stop, so the gate refused the trade already, where a dry run shows it
+        too. Set to shrink, the budget comes down to the cap, which sizes the trade to fit; set
+        to warn, it is said and the trade goes as sized.
+        """
+        cap = verdict.max_risk
+        if cap is None or action.kind not in (ActionKind.OPEN, ActionKind.PLACE):
+            return risk
+        if risk <= cap.amount:
+            return risk
+        name = self._cfg.display_name(cfg.terminal_id)
+        if cap.mode == "shrink":
+            log.warning(
+                "guards: #%s on %s sized to risk %.2f, not %.2f: %s",
+                action.master_ticket,
+                name,
+                cap.amount,
+                risk,
+                cap.rule,
+            )
+            return cap.amount
+        log.warning(
+            "guards: #%s on %s risks %.2f, over the %.2f %s allows (set only to warn)",
+            action.master_ticket,
+            name,
+            risk,
+            cap.amount,
+            cap.rule,
+        )
+        return risk
 
     def _abandon(self, cmd: OrderCommand, terminal_id: str, error: str) -> None:
         """Fail a command we could not even send, immediately.
@@ -906,6 +1006,20 @@ class Engine:
         with self._lock:
             return self._day.events(limit)
 
+    def trade_history(self, terminal_id: str, *, since: float | None = None) -> list[Trade]:
+        """The slave's trades with every step taken with each, the most recently active
+        first. Read from disk, so it reaches back past this session."""
+        return self._history.trades(terminal_id, since=since)
+
+    def _on_step(self, head: MasterEvent, outcome: SlaveOutcome, action: Action | None) -> None:
+        """The day book settled one slave's outcome: keep it in the trade's history. Called
+        under the engine's lock; a failure here must never reach the copying."""
+        try:
+            self._history.keep_days = self._cfg.history_days
+            self._history.record(step_for(head, outcome, action))
+        except Exception:
+            log.exception("could not record a step in the trade history")
+
     @property
     def day_book_since(self) -> float:
         """Wall-clock time from which :meth:`day_book` holds every master event."""
@@ -916,6 +1030,87 @@ class Engine:
         """This terminal's copy-health numbers for the session, as a read-only copy."""
         with self._lock:
             return self._stats.snapshot(terminal_id, now=time.monotonic())
+
+    def _judge(self, snap: Snapshot) -> None:
+        """Ask a slave's guards what they say now, and announce it when that changes.
+
+        Announced on the transition, like a hold: a slave quietly declining every trade is
+        indistinguishable from a master that is not trading.
+        """
+        tid = snap.terminal_id
+        cfg = self._cfg.terminals.get(tid)
+        if cfg is None or cfg.role is not Role.SLAVE:
+            self._verdicts.pop(tid, None)
+            return
+        risk = self._risk_amount(cfg, snap)
+        verdict = self._guards.verdict(
+            account_key(snap.login, snap.server), snap, time.time(), sizing_risk=risk
+        )
+        before = self._verdicts.get(tid, NO_VERDICT)
+        self._verdicts[tid] = verdict
+        name = self._cfg.display_name(tid)
+        # The hold's text carries the live measurement, which moves with every tick of a
+        # floating loss; only the slave being held back or let go is news.
+        if (verdict.hold is None) != (before.hold is None):
+            if verdict.hold is None:
+                log.info("guards: %s takes new trades again (was: %s)", name, before.hold)
+            else:
+                log.warning("guards: %s takes no new trades: %s", name, verdict.hold)
+        if verdict.news != before.news:
+            if verdict.news:
+                log.warning("guards: %s: %s", name, verdict.news_why)
+            else:
+                log.info("guards: %s: the news is over; new trades are copied again", name)
+        for rule_id, line in zip(verdict.warned_by, verdict.warnings, strict=True):
+            if rule_id not in before.warned_by:
+                log.warning("guards: %s: %s", name, line)
+
+    def _gate(self, terminal_id: str, snap: Snapshot | None) -> GuardGate | None:
+        verdict = self._verdicts.get(terminal_id)
+        if verdict is None or verdict == NO_VERDICT:
+            return None
+        cfg = self._cfg.terminals[terminal_id]
+        risk = self._risk_amount(cfg, snap) if snap is not None else None
+        cap = verdict.max_risk
+        over = cap is not None and cap.mode == "decline" and risk is not None and risk > cap.amount
+        return GuardGate(
+            hold=bool(verdict.held_back),
+            needs_stop=verdict.stop_required is not None,
+            over_risk=over,
+            news=verdict.news,
+        )
+
+    def clear_guard_latch(self, terminal_id: str, rule_id: str) -> bool:
+        """Let go of a breach a guard is holding on this terminal's account, by hand."""
+        with self._lock:
+            key = self._account_of(terminal_id)
+            return key is not None and self._guards.clear_latch(key, rule_id)
+
+    def _account_of(self, terminal_id: str) -> str | None:
+        """The account logged into this terminal: the one its latest snapshot names, else the
+        one it was last known to be logged into."""
+        snap = self._snapshots.get(terminal_id)
+        cfg = self._cfg.terminals.get(terminal_id)
+        if snap is not None and snap.login is not None:
+            return account_key(snap.login, snap.server)
+        if cfg is not None:
+            return account_key(cfg.last_login, cfg.last_server)
+        return None
+
+    def guard_report(self, terminal_id: str) -> GuardReport:
+        """How the guards of the account logged into this terminal stand right now.
+
+        The account is the one the latest snapshot names, else the one the terminal was last
+        known to be logged into -- so the page can be set up before connecting.
+        """
+        with self._lock:
+            snap = self._snapshots.get(terminal_id)
+            cfg = self._cfg.terminals.get(terminal_id)
+            key = self._account_of(terminal_id)
+            risk = None
+            if snap is not None and cfg is not None and cfg.role is Role.SLAVE:
+                risk = self._risk_amount(cfg, snap)
+            return self._guards.report(key, snap, time.time(), sizing_risk=risk)
 
     @property
     def failed_total(self) -> int:
@@ -1120,7 +1315,9 @@ class Engine:
                 self._set_hold(cfg.terminal_id, hold)
                 if hold is not None:
                     connected = False
-            links.append(SlaveLink(cfg=cfg, connected=connected))
+            links.append(
+                SlaveLink(cfg=cfg, connected=connected, gate=self._gate(cfg.terminal_id, snap))
+            )
         return links
 
     def orphans(self, terminal_id: str | None = None) -> list[Orphan]:
@@ -1345,6 +1542,45 @@ class Engine:
             if refusal is not None:
                 return refusal
             role_actions.unassign(self._cfg, terminal_id)
+        return None
+
+    def setup_stake(self, setup: Setup) -> dict[str, list[OpenCopy]] | None:
+        """The open copies loading this setup would give up, by slave, or None if any of them
+        cannot be read. An empty dict means there is nothing to ask."""
+        with self._lock:
+            return self._setup_stake(setup)
+
+    def _setup_stake(self, setup: Setup) -> dict[str, list[OpenCopy]] | None:
+        """Caller must hold the lock."""
+        stake: dict[str, list[OpenCopy]] = {}
+        for tid in setups_mod.losing(setup, self._cfg):
+            held = self._open_copies(tid)
+            if held is None:
+                return None
+            if held:
+                stake[tid] = held
+        return stake
+
+    def load_setup(
+        self, setup: Setup, *, orphan: Mapping[str, Collection[int]] | None = None
+    ) -> str | None:
+        """Put a saved setup's roles in place, and copying on or off as it was saved. None means
+        done; otherwise why not, with nothing changed.
+
+        The same rule as :meth:`unassign`, for the same reason: a slave taken off its master --
+        or left on while the master changes under it -- has its copies given up, and only if the
+        person agreed to exactly those. One that keeps its master keeps its copies.
+
+        The caller still has to save the config and :meth:`sync`.
+        """
+        with self._lock:
+            found = setups_mod.problems(setup, self._cfg)
+            if found:
+                return "; ".join(found)
+            refusal = self._give_up_agreed(self._setup_stake(setup), orphan)
+            if refusal is not None:
+                return refusal
+            setups_mod.apply_roles(setup, self._cfg)
         return None
 
     def _give_up_copies(self, terminal_id: str) -> None:

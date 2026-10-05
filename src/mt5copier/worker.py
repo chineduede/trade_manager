@@ -37,6 +37,7 @@ from .logging_setup import configure, get_logger
 from .protocol import (
     Command,
     CommandKind,
+    Deal,
     OrderCommand,
     OrderResult,
     OrderType,
@@ -75,6 +76,11 @@ class _Session:
         are not connected, or the terminal was already running, which makes it the user's to
         close, not ours. Re-derived on every connect, so a terminal we launched that later
         crashes and gets relaunched by hand is correctly no longer considered ours."""
+        self._clock = _ServerClock()
+        self._deals: tuple[Deal, ...] | None = None
+        self._deals_since: float | None = None
+        self._deals_read_at = 0.0
+        self._deals_balance: float | None = None
 
     def connect(self) -> tuple[bool, str | None]:
         """Call ``initialize(path=...)``. Returns (ok, error message).
@@ -94,6 +100,9 @@ class _Session:
         if not ok:
             return False, f"initialize() failed: {self._last_error()}"
         self.connected = True
+        # The account may not be the one this session last read, so its history is not kept.
+        self._deals = self._deals_since = self._deals_balance = None
+        self._deals_read_at = 0.0
         self._launched_pid = None if already_running else find_terminal_pid(self._exe_path)
         return True, None
 
@@ -277,6 +286,21 @@ class _Session:
         except (TypeError, ValueError):
             return None
 
+    def margin_for(
+        self, direction: PositionType, symbol: str, volume: float, price: float
+    ) -> float | None:
+        """The margin ``volume`` lots would take, in the account currency, via
+        ``order_calc_margin``. None if the terminal cannot say."""
+        try:
+            margin = self._mt5.order_calc_margin(int(direction), symbol, volume, price)
+        except Exception as exc:
+            log.debug("order_calc_margin(%r) raised: %r", symbol, exc)
+            return None
+        try:
+            return None if margin is None else float(margin)
+        except (TypeError, ValueError):
+            return None
+
     def position(self, ticket: int) -> LivePosition | None | ReadFailure:
         """``(symbol, direction, volume)`` for one open position, read live.
 
@@ -374,6 +398,9 @@ class _Session:
 
         open_positions, live_positions = self._read_positions()
         pending_orders = self._read_orders()
+        offset = self._clock.update(self._mt5, open_positions, now=time.time())
+        balance = getattr(account, "balance", None)
+        self._refresh_deals(offset, balance, now=time.time())
 
         # A terminal can be reachable while its broker link is down; report that distinctly
         # rather than as a hard failure, because the process is healthy and will recover.
@@ -403,9 +430,77 @@ class _Session:
             open_positions=open_positions,
             live_positions=live_positions,
             pending_orders=pending_orders,
+            server_offset_s=offset,
+            deals=self._deals,
+            deals_since=self._deals_since,
             error=None if broker_up else "terminal not connected to broker",
             connect_attempts=attempts,
         )
+
+    def _refresh_deals(self, offset: int | None, balance: float | None, *, now: float) -> None:
+        """Re-read the recent deal history when it may have changed.
+
+        Not on every poll: the history is the one read here that grows with the account's
+        activity. Every few seconds, and at once whenever the balance moves -- a close, a
+        deposit -- so a guard never works from a history that is missing the deal it just saw
+        land in the balance. Without the server's offset there is no knowing which deals fall
+        in the window, so nothing is read and the last answer stands as unknown.
+        """
+        if offset is None:
+            return
+        due = now - self._deals_read_at >= _DEALS_REFRESH_S or balance != self._deals_balance
+        if not due:
+            return
+        since = now - _DEALS_WINDOW_S
+        deals = self._read_deals(since, offset, now=now)
+        self._deals_read_at = now
+        if deals is None:
+            self._deals = self._deals_since = None
+            return
+        self._deals, self._deals_since, self._deals_balance = deals, since, balance
+
+    def _read_deals(self, since: float, offset: int, *, now: float) -> tuple[Deal, ...] | None:
+        """Deals from ``since`` (real UTC) to now, oldest first, or None if they could not be
+        read. Asked for in the broker's clock, which is how MT5 takes and gives every time."""
+        try:
+            raw = self._mt5.history_deals_get(int(since) + offset, int(now) + offset + 3600)
+        except Exception as exc:
+            log.debug("history_deals_get() raised: %r", exc)
+            return None
+        if raw is None:
+            # As with positions: None is both "no deals" and "failed". A count of zero over the
+            # same window is what tells them apart.
+            try:
+                total = self._mt5.history_deals_total(int(since) + offset, int(now) + offset + 3600)
+            except Exception as exc:
+                log.debug("history_deals_total() raised: %r", exc)
+                return None
+            return () if total == 0 else None
+        out: list[Deal] = []
+        for d in raw:
+            try:
+                msc = int(getattr(d, "time_msc", 0) or 0)
+                server_time = msc / 1000 if msc else float(d.time)
+                out.append(
+                    Deal(
+                        ticket=int(d.ticket),
+                        time=server_time - offset,
+                        type=int(d.type),
+                        entry=int(getattr(d, "entry", 0) or 0),
+                        profit=float(getattr(d, "profit", 0.0) or 0.0),
+                        commission=float(getattr(d, "commission", 0.0) or 0.0),
+                        swap=float(getattr(d, "swap", 0.0) or 0.0),
+                        fee=float(getattr(d, "fee", 0.0) or 0.0),
+                        symbol=str(getattr(d, "symbol", "") or ""),
+                    )
+                )
+            except (AttributeError, TypeError, ValueError) as exc:
+                # One deal we cannot read would leave a hole in a rebuilt balance, so the whole
+                # history counts as unknown rather than quietly short.
+                log.warning("unparseable deal %r (%s); treating history as unknown", d, exc)
+                return None
+        out.sort(key=lambda deal: deal.time)
+        return tuple(out)
 
     def _read_orders(self) -> tuple[PendingOrder, ...] | None:
         """Read the resting orders, or None if they could not be read.
@@ -501,6 +596,88 @@ class _Session:
                 )
             )
         return tuple(out), tuple(live)
+
+
+_DEALS_REFRESH_S = 5.0
+_DEALS_WINDOW_S = 50 * 3600.0
+"""How far back the deal history goes. A daily reset is at most a day ago; the rest is room for
+time zones and for a reset that falls just after a weekend's quiet."""
+
+
+class _ServerClock:
+    """Works out how far the broker's clock is from UTC.
+
+    MT5 has no call for the server's time. What it has is tick times, stamped in the broker's
+    clock as if that were UTC. A tick that has *just changed* was stamped a moment ago, so its
+    time less ours is the offset, give or take latency -- rounded to the half hour every real
+    offset is a multiple of. A tick that has not changed since the last look says nothing: on a
+    closed market it may be days old, and rounding that would give a confident wrong answer.
+    """
+
+    _RECHECK_S = 60.0
+    """Once known, how often to look again -- an offset only moves with daylight saving."""
+    _PROBE_S = 1.0
+    _STEP_S = 1800
+    _MAX_S = 14 * 3600
+    _PROBES = 3
+
+    def __init__(self) -> None:
+        self.offset: int | None = None
+        self._checked_at = 0.0
+        self._seen: dict[str, float] = {}
+        self._watch: list[str] | None = None
+
+    def update(self, mt5: Any, positions: tuple[Position, ...] | None, *, now: float) -> int | None:
+        wait = self._RECHECK_S if self.offset is not None else self._PROBE_S
+        if now - self._checked_at < wait:
+            return self.offset
+        self._checked_at = now
+        names = list(dict.fromkeys([p.symbol for p in positions or ()] + self._watched(mt5)))
+        for name in names:
+            stamp = _tick_time(mt5, name)
+            if stamp is None:
+                continue
+            before = self._seen.get(name)
+            self._seen[name] = stamp
+            if before is None or stamp <= before:
+                continue
+            ahead = stamp - now
+            offset = round(ahead / self._STEP_S) * self._STEP_S
+            if abs(offset) <= self._MAX_S and abs(ahead - offset) < 300:
+                if offset != self.offset:
+                    log.info("broker clock is UTC%+.1fh", offset / 3600)
+                self.offset = offset
+                break
+        return self.offset
+
+    def _watched(self, mt5: Any) -> list[str]:
+        """A few Market Watch symbols, so the offset can be found with nothing open. Listed
+        once per session: the full symbol list can run to thousands."""
+        if self._watch is None:
+            try:
+                symbols = mt5.symbols_get() or ()
+                self._watch = [str(s.name) for s in symbols if getattr(s, "visible", False)][
+                    : self._PROBES
+                ]
+            except Exception as exc:
+                log.debug("symbols_get() raised: %r", exc)
+                self._watch = []
+        return self._watch
+
+
+def _tick_time(mt5: Any, name: str) -> float | None:
+    """The last tick's time for ``name`` in the broker's clock, to the millisecond if given."""
+    try:
+        tick = mt5.symbol_info_tick(name)
+    except Exception:
+        return None
+    if tick is None:
+        return None
+    msc = _opt_int(tick, "time_msc")
+    if msc:
+        return msc / 1000
+    seconds = _opt_int(tick, "time")
+    return float(seconds) if seconds else None
 
 
 def _opt_float(obj: object, name: str) -> float | None:

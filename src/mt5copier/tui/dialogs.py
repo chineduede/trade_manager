@@ -97,7 +97,8 @@ class OrphanDialog(ModalScreen[bool]):
     Dismisses with True if agreed.
 
     ``copies`` is keyed by the name of the slave that holds them. ``unassigning`` words the
-    screen for a role being taken away rather than a settings edit.
+    screen for a role being taken away rather than a settings edit, and ``loading`` -- a saved
+    setup's name -- for that setup being loaded.
     """
 
     BINDINGS = [
@@ -114,6 +115,7 @@ class OrphanDialog(ModalScreen[bool]):
         halt: Callable[[], None],
         *,
         unassigning: bool = False,
+        loading: str | None = None,
     ) -> None:
         super().__init__()
         self._copies = {name: list(held) for name, held in copies.items() if held}
@@ -121,6 +123,7 @@ class OrphanDialog(ModalScreen[bool]):
         self._live = live
         self._halt = halt
         self._unassigning = unassigning
+        self._loading = loading
 
     @property
     def copier(self) -> CopierApp:
@@ -155,7 +158,11 @@ class OrphanDialog(ModalScreen[bool]):
                 rows.append((f"{number} {holder}".strip(), copy_line(copy, side), ticket))
 
         with VerticalScroll(id="dialog", classes="dialog", can_focus=False):
-            if self._unassigning:
+            if self._loading is not None:
+                title = f"Load setup {self._loading}?"
+                lead = "Loading it takes these slaves off what they copied from their master:"
+                go = f"Load and orphan {total} cop{'y' if total == 1 else 'ies'}"
+            elif self._unassigning:
                 role = cfg.terminals[tid].role if tid else Role.SLAVE
                 title = f"Unassign {name}?"
                 lead = unassign_lead(role, len(cfg.slaves), len(self._copies))
@@ -196,7 +203,10 @@ class OrphanDialog(ModalScreen[bool]):
             yield Static(said, id="consequence")
             if not self._unassigning:
                 change = Text("The change: ", style=MUTED)
-                change.append(f"{self._changes}. It applies to every trade copied from now on.")
+                if self._loading is not None:
+                    change.append(f"{self._changes}.")
+                else:
+                    change.append(f"{self._changes}. It applies to every trade copied from now on.")
                 yield Static(change, id="changes")
             with Horizontal(id="buttons"):
                 yield Button("Keep everything  esc", id="cancel", classes="keep")

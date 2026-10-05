@@ -298,13 +298,198 @@ ActionMenu OptionList:focus > .option-list--option-highlighted {
     background: $foreground 10%;
 }
 
+/* --- an account's guards ------------------------------------------------------------------ */
+
+#gd-page {
+    padding-top: 1;
+    scrollbar-size-vertical: 1;
+}
+
+/* The same cream band as a terminal's details. */
+#gd-band {
+    background: $foreground;
+    color: $background;
+    padding: 1 2;
+    height: auto;
+}
+
+#gd-note, #gd-account, #gd-empty, #gd-said {
+    height: auto;
+    margin-top: 1;
+}
+
+#gd-rules-head {
+    margin-top: 2;
+}
+
+#gd-rules {
+    background: $background;
+    border: none;
+    height: auto;
+}
+
+#gd-rules:focus {
+    background-tint: $foreground 0%;
+}
+
+#gd-rules > .datatable--header {
+    background: $background;
+}
+
+#gd-rules > .datatable--cursor {
+    background: $foreground 18%;
+}
+
+#gd-rules > .datatable--hover {
+    background: $foreground 10%;
+}
+
+#gd-ask {
+    display: none;
+    height: 1;
+    margin-top: 1;
+}
+
+#gd-ask-what, #gd-ask .w {
+    width: auto;
+}
+
+#gd-ask-box {
+    width: 24;
+}
+
+#gd-ask-box:focus {
+    background: $foreground 30%;
+}
+
+#gd-ask-error {
+    display: none;
+    height: auto;
+}
+
+/* --- saved setups ------------------------------------------------------------------------ */
+
+#st-page {
+    padding-top: 1;
+    scrollbar-size-vertical: 1;
+}
+
+#st-band {
+    background: $foreground;
+    color: $background;
+    padding: 1 2;
+    height: auto;
+}
+
+#st-note, #st-now, #st-empty, #st-said {
+    height: auto;
+    margin-top: 1;
+}
+
+#st-head {
+    margin-top: 2;
+}
+
+#st-table {
+    background: $background;
+    border: none;
+    height: auto;
+}
+
+#st-table:focus {
+    background-tint: $foreground 0%;
+}
+
+#st-table > .datatable--header {
+    background: $background;
+}
+
+#st-table > .datatable--cursor {
+    background: $foreground 18%;
+}
+
+#st-table > .datatable--hover {
+    background: $foreground 10%;
+}
+
+#st-ask {
+    display: none;
+    height: 1;
+    margin-top: 1;
+}
+
+#st-ask-what, #st-ask .w {
+    width: auto;
+}
+
+#st-ask-box {
+    width: 32;
+}
+
+#st-ask-box:focus {
+    background: $foreground 30%;
+}
+
+#st-ask-error {
+    display: none;
+    height: auto;
+}
+
+/* --- a slave's trade history -------------------------------------------------------------- */
+
+#hs-page {
+    padding-top: 1;
+    scrollbar-size-vertical: 1;
+}
+
+#hs-band {
+    background: $foreground;
+    color: $background;
+    padding: 1 2;
+    height: auto;
+}
+
+#hs-head {
+    margin-top: 1;
+}
+
+#hs-empty {
+    height: auto;
+    margin-top: 1;
+}
+
+#hs-cards {
+    height: auto;
+}
+
+/* A card per copied trade, in the map's card language: green while it is open on the slave,
+   red dashed when a step with it failed. */
+.hs-card {
+    border: solid $foreground 40%;
+    border-title-color: $foreground;
+    border-title-style: bold;
+    border-subtitle-color: $text-muted;
+    padding: 0 1;
+    margin-top: 1;
+    height: auto;
+}
+
+.hs-card.-open {
+    border: solid #7fbf6e;
+}
+
+.hs-card.-failed {
+    border: dashed $error;
+}
+
 /* --- the questions that guard money -------------------------------------------------------- */
 
 /* Screens of their own, so they would take the Screen rule at the top: solid and padded. They
    dim what is under them instead, and sit in the middle of it. */
 OrphanDialog,
 LiveDialog,
-GoLiveDialog {
+GoLiveDialog,
+GuardConfirm {
     background: #0c0b09 80%;
     padding: 0;
     align: center middle;
@@ -312,7 +497,8 @@ GoLiveDialog {
 
 OrphanDialog #dialog,
 LiveDialog #dialog,
-GoLiveDialog #dialog {
+GoLiveDialog #dialog,
+GuardConfirm #dialog {
     width: 96;
     max-width: 100%;
     height: auto;

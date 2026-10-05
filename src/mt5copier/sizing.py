@@ -135,7 +135,7 @@ def quantize_volume(raw: float, facts: SymbolFacts, max_lot: float | None = None
         return SizingResult(failure=SizingFailure.BELOW_MINIMUM, raw_lots=raw)
 
     try:
-        stepped = _floor_to_step(raw, facts.volume_step)
+        stepped = floor_to_step(raw, facts.volume_step)
     except (ArithmeticError, InvalidOperation, ValueError):
         return SizingResult(failure=SizingFailure.UNUSABLE_SYMBOL_FACTS, raw_lots=raw)
 
@@ -152,7 +152,7 @@ def quantize_volume(raw: float, facts: SymbolFacts, max_lot: float | None = None
     if stepped > ceiling:
         if capped_by is None:
             capped_by = "volume_max"
-        stepped = _floor_to_step(ceiling, facts.volume_step)
+        stepped = floor_to_step(ceiling, facts.volume_step)
         if stepped < facts.volume_min:
             # A ceiling below one step cannot be honoured without rounding up past it.
             return SizingResult(failure=SizingFailure.BELOW_MINIMUM, raw_lots=raw)
@@ -162,7 +162,7 @@ def quantize_volume(raw: float, facts: SymbolFacts, max_lot: float | None = None
     return SizingResult(lots=stepped, raw_lots=raw, capped_by=capped_by)
 
 
-def _floor_to_step(value: float, step: float) -> float:
+def floor_to_step(value: float, step: float) -> float:
     d_step = Decimal(str(step))
     stepped = (Decimal(str(value)) / d_step).to_integral_value(rounding="ROUND_DOWN") * d_step
     return float(stepped)

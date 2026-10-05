@@ -62,6 +62,34 @@ def mapping_db_path() -> Path:
     return user_data_dir() / "mapping.db"
 
 
+def history_db_path() -> Path:
+    """SQLite store of each trade's history on each slave, kept for ``history_days``. Display
+    only: losing it loses nothing the copier needs."""
+    return user_data_dir() / "history.db"
+
+
+def guards_path() -> Path:
+    """Each account's guard rules, and the person's saved templates of them. Apart from
+    ``config.json`` so that a slip editing rules cannot disturb copy settings."""
+    return user_data_dir() / "guards.json"
+
+
+def setups_path() -> Path:
+    """The person's saved setups: which terminal is the master, which are slaves, and whether
+    copying was on. Apart from ``config.json``, as the guards are."""
+    return user_data_dir() / "setups.json"
+
+
+def news_path() -> Path:
+    """The last news calendar fetched, kept so a restart without the internet still knows it."""
+    return user_data_dir() / "news.json"
+
+
+def guard_state_path() -> Path:
+    """What the guards have recorded from earlier snapshots, such as the equity at a reset."""
+    return user_data_dir() / "guard_state.json"
+
+
 def dryrun_store_path() -> Path:
     """Believed copies for a dry run -- simulated, and kept well away from the real thing.
 

@@ -96,6 +96,35 @@ class PositionLive:
     swap: float | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class Deal:
+    """One entry in the account's trade history, as far as it moved the balance.
+
+    Read for the guards, which rebuild the balance at an earlier moment -- a daily reset -- by
+    taking off what every later deal added. That is why every kind of deal is kept, not only
+    trades: a deposit or a withdrawal moves the balance as surely as a closed loss does.
+    """
+
+    ticket: int
+    time: float
+    """When it happened, in real UTC seconds -- converted from the broker's own clock, which
+    MT5 reports as if it were UTC (see ``Snapshot.server_offset_s``)."""
+    type: int
+    """MT5's ``DEAL_TYPE_*``: 0 buy, 1 sell, 2 balance, and the rest."""
+    entry: int
+    """MT5's ``DEAL_ENTRY_*``: 0 in, 1 out, 2 in/out reversal, 3 out by."""
+    profit: float = 0.0
+    commission: float = 0.0
+    swap: float = 0.0
+    fee: float = 0.0
+    symbol: str = ""
+
+    @property
+    def net(self) -> float:
+        """What this deal added to the balance."""
+        return self.profit + self.commission + self.swap + self.fee
+
+
 class OrderType(IntEnum):
     """MT5's ``ORDER_TYPE_*`` values, restated rather than imported for the same reason as
     :class:`PositionType`."""
@@ -332,6 +361,13 @@ class OrderCommand:
     allow_live: bool = False
     """Explicit per-slave override of the demo-only guard. Absent this, the worker refuses to
     trade any account that is not a demo -- see :mod:`mt5copier.executor`."""
+    max_margin: float | None = None
+    """OPEN / PLACE only: the most margin, in the account's money, a prop-firm guard lets this
+    trade use. Only the worker can price margin, so the engine sends the limit and the worker
+    holds the trade to it after sizing. None for no limit."""
+    margin_cap: str = ""
+    """What the worker does with a trade over ``max_margin``: ``"decline"`` it, ``"shrink"``
+    it to fit, or ``"warn"`` and send it as sized."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,6 +507,23 @@ class Snapshot:
     """Resting limit/stop orders, with the same None-means-unknown rule as ``open_positions``,
     and for a sharper reason: a vanished order is read as a cancellation, so an empty list
     after a failed read would propose cancelling every copied order at once."""
+
+    server_offset_s: int | None = None
+    """How far the broker's clock runs ahead of UTC, in seconds (negative if behind). MT5
+    reports every time -- ticks, deals -- in the broker's own clock as if it were UTC, so this
+    is what turns them into real time. None until a live price has been seen: it is measured
+    off a tick that has just changed, never off a stale one, which on a closed market could be
+    days old. Read for the guards."""
+
+    deals: tuple[Deal, ...] | None = None
+    """The account's deals from ``deals_since`` on, oldest first, with times in real UTC.
+    **None means "unknown"**, not "no deals": a guard that rebuilt today's opening balance
+    from an empty list after a failed read would report every loss today as never having
+    happened. Refreshed every few seconds, and at once when the balance changes."""
+
+    deals_since: float | None = None
+    """The UTC start of the window ``deals`` covers. A balance can only be rebuilt for a moment
+    inside it."""
 
     error: str | None = None
     """Human-readable last error, kept for display even after a later success."""

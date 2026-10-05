@@ -16,6 +16,7 @@ from rich.text import Text
 
 from ..config import SizingMode, TerminalConfig
 from ..engine import TerminalView
+from ..guards import GuardReport, Level
 from ..presentation import RowInfo, slave_badge
 from ..protocol import Snapshot
 from ..terminal_detail import bar, format_ping, margin_gauge
@@ -144,6 +145,22 @@ def slave_state(info: RowInfo, *, dry_run: bool, copying: bool) -> SlaveState:
     return SlaveState("copying", Text("copying", style=f"bold {GREEN}"))
 
 
+def guard_badge(report: GuardReport | None) -> Text:
+    """Nothing while every guard is comfortable; ``GUARD 82%`` in yellow once one is past the
+    point it acts at, ``GUARD BREACHED`` in red once one is at its limit, and ``GUARD: NO NEW
+    TRADES`` in red while one is keeping the slave from new trades."""
+    if report is not None and report.holding_back:
+        return Text("GUARD: NO NEW TRADES", style=f"bold {RED}")
+    worst = report.worst if report is not None else None
+    if worst is None or worst.level is Level.OK:
+        return Text("")
+    if worst.level is Level.BREACHED:
+        return Text("GUARD BREACHED", style=f"bold {RED}")
+    fraction = worst.fraction
+    said = f"GUARD {fraction:.0%}" if fraction is not None else "GUARD"
+    return Text(said, style=f"bold {YELLOW}")
+
+
 def slave_card(
     number: int,
     view: TerminalView,
@@ -152,6 +169,7 @@ def slave_card(
     *,
     refused: int,
     width: int = 0,
+    guards: GuardReport | None = None,
 ) -> RenderableType:
     """``width`` is the card's inside width, which decides whether the balance fits in big
     digits."""
@@ -181,7 +199,8 @@ def slave_card(
     else:
         lines.append(floating(info.floating_pl))
         lines.append(Text(f"{risk} · {opened}", style=MUTED))
-    lines.append(margin_line(view.snapshot))
+    # On the margin line, so a card is no taller for having guards.
+    lines.append(left_right(margin_line(view.snapshot), guard_badge(guards)))
     return Group(*lines)
 
 

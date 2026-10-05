@@ -578,6 +578,7 @@ class DetailScreen(Screen[None]):
         Binding("e", "edit_settings", "Settings"),
         Binding("b", "toggle_breakeven_exempt", "Exempt from BE"),
         Binding("B", "breakeven_price", "BE price"),
+        Binding("h", "history", "History"),
         Binding("left", "app.step(-1)", "Other terminal", show=False, priority=True),
         Binding("right", "app.step(1)", "Other terminal", show=False, priority=True),
     ]
@@ -832,6 +833,9 @@ class DetailScreen(Screen[None]):
 
     # --- a copy's breakeven -------------------------------------------------------------------
 
+    def action_history(self) -> None:
+        self.copier.open_history(self.terminal_id)
+
     def action_edit_settings(self) -> None:
         """This terminal's settings form, on top of this page; closing it comes back here."""
         self.copier.open_settings(self.terminal_id)
@@ -939,6 +943,8 @@ class DetailScreen(Screen[None]):
             keys.append(key_hint("e", "settings"))
         if cfg.role is Role.SLAVE:
             keys.append(key_hint("p", "resume" if cfg.paused else "pause"))
+            keys.append(key_hint("k", "guards"))
+            keys.append(key_hint("h", "history"))
             if any(r.master_ticket is not None for r in self._rows):
                 keys.append(key_hint("B", "breakeven price"))
                 keys.append(key_hint("b", "exempt"))
