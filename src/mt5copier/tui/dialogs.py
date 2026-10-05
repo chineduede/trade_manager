@@ -37,6 +37,7 @@ from ..protocol import ACCOUNT_TRADE_MODE_DEMO, PositionType, Snapshot
 from ..reconcile import OpenCopy
 from ..settings_edit import EditOutcome, live_override_phrase, set_live_override
 from .style import FG, MUTED, RED, RULED, amount
+from .widgets import ButtonRow
 
 if TYPE_CHECKING:
     from .app import CopierApp
@@ -208,7 +209,7 @@ class OrphanDialog(ModalScreen[bool]):
                 else:
                     change.append(f"{self._changes}. It applies to every trade copied from now on.")
                 yield Static(change, id="changes")
-            with Horizontal(id="buttons"):
+            with ButtonRow(id="buttons"):
                 yield Button("Keep everything  esc", id="cancel", classes="keep")
                 yield Button(go, id="go", classes="danger")
 
@@ -358,7 +359,7 @@ class LiveDialog(ModalScreen[bool]):
                     )
                 )
             yield Static("", id="error")
-            with Horizontal(id="buttons"):
+            with ButtonRow(id="buttons"):
                 if on:
                     yield Button("Keep it on  esc", id="cancel", classes="keep")
                     yield Button("Turn it off  enter", id="go", classes="keep")
@@ -477,7 +478,7 @@ class GoLiveDialog(ModalScreen[str | None]):
                 yield Input(placeholder=LIVE_WORD, id="typed", compact=True)
                 yield Static(letters_to_go("", LIVE_WORD), id="to-go")
             yield Static("", id="error")
-            with Horizontal(id="buttons"):
+            with ButtonRow(id="buttons"):
                 yield Button("Keep the dry run  esc", id="cancel", classes="keep")
                 yield Button("Go live  enter", id="go", classes="danger -waiting")
 

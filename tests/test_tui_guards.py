@@ -7,13 +7,14 @@ from pathlib import Path
 
 import pytest
 from textual.widgets import DataTable, Input, Static
-from tui_support import TID_MASTER, TID_SLAVE, make_app, make_cfg, plain
+from tui_support import TID_MASTER, TID_SLAVE, copy_of, make_app, make_cfg, plain
 
 from mt5copier.config import AppConfig, Role
 from mt5copier.guards import AccountGuards, GuardReport, GuardRule, Level, RuleStatus
 from mt5copier.protocol import Snapshot, WorkerState
 from mt5copier.tui import CopierApp
 from mt5copier.tui.cards import guard_badge
+from mt5copier.tui.dialogs import OrphanDialog
 from mt5copier.tui.guards import GuardConfirm, GuardPick, GuardsScreen, RuleForm, standing
 from mt5copier.tui.settings import Choice
 
@@ -236,3 +237,24 @@ async def test_the_card_carries_the_badge(app: CopierApp, on_breach: str, badge:
         await pilot.pause()
         card = app._cards[TID_SLAVE]
         assert badge in plain(card.content, width=40)
+
+
+async def test_the_arrows_move_along_a_dialogs_buttons(app: CopierApp) -> None:
+    async with app.run_test(size=(140, 50)) as pilot:
+        app._select(TID_MASTER)
+        for dialog in (
+            GuardConfirm("Forget it?", "It goes.", "Forget it"),
+            OrphanDialog(
+                copies={"Beta Broker": [copy_of(100)]}, changes="", live=False, halt=print
+            ),
+        ):
+            app.push_screen(dialog)
+            await pilot.pause()
+            focused = []
+            for key in ("right", "right", "left"):
+                await pilot.press(key)
+                focused.append(app.focused.id if app.focused else None)
+            assert focused == ["go", "cancel", "go"], "round from one end to the other"
+            await pilot.press("escape")
+            await pilot.pause()
+            assert app._sel == TID_MASTER, "the arrows never reach the map under it"

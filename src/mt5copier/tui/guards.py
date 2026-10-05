@@ -30,7 +30,7 @@ from ..guards.params import Param, ParamKind, ParamValue, resolve
 from ..terminal_detail import bar
 from .settings import Choice, Tick, lead, rows, section, words
 from .style import BLUE, FG, MUTED, RED, YELLOW, key_hint, left_right, spaced
-from .widgets import KeyBar, QuickInput, TopBar
+from .widgets import ButtonRow, KeyBar, QuickInput, TopBar
 
 if TYPE_CHECKING:
     from .app import CopierApp
@@ -665,7 +665,7 @@ class GuardConfirm(ModalScreen[bool]):
         with VerticalScroll(id="dialog", classes="dialog", can_focus=False):
             yield Static(Text(self._heading.upper(), style="bold"), classes="dialog-title")
             yield Static(self._said)
-            with Horizontal(id="buttons"):
+            with ButtonRow(id="buttons"):
                 yield Button("Keep it  esc", id="cancel", classes="keep")
                 yield Button(self._go, id="go", classes="danger")
 

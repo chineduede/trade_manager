@@ -10,10 +10,11 @@ from rich.console import RenderableType
 from rich.style import Style
 from rich.text import Text
 from textual.binding import Binding
+from textual.containers import Horizontal
 from textual.geometry import Region, Size
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Input, Static
+from textual.widgets import Button, Input, Static
 
 from .style import FAINT, FG, GREEN, MUTED, RED, SELECTED_BG
 
@@ -35,6 +36,22 @@ class QuickInput(Input):
 
     def action_back_out(self) -> None:
         self.post_message(self.Escaped(self))
+
+
+class ButtonRow(Horizontal):
+    """A dialog's row of buttons, that the left and right arrows move along, round from one end
+    to the other. Tab still does too; a button alone answers only enter and space."""
+
+    BINDINGS = [
+        Binding("left", "along(-1)", "Previous button", show=False),
+        Binding("right", "along(1)", "Next button", show=False),
+    ]
+
+    def action_along(self, step: int) -> None:
+        buttons = [b for b in self.query(Button) if b.focusable]
+        focused = self.screen.focused
+        if focused in buttons:
+            buttons[(buttons.index(focused) + step) % len(buttons)].focus()
 
 
 class Picked(Message):
