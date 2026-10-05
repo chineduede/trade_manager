@@ -1544,6 +1544,20 @@ class Engine:
             role_actions.unassign(self._cfg, terminal_id)
         return None
 
+    def logins(self) -> dict[str, int | None]:
+        """The account each terminal is logged into: the one its latest snapshot names, else the
+        one it was last known to be logged into. The login alone, as a setup keeps it."""
+        with self._lock:
+            return self._logins()
+
+    def _logins(self) -> dict[str, int | None]:
+        """Caller must hold the lock."""
+        found = setups_mod.logins_of(self._cfg)
+        for tid, snap in self._snapshots.items():
+            if tid in found and snap.login is not None:
+                found[tid] = snap.login
+        return found
+
     def setup_stake(self, setup: Setup) -> dict[str, list[OpenCopy]] | None:
         """The open copies loading this setup would give up, by slave, or None if any of them
         cannot be read. An empty dict means there is nothing to ask."""
@@ -1553,7 +1567,7 @@ class Engine:
     def _setup_stake(self, setup: Setup) -> dict[str, list[OpenCopy]] | None:
         """Caller must hold the lock."""
         stake: dict[str, list[OpenCopy]] = {}
-        for tid in setups_mod.losing(setup, self._cfg):
+        for tid in setups_mod.losing(setup, self._cfg, self._logins()):
             held = self._open_copies(tid)
             if held is None:
                 return None
@@ -1562,25 +1576,42 @@ class Engine:
         return stake
 
     def load_setup(
-        self, setup: Setup, *, orphan: Mapping[str, Collection[int]] | None = None
+        self,
+        setup: Setup,
+        *,
+        orphan: Mapping[str, Collection[int]] | None = None,
+        leave_out: Collection[str] = (),
     ) -> str | None:
         """Put a saved setup's roles in place, and copying on or off as it was saved. None means
         done; otherwise why not, with nothing changed.
 
         The same rule as :meth:`unassign`, for the same reason: a slave taken off its master --
-        or left on while the master changes under it -- has its copies given up, and only if the
-        person agreed to exactly those. One that keeps its master keeps its copies.
+        or left on while the master changes under it, or logged into another account -- has its
+        copies given up, and only if the person agreed to exactly those. One that keeps its
+        master and its account keeps its copies.
+
+        **A terminal is never given a role on an account the setup does not name.** One that has
+        to be logged into its account first must be in ``leave_out``, and is left unassigned:
+        the app logs it in and then loads the setup again (see :func:`setups.apply_roles`).
 
         The caller still has to save the config and :meth:`sync`.
         """
         with self._lock:
-            found = setups_mod.problems(setup, self._cfg)
+            logins = self._logins()
+            found = setups_mod.problems(setup, self._cfg, logins)
             if found:
                 return "; ".join(found)
+            unswitched = [
+                self._cfg.display_name(tid)
+                for tid in setups_mod.switches(setup, logins)
+                if tid not in leave_out
+            ]
+            if unswitched:
+                return f"{', '.join(unswitched)} is not logged into the setup's account"
             refusal = self._give_up_agreed(self._setup_stake(setup), orphan)
             if refusal is not None:
                 return refusal
-            setups_mod.apply_roles(setup, self._cfg)
+            setups_mod.apply_roles(setup, self._cfg, leave_out)
         return None
 
     def _give_up_copies(self, terminal_id: str) -> None:

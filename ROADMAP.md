@@ -1571,11 +1571,31 @@ are the design, not a limitation waiting to be lifted.
     A slave that stays a slave stays paused if it was.
   - *Demo check:* save the current roles; assign a different master and slaves; load the saved
     one back, with and without a copy open on a slave (the copy is listed, then orphaned).
+  - **Accounts too — asked for 2026-10-05 on `integration`, after account switch was built.** A
+    setup also keeps the **login** each terminal was on (no server: it is found again from the
+    terminal's `bases/<server>/trades/<login>` folders when needed). Loading one whose terminal
+    is on another account logs it in to the saved one first, as `i` does:
+    - The confirmation names each login ("Delta logs in to 555@X-Demo"). A terminal changing
+      account loses its copies as a change of master does: listed, orphaned on agreement; the
+      master changing account strands every slave's.
+    - The terminals to log in are left unassigned, the rest of the setup goes in, they log in
+      one at a time off the UI thread, then the setup is loaded again. One that fails is left
+      unassigned and says why; if it is the master, nothing is assigned and copying stays off.
+    - `Engine.load_setup` refuses to give a role to a terminal not on its saved account unless
+      it is left out for the login — the check that cannot be raced.
+    - A setup saved before this has no accounts and loads on whatever accounts are in place.
+      The ● and the top bar count a setup as in place only on its accounts. The page shows each
+      terminal's saved login beside its name. A saved account the terminal no longer has, or has
+      on two servers, stops the setup loading, with the reason.
+    - *Demo check:* save a setup; `u`/`i` a slave (unassign it, log it into its other account);
+      load the setup: the confirmation names the login, MT5 shows the slave back on the saved
+      account, and it is a slave again. Repeat with the master's account changed.
 - **Logging a terminal into another of its accounts — asked for 2026-10-05, built the same day
   on `account-switch` (off `setups`), awaiting its demo check.** A terminal can hold several
   accounts; the person names them (account names, already in the settings form) and picks one.
   A fuller design — switching under a role, asking about copies, setups remembering accounts —
-  was scoped and **dropped by the user for the simple version**:
+  was scoped and **dropped by the user for the simple version** (setups remembering accounts
+  was added afterwards, at the user's ask: see Saved setups above):
   - **Only an unassigned terminal is switched.** On one with a role, `i` says to unassign it
     first; unassigning already asks about its copies, so switching never strands any.
   - `i` (map, and the actions menu of an installed unassigned terminal) lists the accounts that

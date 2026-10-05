@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -16,10 +17,13 @@ from tui_support import (
     make_app,
     make_cfg,
     plain,
+    toasted,
     toasts,
 )
 
+from mt5copier import account_switch as account_mod
 from mt5copier import setups as setups_mod
+from mt5copier.account_switch import Account, LoginResult
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.setups import Setup, SetupsDoc
 from mt5copier.tui.dialogs import OrphanDialog
@@ -55,6 +59,20 @@ def test_capture_takes_the_roles_and_whether_copying_is_on(cfg: AppConfig) -> No
     setup = setups_mod.capture(cfg)
     assert setup is not None
     assert (setup.master, setup.slaves, setup.copying) == (TID_MASTER, (TID_SLAVE,), True)
+    assert setup.accounts == {TID_MASTER: 111, TID_SLAVE: 222}
+
+
+def test_capture_takes_the_account_a_terminal_is_on_now(cfg: AppConfig) -> None:
+    setup = setups_mod.capture(cfg, {TID_MASTER: 999, TID_SLAVE: None})
+    assert setup is not None
+    assert setup.accounts == {TID_MASTER: 999}, "an account not known is not kept"
+
+
+def test_a_setup_saved_before_accounts_were_kept_still_loads(tmp_path: Path) -> None:
+    path = tmp_path / "setups.json"
+    old = {"master": TID_MASTER, "slaves": [], "copying": False, "saved_at": 1.0}
+    path.write_text(json.dumps({"version": 1, "setups": {"old": old}}), encoding="utf-8")
+    assert setups_mod.load(path).setups["old"].accounts == {}
 
 
 def test_there_is_nothing_to_capture_with_no_master(cfg: AppConfig) -> None:
@@ -73,6 +91,13 @@ def test_the_current_setup_is_the_one_with_the_same_roles(cfg: AppConfig) -> Non
     assert setups_mod.current_name(doc, cfg) == "main", "copying on or off makes no difference"
     cfg.set_role(TID_THIRD, Role.SLAVE)
     assert setups_mod.current_name(doc, cfg) is None
+
+
+def test_the_current_setup_is_on_its_accounts(cfg: AppConfig) -> None:
+    doc = SetupsDoc(setups={"main": Setup(master=TID_MASTER, accounts={TID_MASTER: 111})})
+    cfg.terminals[TID_SLAVE].role = Role.UNASSIGNED
+    assert setups_mod.current_name(doc, cfg) == "main"
+    assert setups_mod.current_name(doc, cfg, {TID_MASTER: 999}) is None, "another account"
 
 
 def test_loading_another_master_puts_every_role_in_place(cfg: AppConfig) -> None:
@@ -100,6 +125,44 @@ def test_who_loses_their_copies(cfg: AppConfig) -> None:
     assert setups_mod.losing(kept, cfg) == [], "same master, still a slave: copies stay"
     new_master = Setup(master=TID_THIRD, slaves=(TID_SLAVE,))
     assert setups_mod.losing(new_master, cfg) == [TID_SLAVE], "what it copied was the old one's"
+
+
+def test_a_change_of_account_loses_copies_as_a_change_of_terminal_does(cfg: AppConfig) -> None:
+    slave_moves = Setup(master=TID_MASTER, slaves=(TID_SLAVE,), accounts={TID_SLAVE: 555})
+    assert setups_mod.switches(slave_moves, setups_mod.logins_of(cfg)) == {TID_SLAVE: 555}
+    assert setups_mod.losing(slave_moves, cfg) == [TID_SLAVE], "made on the account it leaves"
+    master_moves = Setup(master=TID_MASTER, slaves=(TID_SLAVE,), accounts={TID_MASTER: 555})
+    assert setups_mod.losing(master_moves, cfg) == [TID_SLAVE], "copied from the account it leaves"
+    same = Setup(master=TID_MASTER, slaves=(TID_SLAVE,), accounts={TID_SLAVE: 222})
+    assert setups_mod.switches(same, setups_mod.logins_of(cfg)) == {}
+    assert setups_mod.losing(same, cfg) == []
+
+
+def test_terminals_left_out_stay_unassigned_until_they_are_logged_in(cfg: AppConfig) -> None:
+    setup = Setup(master=TID_MASTER, slaves=(TID_SLAVE, TID_THIRD), copying=True)
+    setups_mod.apply_roles(setup, cfg, leave_out=[TID_THIRD])
+    assert cfg.terminals[TID_THIRD].role is Role.UNASSIGNED
+    assert cfg.terminals[TID_SLAVE].role is Role.SLAVE
+    assert cfg.copying_enabled
+
+    setups_mod.apply_roles(setup, cfg, leave_out=[TID_MASTER])
+    assert set(roles(cfg).values()) == {Role.UNASSIGNED}, "no slave without its master"
+    assert not cfg.copying_enabled
+
+
+def test_an_account_the_terminal_does_not_have_cannot_be_loaded(
+    cfg: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        account_mod, "known_accounts", lambda tid: [Account(555, "A-Demo"), Account(666, "A-Demo")]
+    )
+    setup = Setup(master=TID_MASTER, accounts={TID_MASTER: 555, TID_SLAVE: 777})
+    assert setups_mod.problems(setup, cfg) == [], "a terminal it does not name is not switched"
+    assert setups_mod.find_account(cfg, TID_MASTER, 555) == Account(555, "A-Demo")
+    setup = Setup(master=TID_MASTER, accounts={TID_MASTER: 777})
+    assert setups_mod.problems(setup, cfg) == [
+        "Alpha Broker has no account 777 any more: log in to it once from MT5"
+    ]
 
 
 def test_a_setup_naming_a_terminal_that_cannot_connect_cannot_be_loaded(cfg: AppConfig) -> None:
@@ -163,6 +226,27 @@ def test_a_new_master_is_refused_until_the_slaves_copies_are_agreed_to(
     assert [o.slave_ticket for o in eng.orphans(TID_SLAVE)] == [900]
 
 
+def test_no_role_is_given_on_an_account_the_setup_does_not_name(
+    engine_cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(account_mod, "known_accounts", lambda tid: [Account(555, "A-Demo")])
+    eng = live_engine(engine_cfg, tmp_path)
+    setup = Setup(master=TID_MASTER, slaves=(TID_SLAVE2,), accounts={TID_SLAVE2: 555})
+
+    refusal = eng.load_setup(setup)
+    assert refusal is not None and "not logged into the setup's account" in refusal
+    assert eng.config.terminals[TID_SLAVE2].role is Role.UNASSIGNED
+
+    assert eng.load_setup(setup, leave_out=[TID_SLAVE2]) is None
+    assert eng.config.terminals[TID_SLAVE2].role is Role.UNASSIGNED, "left for the login"
+    assert eng.config.terminals[TID_SLAVE].role is Role.UNASSIGNED, "not in the setup"
+
+    eng.config.terminals[TID_SLAVE2].last_login = 555
+    assert eng.logins()[TID_SLAVE2] == 555
+    assert eng.load_setup(setup) is None
+    assert eng.config.terminals[TID_SLAVE2].role is Role.SLAVE
+
+
 def test_a_slave_kept_under_the_same_master_keeps_its_copies(
     engine_cfg: AppConfig, tmp_path: Path
 ) -> None:
@@ -219,7 +303,7 @@ async def test_loading_a_setup_asks_then_puts_its_roles_in_place(
         assert cfg.terminals[TID_THIRD].role is Role.MASTER
         assert cfg.terminals[TID_MASTER].role is Role.SLAVE
         assert cfg.terminals[TID_SLAVE].role is Role.UNASSIGNED
-        assert any("setup delta loaded" in t for t in toasts(app))
+        assert await toasted(pilot, "setup delta loaded"), toasts(app)
         assert app._engine.sync_calls  # type: ignore[attr-defined]
 
 
@@ -278,3 +362,71 @@ async def test_rename_and_delete(
         assert app._setups.setups == {}
         assert setups_mod.load(tmp_path / "setups.json") == SetupsDoc()
         assert cfg.terminals[TID_MASTER].role is Role.MASTER, "the roles in place stay"
+
+
+def fake_logins(
+    monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, int]], *, failing: int | None = None
+) -> None:
+    monkeypatch.setattr(
+        account_mod, "known_accounts", lambda tid: [Account(555, "X-Demo"), Account(666, "X-Demo")]
+    )
+
+    def log_in(exe: Path, acct: Account, log_file: Path) -> LoginResult:
+        calls.append((log_file.stem, acct.login))
+        if acct.login == failing:
+            return LoginResult(False, "login failed")
+        return LoginResult(True, "logged in", acct.login, acct.server)
+
+    monkeypatch.setattr(account_mod, "log_in", log_in)
+
+
+async def test_loading_a_setup_logs_a_terminal_into_its_account_first(
+    cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, int]] = []
+    fake_logins(monkeypatch, calls)
+    app = make_app(cfg, tmp_path, monkeypatch)
+    app._setups.setups["third"] = Setup(
+        master=TID_MASTER,
+        slaves=(TID_SLAVE, TID_THIRD),
+        accounts={TID_MASTER: 111, TID_SLAVE: 222, TID_THIRD: 555},
+    )
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.press("w", "enter")
+        await pilot.pause()
+        question = app.screen
+        assert isinstance(question, GuardConfirm)
+        assert "Delta Broker logs in to 555@X-Demo" in question._said
+        question.query_one("#go", Button).press()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert calls == [(f"login-{TID_THIRD[:8]}", 555)], "only the one on another account"
+        assert cfg.terminals[TID_THIRD].last_login == 555
+        assert cfg.terminals[TID_THIRD].role is Role.SLAVE
+        assert cfg.terminals[TID_SLAVE].role is Role.SLAVE
+        assert app._switching == set()
+        assert await toasted(pilot, "setup third loaded"), toasts(app)
+        assert setups_mod.current_name(app._setups, cfg, app._engine.logins()) == "third"
+
+
+async def test_a_terminal_that_cannot_log_in_is_left_unassigned(
+    cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, int]] = []
+    fake_logins(monkeypatch, calls, failing=555)
+    app = make_app(cfg, tmp_path, monkeypatch)
+    app._setups.setups["third"] = Setup(
+        master=TID_MASTER, slaves=(TID_SLAVE, TID_THIRD), accounts={TID_THIRD: 555}
+    )
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.press("w", "enter")
+        await pilot.pause()
+        app.screen.query_one("#go", Button).press()
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+
+        assert cfg.terminals[TID_THIRD].role is Role.UNASSIGNED
+        assert cfg.terminals[TID_THIRD].last_login == 444, "still on the account it was on"
+        assert cfg.terminals[TID_SLAVE].role is Role.SLAVE, "the rest is loaded"
+        assert await toasted(pilot, "Delta Broker was not logged in"), toasts(app)

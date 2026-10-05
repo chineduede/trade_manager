@@ -573,37 +573,49 @@ class CopierApp(App[None]):
 
     def load_setup(self, name: str, done: Callable[[], None] | None = None) -> None:
         """Load a saved setup in place of the roles now -- asking first, and if that strands
-        open copies, showing them as unassigning does (:meth:`action_unassign`)."""
+        open copies, showing them as unassigning does (:meth:`action_unassign`). A terminal on
+        another account than the one saved is logged into it first."""
         setup = self._setups.setups[name]
-        found = setups_mod.problems(setup, self._cfg)
+        logins = self._engine.logins()
+        found = setups_mod.problems(setup, self._cfg, logins)
         if found:
             self.notify(f"setup {name} cannot be loaded: {'; '.join(found)}", severity="error")
             return
-        busy = [
-            self._cfg.display_name(t) for t in (setup.master, *setup.slaves) if t in self._switching
-        ]
+        busy = [self._cfg.display_name(t) for t in setup.terminals if t in self._switching]
         if busy:
             self.notify(f"{', '.join(busy)} is logging in; wait for it to finish")
             return
-        now = setups_mod.capture(self._cfg)
-        if now is not None and now.same_roles(setup) and now.copying == setup.copying:
+        now = setups_mod.capture(self._cfg, logins)
+        if now is not None and setup.same_roles(now) and now.copying == setup.copying:
             self.notify(f"setup {name} is already in place")
             return
+        accounts: dict[str, account_mod.Account] = {}
+        for tid, login in setups_mod.switches(setup, logins).items():
+            account = setups_mod.find_account(self._cfg, tid, login)
+            assert not isinstance(account, str), "problems() has checked"
+            accounts[tid] = account
         # Unreadable reads as nothing to ask about; the engine reads again and refuses.
         stake = self._engine.setup_stake(setup) or {}
 
         def decided(agreed: bool | None) -> None:
             if agreed:
-                self._commit_setup(name, setup, stake)
+                self._commit_setup(name, setup, stake, accounts)
             if done is not None:
                 done()
 
         live = setup.copying and not self._cfg.dry_run
+        changes = describe(setup, self._cfg)
+        if accounts:
+            changes += "; " + ", ".join(
+                f"{self._cfg.display_name(tid)} logs in to "
+                f"{self._account_name(account_key(a.login, a.server) or '')}"
+                for tid, a in accounts.items()
+            )
         if stake:
             self.push_screen(
                 OrphanDialog(
                     copies=self._by_name(stake),
-                    changes=describe(setup, self._cfg),
+                    changes=changes,
                     live=not self._cfg.dry_run,
                     halt=self.action_panic,
                     loading=name,
@@ -611,19 +623,100 @@ class CopierApp(App[None]):
                 decided,
             )
             return
-        said = f"The roles become: {describe(setup, self._cfg)}."
+        said = f"The roles become: {changes}."
         if live:
             said += " Copying starts LIVE: orders will be sent to the slaves."
         self.push_screen(GuardConfirm(f"Load setup {name}?", said, "Load it"), decided)
 
     def _commit_setup(
-        self, name: str, setup: setups_mod.Setup, given_up: Mapping[str, Sequence[OpenCopy]]
+        self,
+        name: str,
+        setup: setups_mod.Setup,
+        given_up: Mapping[str, Sequence[OpenCopy]],
+        accounts: Mapping[str, account_mod.Account],
     ) -> None:
-        refusal = self._engine.load_setup(setup, orphan=self._agreed(given_up))
+        """Load the setup, leaving the terminals that have to log in unassigned; they are logged
+        in off the UI thread, and the setup loaded again once they are (:meth:`_setup_logged_in`).
+        """
+        refusal = self._engine.load_setup(
+            setup, orphan=self._agreed(given_up), leave_out=list(accounts)
+        )
         if refusal is not None:
             self.notify(f"setup {name} was not loaded: {refusal}", severity="error")
             return
         self._persist_and_sync()
+        if accounts:
+            self._switching.update(accounts)
+            self.notify(
+                f"setup {name}: logging "
+                + ", ".join(self._cfg.display_name(tid) for tid in accounts)
+                + " in first..."
+            )
+            self._setup_log_in_worker(name, setup, dict(accounts), given_up)
+            return
+        self._setup_loaded(name, setup, given_up)
+
+    @work(thread=True)
+    def _setup_log_in_worker(
+        self,
+        name: str,
+        setup: setups_mod.Setup,
+        accounts: dict[str, account_mod.Account],
+        given_up: Mapping[str, Sequence[OpenCopy]],
+    ) -> None:
+        """One terminal at a time: each login starts its terminal, and they need not compete."""
+        results: dict[str, account_mod.LoginResult] = {}
+        for tid, acct in accounts.items():
+            results[tid] = self._log_in(tid, acct)
+        self.call_from_thread(self._setup_logged_in, name, setup, accounts, results, given_up)
+
+    def _setup_logged_in(
+        self,
+        name: str,
+        setup: setups_mod.Setup,
+        accounts: Mapping[str, account_mod.Account],
+        results: Mapping[str, account_mod.LoginResult],
+        given_up: Mapping[str, Sequence[OpenCopy]],
+    ) -> None:
+        failed: list[str] = []
+        for tid, result in results.items():
+            self._switching.discard(tid)
+            acct = accounts[tid]
+            if result.ok:
+                self._record_login(tid, acct, result)
+                continue
+            failed.append(tid)
+            key = account_key(acct.login, acct.server) or ""
+            self.notify(
+                f"{self._cfg.display_name(tid)} was not logged in to {self._account_name(key)}: "
+                f"{result.said}. It is left unassigned",
+                severity="error",
+                timeout=15,
+            )
+        refusal = self._engine.load_setup(setup, leave_out=failed)
+        if refusal is not None:
+            self._persist_and_sync()
+            self.notify(
+                f"setup {name} was not loaded in full: {refusal}", severity="error", timeout=15
+            )
+            return
+        self._persist_and_sync()
+        if setup.master in failed:
+            self.notify(
+                f"setup {name} was not loaded: its master could not log in", severity="error"
+            )
+            return
+        self._setup_loaded(name, setup, given_up, partly=bool(failed))
+
+    def _setup_loaded(
+        self,
+        name: str,
+        setup: setups_mod.Setup,
+        given_up: Mapping[str, Sequence[OpenCopy]],
+        *,
+        partly: bool = False,
+    ) -> None:
+        name = f"{name} (all but what could not log in)" if partly else name
         if not setup.copying:
             self.notify(f"setup {name} loaded; copying is off")
         elif self._cfg.dry_run:
@@ -693,14 +786,28 @@ class CopierApp(App[None]):
 
     @work(thread=True)
     def _log_in_worker(self, tid: str, acct: account_mod.Account) -> None:
+        self.call_from_thread(self._logged_in, tid, acct, self._log_in(tid, acct))
+
+    def _log_in(self, tid: str, acct: account_mod.Account) -> account_mod.LoginResult:
+        """Log a terminal in to an account. Blocks: off the UI thread only."""
         exe = self._cfg.terminals[tid].exe_path
         assert exe is not None
         try:
-            result = account_mod.log_in(exe, acct, log_dir() / f"login-{tid[:8]}.log")
+            return account_mod.log_in(exe, acct, log_dir() / f"login-{tid[:8]}.log")
         except Exception as exc:
             log.exception("logging %s in to %s@%s failed", tid[:8], acct.login, acct.server)
-            result = account_mod.LoginResult(False, f"the login process failed: {exc!r}")
-        self.call_from_thread(self._logged_in, tid, acct, result)
+            return account_mod.LoginResult(False, f"the login process failed: {exc!r}")
+
+    def _record_login(
+        self, tid: str, acct: account_mod.Account, result: account_mod.LoginResult
+    ) -> None:
+        """Keep the account a login left the terminal on, as the one it was last on."""
+        tcfg = self._cfg.terminals[tid]
+        self._cfg.replace_terminal(
+            tcfg.model_copy(
+                update={"last_login": result.login, "last_server": result.server or acct.server}
+            )
+        )
 
     def _logged_in(
         self, tid: str, acct: account_mod.Account, result: account_mod.LoginResult
@@ -715,12 +822,7 @@ class CopierApp(App[None]):
                 timeout=15,
             )
             return
-        tcfg = self._cfg.terminals[tid]
-        self._cfg.replace_terminal(
-            tcfg.model_copy(
-                update={"last_login": result.login, "last_server": result.server or acct.server}
-            )
-        )
+        self._record_login(tid, acct, result)
         self._persist_and_sync()
         self.notify(f"{self._cfg.display_name(tid)} is logged in to {self._account_name(key)}")
 
@@ -1220,7 +1322,7 @@ class CopierApp(App[None]):
             right.append(Piece(doing, short=short))
         else:
             right.append(Piece(Text("Not copying", style=MUTED)))
-        setup = setups_mod.current_name(self._setups, self._cfg)
+        setup = setups_mod.current_name(self._setups, self._cfg, self._engine.logins())
         if setup is not None:
             right.append(Piece(Text(f"Setup {setup}", style=MUTED), drop=2))
         right.append(Piece(Text(time.strftime("%H:%M:%S"), style=MUTED), drop=1))

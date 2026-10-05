@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from rich.console import Console
+from textual.pilot import Pilot
 
 from mt5copier import setups as setups_mod
 from mt5copier.config import BREAKEVEN_FIELDS, AppConfig, Role, TerminalConfig, account_key
@@ -261,10 +262,17 @@ class StubEngine:
         role_actions.unassign(self._cfg, terminal_id)
         return None
 
+    def logins(self) -> dict[str, int | None]:
+        found = setups_mod.logins_of(self._cfg)
+        for tid, snap in self.snapshots.items():
+            if tid in found and snap.login is not None:
+                found[tid] = snap.login
+        return found
+
     def setup_stake(self, setup: Setup) -> dict[str, list[OpenCopy]] | None:
         """The real engine's rule: the slaves :func:`setups.losing` names stake their copies."""
         stake: dict[str, list[OpenCopy]] = {}
-        for tid in setups_mod.losing(setup, self._cfg):
+        for tid in setups_mod.losing(setup, self._cfg, self.logins()):
             held = self.open_copies(tid)
             if held is None:
                 return None
@@ -273,15 +281,22 @@ class StubEngine:
         return stake
 
     def load_setup(
-        self, setup: Setup, *, orphan: Mapping[str, Collection[int]] | None = None
+        self,
+        setup: Setup,
+        *,
+        orphan: Mapping[str, Collection[int]] | None = None,
+        leave_out: Collection[str] = (),
     ) -> str | None:
-        found = setups_mod.problems(setup, self._cfg)
+        logins = self.logins()
+        found = setups_mod.problems(setup, self._cfg, logins)
         if found:
             return "; ".join(found)
+        if set(setups_mod.switches(setup, logins)) - set(leave_out):
+            return "not logged into the setup's account"
         refusal = self._give_up(self.setup_stake(setup), orphan)
         if refusal is not None:
             return refusal
-        setups_mod.apply_roles(setup, self._cfg)
+        setups_mod.apply_roles(setup, self._cfg, leave_out)
         return None
 
 
@@ -399,6 +414,17 @@ def hold(app: CopierApp, *copies: OpenCopy, terminal_id: str = TID_SLAVE) -> Non
 
 def toasts(app: CopierApp) -> list[str]:
     return [n.message for n in app._notifications]
+
+
+async def toasted(pilot: Pilot[None], words: str, *, within_s: float = 1.0) -> bool:
+    """Whether a toast saying ``words`` shows within ``within_s``. ``notify`` posts a message,
+    so a toast raised by the last thing done can still be on its way after one pause."""
+    deadline = time.monotonic() + within_s
+    while not any(words in t for t in toasts(pilot.app)):  # type: ignore[arg-type]
+        if time.monotonic() > deadline:
+            return False
+        await pilot.pause(0.02)
+    return True
 
 
 def plain(renderable: object, width: int = 160) -> str:

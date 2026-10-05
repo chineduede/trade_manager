@@ -1,5 +1,5 @@
-"""The setups page: ``w``. Saved setups -- a master, its slaves and whether copying was on -- to
-save the one in place now as, and to load another in its place.
+"""The setups page: ``w``. Saved setups -- a master, its slaves, the account each is logged into
+and whether copying was on -- to save the one in place now as, and to load another in its place.
 
 What a setup holds, and what loading one does, are :mod:`mt5copier.setups`' and the engine's;
 loading goes through the app (:meth:`CopierApp.load_setup`), which asks first if it would
@@ -31,17 +31,25 @@ if TYPE_CHECKING:
     from .app import CopierApp
 
 ABOUT = (
-    "A setup is who copies from whom: the master, its slaves, and whether copying was on. Each "
-    "terminal keeps its own settings and each account its own guards, whichever setup is loaded."
+    "A setup is who copies from whom: the master, its slaves, the account each is logged into, "
+    "and whether copying was on. Loading one logs a terminal into its account if it is on "
+    "another. Each terminal keeps its own settings and each account its own guards, whichever "
+    "setup is loaded."
 )
 
 _COLUMNS = ("SETUP", "MASTER", "SLAVES", "COPYING")
 
 
+def on_account(setup: Setup, cfg: AppConfig, tid: str) -> str:
+    """A terminal's name, and the account the setup has it on if it keeps one."""
+    login = setup.accounts.get(tid)
+    return name_of(cfg, tid) + (f" · {login}" if login is not None else "")
+
+
 def slaves_cell(setup: Setup, cfg: AppConfig) -> str:
     if not setup.slaves:
         return "none"
-    return ", ".join(name_of(cfg, tid) for tid in setup.slaves)
+    return ", ".join(on_account(setup, cfg, tid) for tid in setup.slaves)
 
 
 def setup_cells(name: str, setup: Setup, cfg: AppConfig, *, current: bool) -> list[Text]:
@@ -50,7 +58,7 @@ def setup_cells(name: str, setup: Setup, cfg: AppConfig, *, current: bool) -> li
     copying = Text("on", style=GREEN) if setup.copying else Text("off", style=MUTED)
     return [
         title,
-        Text(name_of(cfg, setup.master)),
+        Text(on_account(setup, cfg, setup.master)),
         Text(slaves_cell(setup, cfg)),
         copying,
     ]
@@ -59,7 +67,7 @@ def setup_cells(name: str, setup: Setup, cfg: AppConfig, *, current: bool) -> li
 def describe(setup: Setup, cfg: AppConfig) -> str:
     """The roles a setup puts in place, as the change a confirmation names."""
     n = len(setup.slaves)
-    said = f"master {name_of(cfg, setup.master)}, "
+    said = f"master {on_account(setup, cfg, setup.master)}, "
     said += f"{n} slave{'' if n == 1 else 's'}" + (f" ({slaves_cell(setup, cfg)})" if n else "")
     said += ", copying " + ("on" if setup.copying else "off")
     return said
@@ -142,7 +150,8 @@ class SetupsScreen(Screen[None]):
         cfg = app._cfg
         doc = app._setups
         self.query_one("#topbar", TopBar).update(app.topbar(crumb="setups"))
-        current = current_name(doc, cfg)
+        logins = app._engine.logins()
+        current = current_name(doc, cfg, logins)
 
         band = Text(spaced("setups"), style="bold")
         self.query_one("#st-band", Static).update(
@@ -150,7 +159,7 @@ class SetupsScreen(Screen[None]):
         )
 
         now = Text("Now  ", style=MUTED)
-        live = capture(cfg)
+        live = capture(cfg, logins)
         if live is None:
             now.append("no master assigned", style=YELLOW)
         else:
@@ -210,14 +219,14 @@ class SetupsScreen(Screen[None]):
         setup = self.copier._setups.setups[name]
         line = Text(f"{name}: ", style=f"bold {FG}")
         line.append(f"saved {saved_when(setup.saved_at)}", style=MUTED)
-        for problem in problems(setup, self.copier._cfg):
+        for problem in problems(setup, self.copier._cfg, self.copier._engine.logins()):
             line.append(f"\ncannot load: {problem}", style=RED)
         said.update(line)
 
     # --- writing -------------------------------------------------------------------------
 
     def _now_or_say(self) -> Setup | None:
-        live = capture(self.copier._cfg)
+        live = capture(self.copier._cfg, self.copier._engine.logins())
         if live is None:
             self.notify("no master is assigned: assign one (m) before saving a setup")
         return live
