@@ -38,6 +38,7 @@ from textual.widgets import ContentSwitcher, DataTable, Input, Static
 
 from .. import config as config_mod
 from .. import role_actions
+from .. import setups as setups_mod
 from ..config import AppConfig, Role, TerminalConfig
 from ..day_book import MasterEvent, Outcome, SlaveOutcome, describe_master, describe_outcome
 from ..discovery import discover_terminals
@@ -57,7 +58,7 @@ from ..log_entries import (
     terminal_names,
 )
 from ..logging_setup import get_logger
-from ..paths import config_path, guards_path, log_dir
+from ..paths import config_path, guards_path, log_dir, setups_path
 from ..presentation import RowInfo, read_log_tail, row_info
 from ..protocol import WorkerState
 from ..reconcile import OpenCopy
@@ -72,10 +73,11 @@ from . import cards
 from .detail import DetailScreen
 from .dialogs import LiveDialog, OrphanDialog
 from .general import GeneralForm
-from .guards import GuardsScreen
+from .guards import GuardConfirm, GuardsScreen
 from .history import HistoryScreen
 from .menu import ActionMenu, terminal_actions
 from .settings import SettingsForm
+from .setups import SetupsScreen, describe
 from .style import (
     BG,
     BLUE,
@@ -140,6 +142,7 @@ class CopierApp(App[None]):
         Binding("p", "toggle_pause", "Pause/resume slave", show=False),
         Binding("k", "guards", "Guards (prop-firm rules)", show=False),
         Binding("h", "history", "Trade history", show=False),
+        Binding("w", "setups", "Saved setups", show=False),
         Binding("tab", "next_page", "Map / Log", show=False, priority=True),
         Binding("shift+tab", "next_page", "Map / Log", show=False, priority=True),
         Binding("left", "step(-1)", "Previous card", show=False),
@@ -155,11 +158,18 @@ class CopierApp(App[None]):
         *(Binding(str(n), f"jump({n})", f"Slave {n}", show=False) for n in range(1, 10)),
     ]
 
-    def __init__(self, cfg: AppConfig, guards: GuardsDoc | None = None) -> None:
+    def __init__(
+        self,
+        cfg: AppConfig,
+        guards: GuardsDoc | None = None,
+        setups: setups_mod.SetupsDoc | None = None,
+    ) -> None:
         super().__init__()
         self._cfg = cfg
         self._guards = guards if guards is not None else GuardsDoc()
         """Every account's guard rules: edited by the guards page, read by the engine."""
+        self._setups = setups if setups is not None else setups_mod.SetupsDoc()
+        """The saved setups: edited and loaded from the setups page."""
         self._engine = Engine(cfg, guards=self._guards)
         self._page = "map"
         self._sel: str | None = None
@@ -535,6 +545,80 @@ class CopierApp(App[None]):
             self.notify("History is kept per slave: what was done with each trade copied to it.")
             return
         self.push_screen(HistoryScreen(tid))
+
+    def action_setups(self) -> None:
+        """Open the saved setups: a master and its slaves, to save or load."""
+        self.push_screen(SetupsScreen())
+
+    def save_setups(self) -> bool:
+        """Write the setups file. False if it could not be written, which is said; the change
+        then holds until the copier closes."""
+        try:
+            setups_mod.save(self._setups, setups_path())
+        except OSError as exc:
+            self.notify(f"could not save the setups: {exc}", severity="error", timeout=8)
+            log.exception("setups save failed")
+            return False
+        return True
+
+    def load_setup(self, name: str, done: Callable[[], None] | None = None) -> None:
+        """Load a saved setup in place of the roles now -- asking first, and if that strands
+        open copies, showing them as unassigning does (:meth:`action_unassign`)."""
+        setup = self._setups.setups[name]
+        found = setups_mod.problems(setup, self._cfg)
+        if found:
+            self.notify(f"setup {name} cannot be loaded: {'; '.join(found)}", severity="error")
+            return
+        now = setups_mod.capture(self._cfg)
+        if now is not None and now.same_roles(setup) and now.copying == setup.copying:
+            self.notify(f"setup {name} is already in place")
+            return
+        # Unreadable reads as nothing to ask about; the engine reads again and refuses.
+        stake = self._engine.setup_stake(setup) or {}
+
+        def decided(agreed: bool | None) -> None:
+            if agreed:
+                self._commit_setup(name, setup, stake)
+            if done is not None:
+                done()
+
+        live = setup.copying and not self._cfg.dry_run
+        if stake:
+            self.push_screen(
+                OrphanDialog(
+                    copies=self._by_name(stake),
+                    changes=describe(setup, self._cfg),
+                    live=not self._cfg.dry_run,
+                    halt=self.action_panic,
+                    loading=name,
+                ),
+                decided,
+            )
+            return
+        said = f"The roles become: {describe(setup, self._cfg)}."
+        if live:
+            said += " Copying starts LIVE: orders will be sent to the slaves."
+        self.push_screen(GuardConfirm(f"Load setup {name}?", said, "Load it"), decided)
+
+    def _commit_setup(
+        self, name: str, setup: setups_mod.Setup, given_up: Mapping[str, Sequence[OpenCopy]]
+    ) -> None:
+        refusal = self._engine.load_setup(setup, orphan=self._agreed(given_up))
+        if refusal is not None:
+            self.notify(f"setup {name} was not loaded: {refusal}", severity="error")
+            return
+        self._persist_and_sync()
+        if not setup.copying:
+            self.notify(f"setup {name} loaded; copying is off")
+        elif self._cfg.dry_run:
+            self.notify(f"setup {name} loaded; detection on: dry run, nothing will be sent")
+        else:
+            self.notify(
+                f"setup {name} loaded. COPYING LIVE: orders will be sent to every connected slave",
+                severity="warning",
+                timeout=10,
+            )
+        self._report_given_up(given_up)
 
     def save_guards(self, key: str, guards: AccountGuards) -> bool:
         """Put one account's guards in place and write the file. False if it could not be
@@ -1032,6 +1116,9 @@ class CopierApp(App[None]):
             right.append(Piece(doing, short=short))
         else:
             right.append(Piece(Text("Not copying", style=MUTED)))
+        setup = setups_mod.current_name(self._setups, self._cfg)
+        if setup is not None:
+            right.append(Piece(Text(f"Setup {setup}", style=MUTED), drop=2))
         right.append(Piece(Text(time.strftime("%H:%M:%S"), style=MUTED), drop=1))
         right.append(Piece(badge("DRY RUN", YELLOW) if self._cfg.dry_run else badge("LIVE", RED)))
         return Fitted(left, right, joiner="   ")
@@ -1093,6 +1180,7 @@ class CopierApp(App[None]):
             keys.append(
                 Piece(key_hint("g", "copier settings"), drop=6, short=key_hint("g", "settings"))
             )
+            keys.append(Piece(key_hint("w", "setups"), drop=7))
         else:
             keys.append(Piece(key_hint("↑↓", "line"), drop=7))
             problems = "everything" if self._log_problems else "problems only"
@@ -1541,10 +1629,11 @@ def run() -> None:
     """Entry point: load config, fold in a discovery sweep, then hand over to the UI."""
     cfg = config_mod.load()
     guards = guards_mod.load(guards_path())
+    saved = setups_mod.load(setups_path())
     try:
         config_mod.merge_discovery(cfg, discover_terminals())
         config_mod.save(cfg)
     except Exception:
         log.exception("initial discovery failed; starting with saved config only")
     log.info("config at %s", config_path())
-    CopierApp(cfg, guards).run()
+    CopierApp(cfg, guards, saved).run()

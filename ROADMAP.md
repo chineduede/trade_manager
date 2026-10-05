@@ -1552,6 +1552,25 @@ are the design, not a limitation waiting to be lifted.
     those.
   - *Demo check:* copy a trade, partially close it, move its stop, let it reach breakeven, close
     it; see one card with each step once; restart and see it still there.
+- **Saved setups — asked for 2026-10-05 ahead of the demo checks above, built the same day on
+  `setups` (off `guards-enforce`), awaiting its demo check.** Save the copier's state under a
+  name and load another in its place. The user's decisions:
+  - **Roles only**: a setup is the master, its slaves and whether copying was on. Each
+    terminal's settings stay with the terminal, each account's guards with the account.
+  - **Open copies: ask, then give them up**, as unassigning does. A slave taken off its master,
+    or left on while the master changes, has its copies listed and orphaned on agreement; one
+    kept under the same master keeps them, still managed.
+  - **Copying comes back as it was saved**: a setup saved copying loads copying (live, if the
+    copier is live — the confirmation says so).
+  - **Its own page on `w`**: `a` save the roles in place now as a new setup, enter load, `u`
+    update the selected one with the roles now, `n` rename, `x` delete. The setup whose roles
+    are in place is marked ● and named in the top bar.
+  - `setups.py`, `setups.json` (apart from `config.json`, as the guards are). Keyed by
+    `terminal_id`. A setup naming a terminal that is gone or has no executable says so and
+    does not load. Loading is `Engine.load_setup`: check, give up, set roles under one lock.
+    A slave that stays a slave stays paused if it was.
+  - *Demo check:* save the current roles; assign a different master and slaves; load the saved
+    one back, with and without a copy open on a slave (the copy is listed, then orphaned).
 
 ---
 

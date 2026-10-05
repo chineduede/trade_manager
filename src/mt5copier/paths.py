@@ -74,6 +74,12 @@ def guards_path() -> Path:
     return user_data_dir() / "guards.json"
 
 
+def setups_path() -> Path:
+    """The person's saved setups: which terminal is the master, which are slaves, and whether
+    copying was on. Apart from ``config.json``, as the guards are."""
+    return user_data_dir() / "setups.json"
+
+
 def guard_state_path() -> Path:
     """What the guards have recorded from earlier snapshots, such as the equity at a reset."""
     return user_data_dir() / "guard_state.json"

@@ -367,6 +367,74 @@ ActionMenu OptionList:focus > .option-list--option-highlighted {
     height: auto;
 }
 
+/* --- saved setups ------------------------------------------------------------------------ */
+
+#st-page {
+    padding-top: 1;
+    scrollbar-size-vertical: 1;
+}
+
+#st-band {
+    background: $foreground;
+    color: $background;
+    padding: 1 2;
+    height: auto;
+}
+
+#st-note, #st-now, #st-empty, #st-said {
+    height: auto;
+    margin-top: 1;
+}
+
+#st-head {
+    margin-top: 2;
+}
+
+#st-table {
+    background: $background;
+    border: none;
+    height: auto;
+}
+
+#st-table:focus {
+    background-tint: $foreground 0%;
+}
+
+#st-table > .datatable--header {
+    background: $background;
+}
+
+#st-table > .datatable--cursor {
+    background: $foreground 18%;
+}
+
+#st-table > .datatable--hover {
+    background: $foreground 10%;
+}
+
+#st-ask {
+    display: none;
+    height: 1;
+    margin-top: 1;
+}
+
+#st-ask-what, #st-ask .w {
+    width: auto;
+}
+
+#st-ask-box {
+    width: 32;
+}
+
+#st-ask-box:focus {
+    background: $foreground 30%;
+}
+
+#st-ask-error {
+    display: none;
+    height: auto;
+}
+
 /* --- a slave's trade history -------------------------------------------------------------- */
 
 #hs-page {

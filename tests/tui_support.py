@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
+from mt5copier import setups as setups_mod
 from mt5copier.config import BREAKEVEN_FIELDS, AppConfig, Role, TerminalConfig, account_key
 from mt5copier.copy_stats import TerminalStats
 from mt5copier.day_book import MasterEvent
@@ -30,6 +31,7 @@ from mt5copier.protocol import (
 )
 from mt5copier.reconcile import OpenCopy
 from mt5copier.settings_edit import copies_word
+from mt5copier.setups import Setup
 from mt5copier.store import Orphan
 from mt5copier.tui import CopierApp
 
@@ -259,6 +261,29 @@ class StubEngine:
         role_actions.unassign(self._cfg, terminal_id)
         return None
 
+    def setup_stake(self, setup: Setup) -> dict[str, list[OpenCopy]] | None:
+        """The real engine's rule: the slaves :func:`setups.losing` names stake their copies."""
+        stake: dict[str, list[OpenCopy]] = {}
+        for tid in setups_mod.losing(setup, self._cfg):
+            held = self.open_copies(tid)
+            if held is None:
+                return None
+            if held:
+                stake[tid] = held
+        return stake
+
+    def load_setup(
+        self, setup: Setup, *, orphan: Mapping[str, Collection[int]] | None = None
+    ) -> str | None:
+        found = setups_mod.problems(setup, self._cfg)
+        if found:
+            return "; ".join(found)
+        refusal = self._give_up(self.setup_stake(setup), orphan)
+        if refusal is not None:
+            return refusal
+        setups_mod.apply_roles(setup, self._cfg)
+        return None
+
 
 def make_cfg(tmp_path: Path) -> AppConfig:
     exe = tmp_path / "terminal64.exe"
@@ -286,6 +311,7 @@ def make_app(cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr("mt5copier.config.config_path", lambda: saved)
     monkeypatch.setattr("mt5copier.tui.app.config_path", lambda: saved)
     monkeypatch.setattr("mt5copier.tui.app.guards_path", lambda: tmp_path / "guards.json")
+    monkeypatch.setattr("mt5copier.tui.app.setups_path", lambda: tmp_path / "setups.json")
     instance = CopierApp(cfg)
     instance._saved_to = saved  # type: ignore[attr-defined]
     return instance

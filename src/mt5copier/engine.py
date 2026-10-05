@@ -25,6 +25,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import role_actions
+from . import setups as setups_mod
 from .breakeven import breakeven_level, buffer_distance, check_breakeven_price
 from .config import (
     BREAKEVEN_FIELDS,
@@ -55,6 +56,7 @@ from .protocol import (
 )
 from .reconcile import Action, CopiedPosition, CopyLedger, GuardGate, OpenCopy, SlaveLink
 from .settings_edit import copies_word
+from .setups import Setup
 from .sizing import risk_budget
 from .store import MappingStore, Orphan, find_missing, find_missing_orders, find_orphans
 from .worker import run_worker
@@ -1526,6 +1528,45 @@ class Engine:
             if refusal is not None:
                 return refusal
             role_actions.unassign(self._cfg, terminal_id)
+        return None
+
+    def setup_stake(self, setup: Setup) -> dict[str, list[OpenCopy]] | None:
+        """The open copies loading this setup would give up, by slave, or None if any of them
+        cannot be read. An empty dict means there is nothing to ask."""
+        with self._lock:
+            return self._setup_stake(setup)
+
+    def _setup_stake(self, setup: Setup) -> dict[str, list[OpenCopy]] | None:
+        """Caller must hold the lock."""
+        stake: dict[str, list[OpenCopy]] = {}
+        for tid in setups_mod.losing(setup, self._cfg):
+            held = self._open_copies(tid)
+            if held is None:
+                return None
+            if held:
+                stake[tid] = held
+        return stake
+
+    def load_setup(
+        self, setup: Setup, *, orphan: Mapping[str, Collection[int]] | None = None
+    ) -> str | None:
+        """Put a saved setup's roles in place, and copying on or off as it was saved. None means
+        done; otherwise why not, with nothing changed.
+
+        The same rule as :meth:`unassign`, for the same reason: a slave taken off its master --
+        or left on while the master changes under it -- has its copies given up, and only if the
+        person agreed to exactly those. One that keeps its master keeps its copies.
+
+        The caller still has to save the config and :meth:`sync`.
+        """
+        with self._lock:
+            found = setups_mod.problems(setup, self._cfg)
+            if found:
+                return "; ".join(found)
+            refusal = self._give_up_agreed(self._setup_stake(setup), orphan)
+            if refusal is not None:
+                return refusal
+            setups_mod.apply_roles(setup, self._cfg)
         return None
 
     def _give_up_copies(self, terminal_id: str) -> None:
