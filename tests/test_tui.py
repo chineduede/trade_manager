@@ -508,7 +508,7 @@ def test_menu_offers_an_unassigned_terminal_only_the_role_it_can_take() -> None:
 
     cfg = TerminalConfig(terminal_id=TID_SLAVE, exe_path=Path("t.exe"))
     keys = [i.key for i in terminal_actions(cfg, has_master=False, orphans_waiting=False)]
-    assert keys == ["m", "enter", "e"]
+    assert keys == ["m", "i", "enter", "e"]
     keys = [i.key for i in terminal_actions(cfg, has_master=True, orphans_waiting=False)]
     assert keys[0] == "s"
     uninstalled = TerminalConfig(terminal_id=TID_SLAVE)

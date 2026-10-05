@@ -36,10 +36,11 @@ from textual.geometry import Region
 from textual.widget import Widget
 from textual.widgets import ContentSwitcher, DataTable, Input, Static
 
+from .. import account_switch as account_mod
 from .. import config as config_mod
 from .. import role_actions
 from .. import setups as setups_mod
-from ..config import AppConfig, Role, TerminalConfig
+from ..config import AppConfig, Role, TerminalConfig, account_key
 from ..day_book import MasterEvent, Outcome, SlaveOutcome, describe_master, describe_outcome
 from ..discovery import discover_terminals
 from ..engine import Engine, TerminalView
@@ -73,7 +74,7 @@ from . import cards
 from .detail import DetailScreen
 from .dialogs import LiveDialog, OrphanDialog
 from .general import GeneralForm
-from .guards import GuardConfirm, GuardsScreen
+from .guards import GuardConfirm, GuardPick, GuardsScreen
 from .history import HistoryScreen
 from .menu import ActionMenu, terminal_actions
 from .settings import SettingsForm
@@ -143,6 +144,7 @@ class CopierApp(App[None]):
         Binding("k", "guards", "Guards (prop-firm rules)", show=False),
         Binding("h", "history", "Trade history", show=False),
         Binding("w", "setups", "Saved setups", show=False),
+        Binding("i", "switch_account", "Log in to another account", show=False),
         Binding("tab", "next_page", "Map / Log", show=False, priority=True),
         Binding("shift+tab", "next_page", "Map / Log", show=False, priority=True),
         Binding("left", "step(-1)", "Previous card", show=False),
@@ -170,6 +172,8 @@ class CopierApp(App[None]):
         """Every account's guard rules: edited by the guards page, read by the engine."""
         self._setups = setups if setups is not None else setups_mod.SetupsDoc()
         """The saved setups: edited and loaded from the setups page."""
+        self._switching: set[str] = set()
+        """Terminals being logged into another account: no role is given them until it ends."""
         self._engine = Engine(cfg, guards=self._guards)
         self._page = "map"
         self._sel: str | None = None
@@ -429,6 +433,9 @@ class CopierApp(App[None]):
         tid = self._selected_id()
         if tid is None:
             return
+        if tid in self._switching:
+            self.notify(f"{self._cfg.display_name(tid)} is logging in; wait for it to finish")
+            return
         refusal = role_actions.set_master(self._cfg, tid)
         if refusal is not None:
             self.notify(refusal, severity="error")
@@ -446,6 +453,9 @@ class CopierApp(App[None]):
     def action_set_slave(self) -> None:
         tid = self._selected_id()
         if tid is None:
+            return
+        if tid in self._switching:
+            self.notify(f"{self._cfg.display_name(tid)} is logging in; wait for it to finish")
             return
         refusal = role_actions.set_slave(self._cfg, tid)
         if refusal is not None:
@@ -569,6 +579,12 @@ class CopierApp(App[None]):
         if found:
             self.notify(f"setup {name} cannot be loaded: {'; '.join(found)}", severity="error")
             return
+        busy = [
+            self._cfg.display_name(t) for t in (setup.master, *setup.slaves) if t in self._switching
+        ]
+        if busy:
+            self.notify(f"{', '.join(busy)} is logging in; wait for it to finish")
+            return
         now = setups_mod.capture(self._cfg)
         if now is not None and now.same_roles(setup) and now.copying == setup.copying:
             self.notify(f"setup {name} is already in place")
@@ -619,6 +635,94 @@ class CopierApp(App[None]):
                 timeout=10,
             )
         self._report_given_up(given_up)
+
+    def action_switch_account(self) -> None:
+        """Log the selected terminal into another of its accounts, picked from those that have
+        connected in it. Only while it is unassigned: see :mod:`mt5copier.account_switch`."""
+        tid = self._selected_id()
+        if tid is None:
+            return
+        tcfg = self._cfg.terminals[tid]
+        name = self._cfg.display_name(tid)
+        if tcfg.role is not Role.UNASSIGNED:
+            self.notify(
+                f"unassign {name} first: its copies were made on the account it is logged into, "
+                "and unassigning asks about them",
+                severity="warning",
+                timeout=8,
+            )
+            return
+        if tcfg.exe_path is None:
+            self.notify(f"{name} has no terminal executable", severity="error")
+            return
+        if tid in self._switching:
+            self.notify(f"{name} is already logging in")
+            return
+        accounts = account_mod.known_accounts(tid)
+        if not accounts:
+            self.notify(
+                f"no accounts found for {name}: log in to one from MT5 first", severity="warning"
+            )
+            return
+        now = account_key(tcfg.last_login, tcfg.last_server)
+        options: list[tuple[str, str]] = []
+        for acct in accounts:
+            key = account_key(acct.login, acct.server) or ""
+            called = self._cfg.account_names.get(key)
+            words = f"{called} · {key}" if called else key
+            if key == now:
+                words += "  (logged in now)"
+            options.append((key, words))
+
+        def picked(key: str | None) -> None:
+            if key is None:
+                return
+            if key == now:
+                self.notify(f"{name} is already logged in to {key}")
+                return
+            acct = next(a for a in accounts if account_key(a.login, a.server) == key)
+            self._switching.add(tid)
+            self.notify(f"{name}: logging in to {self._account_name(key)}...")
+            self._log_in_worker(tid, acct)
+
+        self.push_screen(GuardPick(f"LOG {name.upper()} IN TO", options), picked)
+
+    def _account_name(self, key: str) -> str:
+        called = self._cfg.account_names.get(key)
+        return f"{called} ({key})" if called else key
+
+    @work(thread=True)
+    def _log_in_worker(self, tid: str, acct: account_mod.Account) -> None:
+        exe = self._cfg.terminals[tid].exe_path
+        assert exe is not None
+        try:
+            result = account_mod.log_in(exe, acct, log_dir() / f"login-{tid[:8]}.log")
+        except Exception as exc:
+            log.exception("logging %s in to %s@%s failed", tid[:8], acct.login, acct.server)
+            result = account_mod.LoginResult(False, f"the login process failed: {exc!r}")
+        self.call_from_thread(self._logged_in, tid, acct, result)
+
+    def _logged_in(
+        self, tid: str, acct: account_mod.Account, result: account_mod.LoginResult
+    ) -> None:
+        self._switching.discard(tid)
+        name = self._cfg.display_name(tid)
+        key = account_key(acct.login, acct.server) or ""
+        if not result.ok:
+            self.notify(
+                f"{name} was not logged in to {self._account_name(key)}: {result.said}",
+                severity="error",
+                timeout=15,
+            )
+            return
+        tcfg = self._cfg.terminals[tid]
+        self._cfg.replace_terminal(
+            tcfg.model_copy(
+                update={"last_login": result.login, "last_server": result.server or acct.server}
+            )
+        )
+        self._persist_and_sync()
+        self.notify(f"{self._cfg.display_name(tid)} is logged in to {self._account_name(key)}")
 
     def save_guards(self, key: str, guards: AccountGuards) -> bool:
         """Put one account's guards in place and write the file. False if it could not be

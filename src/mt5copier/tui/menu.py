@@ -57,6 +57,8 @@ def terminal_actions(
             items.append(MenuItem("s", "make it a slave", "set_slave"))
         else:
             items.append(MenuItem("m", "make it the master", "set_master"))
+        if cfg.exe_path is not None:
+            items.append(MenuItem("i", "log in to another account", "switch_account"))
         items.append(MenuItem("enter", "details", "open_terminal"))
         items.append(MenuItem("e", "settings", "edit_settings"))
         return items

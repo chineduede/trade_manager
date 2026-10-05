@@ -1571,6 +1571,35 @@ are the design, not a limitation waiting to be lifted.
     A slave that stays a slave stays paused if it was.
   - *Demo check:* save the current roles; assign a different master and slaves; load the saved
     one back, with and without a copy open on a slave (the copy is listed, then orphaned).
+- **Logging a terminal into another of its accounts — asked for 2026-10-05, built the same day
+  on `account-switch` (off `setups`), awaiting its demo check.** A terminal can hold several
+  accounts; the person names them (account names, already in the settings form) and picks one.
+  A fuller design — switching under a role, asking about copies, setups remembering accounts —
+  was scoped and **dropped by the user for the simple version**:
+  - **Only an unassigned terminal is switched.** On one with a role, `i` says to unassign it
+    first; unassigning already asks about its copies, so switching never strands any.
+  - `i` (map, and the actions menu of an installed unassigned terminal) lists the accounts that
+    have connected in that terminal, read from disk without connecting
+    (`bases/<server>/trades/<login>`), with their names and the one logged in now marked.
+  - The login runs in a process of its own (`account_switch.py`): connect, `mt5.login(login,
+    server=...)` **with no password**, so MT5 uses the one saved in the terminal; read the
+    account back; disconnect, leaving the terminal running. A refused login says to save the
+    password from MT5. No role can be given the terminal, nor a setup loaded onto it, while it
+    logs in.
+  - *Demo check:* on an unassigned terminal with two saved accounts, `i` and pick the other;
+    MT5 shows it logged in, the card shows its name; assign it and see it copy. Also: an
+    account whose password is not saved fails with the message; rescan (`r`) afterwards keeps
+    the new account (it reads `common.ini`, which MT5 may only write on exit — unverified).
+- **Not handled: an account switched by hand in MT5 while the terminal has a role — noted
+  2026-10-05, nothing built.** If a slave is switched to another account inside MT5 while
+  the copier is connected, nothing notices: its copies are filed by terminal, not account, so
+  the copier goes on believing in tickets the new account does not hold — what it then does
+  with them (treat them as gone, try to close or re-copy) has not been traced. A master switched
+  the same way would look to the slaves like every master trade closing and new ones opening.
+  Guards are unaffected (they follow the account the snapshot reports). The fix, if it is ever
+  wanted: when a terminal's snapshot reports a login other than the one its copies were made
+  on, hold it and say so, as an untracked-position hold does. Until then: switch accounts with
+  `i`, on an unassigned terminal.
 
 ---
 
