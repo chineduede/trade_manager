@@ -42,6 +42,7 @@ from .day_book import DayBook, MasterEvent, Outcome, SlaveOutcome
 from .guards import NO_VERDICT, GuardBook, GuardReport, GuardsDoc, Verdict
 from .history import HistoryStore, Trade, step_for
 from .logging_setup import get_logger
+from .news import NewsCalendar
 from .paths import dryrun_store_path, history_db_path, log_dir, mapping_db_path
 from .protocol import (
     COPIER_MAGIC,
@@ -170,6 +171,7 @@ class Engine:
         guards: GuardsDoc | None = None,
         guard_state_path: Path | None = None,
         history_path: Path | None = None,
+        calendar: NewsCalendar | None = None,
     ) -> None:
         # Windows only offers the spawn start method; request it explicitly so behaviour is
         # identical if this ever runs on Linux for testing.
@@ -228,7 +230,11 @@ class Engine:
         """Every step taken with each trade on each slave, kept for days. Fed by the day book
         as each outcome settles; display only."""
         self._day.listener = self._on_step
-        self._guards = GuardBook(guards if guards is not None else GuardsDoc(), guard_state_path)
+        self._calendar = calendar if calendar is not None else NewsCalendar()
+        """The news calendar: fetched on its own thread, and only once a news rule asks."""
+        self._guards = GuardBook(
+            guards if guards is not None else GuardsDoc(), guard_state_path, self._calendar
+        )
         """Each account's prop-firm rules and how they stand."""
         self._verdicts: dict[str, Verdict] = {}
         """Per slave: what its guards said on its latest snapshot. Read when the master's tick
@@ -252,6 +258,7 @@ class Engine:
                 target=self._drain_loop, name="engine-drain", daemon=True
             )
             self._drain_thread.start()
+        self._calendar.start()
         self.sync()
 
     def stop(self) -> None:
@@ -265,6 +272,7 @@ class Engine:
         for tid in terminal_ids:
             self._stop_worker(tid, close_terminal=True)
         self._stop_drain.set()
+        self._calendar.stop()
         thread = self._drain_thread
         if thread is not None:
             thread.join(timeout=2.0)
@@ -1048,6 +1056,11 @@ class Engine:
                 log.info("guards: %s takes new trades again (was: %s)", name, before.hold)
             else:
                 log.warning("guards: %s takes no new trades: %s", name, verdict.hold)
+        if verdict.news != before.news:
+            if verdict.news:
+                log.warning("guards: %s: %s", name, verdict.news_why)
+            else:
+                log.info("guards: %s: the news is over; new trades are copied again", name)
         for rule_id, line in zip(verdict.warned_by, verdict.warnings, strict=True):
             if rule_id not in before.warned_by:
                 log.warning("guards: %s: %s", name, line)
@@ -1064,6 +1077,7 @@ class Engine:
             hold=bool(verdict.held_back),
             needs_stop=verdict.stop_required is not None,
             over_risk=over,
+            news=verdict.news,
         )
 
     def clear_guard_latch(self, terminal_id: str, rule_id: str) -> bool:

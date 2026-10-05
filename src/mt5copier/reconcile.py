@@ -47,6 +47,7 @@ from typing import Any, Protocol
 
 from .config import NoStopPolicy, TerminalConfig
 from .logging_setup import get_logger
+from .news import symbol_currencies
 from .protocol import (
     ActionKind,
     OrderResult,
@@ -91,6 +92,7 @@ class SkipReason(StrEnum):
     GUARD_HOLDS = "a guard is holding this slave back: it takes no new trades"
     GUARD_NEEDS_STOP = "a guard requires a stop loss, and this trade has none"
     GUARD_RISK = "this slave risks more on a trade than a guard allows"
+    GUARD_NEWS = "a guard takes no new trades in this symbol around high-impact news"
     BREAKEVEN_HOLDS = (
         "the copy is at breakeven, so its stop only tightens; a looser one is not copied"
     )
@@ -348,15 +350,30 @@ class GuardGate:
     """Refuse a new trade sized from its stop: the slave's risk budget, the same for every such
     trade, is over what a guard allows. A trade sized as a multiple of the master's lots has no
     known risk, so this cannot apply to it."""
+    news: frozenset[str] = frozenset()
+    """Refuse a new trade in a symbol that trades one of these currencies -- news is on for
+    them. ``"*"`` refuses every new trade. A symbol whose currencies cannot be read from its
+    name is refused while any news is on."""
+
+
+def _news_hits(news: frozenset[str], symbol: str) -> bool:
+    if not news:
+        return False
+    if "*" in news:
+        return True
+    currencies = symbol_currencies(symbol)
+    return currencies is None or bool(currencies & news)
 
 
 def _guard_reason(
-    gate: GuardGate | None, slave_sl: float, sizing: _SizingChoice
+    gate: GuardGate | None, slave_sl: float, sizing: _SizingChoice, symbol: str
 ) -> SkipReason | None:
     if gate is None:
         return None
     if gate.hold:
         return SkipReason.GUARD_HOLDS
+    if _news_hits(gate.news, symbol):
+        return SkipReason.GUARD_NEWS
     if gate.needs_stop and slave_sl == 0.0:
         return SkipReason.GUARD_NEEDS_STOP
     if gate.over_risk and sizing.basis is SizingBasis.RISK_FROM_STOP:
@@ -517,7 +534,7 @@ def reconcile_slave(
             # report when both apply.
             reason = (
                 _paused_reason(cfg)
-                or _guard_reason(gate, slave_sl, sizing)
+                or _guard_reason(gate, slave_sl, sizing, p.symbol)
                 or _filter_reason(p.symbol, cfg)
                 or sizing.skip_reason
             )
@@ -699,7 +716,7 @@ def reconcile_slave_orders(
             reason = (
                 _paused_reason(cfg)
                 or (None if cfg.copy_pending else SkipReason.PENDING_DISABLED)
-                or _guard_reason(gate, slave_sl, sizing)
+                or _guard_reason(gate, slave_sl, sizing, o.symbol)
                 or _filter_reason(o.symbol, cfg)
                 # Rejected whether or not this slave inverts: a stop-limit carries an entry
                 # *and* a trigger, and mirroring only one of them is worse than not mirroring.

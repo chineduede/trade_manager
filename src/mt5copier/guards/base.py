@@ -64,10 +64,12 @@ class Rule:
     A rule with a cap is checked as each trade is sent, never against the account."""
     needs_stop: ClassVar[bool] = False
     """For a rule that refuses a new trade with no stop loss."""
+    news: ClassVar[bool] = False
+    """For the rule that refuses new trades around news, by the symbol's currency."""
 
     @classmethod
     def per_trade(cls) -> bool:
-        return cls.cap is not None or cls.needs_stop
+        return cls.cap is not None or cls.needs_stop or cls.news
 
     def sentence(self, p: dict[str, ParamValue], currency: str) -> str:
         """The rule as it is set, in words, for the guards page."""

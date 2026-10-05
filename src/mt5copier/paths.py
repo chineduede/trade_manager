@@ -80,6 +80,11 @@ def setups_path() -> Path:
     return user_data_dir() / "setups.json"
 
 
+def news_path() -> Path:
+    """The last news calendar fetched, kept so a restart without the internet still knows it."""
+    return user_data_dir() / "news.json"
+
+
 def guard_state_path() -> Path:
     """What the guards have recorded from earlier snapshots, such as the equity at a reset."""
     return user_data_dir() / "guard_state.json"

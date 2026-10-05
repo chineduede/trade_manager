@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from ..news import Calendar
 from ..protocol import Deal, Position, PositionLive, Snapshot
 
 
@@ -30,6 +31,8 @@ class AccountView:
     """The account size the person entered on the guards page; the firms' "initial balance"."""
     sizing_risk: float | None = None
     """What this slave's own sizing settings risk on one trade right now, in money."""
+    news: Calendar | None = None
+    """The news calendar, given only to an account with a news rule."""
 
     @classmethod
     def of(
@@ -39,6 +42,7 @@ class AccountView:
         now: float,
         initial_balance: float | None,
         sizing_risk: float | None = None,
+        news: Calendar | None = None,
     ) -> AccountView:
         return cls(
             now=now,
@@ -52,6 +56,7 @@ class AccountView:
             deals_since=snap.deals_since,
             initial_balance=initial_balance,
             sizing_risk=sizing_risk,
+            news=news,
         )
 
     def balance_at(self, when: float) -> float | None:

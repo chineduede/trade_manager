@@ -14,6 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..logging_setup import get_logger
+from ..news import NewsCalendar
 from ..paths import guard_state_path
 from ..protocol import Snapshot
 from .account import AccountView, last_reset
@@ -123,6 +124,10 @@ class Verdict:
     """The rule refusing new trades with no stop, when one is set to refuse."""
     stop_warning: str | None = None
     """The rule set only to warn about a new trade with no stop."""
+    news: frozenset[str] = frozenset()
+    """The currencies whose new trades a news rule declines now; ``"*"`` for every new trade."""
+    news_why: str = ""
+    """Which news, and until when, for the log."""
     max_risk: Cap | None = None
     max_margin: Cap | None = None
 
@@ -147,8 +152,15 @@ class _Recall:
 
 
 class GuardBook:
-    def __init__(self, doc: GuardsDoc, state_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        doc: GuardsDoc,
+        state_path: Path | None = None,
+        calendar: NewsCalendar | None = None,
+    ) -> None:
         self.doc = doc
+        self.calendar = calendar
+        """The news calendar, asked only for an account with a news rule."""
         self._path = state_path if state_path is not None else guard_state_path()
         state = self._load()
         self._day_equity: dict[str, dict[str, dict[str, object]]] = _section(state, "day_equity")
@@ -264,9 +276,17 @@ class GuardBook:
     ) -> GuardReport:
         guards = self.doc.for_account(key)
         currency = (snap.currency if snap else None) or ""
+        wants_news = self.calendar is not None and any(
+            r.enabled and getattr(REGISTRY.get(r.type), "news", False) for r in guards.rules
+        )
+        news = self.calendar.current() if wants_news and self.calendar is not None else None
         view = (
             AccountView.of(
-                snap, now=now, initial_balance=guards.initial_balance, sizing_risk=sizing_risk
+                snap,
+                now=now,
+                initial_balance=guards.initial_balance,
+                sizing_risk=sizing_risk,
+                news=news,
             )
             if snap is not None
             else None
@@ -296,6 +316,8 @@ class GuardBook:
         warnings: list[str] = []
         warned_by: list[str] = []
         stop_required = stop_warning = None
+        news: set[str] = set()
+        news_why: list[str] = []
         caps: dict[str, Cap] = {}
         for status in report.rules:
             rule = REGISTRY.get(status.type)
@@ -306,6 +328,21 @@ class GuardBook:
                     stop_warning = status.title
                 else:
                     stop_required = status.title
+                continue
+            if rule.news:
+                given = rules.get(status.rule_id)
+                if given is None or self.calendar is None:
+                    continue
+                params, _ = given.resolved()
+                on_news, why = rule.held(params, self.calendar.current(), now)  # type: ignore[attr-defined]
+                if not on_news:
+                    continue
+                if status.action == "warn":
+                    warnings.append(f"{status.title}: {why}")
+                    warned_by.append(status.rule_id)
+                else:
+                    news |= on_news
+                    news_why.append(why)
                 continue
             if rule.cap is not None:
                 if status.limit is not None:
@@ -332,6 +369,8 @@ class GuardBook:
             warned_by=tuple(warned_by),
             stop_required=stop_required,
             stop_warning=stop_warning,
+            news=frozenset(news),
+            news_why="; ".join(news_why),
             max_risk=caps.get("risk"),
             max_margin=caps.get("margin"),
         )

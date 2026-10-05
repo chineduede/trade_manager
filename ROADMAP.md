@@ -1590,6 +1590,30 @@ are the design, not a limitation waiting to be lifted.
     MT5 shows it logged in, the card shows its name; assign it and see it copy. Also: an
     account whose password is not saved fails with the message; rescan (`r`) afterwards keeps
     the new account (it reads `common.ini`, which MT5 may only write on exit — unverified).
+- **High-impact news guard — asked for 2026-10-05, built the same day on `news-filter` (off
+  `account-switch`), awaiting its demo check.** A guard rule, `news`, added on the guards page
+  (`k`) like any other. The user chose the calendar source: **Forex Factory's weekly feed**
+  (`nfs.faireconomy.media/ff_calendar_thisweek.json`), free and unofficial.
+  - Parameters, firm-neutral: impact (high only, or high and medium); minutes before and after
+    (default 2 and 2); which new trades (only those in the news currency, or every one); if the
+    calendar cannot be read, take no new trades (default — not decided by the user, the
+    recommendation they did not object to) or copy as usual; decline or only warn.
+  - Like the other per-trade rules it declines new trades only: closes, partials and stop moves
+    go on through the news. Pending orders placed in the window are declined too.
+  - A symbol's currencies are read from its name (`news.symbol_currencies`): a pair's two codes
+    through broker prefixes and suffixes, metals (XAU, XAG), and a table of index, oil and coin
+    names (US30 → USD, GER40 → EUR, UK100 → GBP...). A name it cannot read is declined while any
+    news is on. News the feed files under "All" (an OPEC meeting) declines every new trade.
+  - `news.py`: fetched on its own thread, only while some account has a news rule, hourly
+    (5 minutes after a failure); kept in `news.json` so a restart offline still knows the week;
+    counts as known for a day. The feed refuses a client that names itself, so the request
+    reads as a browser; it also rate-limits, which hourly is well inside. Checked against the
+    live feed on 2026-10-05: all 79 events read.
+  - *Demo check:* add the rule to a slave's account; before a release, see "next: ..." on the
+    guards page; in the window, open a trade on the master in that currency (declined, logged,
+    in the slave's history as skipped) and one in another (copied); close a copy during the
+    window (closed). Pull the network: after a day the rule says the calendar cannot be read and
+    holds new trades.
 - **Not handled: an account switched by hand in MT5 while the terminal has a role — noted
   2026-10-05, nothing built.** If a slave is switched to another account inside MT5 while
   the copier is connected, nothing notices: its copies are filed by terminal, not account, so
