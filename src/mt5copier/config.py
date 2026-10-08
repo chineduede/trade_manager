@@ -143,7 +143,7 @@ class BreakevenMode(StrEnum):
     fill. A copy opened with no stop has no R, so it never triggers."""
 
 
-BREAKEVEN_FIELDS = frozenset({"breakeven_mode", "breakeven_trigger_r"})
+BREAKEVEN_FIELDS = frozenset({"breakeven_mode", "breakeven_trigger_r", "breakeven_book_percent"})
 """The settings an edit may change without giving up the slave's open copies. They change how
 a copy's stop is managed from here on, never its direction or size."""
 
@@ -240,6 +240,11 @@ class TerminalConfig(BaseModel):
     moves: 0.3 is 0.3R. Where it moves to is not a setting of its own: entry, plus enough to
     pay ``commission_per_lot_round_turn``, plus ``slippage_buffer_points``. See
     :mod:`mt5copier.breakeven`."""
+    breakeven_book_percent: float = Field(default=0.0, ge=0, lt=100)
+    """The percent of a copy's volume to close when its breakeven fires, booking that much of
+    the profit; 0 books nothing. Once per copy, whether the breakeven came from the R trigger
+    or a price set by hand. A slice, or a remainder, under the symbol's minimum lot is not
+    booked at all: the position stays whole and only its stop moves."""
 
     symbol_prefix: str = ""
     symbol_suffix: str = ""

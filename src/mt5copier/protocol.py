@@ -213,6 +213,11 @@ class ActionKind(StrEnum):
     """The master partially closed; mirror the same fraction. Volume only ever moves down --
     on a hedging account each entry is its own ticket, so an open position's volume cannot be
     added to, only reduced."""
+    BOOK = "book"
+    """The copy's breakeven fired and its slave books profit: close the slave's set percent of
+    the position, once. The copier's own decision rather than a mirror of the master, which is
+    why it is not a ``REDUCE``: the two are de-duplicated and retried separately, and a
+    master's later partial is still mirrored as a fraction of what is left."""
     MODIFY_SLTP = "modify_sltp"
 
     # --- pending orders ---------------------------------------------------------------------
@@ -235,6 +240,7 @@ DISPATCHABLE_KINDS = frozenset(
         ActionKind.PLACE,
         ActionKind.CLOSE,
         ActionKind.REDUCE,
+        ActionKind.BOOK,
         ActionKind.MODIFY_SLTP,
         ActionKind.MODIFY_ORDER,
         ActionKind.CANCEL,
@@ -339,7 +345,7 @@ class OrderCommand:
     deviation_points: int = 20
 
     close_fraction: float | None = None
-    """REDUCE only."""
+    """REDUCE and BOOK only."""
     slave_ticket: int | None = None
     """The slave's own ticket, for anything that acts on an existing position or order."""
 
@@ -404,6 +410,11 @@ class OrderResult:
     """On a filled OPEN or PLACE: what a 1.0 move in price is worth on one lot, in the account
     currency. Kept on the copy record, where it turns the slave's commission into a breakeven
     distance."""
+
+    unsplittable: bool = False
+    """A ``BOOK`` that was not sent because the slice, or what it would leave open, is under
+    the symbol's minimum lot. Reported as a failure, but a final one: the position stays whole
+    and is never booked, rather than closed outright."""
 
     target_gone: bool = False
     """The position or order this acted on does not exist any more.

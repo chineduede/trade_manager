@@ -954,6 +954,27 @@ async def test_the_settings_form_shows_only_the_values_its_choices_use(
         assert form.query_one("#multiple-part").display
 
 
+@pytest.mark.parametrize("size", [(200, 62), (160, 60), (120, 60), (90, 70)])
+async def test_a_part_of_a_sentence_that_does_not_fit_moves_to_the_next_line_whole(
+    app: CopierApp, cfg: AppConfig, size: tuple[int, int]
+) -> None:
+    """Seen on a 200-column terminal: "copy it at" ended its line and the multiple after it
+    was squeezed into one cell, a letter of each word stacked underneath."""
+    from mt5copier.config import BreakevenMode, NoStopPolicy
+
+    cfg.terminals[TID_MASTER].role = Role.MASTER
+    cfg.terminals[TID_SLAVE].role = Role.SLAVE
+    cfg.terminals[TID_SLAVE].no_stop_policy = NoStopPolicy.LOT_MULTIPLE
+    cfg.terminals[TID_SLAVE].breakeven_mode = BreakevenMode.R
+    cfg.terminals[TID_SLAVE].invert = True
+    async with app.run_test(size=size) as pilot:
+        await pilot.press("1", "e")
+        await pilot.pause()
+        for part in ("#multiple-part", "#trigger-part"):
+            region = app.screen.query_one(part).region
+            assert region.height == 1 and region.width > 10, (part, region)
+
+
 def test_every_editable_setting_is_drawn_into_the_new_form() -> None:
     """A setting added to the editor has to be given a place in a sentence here too."""
     import inspect

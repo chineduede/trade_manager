@@ -1634,6 +1634,34 @@ are the design, not a limitation waiting to be lifted.
     in the slave's history as skipped) and one in another (copied); close a copy during the
     window (closed). Pull the network: after a day the rule says the calendar cannot be read and
     holds new trades.
+- **Booking profit at breakeven — asked for 2026-10-06, built the same day on
+  `breakeven-partial` (off `integration`), awaiting its demo check.** When a copy's breakeven
+  fires, its slave closes a set percent of it to book some profit. The user's decisions:
+  - **A per-slave setting**, `breakeven_book_percent` (0–under 100, default 0 = off), on the
+    Breakeven line of the settings form ("Then close X% of the copy"). It is a breakeven field,
+    so changing it keeps open copies.
+  - **Once per copy**, sent on the same tick as the stop move, whether the breakeven came from
+    the R trigger or a hand-set price (`B`, which books even with breakeven off). An exempt copy
+    (`b`) never fires so never books, and neither does a dry run.
+  - **Too small to split** — the slice, or what it would leave, under the symbol's minimum lot:
+    nothing is closed, the stop still moves, and it is said once (WARNING). Never closed whole.
+  - **No per-trade override** (left out by the user).
+  - **A refused close is tried again at most 3 times**, 5 s apart, then given up (ERROR).
+  - How: a new action kind, `BOOK`, separate from `REDUCE` so the two de-duplicate and retry
+    apart (sharing REDUCE's slot would let them alternate and re-send a refused master partial).
+    The copy record gains `book_fraction` (waiting), `book_tries`, `booked` (done or given up),
+    so a breakeven firing again after a refused stop move books nothing more, and so does a
+    restart. An answer that arrives with no action in memory still marks it booked; a booking
+    never answered is put behind the copy, not re-sent (it may have closed the slice). The
+    executor closes the fraction of the live volume, as for a partial. A booking leaves the
+    copy's master-volume anchor alone, so a later master partial closes its fraction of what
+    the slave has left. The day book and the trade history name it as a profit booking.
+  - `booked` is set when the command goes out, not when it is answered, so a restart while it
+    is out never sends it again (REDUCE still has that gap); only a failure to retry clears it.
+  - *Demo check:* set a slave to book 50% with breakeven at 0.3R; open on the master; when it
+    fires, the slave's stop moves and half the volume closes, once; the history shows "profit
+    booked". Then halve the master: the slave closes half of what is left. Also: a 0.01-lot copy
+    (too small) only moves its stop, and says so.
 - **Not handled: an account switched by hand in MT5 while the terminal has a role — noted
   2026-10-05, nothing built.** If a slave is switched to another account inside MT5 while
   the copier is connected, nothing notices: its copies are filed by terminal, not account, so

@@ -214,6 +214,15 @@ SECTIONS: tuple[Section, ...] = (
                 "never triggers. A single position can be given its own price on its detail "
                 "page instead.",
             ),
+            EditableField(
+                "breakeven_book_percent",
+                "Book at breakeven, %",
+                Kind.FLOAT,
+                "Close this percent of the copy when its breakeven fires, to book some profit; "
+                "0 books nothing. Once per copy, a hand-set breakeven price included. If the "
+                "slice or what it leaves is under the symbol's minimum lot, nothing is closed "
+                "and only the stop moves. A refused close is tried again up to 3 times.",
+            ),
         ),
     ),
     Section(

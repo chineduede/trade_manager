@@ -149,7 +149,7 @@ class Executor:
         if refusal is not None:
             return refusal
 
-        if cmd.op in (ActionKind.CLOSE, ActionKind.REDUCE):
+        if cmd.op in (ActionKind.CLOSE, ActionKind.REDUCE, ActionKind.BOOK):
             return self._close_or_reduce(cmd)
         if cmd.op is ActionKind.CANCEL:
             return self._cancel(cmd)
@@ -307,7 +307,7 @@ class Executor:
         symbol, direction, open_volume = live
 
         volume = open_volume
-        if cmd.op is ActionKind.REDUCE:
+        if cmd.op in (ActionKind.REDUCE, ActionKind.BOOK):
             fraction = cmd.close_fraction or 0.0
             if not 0.0 < fraction < 1.0:
                 return self._fail(cmd, error=f"nonsensical close fraction {fraction!r}")
@@ -320,6 +320,20 @@ class Executor:
                     error=f"no symbol_info for {symbol!r}",
                 )
             sized = quantize_volume(open_volume * fraction, facts)
+            if cmd.op is ActionKind.BOOK:
+                # Booking is the copier's own choice, so it gives way: a slice it cannot cut,
+                # or one that would leave less than the broker lets stay open, is not booked
+                # at all -- never rounded up into closing the whole trade.
+                left = open_volume - (sized.lots or 0.0)
+                if not sized.ok or sized.lots is None or left < facts.volume_min - 1e-9:
+                    words = (
+                        f"{fraction:.0%} of {open_volume:g} lots"
+                        + (f" would leave {left:g}" if sized.ok else f": {sized.describe()}")
+                        + f"; the minimum on {symbol} is {facts.volume_min:g}"
+                    )
+                    return self._fail(
+                        cmd, slave_symbol=symbol, unsplittable=True, error=f"cannot book {words}"
+                    )
             if not sized.ok or sized.lots is None:
                 # Too small a slice to express. Leaving the position whole is the safe
                 # answer: over-closing cannot be undone.
@@ -706,7 +720,11 @@ class Executor:
                     attempts=attempts,
                 )
 
-            if outcome is Outcome.GONE and cmd.op in (ActionKind.CLOSE, ActionKind.REDUCE):
+            if outcome is Outcome.GONE and cmd.op in (
+                ActionKind.CLOSE,
+                ActionKind.REDUCE,
+                ActionKind.BOOK,
+            ):
                 # The position went between our read and our send. Not open is what was
                 # wanted, so this is the desired state reached without us, exactly as an
                 # already-missing position is. Guarded by op rather than assumed: this path is

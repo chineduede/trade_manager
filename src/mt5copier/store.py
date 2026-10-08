@@ -58,6 +58,9 @@ CREATE TABLE IF NOT EXISTS copies (
     breakeven_sl  REAL    NOT NULL DEFAULT 0,
     breakeven_exempt INTEGER NOT NULL DEFAULT 0,
     breakeven_at  REAL    NOT NULL DEFAULT 0,
+    book_fraction REAL    NOT NULL DEFAULT 0,
+    book_tries    INTEGER NOT NULL DEFAULT 0,
+    booked        INTEGER NOT NULL DEFAULT 0,
     opened_at     REAL    NOT NULL,
     updated_at    REAL    NOT NULL,
     PRIMARY KEY (terminal_id, master_ticket)
@@ -74,10 +77,13 @@ _ADDED_COLUMNS = (
     ("breakeven_sl", "REAL NOT NULL DEFAULT 0"),
     ("breakeven_exempt", "INTEGER NOT NULL DEFAULT 0"),
     ("breakeven_at", "REAL NOT NULL DEFAULT 0"),
+    ("book_fraction", "REAL NOT NULL DEFAULT 0"),
+    ("book_tries", "INTEGER NOT NULL DEFAULT 0"),
+    ("booked", "INTEGER NOT NULL DEFAULT 0"),
 )
-"""Columns added after the table first shipped, for breakeven. ``CREATE TABLE IF NOT EXISTS``
-leaves an older file's table as it was, so each is added on open when it is missing. The
-defaults read as "not known" and "not triggered", which is what an older copy is."""
+"""Columns added after the table first shipped, for breakeven and booking at it. ``CREATE TABLE
+IF NOT EXISTS`` leaves an older file's table as it was, so each is added on open when it is
+missing. The defaults read as "not known" and "not triggered", which is what an older copy is."""
 
 
 class CopyKind(StrEnum):
@@ -113,6 +119,9 @@ class Copy:
     breakeven_sl: float = 0.0
     breakeven_exempt: bool = False
     breakeven_at: float = 0.0
+    book_fraction: float = 0.0
+    book_tries: int = 0
+    booked: bool = False
     opened_at: float = 0.0
     updated_at: float = 0.0
 
@@ -134,6 +143,9 @@ class Copy:
             breakeven_sl=self.breakeven_sl,
             breakeven_exempt=self.breakeven_exempt,
             breakeven_at=self.breakeven_at,
+            book_fraction=self.book_fraction,
+            book_tries=self.book_tries,
+            booked=self.booked,
         )
 
     def as_order(self) -> CopiedOrder:
@@ -235,8 +247,9 @@ class MappingStore:
                     terminal_id, master_ticket, kind, slave_ticket, slave_symbol, direction,
                     order_type, master_volume, slave_volume, entry, synced_sl, synced_tp,
                     point, digits, risk_distance, price_value, breakeven_sl,
-                    breakeven_exempt, breakeven_at, opened_at, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    breakeven_exempt, breakeven_at, book_fraction, book_tries, booked,
+                    opened_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     stamped.terminal_id,
@@ -258,6 +271,9 @@ class MappingStore:
                     stamped.breakeven_sl,
                     int(stamped.breakeven_exempt),
                     stamped.breakeven_at,
+                    stamped.book_fraction,
+                    stamped.book_tries,
+                    int(stamped.booked),
                     stamped.opened_at,
                     stamped.updated_at,
                 ),
@@ -539,6 +555,9 @@ def _from_row(row: sqlite3.Row) -> Copy:
         breakeven_sl=float(row["breakeven_sl"]),
         breakeven_exempt=bool(row["breakeven_exempt"]),
         breakeven_at=float(row["breakeven_at"]),
+        book_fraction=float(row["book_fraction"]),
+        book_tries=int(row["book_tries"]),
+        booked=bool(row["booked"]),
         opened_at=float(row["opened_at"]),
         updated_at=float(row["updated_at"]),
     )
