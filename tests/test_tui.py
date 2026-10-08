@@ -526,7 +526,7 @@ def test_menu_for_a_slave_and_the_master() -> None:
     assert next(i for i in items if i.key == "p").label == "resume"
     master = TerminalConfig(terminal_id=TID_MASTER, role=Role.MASTER)
     keys = [i.key for i in terminal_actions(master, has_master=True, orphans_waiting=False)]
-    assert keys == ["enter", "u"], "no settings, no pause, and no live guard to lift"
+    assert keys == ["enter", "e", "u"], "its symbol prefix/suffix only: no pause, no live guard"
 
 
 def test_menu_offers_live_trading_only_where_the_guard_is_in_play() -> None:

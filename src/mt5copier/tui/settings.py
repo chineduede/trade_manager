@@ -50,6 +50,7 @@ from ..settings_edit import (
     initial_values,
 )
 from ..settings_example import Example, MasterTrade, PriceValue, pick, work
+from ..symbols import undecorate
 from .flow import Flow, Word, flow_words
 from .style import BG, BLUE, CHIP_BG, FG, MUTED, RED, spaced
 
@@ -324,11 +325,13 @@ class SettingsForm(ModalScreen[bool]):
         held: list[MasterTrade] = []
         master = app._cfg.master
         mview = views.get(master.terminal_id) if master else None
-        if mview and mview.snapshot and mview.snapshot.open_positions:
+        if master and mview and mview.snapshot and mview.snapshot.open_positions:
             for p in sorted(mview.snapshot.open_positions, key=lambda p: p.time, reverse=True):
+                # The plain name, as the engine and the day book use it.
+                name = undecorate(p.symbol, master.symbol_prefix, master.symbol_suffix)
                 held.append(
                     MasterTrade(
-                        p.ticket, p.symbol, p.type is PositionType.BUY, p.price_open, p.sl, p.tp
+                        p.ticket, name, p.type is PositionType.BUY, p.price_open, p.sl, p.tp
                     )
                 )
         events_ = engine.day_book()

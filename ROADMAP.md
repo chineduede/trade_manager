@@ -1634,6 +1634,22 @@ are the design, not a limitation waiting to be lifted.
     in the slave's history as skipped) and one in another (copied); close a copy during the
     window (closed). Pull the network: after a day the rule says the calendar cannot be read and
     holds new trades.
+- **The master's symbol prefix/suffix — built 2026-10-07, branch `master-suffix`.** A master
+  whose broker decorates its names (BlackBull's `EURUSDp`) used to copy only where the built-in
+  scan list happened to know the decoration; `p`, `.a`, `-ECN` were refused on every slave.
+  - `e` on the master now opens a small form: its broker's prefix and suffix, with an example
+    of its open symbols before and after. It reuses `symbol_prefix`/`symbol_suffix`, which on
+    the master mean "take off" and on a slave "put on": one meaning, this broker's decoration.
+  - Taken off once, in the engine, before the ledger and the day book see the master's lists
+    (`engine._undecorated`, `symbols.undecorate`): only where a name carries it, so bare indices
+    stay bare. Everything downstream — slave renames, whitelist/blacklist, slave decoration and
+    resolution, news, history — sees the plain name. The master's own page still shows its
+    terminal's names. Saving it gives up no copies.
+  - Slaves' `symbol_map` keys and filter entries are now written without the master's
+    decoration; ones written with it stop matching once it is set.
+  - *Demo check:* on a master whose broker suffixes its names, set the suffix with `e`; open a
+    trade: a slave with no suffix and one with its own both copy it, a whitelist naming the
+    plain symbol lets it through, and the history shows the plain name.
 - **Not handled: an account switched by hand in MT5 while the terminal has a role — noted
   2026-10-05, nothing built.** If a slave is switched to another account inside MT5 while
   the copier is connected, nothing notices: its copies are filed by terminal, not account, so

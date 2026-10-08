@@ -33,6 +33,7 @@ from mt5copier.store import Orphan
 from mt5copier.tui import CopierApp
 from mt5copier.tui.detail import DetailScreen
 from mt5copier.tui.dialogs import LiveDialog, OrphanDialog
+from mt5copier.tui.master import MasterForm
 from mt5copier.tui.settings import Choice, SettingsForm
 
 
@@ -1673,16 +1674,25 @@ async def test_e_on_the_terminal_page_opens_that_terminals_settings_and_esc_come
         assert isinstance(app.screen, DetailScreen), "closing the form returns to the page"
 
 
-async def test_the_master_has_no_settings_form(app: CopierApp) -> None:
-    """Everything in the form is read off a slave, so e on the master says why there is none."""
+async def test_the_master_form_sets_only_its_symbol_decoration(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    """e on the master opens its own small form, not a slave's, and saving it keeps the copies."""
     async with app.run_test(size=(160, 50)) as pilot:
         app._cfg.set_role(TID_MASTER, Role.MASTER)  # type: ignore[attr-defined]
         app._refresh()
         app._select(TID_MASTER)
         await pilot.press("e")
         await pilot.pause()
-        assert not isinstance(app.screen, SettingsForm)
-        assert any("no settings" in t for t in toasts(app))
+        assert isinstance(app.screen, MasterForm)
+        assert not app.screen.query("#f-risk_percent")
+        app.screen.query_one("#f-symbol_suffix", Input).value = "p"
+        await pilot.pause()
+        assert "EURUSDp → EURUSD" in str(app.screen.query_one("#ex-body", Static).render())
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert not isinstance(app.screen, MasterForm)
+        assert cfg.terminals[TID_MASTER].symbol_suffix == "p"
 
 
 async def test_the_form_no_longer_offers_enabled(app: CopierApp) -> None:

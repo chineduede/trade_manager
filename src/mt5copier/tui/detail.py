@@ -939,8 +939,7 @@ class DetailScreen(Screen[None]):
         app = self.copier
         keys = [key_hint("space", "actions", primary=True), key_hint("esc", "back to map")]
         keys.append(key_hint("←→", "other terminal"))
-        if cfg.role is not Role.MASTER:
-            keys.append(key_hint("e", "settings"))
+        keys.append(key_hint("e", "settings"))
         if cfg.role is Role.SLAVE:
             keys.append(key_hint("p", "resume" if cfg.paused else "pause"))
             keys.append(key_hint("k", "guards"))

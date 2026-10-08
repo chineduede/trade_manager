@@ -435,3 +435,23 @@ def test_a_stop_move_says_what_was_set_and_on_which_trade() -> None:
     assert describe_master(book.events()[0]) == (
         "set stop 84532.7, target 85165.81 on BTCUSD sell 0.78"
     )
+
+
+def test_the_masters_suffix_is_taken_off_before_any_slave_sees_the_name(engine: Engine) -> None:
+    """The slave's filter, decoration and the day book all work on the plain name."""
+    from dataclasses import replace
+
+    engine.config.terminals[TID_MASTER].symbol_suffix = "p"
+    engine.config.terminals[TID_S1].symbol_suffix = ".r"
+    engine.config.terminals[TID_S1].symbol_whitelist = ["BTCUSD"]
+    q1 = wire(engine, TID_S1)
+    engine._reconcile(master_snap())
+    engine._reconcile(master_snap(replace(pos(ticket=11), symbol="BTCUSDp")))
+
+    [cmd] = q1.sent
+    assert isinstance(cmd, OrderCommand)
+    assert cmd.master_symbol == "BTCUSD", "what the slave resolves, adding its own .r"
+    [event] = engine.day_book()
+    assert event.symbol == "BTCUSD"
+    out = {o.terminal_id: o for o in event.outcomes}[TID_S1]
+    assert out.outcome is Outcome.SENDING, "the whitelist names the plain symbol"
