@@ -171,6 +171,9 @@ class Action:
         elif self.kind is ActionKind.REDUCE:
             pct = (self.close_fraction or 0.0) * 100.0
             bits.append(f"close {pct:.1f}% (master now {self.master_volume:g})")
+        elif self.kind is ActionKind.BOOK:
+            pct = (self.close_fraction or 0.0) * 100.0
+            bits.append(f"close {pct:g}% to book profit at breakeven")
         elif self.kind is ActionKind.MODIFY_SLTP:
             bits.append(f"sl {self.sl:g} tp {self.tp:g}")
         if self.unprotected:
@@ -228,6 +231,15 @@ class CopiedPosition:
     breakeven_at: float = 0.0
     """Set by hand on one copy: the price at which it goes to breakeven, in place of the
     slave's R trigger, and whether or not the slave has breakeven on. 0 is unset."""
+    book_fraction: float = 0.0
+    """A profit booking waiting to be sent: the fraction of the slave position to close,
+    set when breakeven fires on a slave that books. 0 when there is none."""
+    book_tries: int = 0
+    """How many times the booking has been sent and failed."""
+    booked: bool = False
+    """The booking has gone out: sent and not yet answered, done, or given up. A breakeven
+    that fires again (after a refused stop move) then books nothing more, and a restart while
+    it is out does not send it again. Only a failure that is to be tried again clears it."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -586,6 +598,26 @@ def reconcile_slave(
                 )
             )
 
+        # Profit booked at breakeven: the engine set it on the copy when its breakeven fired,
+        # and it stays until the booking is done or given up (see CopyLedger.apply_result).
+        if c.book_fraction > 0.0 and not c.booked and c.slave_ticket is not None:
+            out.append(
+                Action(
+                    kind=ActionKind.BOOK,
+                    terminal_id=cfg.terminal_id,
+                    master_ticket=ticket,
+                    master_symbol=p.symbol,
+                    slave_symbol=slave_symbol,
+                    type=ptype,
+                    master_volume=p.volume,
+                    entry=p.price_open,
+                    sl=slave_sl,
+                    tp=slave_tp,
+                    slave_ticket=c.slave_ticket,
+                    close_fraction=c.book_fraction,
+                )
+            )
+
         # SL/TP change, compared in slave-facing terms so an inverted copy is measured against
         # the levels it actually carries.
         #
@@ -793,6 +825,13 @@ reach the broker and only its answer was lost, deriving it again closes another 
 over-closing cannot be undone. ``OPEN`` and ``PLACE`` are absent for a different reason: an
 entry goes stale, and by the time a link returns the copy would be a late join.
 """
+
+BOOK_RETRIES = 3
+"""How many times a refused profit booking is tried again before it is given up."""
+
+BOOK_RETRY_S = 5.0
+"""How long after a failed booking the next try waits, so the retries are spread over a
+little time rather than spent in consecutive polls on the same refusal."""
 
 INFLIGHT_TIMEOUT_S = 30.0
 """How long to wait for a command's result before giving up on it. Generous, because the
@@ -1107,6 +1146,8 @@ class CopyLedger:
         ``copy_pending = False`` behave sensibly, mirroring the fill but not the resting order.
         """
         self._warned_increase: set[tuple[str, int]] = set()
+        self._book_wait: dict[tuple[str, int], float] = {}
+        """Per copy: the monotonic time before which a failed booking is not tried again."""
         self._refused_breakevens: list[tuple[str, int]] = []
         """Copies whose breakeven move the broker refused, until the engine collects them to
         decide when to try again. See :meth:`take_refused_breakevens`."""
@@ -1200,6 +1241,16 @@ class CopyLedger:
         """
         self._store.update(terminal_id, master_ticket, breakeven_sl=sl)
         self._last.pop((terminal_id, master_ticket, ActionKind.MODIFY_SLTP), None)
+
+    def set_booking(self, terminal_id: str, master_ticket: int, fraction: float) -> None:
+        """Book a fraction of one copy at its breakeven. Nothing is sent from here, as with the
+        floor: the next diff derives the ``BOOK``. Ignored on a copy whose booking is already
+        behind it or waiting, so a breakeven that fires again books nothing more."""
+        copy = self._store.get_position(terminal_id, master_ticket)
+        if copy is None or copy.booked or copy.book_fraction > 0.0:
+            return
+        self._store.update(terminal_id, master_ticket, book_fraction=fraction)
+        self._last.pop((terminal_id, master_ticket, ActionKind.BOOK), None)
 
     def take_refused_breakevens(self) -> list[tuple[str, int]]:
         """The ``(slave, master ticket)`` pairs whose breakeven move was refused since the last
@@ -1354,7 +1405,7 @@ class CopyLedger:
                 gate=link.gate,
             )
             for action in self._emit(
-                order_actions, fresh, simulate=simulate, dispatchable=dispatchable
+                order_actions, fresh, simulate=simulate, dispatchable=dispatchable, now=now
             ):
                 if action.kind is ActionKind.ORDER_FILLED:
                     self._on_fill(action, positions_by_ticket.get(action.master_ticket), link.cfg)
@@ -1372,6 +1423,7 @@ class CopyLedger:
                 fresh,
                 simulate=simulate,
                 dispatchable=dispatchable,
+                now=now,
             ):
                 if action.kind is ActionKind.OPEN and not action.executable:
                     # A decline is final. Whatever the reason -- no stop, a filter, or the
@@ -1393,6 +1445,7 @@ class CopyLedger:
         *,
         simulate: bool,
         dispatchable: frozenset[ActionKind] | None = None,
+        now: float | None = None,
     ) -> list[Action]:
         """Keep the actions that are new or changed, and hand them out once each.
 
@@ -1415,6 +1468,9 @@ class CopyLedger:
                     "withholding %s for #%s: still in flight", action.kind, action.master_ticket
                 )
                 continue
+            wait = self._book_wait.get(key[:2]) if action.kind is ActionKind.BOOK else None
+            if wait is not None and now is not None and now < wait:
+                continue
             self._last[key] = action
             fresh.append(action)
             kept.append(action)
@@ -1430,6 +1486,10 @@ class CopyLedger:
                 self.apply_result(_simulated_result(action), simulated=True)
             else:
                 self._inflight[key] = time.monotonic()
+                if action.kind is ActionKind.BOOK:
+                    # Marked before the answer, so a restart while it is out does not send
+                    # it again: an unanswered booking may have closed the slice already.
+                    self._store.update(action.terminal_id, action.master_ticket, booked=True)
         return kept
 
     def _on_fill(self, action: Action, position: Position | None, cfg: TerminalConfig) -> None:
@@ -1574,6 +1634,10 @@ class CopyLedger:
         key = (result.terminal_id, result.master_ticket, result.op)
         self._inflight.pop(key, None)
 
+        if result.op is ActionKind.BOOK:
+            self._on_booked(result, simulated=simulated)
+            return
+
         if not result.ok:
             if (
                 result.op is ActionKind.MODIFY_SLTP
@@ -1701,6 +1765,66 @@ class CopyLedger:
                 changes["entry"] = last.entry
             self._store.update(last.terminal_id, last.master_ticket, **changes)
 
+    def _on_booked(self, result: OrderResult, *, simulated: bool) -> None:
+        """Fold a booking's outcome into its copy. Handled apart from every other op because
+        it is the only one that is retried on a refusal, and only a few times.
+
+        Done means done whatever else is true: a result arriving after a restart, with no
+        action in memory, still marks the copy booked, since deriving it again would close a
+        second slice. A slice too small to cut is final at once and only said; a refusal, or
+        a transient failure, is tried again ``BOOK_RETRIES`` times, ``BOOK_RETRY_S`` apart,
+        then given up.
+        """
+        tid, ticket = result.terminal_id, result.master_ticket
+        key = (tid, ticket, ActionKind.BOOK)
+        copy = self._store.get_position(tid, ticket)
+        if copy is None:
+            return
+        name = f"#{ticket} on {tid[:8]}"
+        if result.ok:
+            self._book_wait.pop((tid, ticket), None)
+            remaining = copy.volume
+            if copy.volume is not None and not result.target_gone:
+                closed = result.filled_volume
+                remaining = (
+                    copy.volume - closed
+                    if closed is not None and not simulated
+                    else copy.volume * (1.0 - copy.book_fraction)
+                )
+            self._store.update(tid, ticket, book_fraction=0.0, booked=True, slave_volume=remaining)
+            return
+        if result.unsplittable:
+            self._store.update(tid, ticket, book_fraction=0.0, booked=True)
+            log.warning(
+                "%s: no profit booked at breakeven: %s. The position stays whole; only its "
+                "stop moves",
+                name,
+                result.error,
+            )
+            return
+        tries = copy.book_tries + 1
+        if tries > BOOK_RETRIES:
+            self._store.update(tid, ticket, book_fraction=0.0, booked=True, book_tries=tries)
+            log.error(
+                "%s: booking profit at breakeven failed %d times, the last: %s; given up, the "
+                "position stays whole",
+                name,
+                tries,
+                result.error or result.outcome,
+            )
+            return
+        self._store.update(tid, ticket, book_tries=tries, booked=False)
+        self._last.pop(key, None)
+        self._book_wait[(tid, ticket)] = time.monotonic() + BOOK_RETRY_S
+        log.warning(
+            "%s: booking profit at breakeven failed (%s); trying again in %.0fs, retry %d of %d",
+            name,
+            result.error or result.outcome,
+            BOOK_RETRY_S,
+            tries,
+            BOOK_RETRIES,
+        )
+
     def _is_order(self, terminal_id: str, master_ticket: int) -> bool:
         """Whether that row is still a resting order rather than the position it became."""
         return any(c.master_ticket == master_ticket for c in self._store.orders(terminal_id))
@@ -1735,6 +1859,14 @@ class CopyLedger:
                 consequence = (
                     "if it reached the broker it will appear as an orphan on the next "
                     "startup reconciliation"
+                )
+            elif op is ActionKind.BOOK:
+                # It may have closed the slice, and closing another cannot be undone, so the
+                # booking is put behind the copy rather than tried again.
+                self._store.update(tid, ticket, book_fraction=0.0, booked=True)
+                consequence = (
+                    "the profit may or may not have been booked; it is not tried again, "
+                    "so check the slave's volume"
                 )
             elif op in RE_ARMABLE_KINDS:
                 # Nothing was created, so there is no orphan to find and the promise the
@@ -1810,3 +1942,4 @@ class CopyLedger:
             for tid, ticket in self._warned_increase
             if tid in slave_ids and ticket in master_tickets
         }
+        self._book_wait = {k: t for k, t in self._book_wait.items() if k in tracked}

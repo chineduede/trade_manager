@@ -525,7 +525,12 @@ class SettingsForm(ModalScreen[bool]):
                         id="trigger-part",
                     ),
                 ),
-                *self._errors("breakeven_mode", "breakeven_trigger_r"),
+                rows(
+                    lead("Then close"),
+                    self._input("breakeven_book_percent", v["breakeven_book_percent"], "n5"),
+                    words("% of the copy to book profit (0: none)."),
+                ),
+                *self._errors("breakeven_mode", "breakeven_trigger_r", "breakeven_book_percent"),
             )
             yield section(
                 "symbols",

@@ -460,13 +460,16 @@ _DONE_VERB = {
     ActionKind.OPEN: "opened",
     ActionKind.CLOSE: "closed",
     ActionKind.REDUCE: "closed",
+    ActionKind.BOOK: "booked profit: closed",
     ActionKind.MODIFY_SLTP: "moved stop and target",
     ActionKind.PLACE: "placed",
     ActionKind.MODIFY_ORDER: "changed the order",
     ActionKind.CANCEL: "cancelled",
 }
 
-_LOTS_KINDS = frozenset({ActionKind.OPEN, ActionKind.CLOSE, ActionKind.REDUCE, ActionKind.PLACE})
+_LOTS_KINDS = frozenset(
+    {ActionKind.OPEN, ActionKind.CLOSE, ActionKind.REDUCE, ActionKind.BOOK, ActionKind.PLACE}
+)
 
 
 def _price(value: float) -> str:
@@ -493,6 +496,9 @@ def describe_master(event: MasterEvent) -> str:
         if event.volume_before is not None:
             return f"closed part of {what}: {_num(event.volume_before)} to {vol}"
         return f"closed part of {what}, {vol} left"
+    if kind is ActionKind.BOOK:
+        # Not something the master did: the copy's own breakeven, on the slave.
+        return f"{what} {vol} reached breakeven on a slave, which books some profit"
     if kind is ActionKind.MODIFY_SLTP:
         return f"set stop {_price(event.sl)}, target {_price(event.tp)} on {what} {vol}"
     if kind is ActionKind.PLACE:

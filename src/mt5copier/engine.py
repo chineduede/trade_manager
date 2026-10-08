@@ -663,6 +663,13 @@ class Engine:
                     continue
                 self._be_room[key] = room
                 self._ledger.set_breakeven(cfg.terminal_id, copy.master_ticket, level)
+                booking = (
+                    cfg.breakeven_book_percent > 0 and not copy.booked and copy.book_fraction == 0.0
+                )
+                if booking:
+                    self._ledger.set_booking(
+                        cfg.terminal_id, copy.master_ticket, cfg.breakeven_book_percent / 100.0
+                    )
                 self._history.note(
                     cfg.terminal_id,
                     copy.master_ticket,
@@ -670,7 +677,12 @@ class Engine:
                     copy.type.name.lower(),
                     "breakeven",
                     f"reached at {price:g} (fill {opened[ticket]:g}): the stop moves to "
-                    f"{level:g} and from now on only tightens",
+                    f"{level:g} and from now on only tightens"
+                    + (
+                        f", and {cfg.breakeven_book_percent:g}% is closed to book profit"
+                        if booking
+                        else ""
+                    ),
                 )
                 log.info(
                     "%s: breakeven reached on #%s %s (fill %s, now %s); stop moves to %s and "

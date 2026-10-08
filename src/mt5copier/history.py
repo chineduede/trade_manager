@@ -161,6 +161,7 @@ _NOUN = {
     ActionKind.OPEN: "copy",
     ActionKind.CLOSE: "close",
     ActionKind.REDUCE: "partial close",
+    ActionKind.BOOK: "profit booking",
     ActionKind.MODIFY_SLTP: "stop/target change",
     ActionKind.PLACE: "order",
     ActionKind.MODIFY_ORDER: "order change",
@@ -186,6 +187,7 @@ _DONE = {
     ActionKind.PLACE: "placed",
     ActionKind.CLOSE: "closed",
     ActionKind.REDUCE: "partly closed",
+    ActionKind.BOOK: "profit booked",
     ActionKind.MODIFY_SLTP: "stop/target moved",
     ActionKind.MODIFY_ORDER: "order changed",
     ActionKind.CANCEL: "cancelled",
@@ -234,7 +236,7 @@ def describe_step(
                 f" at {_price(action.entry)}, stop {_price(action.sl)}, target {_price(action.tp)}"
             )
         return verb, text + _timing(outcome)
-    if kind in (ActionKind.CLOSE, ActionKind.REDUCE):
+    if kind in (ActionKind.CLOSE, ActionKind.REDUCE, ActionKind.BOOK):
         return verb, f"{_lots(outcome.lots)}{at}{_timing(outcome)}"
     if kind is ActionKind.MODIFY_SLTP and action is not None:
         return verb, f"stop {_price(action.sl)}, target {_price(action.tp)}{_timing(outcome)}"

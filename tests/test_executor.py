@@ -786,3 +786,53 @@ def test_a_refused_open_carries_no_point() -> None:
     result = run(FakeSession(results=[FakeResult(retcode=int(Retcode.INVALID_STOPS))]))
     assert not result.ok
     assert result.point is None
+
+
+# --- booking profit at breakeven -------------------------------------------------------------
+
+
+def test_a_booking_closes_its_fraction_of_the_live_volume() -> None:
+    session = closing_session(volume=1.0)
+    result = run(session, cmd(op=ActionKind.BOOK, slave_ticket=77, close_fraction=0.5))
+    assert result.ok
+    assert session.sent[0]["volume"] == pytest.approx(0.5)
+
+
+@pytest.mark.parametrize(
+    ("volume", "fraction", "why"),
+    [
+        (0.01, 0.5, "the slice is under the minimum lot"),
+        (0.03, 0.2, "a fifth of 0.03 is under the minimum lot too"),
+    ],
+)
+def test_a_booking_that_cannot_be_cut_closes_nothing_and_says_so(
+    volume: float, fraction: float, why: str
+) -> None:
+    session = closing_session(volume=volume)
+    session.facts = SymbolFacts(
+        name="EURUSD",
+        volume_min=0.01,
+        volume_max=100.0,
+        volume_step=0.01,
+        point=0.00001,
+        filling_mask=int(SymbolFilling.FOK | SymbolFilling.IOC),
+    )
+    result = run(session, cmd(op=ActionKind.BOOK, slave_ticket=77, close_fraction=fraction))
+    assert not result.ok and result.unsplittable, why
+    assert session.sent == []
+
+
+def test_a_booking_that_would_leave_less_than_the_minimum_closes_nothing() -> None:
+    session = closing_session(volume=0.15)
+    session.facts = SymbolFacts(
+        name="EURUSD",
+        volume_min=0.10,
+        volume_max=100.0,
+        volume_step=0.01,
+        point=0.00001,
+        filling_mask=int(SymbolFilling.FOK | SymbolFilling.IOC),
+    )
+    result = run(session, cmd(op=ActionKind.BOOK, slave_ticket=77, close_fraction=0.7))
+    assert not result.ok and result.unsplittable
+    assert "would leave 0.05" in (result.error or "")
+    assert session.sent == []

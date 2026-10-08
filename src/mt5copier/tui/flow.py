@@ -79,6 +79,18 @@ class FlowLayout(Layout):
             line = max(line, h)
         return placements
 
+    def get_content_width(self, widget: Widget, container: Size, viewport: Size) -> int:
+        """How wide the flow is with nothing wrapped, up to the container's width.
+
+        Textual's own measure lays a ``shrink`` widget out at width 0, which for a flow puts
+        every word on a line of its own and calls it one cell wide. A part of a sentence (see
+        ``settings.part``) then sat at the end of its line as a column of single letters,
+        instead of being seen not to fit and moved to the next line.
+        """
+        if not widget._nodes:
+            return 0
+        return widget.arrange(Size(container.width, 0), optimal=True).total_region.right
+
 
 def _min_width(scalar: Scalar | None, width: int) -> int:
     if scalar is None:
