@@ -20,7 +20,7 @@ import queue
 import threading
 import time
 from collections import deque
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -52,6 +52,8 @@ from .protocol import (
     CommandKind,
     OrderCommand,
     OrderResult,
+    PendingOrder,
+    Position,
     Snapshot,
     WorkerState,
 )
@@ -60,6 +62,7 @@ from .settings_edit import copies_word
 from .setups import Setup
 from .sizing import risk_budget
 from .store import MappingStore, Orphan, find_missing, find_missing_orders, find_orphans
+from .symbols import undecorate
 from .worker import run_worker
 
 log = get_logger(__name__)
@@ -146,6 +149,25 @@ _BE_RETRY_FACTOR = 1.5
 """After a refused breakeven, how much more room than the refused attempt the price needs
 before the next try. Each try is at a strictly better distance, so a broker that keeps
 refusing is asked a handful of times as the trade runs, never once per tick."""
+
+
+def _undecorated(
+    positions: Sequence[Position], orders: Sequence[PendingOrder], master: TerminalConfig
+) -> tuple[Sequence[Position], Sequence[PendingOrder]]:
+    """The master's lists with its broker's prefix/suffix taken off every symbol.
+
+    Done once, here, before anything else reads a symbol, so that the slaves' filters, renames,
+    decorations and resolution, the news guard and the history all see one name -- the plain
+    one -- instead of each having to know about the master's broker. Only the copier's view
+    changes: the master's own page still shows what its terminal calls the instrument.
+    """
+    prefix, suffix = master.symbol_prefix, master.symbol_suffix
+    if not prefix and not suffix:
+        return positions, orders
+    return (
+        [replace(p, symbol=undecorate(p.symbol, prefix, suffix)) for p in positions],
+        [replace(o, symbol=undecorate(o.symbol, prefix, suffix)) for o in orders],
+    )
 
 
 def _only_breakeven_changed(old: TerminalConfig, new: TerminalConfig) -> bool:
@@ -522,6 +544,7 @@ class Engine:
             self._set_blocked("the master's pending orders cannot be read")
             return
         self._set_blocked(None)
+        positions, orders = _undecorated(snap.open_positions, snap.pending_orders, master)
 
         # Before the links, not after: deciding whether a slave may be copied to now includes
         # reconciling it against the store, so the store has to exist first.
@@ -545,9 +568,9 @@ class Engine:
             self._arm_breakevens(links)
         try:
             actions = self._ledger.step(
-                snap.open_positions,
+                positions,
                 links,
-                master_orders=snap.pending_orders,
+                master_orders=orders,
                 now=time.monotonic(),
                 grace_seconds=self._cfg.join_grace_seconds,
                 # The one difference between rehearsal and the real thing: a dry run pretends
@@ -567,7 +590,7 @@ class Engine:
         now = time.time()
         cfgs = {link.cfg.terminal_id: link.cfg for link in links}
         prefix = "[dry-run]" if dry else "[live]"
-        self._day.begin_tick(now, snap.open_positions, snap.pending_orders)
+        self._day.begin_tick(now, positions, orders)
         for action in actions:
             self._actions.append(RecordedAction(ts=now, action=action))
             self._action_total += 1

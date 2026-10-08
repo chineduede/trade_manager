@@ -247,14 +247,16 @@ SECTIONS: tuple[Section, ...] = (
                 "Symbol map",
                 Kind.SYMBOL_MAP,
                 "One MASTER=BROKER pair per line, for symbols the prefix and suffix cannot "
-                "express. A name the broker does not list is refused, not guessed at.",
+                "express. MASTER is the name without the master's own prefix or suffix. A name "
+                "the broker does not list is refused, not guessed at.",
                 placeholder="US30=US30.cash",
             ),
             EditableField(
                 "symbol_whitelist",
                 "Only copy these",
                 Kind.SYMBOLS,
-                "Master symbol names, separated by commas or spaces. Blank means all. Adding one "
+                "Master symbol names, without the master's own prefix or suffix, separated by "
+                "commas or spaces. Blank means all. Adding one "
                 "does not copy a trade that was already declined.",
                 placeholder="all symbols",
             ),
@@ -262,7 +264,8 @@ SECTIONS: tuple[Section, ...] = (
                 "symbol_blacklist",
                 "Never copy these",
                 Kind.SYMBOLS,
-                "Master symbol names, separated by commas or spaces. Removing one does not copy "
+                "Master symbol names, without the master's own prefix or suffix, separated by "
+                "commas or spaces. Removing one does not copy "
                 "a trade that was already declined.",
                 placeholder="none",
             ),

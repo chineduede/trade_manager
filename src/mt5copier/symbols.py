@@ -99,6 +99,28 @@ def candidates(master_symbol: str, prefix: str = "", suffix: str = "") -> list[s
     return list(dict.fromkeys(out))
 
 
+def undecorate(symbol: str, prefix: str = "", suffix: str = "") -> str:
+    """The master's name with its broker's decoration taken off, when it carries it.
+
+    The master-side twin of :func:`candidates`: a slave's prefix/suffix is put *on* a name,
+    the master's is taken *off*, so every slave starts from the plain instrument name. Unlike
+    :func:`base_name` this knows the decoration rather than guessing at it, which is what makes
+    a broker's own ``p`` or ``.a`` -- too short or too odd for the built-in list -- safe to
+    strip.
+
+    A name that does not carry the decoration is left alone, for the reason the module
+    docstring gives for slaves: brokers decorate by asset class, so ``US30`` stays ``US30``
+    beside ``EURUSDp``. Case is folded only for the comparison; what is kept keeps its casing.
+    Nothing is stripped to an empty name.
+    """
+    name = symbol
+    if prefix and name.upper().startswith(prefix.upper()) and len(name) > len(prefix):
+        name = name[len(prefix) :]
+    if suffix and name.upper().endswith(suffix.upper()) and len(name) > len(suffix):
+        name = name[: -len(suffix)]
+    return name
+
+
 def mapped_target(master_symbol: str, symbol_map: Mapping[str, str] | None) -> str | None:
     """The explicit override for this symbol, or None.
 

@@ -76,6 +76,7 @@ from .dialogs import LiveDialog, OrphanDialog
 from .general import GeneralForm
 from .guards import GuardConfirm, GuardPick, GuardsScreen
 from .history import HistoryScreen
+from .master import MasterForm
 from .menu import ActionMenu, terminal_actions
 from .settings import SettingsForm
 from .setups import SetupsScreen, describe
@@ -854,9 +855,17 @@ class CopierApp(App[None]):
     def open_settings(self, tid: str) -> None:
         """Open the settings form for one terminal: from the map, or from its details page."""
         if self._cfg.terminals[tid].role is Role.MASTER:
-            self.notify(
-                "The master has no settings: it is only read from. Sizing, symbols and what "
-                "gets copied are set on each slave."
+            # Its one setting: the decoration its broker puts on names, taken off for the slaves.
+            snap = next((v.snapshot for v in self._views() if v.cfg.terminal_id == tid), None)
+            held = (snap.open_positions if snap is not None else None) or ()
+            self.push_screen(
+                MasterForm(
+                    current=lambda: self._cfg.terminals[tid],
+                    apply=self._apply_settings,
+                    halt=self.action_panic,
+                    name=self._cfg.display_name(tid),
+                    symbols=list(dict.fromkeys(p.symbol for p in held)),
+                )
             )
             return
         self.push_screen(

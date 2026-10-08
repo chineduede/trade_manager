@@ -13,6 +13,7 @@ from mt5copier.symbols import (
     base_name,
     configured_name,
     resolve,
+    undecorate,
 )
 
 TID_A = "A" * 32
@@ -257,3 +258,20 @@ def test_forgetting_one_terminal_leaves_the_others() -> None:
     cache.forget(TID_A)
     assert cache.get(TID_A, "EURUSD") is None
     assert cache.get(TID_B, "EURUSD") is not None
+
+
+def test_the_masters_decoration_comes_off_only_where_it_is() -> None:
+    """BlackBull's p: too short for the built-in list, so only the master's setting strips it."""
+    assert base_name("EURUSDp") == "EURUSDP", "the scan alone cannot get at this one"
+    assert undecorate("EURUSDp", suffix="p") == "EURUSD"
+    assert undecorate("EURUSDP", suffix="p") == "EURUSD", "case is folded for the comparison"
+    assert undecorate("US30", suffix="p") == "US30", "undecorated indices stay as they are"
+    assert undecorate("mGBPUSD.a", prefix="m", suffix=".a") == "GBPUSD"
+    assert undecorate("p", suffix="p") == "p", "never stripped to nothing"
+    assert undecorate("EURUSDp") == "EURUSDp"
+
+
+def test_a_stripped_master_name_takes_the_slaves_own_decoration() -> None:
+    plain = undecorate("EURUSDp", suffix="p")
+    got = resolve(plain, ["EURUSD.r", "GBPUSD.r"], suffix=".r")
+    assert got.name == "EURUSD.r"

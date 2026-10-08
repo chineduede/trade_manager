@@ -248,6 +248,13 @@ class TerminalConfig(BaseModel):
 
     symbol_prefix: str = ""
     symbol_suffix: str = ""
+    """This broker's decoration on symbol names, whichever side of the copy it is on.
+
+    On a slave it is put *on* the master's name to find this broker's. On the master it is
+    taken *off* every name before anything else sees it (see :func:`mt5copier.symbols.undecorate`),
+    so the slaves' renames, filters and decorations are all written against the plain name. One
+    meaning for both roles is why a terminal keeps it when its role changes: it describes the
+    broker, not the role."""
     symbol_map: dict[str, str] = Field(default_factory=dict)
     """Exact per-symbol overrides: the master's name to *this slave's* name.
 
