@@ -143,12 +143,51 @@ def position(raw: object, symbol: SymbolInfo) -> Position:
     )
 
 
-def position_live(raw: object, net_profit: float | None, money_digits: int) -> PositionLive:
+def position_live(
+    raw: object,
+    net_profit: float | None,
+    money_digits: int,
+    spot: tuple[float | None, float | None] | None = None,
+) -> PositionLive:
+    """``spot`` is the symbol's ``(bid, ask)``. A position's current price is MT5's: the bid
+    for a buy, the price it would close at, and the ask for a sell."""
+    bid, ask = spot or (None, None)
+    buy = int(raw.tradeData.tradeSide) == _BUY  # type: ignore[attr-defined]
     return PositionLive(
         ticket=int(raw.positionId),  # type: ignore[attr-defined]
+        price_current=bid if buy else ask,
         profit=net_profit,
         swap=money(int(raw.swap), money_digits),  # type: ignore[attr-defined]
     )
+
+
+def spot_price(raw: int) -> float:
+    """Spot prices come in 1/100000 of a unit."""
+    return raw / 100_000
+
+
+def is_open(raw: object) -> bool:
+    """Whether a ``ProtoOAPosition`` is a real open position, rather than the empty one cTrader
+    creates for every resting order."""
+    return int(raw.positionStatus) == om.POSITION_STATUS_OPEN  # type: ignore[attr-defined]
+
+
+def is_resting(raw: object) -> bool:
+    data = raw.tradeData  # type: ignore[attr-defined]
+    return order_type(int(raw.orderType), int(data.tradeSide)) is not None  # type: ignore[attr-defined]
+
+
+def order_ticket(raw: object) -> int:
+    """The ticket a resting order is known by: the id of **the position it will become**,
+    which cTrader gives it on placement, and not its own order id.
+
+    The copier tells a master's filled order from a cancelled one by the order's ticket
+    reappearing as a position's, which is how MT5 numbers them. A cTrader order and its
+    position have different ids, so reporting the order by its position's makes a slave's
+    fill hand over the same way. The order id is the fallback for an order with no position."""
+    if raw.HasField("positionId") and int(raw.positionId):  # type: ignore[attr-defined]
+        return int(raw.positionId)  # type: ignore[attr-defined]
+    return int(raw.orderId)  # type: ignore[attr-defined]
 
 
 def order_type(cts_type: int, trade_side: int) -> OrderType | None:
@@ -161,6 +200,16 @@ def order_type(cts_type: int, trade_side: int) -> OrderType | None:
         return OrderType.BUY_STOP if buy else OrderType.SELL_STOP
     if cts_type == _STOP_LIMIT:
         return OrderType.BUY_STOP_LIMIT if buy else OrderType.SELL_STOP_LIMIT
+    return None
+
+
+def resting_type(kind: OrderType | None) -> om.ProtoOAOrderType | None:
+    """cTrader's order type for placing one of MT5's: LIMIT or STOP, the side going separately.
+    None for a stop-limit, which the copier never places, or anything that is not resting."""
+    if kind in (OrderType.BUY_LIMIT, OrderType.SELL_LIMIT):
+        return om.LIMIT
+    if kind in (OrderType.BUY_STOP, OrderType.SELL_STOP):
+        return om.STOP
     return None
 
 
@@ -184,7 +233,7 @@ def pending_order(raw: object, symbol: SymbolInfo) -> PendingOrder | None:
             price + reach if kind is OrderType.BUY_STOP_LIMIT else price - reach, symbol.digits
         )
     return PendingOrder(
-        ticket=int(raw.orderId),  # type: ignore[attr-defined]
+        ticket=order_ticket(raw),
         symbol=symbol.name,
         type=kind,
         volume=symbol.lots(int(data.volume)),

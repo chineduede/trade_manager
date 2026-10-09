@@ -1708,10 +1708,8 @@ are the design, not a limitation waiting to be lifted.
     is kept in it (EURUSD, XAUUSD on USD); divided by the stop's price when the account is kept in
     the base (USDJPY on USD). **Any other symbol is refused** until live prices are read (phase 4).
     The no-stop lot multiple works for every symbol. Margin caps ask `ExpectedMarginReq`.
-  - Refused: placing, moving and cancelling resting orders (phase 3), and live accounts unless
-    `allow_live_trading`, as on MT5. Commands arriving while disconnected fail, as on MT5.
-  - Next: phase 3 pendings (and breakeven checks), phase 4 live prices (cross-currency sizing,
-    a position's current price), phase 5 deals.
+  - Refused: live accounts unless `allow_live_trading`, as on MT5. Commands arriving while
+    disconnected fail, as on MT5. (Resting orders followed in phase 3.)
   - *Demo check:* make the cTrader demo a slave and copy for real. (1) Master buys EURUSD with
     SL and TP: the copy's lots match the slave's risk, it carries label `mt5copier`, and its
     SL/TP equal the master's exactly. (2) Move the master's SL: the copy follows. (3) Remove the
@@ -1719,6 +1717,29 @@ are the design, not a limitation waiting to be lifted.
     (4) Partially close the master, then close it: the copy follows both. (5) USDJPY sizes;
     EURGBP is refused with "converting needs live prices". (6) A master trade with no stop
     copies at the lot multiple when the no-stop policy allows it.
+- **cTrader slaves, phase 3 of 5 — built 2026-10-09 on `ctrader`; the user ran the demo check the same day and every step passed.**
+  Resting orders, and the current price breakeven needs.
+  - Place (LIMIT or STOP, absolute entry, SL and TP), move (`AmendOrderReq`, volume kept) and
+    cancel (`CancelOrderReq`); one no longer resting is gone, as on MT5. Stop-limits are never
+    placed (the diff refuses them for every slave).
+  - **A resting order is reported under its positionId, not its orderId.** The ledger tells a
+    fill from a cancel by the order's ticket reappearing as a position's, as MT5 numbers them;
+    cTrader gives each resting order the id of the position it will become, so using that makes
+    the hand-over work unchanged. The orderId is used only to amend or cancel, and is the fallback
+    for an order without a positionId. The empty position cTrader creates for a resting order
+    (`POSITION_STATUS_CREATED`) is left out of the positions.
+  - Spot prices (moved forward from phase 4): the worker subscribes to every symbol it holds a
+    position in, so a position has a current price (bid for a buy, ask for a sell). Breakeven
+    reads that, which is what lets it fire on a cTrader slave.
+  - Next: phase 4 cross-currency risk sizing from the spot prices, phase 5 deals.
+  - *Demo check:* (1) Master places a buy limit with SL/TP: the slave rests one at the same
+    levels, risk-sized; its ORDERS row's ticket is then the id the position will get. (2) Move
+    the master's entry, SL and TP: the slave follows. (3) Remove the master's SL from the order:
+    the slave's goes too (checked: leaving `stopLoss` out of an order amend clears it).
+    (4) Delete the master's order: the slave's is cancelled. (5) Place again and let both fill:
+    the slave's position is then followed (move the master's SL, then close it) and no second copy
+    opens. (6) A sell stop the same way. (7) Breakeven on the cTrader slave: its positions show a
+    current price, the stop moves when the trigger is reached, and booking closes its share.
 - **Not handled: an account switched by hand in MT5 while the terminal has a role — noted
   2026-10-05, nothing built.** If a slave is switched to another account inside MT5 while
   the copier is connected, nothing notices: its copies are filed by terminal, not account, so

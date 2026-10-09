@@ -19,7 +19,6 @@ from mt5copier import role_actions
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.ctrader import auth
 from mt5copier.ctrader import convert as cv
-from mt5copier.ctrader import executor as ct_executor
 from mt5copier.ctrader import worker as ct_worker
 from mt5copier.ctrader.client import CTraderClient, OpenApiError, decode, encode
 from mt5copier.ctrader.proto import OpenApiMessages_pb2 as oa
@@ -345,6 +344,7 @@ class FakeOpenApi:
         self.refuse_order = refuse_order
         self.seen: list[str] = []
         self.requests: list[Any] = []
+        self.orders: dict[int, Any] = {}
         self.positions: dict[int, Any] = {
             77: om.ProtoOAPosition(
                 positionId=77,
@@ -421,8 +421,33 @@ class FakeOpenApi:
             )
         if isinstance(msg, oa.ProtoOAReconcileReq):
             return oa.ProtoOAReconcileRes(
-                ctidTraderAccountId=ACCOUNT, position=list(self.positions.values())
+                ctidTraderAccountId=ACCOUNT,
+                position=list(self.positions.values()),
+                order=list(self.orders.values()),
             )
+        if isinstance(msg, oa.ProtoOASubscribeSpotsReq):
+            return [
+                oa.ProtoOASubscribeSpotsRes(ctidTraderAccountId=ACCOUNT),
+                oa.ProtoOASpotEvent(
+                    ctidTraderAccountId=ACCOUNT, symbolId=1, bid=110_050, ask=110_062
+                ),
+                # Only the side that moved.
+                oa.ProtoOASpotEvent(ctidTraderAccountId=ACCOUNT, symbolId=1, bid=110_055),
+            ]
+        if isinstance(msg, oa.ProtoOAAmendOrderReq):
+            order = next((o for o in self.orders.values() if o.orderId == msg.orderId), None)
+            if order is None:
+                return self._order_error("ORDER_NOT_FOUND")
+            for name in ("limitPrice", "stopPrice", "stopLoss", "takeProfit"):
+                if msg.HasField(name):
+                    setattr(order, name, getattr(msg, name))
+            return self._execution(om.ORDER_REPLACED, self._shell(order), 0, order=order)
+        if isinstance(msg, oa.ProtoOACancelOrderReq):
+            order = next((o for o in self.orders.values() if o.orderId == msg.orderId), None)
+            if order is None:
+                return self._order_error("ORDER_NOT_FOUND")
+            del self.orders[order.positionId]
+            return self._execution(om.ORDER_CANCELLED, self._shell(order), 0, order=order)
         if isinstance(msg, oa.ProtoOANewOrderReq):
             return self._new_order(msg)
         if isinstance(msg, oa.ProtoOAClosePositionReq):
@@ -449,12 +474,15 @@ class FakeOpenApi:
     def _order_error(self, code: str) -> Any:
         return oa.ProtoOAOrderErrorEvent(ctidTraderAccountId=ACCOUNT, errorCode=code)
 
-    def _execution(self, kind: int, position: Any, order_id: int, deal: Any = None) -> Any:
+    def _execution(
+        self, kind: int, position: Any, order_id: int, deal: Any = None, order: Any = None
+    ) -> Any:
         event = oa.ProtoOAExecutionEvent(
             ctidTraderAccountId=ACCOUNT,
             executionType=kind,  # type: ignore[arg-type]
             position=position,
-            order=om.ProtoOAOrder(
+            order=order
+            or om.ProtoOAOrder(
                 orderId=order_id,
                 tradeData=position.tradeData,
                 orderType=om.MARKET,
@@ -480,9 +508,37 @@ class FakeOpenApi:
             dealStatus=om.FILLED,
         )
 
+    def _shell(self, order: Any) -> Any:
+        """The empty position cTrader creates for a resting order."""
+        return om.ProtoOAPosition(
+            positionId=order.positionId,
+            tradeData=order.tradeData,
+            positionStatus=om.POSITION_STATUS_CREATED,
+            swap=0,
+        )
+
     def _new_order(self, msg: Any) -> Any:
         if self.refuse_order:
             return self._order_error(self.refuse_order)
+        if msg.orderType in (om.LIMIT, om.STOP):
+            order = om.ProtoOAOrder(
+                orderId=700,
+                positionId=99,
+                tradeData=om.ProtoOATradeData(
+                    symbolId=msg.symbolId,
+                    volume=msg.volume,
+                    tradeSide=msg.tradeSide,
+                    label=msg.label,
+                    openTimestamp=1,
+                ),
+                orderType=msg.orderType,
+                orderStatus=om.ORDER_STATUS_ACCEPTED,
+            )
+            for name in ("limitPrice", "stopPrice", "stopLoss", "takeProfit"):
+                if msg.HasField(name):
+                    setattr(order, name, getattr(msg, name))
+            self.orders[99] = order
+            return self._execution(om.ORDER_ACCEPTED, self._shell(order), 0, order=order)
         position = om.ProtoOAPosition(
             positionId=88,
             tradeData=om.ProtoOATradeData(
@@ -605,6 +661,9 @@ async def test_the_worker_reports_the_account_like_an_mt5_terminal() -> None:
     assert (pos.ticket, pos.symbol, pos.volume, pos.magic) == (77, "EURUSD", 0.5, COPIER_MAGIC)
     assert snap.live_positions is not None
     assert snap.live_positions[0].swap == pytest.approx(-1.5)
+    # A buy is priced at the bid, the side that moved last.
+    assert snap.live_positions[0].price_current == pytest.approx(1.10055)
+    assert "ProtoOASubscribeSpotsReq" in api.seen
     assert snap.pending_orders == ()
     assert isinstance(got[-1], Snapshot) and got[-1].state is WorkerState.STOPPED
 
@@ -755,12 +814,119 @@ async def test_moving_the_stops_of_a_gone_copy_says_so() -> None:
     assert results[0].ok and results[0].target_gone
 
 
-async def test_resting_orders_and_live_accounts_are_refused() -> None:
-    api = FakeOpenApi()
-    place = _command(ActionKind.PLACE, order_type=OrderType.BUY_LIMIT, entry=1.09)
-    (result,) = await _results(api, place)
-    assert result.ok is False and result.error == ct_executor.PENDINGS_NOT_YET
+def _resting_order(api: FakeOpenApi) -> None:
+    """A copy resting as a buy limit, as ``_new_order`` would leave one."""
+    api.orders[99] = om.ProtoOAOrder(
+        orderId=700,
+        positionId=99,
+        tradeData=_trade(om.BUY, 2_000_000, label=cv.COPIER_LABEL),
+        orderType=om.LIMIT,
+        orderStatus=om.ORDER_STATUS_ACCEPTED,
+        limitPrice=1.09,
+        stopLoss=1.085,
+        takeProfit=1.1,
+    )
 
+
+def test_a_resting_order_is_known_by_the_position_it_will_become() -> None:
+    api = FakeOpenApi()
+    _resting_order(api)
+    order = cv.pending_order(api.orders[99], EURUSD)
+    assert order is not None and order.ticket == 99
+    without = om.ProtoOAOrder()
+    without.CopyFrom(api.orders[99])
+    without.ClearField("positionId")
+    assert cv.order_ticket(without) == 700
+
+
+async def test_a_limit_is_placed_at_the_masters_levels_and_known_by_its_position() -> None:
+    api = FakeOpenApi()
+    place = _command(
+        ActionKind.PLACE,
+        order_type=OrderType.BUY_LIMIT,
+        entry=1.0900,
+        sl=1.0880,
+        tp=1.0950,
+        risk_amount=100.0,
+    )
+    (result,) = await _results(api, place)
+    assert result.ok, result.error
+    assert result.slave_ticket == 99
+    assert result.filled_volume == 0.5
+    assert result.price == 1.09 and result.digits == 5
+    (order,) = _sent(api, oa.ProtoOANewOrderReq)
+    assert order.orderType == om.LIMIT and order.tradeSide == om.BUY
+    assert (order.limitPrice, order.stopLoss, order.takeProfit) == (1.09, 1.088, 1.095)
+    assert not order.HasField("stopPrice")
+    assert order.volume == 5_000_000
+
+
+async def test_a_sell_stop_rests_at_its_stop_price() -> None:
+    api = FakeOpenApi()
+    place = _command(
+        ActionKind.PLACE,
+        order_type=OrderType.SELL_STOP,
+        direction=PositionType.SELL,
+        entry=1.0900,
+        sl=1.0920,
+        risk_amount=100.0,
+    )
+    (result,) = await _results(api, place)
+    assert result.ok, result.error
+    (order,) = _sent(api, oa.ProtoOANewOrderReq)
+    assert order.orderType == om.STOP and order.tradeSide == om.SELL
+    assert order.stopPrice == 1.09 and not order.HasField("limitPrice")
+
+
+async def test_a_resting_copy_is_moved_by_its_order_id() -> None:
+    api = FakeOpenApi()
+    _resting_order(api)
+    move = _command(
+        ActionKind.MODIFY_ORDER,
+        order_type=OrderType.BUY_LIMIT,
+        slave_ticket=99,
+        entry=1.0910,
+        sl=1.0890,
+        tp=1.1,
+    )
+    (result,) = await _results(api, move)
+    assert result.ok, result.error
+    (amend,) = _sent(api, oa.ProtoOAAmendOrderReq)
+    assert amend.orderId == 700
+    assert (amend.limitPrice, amend.stopLoss, amend.takeProfit) == (1.091, 1.089, 1.1)
+
+
+async def test_a_resting_copy_already_where_the_master_is_is_not_sent() -> None:
+    api = FakeOpenApi()
+    _resting_order(api)
+    same = _command(ActionKind.MODIFY_ORDER, slave_ticket=99, entry=1.09, sl=1.085, tp=1.1)
+    (result,) = await _results(api, same)
+    assert result.ok and result.outcome == "already matched"
+    assert not _sent(api, oa.ProtoOAAmendOrderReq)
+
+
+async def test_moving_a_copy_no_longer_resting_says_it_is_gone() -> None:
+    api = FakeOpenApi()
+    (result,) = await _results(api, _command(ActionKind.MODIFY_ORDER, slave_ticket=99, entry=1.0))
+    assert result.ok and result.target_gone
+
+
+async def test_a_resting_copy_is_cancelled_and_one_already_gone_is_done() -> None:
+    api = FakeOpenApi()
+    _resting_order(api)
+    (result,) = await _results(api, _command(ActionKind.CANCEL, slave_ticket=99))
+    assert result.ok, result.error
+    (cancel,) = _sent(api, oa.ProtoOACancelOrderReq)
+    assert cancel.orderId == 700
+    assert not api.orders
+
+    api = FakeOpenApi()
+    (result,) = await _results(api, _command(ActionKind.CANCEL, slave_ticket=99))
+    assert result.ok and result.outcome == "already gone"
+    assert not _sent(api, oa.ProtoOACancelOrderReq)
+
+
+async def test_a_live_account_is_refused() -> None:
     api = FakeOpenApi()
     (result,) = await _results(api, _command(ActionKind.CLOSE, slave_ticket=77), is_live=True)
     assert result.ok is False and result.error is not None and "not a demo" in result.error

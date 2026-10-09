@@ -19,7 +19,10 @@ Where cTrader differs:
 * **No ``order_calc_profit``.** Risk sizing works out a lot's value itself (see
   :func:`~mt5copier.ctrader.convert.price_value`), which it can only do for a symbol quoted
   in the account's currency or based on it. Any other symbol is refused until prices are read.
-* **Resting orders are not built yet**: placing, moving and cancelling them are refused.
+* **A resting order is known by its position's id**, not its own (see
+  :func:`~mt5copier.ctrader.convert.order_ticket`), so it is looked up by that before it is
+  moved or cancelled. Stop-limit orders are never placed: the diff refuses them for every
+  slave.
 """
 
 from __future__ import annotations
@@ -56,8 +59,6 @@ FILL_WAIT_S = 10.0
 failed with a warning to look at the account: it may still fill, and would then show there as
 one of ours that nothing tracks."""
 
-PENDINGS_NOT_YET = "resting orders on cTrader are not built yet"
-
 _TRANSIENT = frozenset(
     {
         "REQUEST_FREQUENCY_EXCEEDED",
@@ -71,6 +72,7 @@ _TRANSIENT = frozenset(
 """Refusals about the moment rather than the request."""
 
 _GONE = frozenset({"POSITION_NOT_FOUND", "POSITION_NOT_OPEN"})
+_ORDER_GONE = frozenset({"ORDER_NOT_FOUND"})
 
 _FILLED = (om.ORDER_FILLED,)
 _ENDED = (om.ORDER_REJECTED, om.ORDER_CANCELLED, om.ORDER_EXPIRED)
@@ -137,13 +139,19 @@ class CTraderExecutor:
             return await self._modify_sltp(cmd)
         if cmd.op is ActionKind.OPEN:
             return await self._open(cmd)
-        if cmd.op in (ActionKind.PLACE, ActionKind.MODIFY_ORDER, ActionKind.CANCEL):
-            return self._fail(cmd, error=PENDINGS_NOT_YET)
+        if cmd.op is ActionKind.PLACE:
+            return await self._place(cmd)
+        if cmd.op is ActionKind.MODIFY_ORDER:
+            return await self._modify_order(cmd)
+        if cmd.op is ActionKind.CANCEL:
+            return await self._cancel(cmd)
         return self._fail(cmd, error=f"nothing to send for {cmd.op.value}")
 
     # --- opening ----------------------------------------------------------------------------
 
-    async def _open(self, cmd: OrderCommand) -> OrderResult:
+    async def _prepare(self, cmd: OrderCommand) -> tuple[str, cv.SymbolInfo, float] | OrderResult:
+        """What every new order starts with: the slave's symbol and the lots to send, or the
+        failure that stops it."""
         account = self._account
         resolved = self._symbols.resolve(
             self._terminal_id,
@@ -176,10 +184,17 @@ class CTraderExecutor:
             if isinstance(fitted, str):
                 return self._fail(cmd, slave_symbol=name, error=fitted)
             lots = fitted
+        return name, symbol, lots
 
+    async def _open(self, cmd: OrderCommand) -> OrderResult:
+        account = self._account
+        prepared = await self._prepare(cmd)
+        if isinstance(prepared, OrderResult):
+            return prepared
+        name, symbol, lots = prepared
         request = oa.ProtoOANewOrderReq(
             ctidTraderAccountId=account.account_id,
-            symbolId=sid,
+            symbolId=symbol.symbol_id,
             orderType=om.MARKET,
             tradeSide=cv.trade_side(cmd.direction),
             volume=symbol.volume(lots),
@@ -259,6 +274,167 @@ class CTraderExecutor:
             point=symbol.point,
             digits=symbol.digits,
             price_value=cv.price_value(symbol, account.deposit_asset_id, price),
+        )
+
+    # --- resting orders -------------------------------------------------------------------------
+
+    async def _place(self, cmd: OrderCommand) -> OrderResult:
+        """Rest a copy of the master's limit or stop order at the master's price, with its stop
+        and target as they are -- a resting order, unlike a market one, takes them absolute.
+
+        Done when cTrader accepts it: the fill comes later, by itself, and is followed as a
+        position from then on."""
+        kind = cv.resting_type(cmd.order_type)
+        if kind is None:
+            return self._fail(cmd, error=f"cannot place a {cmd.order_type!r} order on cTrader")
+        prepared = await self._prepare(cmd)
+        if isinstance(prepared, OrderResult):
+            return prepared
+        name, symbol, lots = prepared
+        digits = symbol.digits
+        request = oa.ProtoOANewOrderReq(
+            ctidTraderAccountId=self._account.account_id,
+            symbolId=symbol.symbol_id,
+            orderType=kind,
+            tradeSide=cv.trade_side(cmd.direction),
+            volume=symbol.volume(lots),
+            label=cv.COPIER_LABEL,
+            comment=cmd.comment[:512],
+        )
+        if kind == om.LIMIT:
+            request.limitPrice = round(cmd.entry, digits)
+        else:
+            request.stopPrice = round(cmd.entry, digits)
+        if cmd.sl:
+            request.stopLoss = round(cmd.sl, digits)
+        if cmd.tp:
+            request.takeProfit = round(cmd.tp, digits)
+
+        answer = await self._follow(request, wait_for_fill=False)
+        event = answer.event
+        refused = _refusal(answer)
+        if refused is not None:
+            return self._fail(
+                cmd,
+                slave_symbol=name,
+                requested_volume=lots,
+                attempts=1,
+                retryable=answer.code in _TRANSIENT,
+                error=f"cTrader refused the order: {refused}",
+            )
+        return self._ok(
+            cmd,
+            slave_ticket=cv.order_ticket(event.order),
+            slave_symbol=name,
+            requested_volume=lots,
+            filled_volume=lots,
+            price=cmd.entry,
+            attempts=1,
+            point=symbol.point,
+            digits=digits,
+            price_value=cv.price_value(symbol, self._account.deposit_asset_id, cmd.entry),
+        )
+
+    async def _modify_order(self, cmd: OrderCommand) -> OrderResult:
+        """Move a resting copy's entry, stop and target to the master's. Its volume stays, as
+        on MT5. An order no longer resting -- filled or gone -- is left for the order diff,
+        which sees it on its next tick."""
+        if cmd.slave_ticket is None:
+            return self._fail(cmd, error="no slave ticket recorded for this copy")
+        raw = (await self._account.resting_orders()).get(cmd.slave_ticket)
+        if raw is None:
+            log.info(
+                "#%s: slave order %s is no longer resting", cmd.master_ticket, cmd.slave_ticket
+            )
+            return self._ok(
+                cmd, slave_ticket=cmd.slave_ticket, outcome=Outcome.GONE.value, target_gone=True
+            )
+        sid = int(raw.tradeData.symbolId)
+        await self._account.symbols_for({sid})
+        symbol = self._account.symbols[sid]
+        digits = symbol.digits
+        limit = int(raw.orderType) == om.LIMIT
+        resting_at = float(raw.limitPrice) if limit else float(raw.stopPrice)
+        wanted = f"entry {cmd.entry:g} sl {cmd.sl:g} tp {cmd.tp:g}"
+        if all(
+            round(a, digits) == round(b, digits)
+            for a, b in (
+                (resting_at, cmd.entry),
+                (float(raw.stopLoss), cmd.sl),
+                (float(raw.takeProfit), cmd.tp),
+            )
+        ):
+            return self._ok(
+                cmd,
+                slave_ticket=cmd.slave_ticket,
+                slave_symbol=symbol.name,
+                outcome="already matched",
+            )
+        request = oa.ProtoOAAmendOrderReq(
+            ctidTraderAccountId=self._account.account_id, orderId=int(raw.orderId)
+        )
+        if limit:
+            request.limitPrice = round(cmd.entry, digits)
+        else:
+            request.stopPrice = round(cmd.entry, digits)
+        if cmd.sl:
+            request.stopLoss = round(cmd.sl, digits)
+        if cmd.tp:
+            request.takeProfit = round(cmd.tp, digits)
+        answer = await self._follow(request, wait_for_fill=False)
+        if answer.code in _ORDER_GONE:
+            log.warning("#%s: %s, so %s was not applied", cmd.master_ticket, answer.refusal, wanted)
+            return self._ok(
+                cmd,
+                slave_ticket=cmd.slave_ticket,
+                slave_symbol=symbol.name,
+                outcome=Outcome.GONE.value,
+                target_gone=True,
+                attempts=1,
+            )
+        refused = _refusal(answer)
+        if refused is not None:
+            return self._fail(
+                cmd,
+                slave_symbol=symbol.name,
+                attempts=1,
+                retryable=answer.code in _TRANSIENT,
+                error=f"{refused} setting {wanted} on {symbol.name}",
+            )
+        return self._ok(cmd, slave_ticket=cmd.slave_ticket, slave_symbol=symbol.name, attempts=1)
+
+    async def _cancel(self, cmd: OrderCommand) -> OrderResult:
+        """Delete a resting copy. One already gone -- filled or removed -- counts as done, as
+        on MT5: not resting is what was asked for."""
+        if cmd.slave_ticket is None:
+            return self._fail(cmd, error="no slave ticket recorded for this copy")
+        raw = (await self._account.resting_orders()).get(cmd.slave_ticket)
+        if raw is None:
+            log.info("#%s: slave order %s already gone", cmd.master_ticket, cmd.slave_ticket)
+            return self._ok(cmd, slave_ticket=cmd.slave_ticket, outcome="already gone")
+        answer = await self._follow(
+            oa.ProtoOACancelOrderReq(
+                ctidTraderAccountId=self._account.account_id, orderId=int(raw.orderId)
+            ),
+            wait_for_fill=False,
+        )
+        if answer.code in _ORDER_GONE:
+            return self._ok(
+                cmd, slave_ticket=cmd.slave_ticket, outcome=Outcome.GONE.value, attempts=1
+            )
+        event = answer.event
+        if (
+            answer.code is None
+            and event is not None
+            and int(event.executionType) == (om.ORDER_CANCELLED)
+        ):
+            return self._ok(cmd, slave_ticket=cmd.slave_ticket, attempts=1)
+        why = _refusal(answer) or _execution_name(event)
+        return self._fail(
+            cmd,
+            attempts=1,
+            retryable=answer.code in _TRANSIENT,
+            error=f"{why} cancelling order {cmd.slave_ticket}",
         )
 
     def _size(
@@ -623,6 +799,16 @@ def _opened(event: Any) -> bool:
         int(position.positionStatus) == om.POSITION_STATUS_OPEN
         and int(position.tradeData.volume) > 0
     )
+
+
+def _refusal(answer: _Answer) -> str | None:
+    """Why a request that does not wait for a fill was turned down, or None if it was taken."""
+    if answer.code is not None:
+        return answer.refusal
+    event = answer.event
+    if event is None or int(event.executionType) in _ENDED:
+        return f"{_execution_name(event)}{_why(event)}"
+    return None
 
 
 def _ended(event: Any) -> bool:

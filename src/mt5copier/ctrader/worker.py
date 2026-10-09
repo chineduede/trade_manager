@@ -7,14 +7,12 @@ treat the account like any other slave. Underneath it is an asyncio loop around 
 :class:`CTraderClient`, re-reading the account's positions and orders each tick.
 
 Order commands go to a :class:`~mt5copier.ctrader.executor.CTraderExecutor`, on the same loop
-and connection, between ticks. It opens, closes and moves the stops of positions; resting orders
-are refused until they are built.
+and connection, between ticks.
 
-What a snapshot leaves unknown (None), and why:
-
-* ``deals`` -- deposits and withdrawals come from a different request than trades, and a guard
-  rebuilding a balance from half the history would be wrong rather than blank.
-* a position's current price -- that needs a price subscription per symbol; its P/L is known.
+A position's current price comes from a spot subscription, taken out for each symbol the account
+holds a position in and kept until the connection ends. What a snapshot leaves unknown is
+``deals``: deposits and withdrawals come from a different request than trades, and a guard
+rebuilding a balance from half the history would be wrong rather than blank.
 """
 
 from __future__ import annotations
@@ -98,6 +96,9 @@ class _Account:
         self.symbols: dict[int, cv.SymbolInfo] = {}
         self._trader_read_at = 0.0
         self.error: str | None = None
+        self.spots: dict[int, tuple[float | None, float | None]] = {}
+        """``(bid, ask)`` by symbol id, from the spot subscriptions."""
+        self._subscribed: set[int] = set()
 
     @property
     def connected(self) -> bool:
@@ -110,6 +111,9 @@ class _Account:
         if not creds.logged_in:
             return False, "not logged in to cTrader: press t on the Map"
         client = self._client_factory(host_for(self.is_live))
+        # Subscriptions belong to a connection.
+        self.spots = {}
+        self._subscribed = set()
         try:
             await client.connect()
             await client.request(
@@ -174,13 +178,50 @@ class _Account:
         """Re-read the balance on the next tick: something was just executed."""
         self._trader_read_at = 0.0
 
-    async def open_positions(self) -> dict[int, Any]:
-        """The account's open positions as cTrader reports them now, by position id."""
+    async def _reconcile(self) -> tuple[list[Any], list[Any]]:
+        """The open positions and the orders, as cTrader reports them now."""
         assert self.client is not None
         state = await self.client.request(
             oa.ProtoOAReconcileReq(ctidTraderAccountId=self.account_id)
         )
-        return {int(p.positionId): p for p in state.position}
+        return [p for p in state.position if cv.is_open(p)], list(state.order)
+
+    async def open_positions(self) -> dict[int, Any]:
+        """The account's open positions, by position id."""
+        positions, _ = await self._reconcile()
+        return {int(p.positionId): p for p in positions}
+
+    async def resting_orders(self) -> dict[int, Any]:
+        """The account's resting orders, by the ticket the copier knows them by
+        (:func:`~mt5copier.ctrader.convert.order_ticket`)."""
+        _, orders = await self._reconcile()
+        return {cv.order_ticket(o): o for o in orders if cv.is_resting(o)}
+
+    async def _subscribe(self, ids: set[int]) -> None:
+        """Ask for spot prices of symbols not yet subscribed to. A refusal is logged and not
+        retried on this connection: a price is wanted for display and breakeven, and must not
+        stop the read."""
+        missing = sorted(ids - self._subscribed)
+        if not missing:
+            return
+        assert self.client is not None
+        self._subscribed.update(missing)
+        try:
+            await self.client.request(
+                oa.ProtoOASubscribeSpotsReq(ctidTraderAccountId=self.account_id, symbolId=missing)
+            )
+        except OpenApiError as exc:
+            log.warning("cTrader refused spot prices for %s: %s", missing, exc)
+
+    def _on_spot(self, event: Any) -> None:
+        """A spot event carries only the side that changed."""
+        sid = int(event.symbolId)
+        bid, ask = self.spots.get(sid, (None, None))
+        if event.HasField("bid"):
+            bid = cv.spot_price(int(event.bid))
+        if event.HasField("ask"):
+            ask = cv.spot_price(int(event.ask))
+        self.spots[sid] = (bid, ask)
 
     async def symbols_for(self, ids: set[int]) -> None:
         missing = sorted(i for i in ids if i not in self.symbols)
@@ -219,6 +260,8 @@ class _Account:
                 raise ConnectionError(f"cTrader ended the session: {reason}")
             if isinstance(event, oa.ProtoOAExecutionEvent):
                 executed = True
+            elif isinstance(event, oa.ProtoOASpotEvent):
+                self._on_spot(event)
 
     async def poll(self, terminal_id: str, seq: int, attempts: int) -> Snapshot:
         try:
@@ -246,15 +289,12 @@ class _Account:
         executed = self._drain_events()
         if executed or time.monotonic() - self._trader_read_at >= _TRADER_EVERY_S:
             await self._read_trader()
-        state = await self.client.request(
-            oa.ProtoOAReconcileReq(ctidTraderAccountId=self.account_id)
-        )
-        raw_positions = list(state.position)
-        raw_orders = list(state.order)
+        raw_positions, raw_orders = await self._reconcile()
         await self.symbols_for(
             {int(p.tradeData.symbolId) for p in raw_positions}
             | {int(o.tradeData.symbolId) for o in raw_orders}
         )
+        await self._subscribe({int(p.tradeData.symbolId) for p in raw_positions})
         pnl: dict[int, float] = {}
         if raw_positions:
             answer = await self.client.request(
@@ -269,7 +309,12 @@ class _Account:
             cv.position(p, self.symbols[int(p.tradeData.symbolId)]) for p in raw_positions
         )
         live = tuple(
-            cv.position_live(p, pnl.get(int(p.positionId)), self._money_digits)
+            cv.position_live(
+                p,
+                pnl.get(int(p.positionId)),
+                self._money_digits,
+                self.spots.get(int(p.tradeData.symbolId)),
+            )
             for p in raw_positions
         )
         orders = tuple(
