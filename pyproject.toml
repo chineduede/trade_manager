@@ -9,6 +9,7 @@ dependencies = [
     "psutil>=7.0",
     "textual>=1.0",
     "tzdata>=2026.5",
+    "protobuf>=7.35.1",
 ]
 
 [project.scripts]
@@ -35,6 +36,8 @@ where = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+# Generated from Spotware's .proto files; regenerated, never edited.
+extend-exclude = ["src/mt5copier/ctrader/proto"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B"]
@@ -61,3 +64,9 @@ strict_equality = true
 [[tool.mypy.overrides]]
 module = "MetaTrader5"
 ignore_missing_imports = true
+
+# The generated messages are typed only loosely: every field is read through Any.
+[[tool.mypy.overrides]]
+module = ["mt5copier.ctrader.proto.*", "google.protobuf.*"]
+ignore_missing_imports = true
+follow_imports = "skip"

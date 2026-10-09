@@ -38,6 +38,7 @@ from .config import (
     account_key,
 )
 from .copy_stats import StatsBook, TerminalStats
+from .ctrader.worker import run_ctrader_worker
 from .day_book import DayBook, MasterEvent, Outcome, SlaveOutcome
 from .guards import NO_VERDICT, GuardBook, GuardReport, GuardsDoc, Verdict
 from .history import HistoryStore, Trade, step_for
@@ -319,7 +320,9 @@ class Engine:
         with self._lock:
             wanted: dict[str, TerminalConfig] = {}
             for tcfg in self._cfg.assigned():
-                if tcfg.exe_path is None or not Path(tcfg.exe_path).is_file():
+                if not tcfg.is_ctrader and (
+                    tcfg.exe_path is None or not Path(tcfg.exe_path).is_file()
+                ):
                     log.warning(
                         "skipping %s (%s): no terminal executable at %s",
                         tcfg.label,
@@ -354,7 +357,7 @@ class Engine:
             tcfg = self._cfg.terminals.get(terminal_id)
             self._stop_worker(terminal_id)
             if tcfg is not None and tcfg.enabled and tcfg.role is not Role.UNASSIGNED:
-                if tcfg.exe_path is not None and Path(tcfg.exe_path).is_file():
+                if tcfg.is_ctrader or (tcfg.exe_path is not None and Path(tcfg.exe_path).is_file()):
                     self._spawn_worker(tcfg)
 
     def reconnect(self, terminal_id: str) -> None:
@@ -370,21 +373,40 @@ class Engine:
 
     def _spawn_worker(self, tcfg: TerminalConfig) -> None:
         cmd_q: mp.Queue = self._ctx.Queue(maxsize=64)
-        log_file = log_dir() / f"worker-{tcfg.terminal_id[:8]}.log"
-        process = self._ctx.Process(
-            target=run_worker,
-            name=f"mt5-{tcfg.terminal_id[:8]}",
-            args=(
-                tcfg.terminal_id,
-                str(tcfg.exe_path),
-                self._out_q,
-                cmd_q,
-                str(log_file),
-                self._cfg.poll_interval_ms,
-                list(self._cfg.reconnect_backoff_s),
-            ),
-            daemon=True,
-        )
+        if tcfg.ctrader_account_id is not None:
+            log_file = log_dir() / f"worker-ctrader-{tcfg.ctrader_account_id}.log"
+            process = self._ctx.Process(
+                target=run_ctrader_worker,
+                name=f"ctrader-{tcfg.ctrader_account_id}",
+                args=(
+                    tcfg.terminal_id,
+                    tcfg.ctrader_account_id,
+                    tcfg.ctrader_live,
+                    tcfg.last_server or "",
+                    self._out_q,
+                    cmd_q,
+                    str(log_file),
+                    self._cfg.poll_interval_ms,
+                    list(self._cfg.reconnect_backoff_s),
+                ),
+                daemon=True,
+            )
+        else:
+            log_file = log_dir() / f"worker-{tcfg.terminal_id[:8]}.log"
+            process = self._ctx.Process(
+                target=run_worker,
+                name=f"mt5-{tcfg.terminal_id[:8]}",
+                args=(
+                    tcfg.terminal_id,
+                    str(tcfg.exe_path),
+                    self._out_q,
+                    cmd_q,
+                    str(log_file),
+                    self._cfg.poll_interval_ms,
+                    list(self._cfg.reconnect_backoff_s),
+                ),
+                daemon=True,
+            )
         process.start()
         self._workers[tcfg.terminal_id] = _Worker(tcfg.terminal_id, process, cmd_q)
         self._received_at[tcfg.terminal_id] = time.monotonic()

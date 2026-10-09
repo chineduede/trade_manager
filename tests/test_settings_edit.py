@@ -70,6 +70,8 @@ NOT_EDITABLE = {
     "last_server",
     "enabled",  # no longer offered: pausing replaced it, and it stays only so old files load
     "paused",  # a switch on the slave's row, flipped far more often than any setting
+    "ctrader_account_id",  # which cTrader account it is: set by the login, an identity
+    "ctrader_live",  # what the login says the account is
 }
 
 

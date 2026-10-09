@@ -21,6 +21,7 @@ keys jump to slave cards.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -41,6 +42,7 @@ from .. import config as config_mod
 from .. import role_actions
 from .. import setups as setups_mod
 from ..config import AppConfig, Role, TerminalConfig, account_key
+from ..ctrader import auth as ctrader_auth
 from ..day_book import MasterEvent, Outcome, SlaveOutcome, describe_master, describe_outcome
 from ..discovery import discover_terminals
 from ..engine import Engine, TerminalView
@@ -71,6 +73,7 @@ from ..settings_edit import (
     describe_changes,
 )
 from . import cards
+from .ctrader import CTraderDialog
 from .detail import DetailScreen
 from .dialogs import LiveDialog, OrphanDialog
 from .general import GeneralForm
@@ -146,6 +149,7 @@ class CopierApp(App[None]):
         Binding("h", "history", "Trade history", show=False),
         Binding("w", "setups", "Saved setups", show=False),
         Binding("i", "switch_account", "Log in to another account", show=False),
+        Binding("t", "ctrader_login", "Log in to cTrader", show=False),
         Binding("tab", "next_page", "Map / Log", show=False, priority=True),
         Binding("shift+tab", "next_page", "Map / Log", show=False, priority=True),
         Binding("left", "step(-1)", "Previous card", show=False),
@@ -174,6 +178,7 @@ class CopierApp(App[None]):
         self._setups = setups if setups is not None else setups_mod.SetupsDoc()
         """The saved setups: edited and loaded from the setups page."""
         self._switching: set[str] = set()
+        self._ctrader_cancel: threading.Event | None = None
         """Terminals being logged into another account: no role is given them until it ends."""
         self._engine = Engine(cfg, guards=self._guards)
         self._page = "map"
@@ -746,6 +751,9 @@ class CopierApp(App[None]):
                 timeout=8,
             )
             return
+        if tcfg.is_ctrader:
+            self.notify(f"{name} is a cTrader account: press t to log in to cTrader again")
+            return
         if tcfg.exe_path is None:
             self.notify(f"{name} has no terminal executable", severity="error")
             return
@@ -1078,6 +1086,73 @@ class CopierApp(App[None]):
         self._cfg.copying_enabled = False
         self._persist_and_sync()
         self.notify("PANIC: copying halted. Positions untouched.", severity="warning", timeout=10)
+
+    def action_ctrader_login(self) -> None:
+        """Ask for the Open API app's details, then log in through the browser on a thread.
+
+        Pressed while a login is still waiting for the browser -- which it does for minutes if
+        cTrader showed an error there and never came back -- it gives that one up first."""
+        if self._ctrader_cancel is not None:
+            self._ctrader_cancel.set()
+            self._ctrader_cancel = None
+            self.notify("the waiting cTrader login was given up")
+
+        def picked(creds: ctrader_auth.CTraderCredentials | None) -> None:
+            if creds is None:
+                return
+            ctrader_auth.save(creds)
+            cancel = threading.Event()
+            self._ctrader_cancel = cancel
+            self.notify("log in to cTrader in your browser...", timeout=10)
+            self._ctrader_login_worker(creds, cancel)
+
+        self.push_screen(CTraderDialog(ctrader_auth.load()), picked)
+
+    @work(thread=True, group="ctrader")
+    def _ctrader_login_worker(
+        self, creds: ctrader_auth.CTraderCredentials, cancel: threading.Event
+    ) -> None:
+        try:
+            accounts = ctrader_auth.log_in(creds, cancel=cancel)
+        except ctrader_auth.LoginCancelled:
+            return
+        except ctrader_auth.LoginError as exc:
+            self.call_from_thread(self._ctrader_failed, cancel, str(exc))
+            return
+        except Exception as exc:
+            log.exception("cTrader login failed")
+            self.call_from_thread(self._ctrader_failed, cancel, f"the login failed: {exc!r}")
+            return
+        self.call_from_thread(self._ctrader_logged_in, cancel, accounts)
+
+    def _ctrader_failed(self, cancel: threading.Event, why: str) -> None:
+        if cancel is not self._ctrader_cancel:
+            return  # a login already given up for another
+        self._ctrader_cancel = None
+        log.warning("cTrader login: %s", why)
+        self.notify(why, severity="error", timeout=10)
+
+    def _ctrader_logged_in(
+        self, cancel: threading.Event, accounts: list[ctrader_auth.CTraderAccount]
+    ) -> None:
+        if cancel is self._ctrader_cancel:
+            self._ctrader_cancel = None
+        added = config_mod.merge_ctrader_accounts(
+            self._cfg, [(a.account_id, a.is_live, a.login, a.broker) for a in accounts]
+        )
+        self._rebuild_rows()
+        self._persist_and_sync()
+        # A worker reads the token when it connects; one already running has the old one.
+        for tcfg in self._cfg.assigned():
+            if tcfg.is_ctrader:
+                self._engine.reconnect(tcfg.terminal_id)
+        if not accounts:
+            self.notify("cTrader login done, but no account was ticked", severity="warning")
+            return
+        msg = f"cTrader: {len(accounts)} account{'s' if len(accounts) != 1 else ''} allowed"
+        if added:
+            msg += f", {len(added)} new under NOT YET OPENED: select one and press s"
+        self.notify(msg, timeout=10)
 
     def action_rescan(self) -> None:
         self.notify("rescanning...")
@@ -1736,7 +1811,7 @@ class CopierApp(App[None]):
                 ChipItem(
                     terminal_id=v.cfg.terminal_id,
                     label=self._cfg.display_name(v.cfg.terminal_id),
-                    usable=v.cfg.exe_path is not None,
+                    usable=v.cfg.usable,
                     selected=v.cfg.terminal_id == self._sel,
                 )
                 for v in unassigned
@@ -1850,5 +1925,10 @@ def run() -> None:
         config_mod.save(cfg)
     except Exception:
         log.exception("initial discovery failed; starting with saved config only")
+    # Before any cTrader worker starts and reads the token: only this process refreshes it.
+    try:
+        ctrader_auth.refresh_if_due()
+    except Exception as exc:
+        log.warning("could not refresh the cTrader login (%s); press t to log in again", exc)
     log.info("config at %s", config_path())
     CopierApp(cfg, guards, saved).run()

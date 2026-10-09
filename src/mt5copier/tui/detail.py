@@ -10,6 +10,7 @@ only decide what each line says, so the tests can read them without starting the
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -29,7 +30,13 @@ from ..config import AppConfig, BreakevenMode, NoStopPolicy, Role, SizingMode, T
 from ..copy_stats import TerminalStats
 from ..engine import Engine, TerminalView
 from ..presentation import RowInfo
-from ..protocol import ACCOUNT_TRADE_MODE_DEMO, Snapshot
+from ..protocol import (
+    ACCOUNT_TRADE_MODE_DEMO,
+    COPIER_MAGIC,
+    PendingOrder,
+    PositionType,
+    Snapshot,
+)
 from ..reconcile import OpenCopy
 from ..terminal_detail import (
     PositionRow,
@@ -41,6 +48,7 @@ from ..terminal_detail import (
     held_by_counts,
     margin_gauge,
     position_rows,
+    price_digits,
 )
 from . import cards
 from .cards import big_amount
@@ -553,6 +561,103 @@ def fit_columns(
     return kept
 
 
+def spread_widths(
+    cols: Sequence[tuple[str, str, bool]],
+    rows: Sequence[Sequence[Text]],
+    kept: Sequence[int],
+    width: int,
+) -> list[int]:
+    """Each kept column's width, so that together they fill ``width`` cells.
+
+    Sized to its widest cell alone, a column leaves the table bunched at the page's left edge
+    with the rest of the line empty. What is left over is shared out evenly instead, the last
+    column taking the odd cells. A column is never narrower than its widest cell."""
+    sizes = [max([len(cols[i][1]), *(row[i].cell_len for row in rows)]) for i in kept]
+    if not sizes:
+        return []
+    # Every column also carries a cell of padding either side.
+    spare = width - sum(sizes) - 2 * len(sizes)
+    if spare <= 0:
+        return sizes
+    share, odd = divmod(spare, len(sizes))
+    out = [s + share for s in sizes]
+    out[-1] += odd
+    return out
+
+
+# --- resting orders ------------------------------------------------------------------------------
+
+
+def order_columns(role: Role) -> list[tuple[str, str, bool]]:
+    """(key, heading, right-aligned) for the resting orders table."""
+    out = [
+        ("symbol", "Symbol", False),
+        ("type", "Type", False),
+        ("lots", "Lots", True),
+        ("price", "Price", True),
+        ("limit", "Then limit", True),
+        ("stop", "Stop", True),
+        ("target", "Target", True),
+        ("placed", "Placed", True),
+    ]
+    if role is Role.SLAVE:
+        out.append(("link", "Copy of", False))
+    return out
+
+
+_ORDER_DROPS = ("placed", "limit", "link", "target")
+"""The orders table's columns a narrow page leaves out, first to last."""
+
+
+def order_cells(
+    order: PendingOrder, role: Role, copy: OpenCopy | None, now: float | None = None
+) -> list[Text]:
+    """One resting order. Its age rather than its time: the broker's clock offset cancels out
+    of a difference, near enough for minutes."""
+    digits = price_digits(order.price_open, order.sl, order.tp, order.price_stoplimit)
+    kind = order.type.name.lower().replace("_", " ")
+    placed = "—"
+    if order.time_setup:
+        age = max((now if now is not None else time.time()) - order.time_setup, 0.0)
+        placed = format_duration(age) + " ago"
+    cells = [
+        Text(order.symbol, style="bold"),
+        Text(kind, style=BLUE if order.type.direction is PositionType.BUY else RED),
+        _right(f"{order.volume:g}"),
+        _right(price(order.price_open, digits)),
+        _right(price(order.price_stoplimit, digits), "" if order.price_stoplimit else MUTED),
+        _level(order.sl, None, digits),
+        _level(order.tp, None, digits),
+        _right(placed, MUTED),
+    ]
+    if role is Role.SLAVE:
+        if copy is not None:
+            cells.append(Text(f"#{copy.master_ticket}", style=FG))
+        elif order.magic == COPIER_MAGIC:
+            cells.append(Text("ours, untracked", style=YELLOW))
+        else:
+            cells.append(Text("not the copier's", style=MUTED))
+    return cells
+
+
+def fit_order_columns(
+    cols: Sequence[tuple[str, str, bool]], rows: Sequence[Sequence[Text]], width: int
+) -> list[int]:
+    """As :func:`fit_columns`, for the orders table."""
+    sizes = [
+        max([len(label), *(row[i].cell_len for row in rows)]) + 2
+        for i, (_, label, _) in enumerate(cols)
+    ]
+    kept = list(range(len(cols)))
+    keys = [k for k, _, _ in cols]
+    for key in _ORDER_DROPS:
+        if sum(sizes[i] for i in kept) <= width:
+            break
+        if key in keys:
+            kept.remove(keys.index(key))
+    return kept
+
+
 def total_cells(rows: Sequence[PositionRow], role: Role) -> list[Text]:
     total = sum(r.profit for r in rows if r.profit is not None)
     cells = [Text("") for _ in columns(role)]
@@ -589,7 +694,8 @@ class DetailScreen(Screen[None]):
         self._cfg = cfg
         self.terminal_id = terminal_id
         self._rows: list[PositionRow] = []
-        self._shape: tuple[Role, tuple[int, ...]] | None = None
+        self._shape: tuple[Role, tuple[int, ...], tuple[int, ...]] | None = None
+        self._order_shape: tuple[Role, tuple[int, ...], tuple[int, ...]] | None = None
         """The role and the columns the positions table was laid out for."""
         self._copies: dict[int, OpenCopy] = {}
         """This slave's copies by their ticket on it, as of the last redraw."""
@@ -618,6 +724,8 @@ class DetailScreen(Screen[None]):
                     yield Sparkline([], id="td-latency")
             yield Static("", id="td-positions-head", classes="heading")
             yield DataTable(id="td-positions", cursor_type="row")
+            yield Static("", id="td-orders-head", classes="heading")
+            yield DataTable(id="td-orders", cursor_type="none")
             with Horizontal(id="td-be"):
                 yield Static("", id="td-be-what")
                 yield QuickInput(
@@ -644,6 +752,7 @@ class DetailScreen(Screen[None]):
             return
         self.terminal_id = terminal_id
         self._shape = None
+        self._order_shape = None
         self.refresh_page()
 
     def menu_anchor(self) -> Region:
@@ -812,14 +921,17 @@ class DetailScreen(Screen[None]):
         # A narrow page leaves columns out, rather than hiding the last ones off its edge.
         width = (table.size.width or self.size.width) - 2
         kept = fit_columns(cols, cells, width)
-        shape = (cfg.role, tuple(kept))
+        widths = spread_widths(cols, cells, kept, width)
+        shape = (cfg.role, tuple(kept), tuple(widths))
         if shape != self._shape:
             self._shape = shape
             table.clear(columns=True)
-            for i in kept:
+            for i, w in zip(kept, widths, strict=True):
                 key, label, right = cols[i]
                 table.add_column(
-                    Text(label, style=f"bold {FG}", justify="right" if right else "left"), key=key
+                    Text(label, style=f"bold {FG}", justify="right" if right else "left"),
+                    key=key,
+                    width=w,
                 )
 
         cursor = table.cursor_row
@@ -830,6 +942,51 @@ class DetailScreen(Screen[None]):
         if self._rows:
             table.move_cursor(row=min(cursor, len(self._rows) - 1), animate=False)
         table.display = bool(self._rows)
+        self._fill_orders(cfg, snap)
+
+    def _fill_orders(self, cfg: TerminalConfig, snap: Snapshot | None) -> None:
+        """The resting orders, under the positions. Hidden, heading and all, when there are
+        none, so a terminal that never uses them looks as it always did."""
+        table = self.query_one("#td-orders", DataTable)
+        head = self.query_one("#td-orders-head", Static)
+        orders = snap.pending_orders if snap is not None else None
+        if orders is None and snap is not None and snap.is_live:
+            head.update(Text("ORDERS · could not be read", style="bold"))
+            head.display = True
+            table.display = False
+            return
+        if not orders:
+            head.display = False
+            table.display = False
+            return
+        held = self._engine.open_copies(self.terminal_id) if cfg.role is Role.SLAVE else ()
+        copies = {c.slave_ticket: c for c in held or () if c.resting and c.slave_ticket is not None}
+        ordered = sorted(orders, key=lambda o: (o.symbol, o.ticket))
+        cells = [order_cells(o, cfg.role, copies.get(o.ticket)) for o in ordered]
+        cols = order_columns(cfg.role)
+        width = (table.size.width or self.size.width) - 2
+        kept = fit_order_columns(cols, cells, width)
+        if not any(o.type.is_stop_limit for o in ordered):
+            # Only a stop-limit order has a second price; for the rest it is a column of dashes.
+            kept = [i for i in kept if cols[i][0] != "limit"]
+        widths = spread_widths(cols, cells, kept, width)
+        shape = (cfg.role, tuple(kept), tuple(widths))
+        if shape != self._order_shape:
+            self._order_shape = shape
+            table.clear(columns=True)
+            for i, w in zip(kept, widths, strict=True):
+                key, label, right = cols[i]
+                table.add_column(
+                    Text(label, style=f"bold {FG}", justify="right" if right else "left"),
+                    key=key,
+                    width=w,
+                )
+        table.clear()
+        for row, o in zip(cells, ordered, strict=True):
+            table.add_row(*(row[i] for i in kept), key=str(o.ticket))
+        head.update(Text(f"ORDERS · {len(ordered)}", style="bold"))
+        head.display = True
+        table.display = True
 
     # --- a copy's breakeven -------------------------------------------------------------------
 

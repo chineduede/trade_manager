@@ -489,6 +489,7 @@ ActionMenu OptionList:focus > .option-list--option-highlighted {
 OrphanDialog,
 LiveDialog,
 GoLiveDialog,
+CTraderDialog,
 GuardConfirm {
     background: #0c0b09 80%;
     padding: 0;
@@ -498,7 +499,8 @@ GuardConfirm {
 OrphanDialog #dialog,
 LiveDialog #dialog,
 GoLiveDialog #dialog,
-GuardConfirm #dialog {
+GuardConfirm #dialog,
+CTraderDialog #dialog {
     width: 96;
     max-width: 100%;
     height: auto;
@@ -546,6 +548,30 @@ GuardConfirm #dialog {
 
 .dialog #error {
     color: $error;
+}
+
+/* The cTrader login's labelled inputs. */
+CTraderDialog #dialog {
+    border: double $foreground;
+}
+
+CTraderDialog .dialog-title {
+    border-bottom: solid $foreground;
+}
+
+CTraderDialog .field {
+    height: 1;
+    margin-top: 1;
+}
+
+CTraderDialog .field .field-label {
+    width: 14;
+    margin-top: 0;
+    color: $text-muted;
+}
+
+CTraderDialog .field Input {
+    width: 1fr;
 }
 
 /* Shown only when there is something to say: the guard's dialog would otherwise keep an empty

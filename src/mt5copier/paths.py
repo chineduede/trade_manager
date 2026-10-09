@@ -85,6 +85,13 @@ def news_path() -> Path:
     return user_data_dir() / "news.json"
 
 
+def ctrader_path() -> Path:
+    """The cTrader Open API app's id and secret, the login's tokens, and the accounts it can
+    reach. Apart from ``config.json`` because it holds secrets: config is meant to be safe to
+    copy or show to someone."""
+    return user_data_dir() / "ctrader.json"
+
+
 def guard_state_path() -> Path:
     """What the guards have recorded from earlier snapshots, such as the equity at a reset."""
     return user_data_dir() / "guard_state.json"

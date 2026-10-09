@@ -21,7 +21,8 @@ a ``MASTER=BROKER`` map out of free text.
   typed out in full: see :func:`set_live_override`.
 * ``label`` is owned by discovery, which overwrites it on every rescan and at every start. An
   edit would revert silently the next time the app ran.
-* ``role`` has its own keys, and ``terminal_id`` and ``exe_path`` are not the user's to set.
+* ``role`` has its own keys, and ``terminal_id`` and ``exe_path`` are not the user's to set,
+  nor are ``ctrader_account_id`` and ``ctrader_live``, which the cTrader login sets.
 * ``paused`` has its own key (``p``), not a setting: it is flipped far more often than anything
   here, and gives nothing up (see ``Engine.set_paused``).
 * ``enabled`` is no longer offered at all. Pausing replaced it.

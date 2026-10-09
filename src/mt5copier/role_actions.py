@@ -44,6 +44,8 @@ def set_master(cfg: AppConfig, terminal_id: str) -> str | None:
     if current is not None:
         held_by = cfg.display_name(current.terminal_id)
         return f"{held_by} is already the master; unassign it before making {label} the master"
+    if tcfg.is_ctrader:
+        return f"{label} is a cTrader account, which can only be a slave"
     if tcfg.exe_path is None:
         return f"{label} has no terminal executable"
     cfg.set_role(terminal_id, Role.MASTER)
@@ -63,7 +65,7 @@ def set_slave(cfg: AppConfig, terminal_id: str) -> str | None:
         return f"{label} is the master; unassign it first"
     if cfg.master is None:
         return f"no master is assigned yet; assign one before making {label} a slave"
-    if tcfg.exe_path is None:
+    if not tcfg.usable:
         return f"{label} has no terminal executable"
     cfg.set_role(terminal_id, Role.SLAVE)
     return None

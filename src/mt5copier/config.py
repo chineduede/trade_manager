@@ -310,6 +310,24 @@ class TerminalConfig(BaseModel):
     last_login: int | None = None
     last_server: str | None = None
 
+    # --- cTrader -----------------------------------------------------------------------------
+    ctrader_account_id: int | None = None
+    """Set only on a cTrader account: its ``ctidTraderAccountId``. Such a terminal has no
+    executable -- it is reached over the Open API -- and can only ever be a slave."""
+    ctrader_live: bool = False
+    """Whether that account is live, which decides the host it is reached on. The demo-only
+    guard reads the account's own report, not this."""
+
+    @property
+    def is_ctrader(self) -> bool:
+        return self.ctrader_account_id is not None
+
+    @property
+    def usable(self) -> bool:
+        """Whether the copier can connect to it: an MT5 terminal's executable is here, or it is
+        a cTrader account."""
+        return self.is_ctrader or self.exe_path is not None
+
     # No cross-field validator: every sizing field is independently constrained by its own
     # Field(), and LOT_MULTIPLE needs nothing but a positive multiplier, which gt=0 gives.
 
@@ -404,6 +422,8 @@ class AppConfig(BaseModel):
         masters = [t.terminal_id for t in self.terminals.values() if t.role is Role.MASTER]
         if len(masters) > 1:
             raise ValueError(f"only one terminal may be master, got {len(masters)}: {masters}")
+        if any(t.is_ctrader for t in self.terminals.values() if t.role is Role.MASTER):
+            raise ValueError("a cTrader account can only be a slave")
         for tid, tcfg in self.terminals.items():
             if tcfg.terminal_id != tid:
                 raise ValueError(f"terminals key {tid!r} != terminal_id {tcfg.terminal_id!r}")
@@ -571,6 +591,55 @@ def merge_discovery(cfg: AppConfig, discovered: list[DiscoveredTerminal]) -> App
             if d.server is not None:
                 existing.last_server = d.server
     return cfg
+
+
+CTRADER_PREFIX = "CTRADER:"
+
+
+def ctrader_server_name(broker: str, is_live: bool) -> str:
+    """What stands in for an MT5 server name on a cTrader account, so :func:`account_key` and
+    the account names work for it as they do for MT5."""
+    return f"{broker or 'cTrader'}-cTrader-{'Live' if is_live else 'Demo'}"
+
+
+def ctrader_terminal_id(account_id: int) -> str:
+    return f"{CTRADER_PREFIX}{account_id}"
+
+
+def merge_ctrader_accounts(
+    cfg: AppConfig, accounts: list[tuple[int, bool, int | None, str]]
+) -> list[str]:
+    """Fold the accounts a cTrader login allows, as ``(account_id, is_live, login, broker)``,
+    into the terminal list. Returns the ids of those that are new.
+
+    As with discovery, an account that is no longer allowed is kept rather than deleted, so its
+    settings survive a login that left it out by mistake; its worker will say it is refused."""
+    added: list[str] = []
+    for account_id, is_live, login, broker in accounts:
+        tid = ctrader_terminal_id(account_id)
+        label = (
+            f"{broker or 'cTrader'} cTrader {'Live' if is_live else 'Demo'} {login or account_id}"
+        )
+        server = ctrader_server_name(broker, is_live)
+        existing = cfg.terminals.get(tid)
+        if existing is None:
+            cfg.terminals[tid] = TerminalConfig(
+                terminal_id=tid,
+                label=label,
+                ctrader_account_id=account_id,
+                ctrader_live=is_live,
+                last_login=login,
+                last_server=server,
+            )
+            added.append(tid)
+            log.info("cTrader account added: %s", label)
+        else:
+            existing.label = label
+            existing.ctrader_live = is_live
+            existing.last_server = server
+            if login is not None:
+                existing.last_login = login
+    return added
 
 
 def load(path: Path | None = None) -> AppConfig:

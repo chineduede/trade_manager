@@ -1753,3 +1753,71 @@ async def test_only_a_slave_can_be_paused(app: CopierApp, cfg: AppConfig) -> Non
         await pilot.pause()
         assert cfg.terminals[TID_MASTER].paused is False
         assert any("Only a slave" in t for t in toasts(app))
+
+
+def test_the_spare_width_is_shared_across_the_columns() -> None:
+    from rich.text import Text
+
+    from mt5copier.tui.detail import spread_widths
+
+    cols = [("a", "A", False), ("b", "Bee", False), ("c", "C", True)]
+    rows = [[Text("xx"), Text("y"), Text("zzzz")]]
+    widths = spread_widths(cols, rows, [0, 1, 2], 40)
+    assert sum(widths) + 2 * len(widths) == 40, "the columns fill the line"
+    assert widths[0] >= 2 and widths[1] >= 3 and widths[2] >= 4
+    assert spread_widths(cols, rows, [0, 1, 2], 5) == [2, 3, 4], "never narrower than the text"
+
+
+async def test_a_terminals_resting_orders_are_listed(app: CopierApp, cfg: AppConfig) -> None:
+    import time
+    from dataclasses import replace
+
+    from textual.widgets import DataTable
+
+    from mt5copier.protocol import OrderType, PendingOrder
+
+    wire_copying(app, cfg)
+    engine = app._engine
+    snap = engine.snapshots[TID_SLAVE]  # type: ignore[attr-defined]
+    engine.snapshots[TID_SLAVE] = replace(  # type: ignore[attr-defined]
+        snap,
+        pending_orders=(
+            PendingOrder(
+                9,
+                "EURNZD",
+                OrderType.SELL_LIMIT,
+                4.78,
+                1.60565,
+                1.60865,
+                1.60265,
+                time_setup=int(time.time()) - 600,
+            ),
+        ),
+    )
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open(app, pilot, TID_SLAVE)
+        assert "ORDERS · 1" in _detail_text(app, "#td-orders-head")
+        table = screen.query_one("#td-orders", DataTable)
+        assert table.display
+        row = [plain(c).strip() for c in table.get_row("9")]
+        assert row[:4] == ["EURNZD", "sell limit", "4.78", "1.60565"]
+        assert "not the copier's" in row
+        assert "Then limit" not in [plain(c.label).strip() for c in table.columns.values()]
+        positions = screen.query_one("#td-positions", DataTable)
+        used = sum(c.get_render_width(positions) for c in positions.columns.values())
+        assert used >= positions.size.width - 4, "the positions table fills the page"
+
+
+async def test_no_orders_shows_no_orders_table(app: CopierApp, cfg: AppConfig) -> None:
+    from dataclasses import replace
+
+    from textual.widgets import DataTable
+
+    wire_copying(app, cfg)
+    engine = app._engine
+    snap = engine.snapshots[TID_SLAVE]  # type: ignore[attr-defined]
+    engine.snapshots[TID_SLAVE] = replace(snap, pending_orders=())  # type: ignore[attr-defined]
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open(app, pilot, TID_SLAVE)
+        assert not screen.query_one("#td-orders-head", Static).display
+        assert not screen.query_one("#td-orders", DataTable).display

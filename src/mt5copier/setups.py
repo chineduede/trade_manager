@@ -140,7 +140,7 @@ def problems(setup: Setup, cfg: AppConfig, logins: Logins | None = None) -> list
         tcfg = cfg.terminals.get(tid)
         if tcfg is None:
             found.append(f"terminal {tid[:8]} is no longer found")
-        elif tcfg.exe_path is None:
+        elif not tcfg.usable:
             found.append(f"{cfg.display_name(tid)} has no terminal executable")
     if found:
         return found

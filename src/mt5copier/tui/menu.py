@@ -51,7 +51,14 @@ def terminal_actions(
     """
     items: list[MenuItem] = []
     if cfg.role is Role.UNASSIGNED:
-        if cfg.exe_path is None:
+        if cfg.is_ctrader:
+            if has_master:
+                items.append(MenuItem("s", "make it a slave", "set_slave"))
+            else:
+                items.append(
+                    MenuItem("", "a cTrader account can only be a slave: make an MT5 master", None)
+                )
+        elif cfg.exe_path is None:
             items.append(MenuItem("", "not installed here, so it cannot be launched", None))
         elif has_master:
             items.append(MenuItem("s", "make it a slave", "set_slave"))

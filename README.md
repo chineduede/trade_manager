@@ -64,6 +64,7 @@ for everything that can be done to it; the keys below do the same without the me
 | `g` | The copier's own settings: dry run or live (going live asks you to type `LIVE`), connection timing, join grace, and which terminals are closed on quit or unassign |
 | `d` | Start/stop copying. Needs a master and at least one slave. |
 | `r` | Rescan for terminals |
+| `t` | Log in to cTrader: the Open API app's id, secret and redirect URI, then the browser. The accounts you tick appear under **NOT YET OPENED**, and can only be slaves. **cTrader slaves are followed in a dry run only: sending orders to them is not built yet** |
 | `c` | Ask the worker to drop and re-establish its MT5 session |
 | `ctrl+r` | Restart the worker process entirely |
 | `ctrl+l` | Clear the detection ledger (forget every believed copy) |

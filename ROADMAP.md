@@ -1678,6 +1678,25 @@ are the design, not a limitation waiting to be lifted.
   - *Demo check:* on a master whose broker suffixes its names, set the suffix with `e`; open a
     trade: a slave with no suffix and one with its own both copy it, a whitelist naming the
     plain symbol lets it through, and the history shows the plain name.
+- **cTrader slaves, phase 1 of 5 — asked for 2026-10-08, built the same day on `ctrader`
+  (off `master`), awaiting its demo check.** cTrader accounts can be slaves (never the master).
+  - No library: Spotware's `ctrader-open-api` pins exact old Twisted/protobuf/requests. Its own
+    `.proto` files are compiled into `ctrader/proto` (regenerate, never edit) and spoken over a
+    small asyncio client (`ctrader/client.py`). Checked live against both hosts.
+  - Login (`t`): app id, secret and redirect URI (`http://127.0.0.1:9290/...`, must match the
+    app exactly) go to `ctrader.json`, never `config.json`. The browser lands on a one-request
+    listener; the code becomes a ~30-day token, refreshed at start-up when under 7 days are left,
+    by the supervisor only (a refresh kills the old refresh token).
+  - Each allowed account is a terminal `CTRADER:<ctidTraderAccountId>` with no executable, run by
+    `ctrader/worker.py`, which sends the same snapshots as an MT5 worker: positions, resting
+    orders, balance, equity, margin, P/L. Volumes in lots, label `mt5copier` read as the magic.
+    Left unknown: deals (deposits come from another request) and the current price.
+  - **Every order command is refused** ("not built yet"), not retryable. Next phases: market
+    open/close and SL/TP on demo (fixed lots), then pendings, partials and breakeven, then
+    risk-% sizing (no `order_calc_profit`: pip value and conversion rates).
+  - *Demo check:* `t`, log in, tick a demo account; it appears under NOT YET OPENED; `s` makes
+    it a slave; its card shows the balance, and a position opened by hand in cTrader shows on
+    its page in lots. With copying on in a dry run, a master trade is reported for it.
 - **Not handled: an account switched by hand in MT5 while the terminal has a role — noted
   2026-10-05, nothing built.** If a slave is switched to another account inside MT5 while
   the copier is connected, nothing notices: its copies are filed by terminal, not account, so
