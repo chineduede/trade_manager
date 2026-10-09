@@ -1715,7 +1715,7 @@ are the design, not a limitation waiting to be lifted.
   - *Demo check:* make the cTrader demo a slave and copy for real. (1) Master buys EURUSD with
     SL and TP: the copy's lots match the slave's risk, it carries label `mt5copier`, and its
     SL/TP equal the master's exactly. (2) Move the master's SL: the copy follows. (3) Remove the
-    master's TP: the copy's TP goes (**unverified: that leaving `takeProfit` out clears it**).
+    master's TP: the copy's TP goes (checked: leaving `takeProfit` out clears it).
     (4) Partially close the master, then close it: the copy follows both. (5) USDJPY sizes;
     EURGBP is refused with "converting needs live prices". (6) A master trade with no stop
     copies at the lot multiple when the no-stop policy allows it.
