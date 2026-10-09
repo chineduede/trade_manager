@@ -21,6 +21,7 @@ import pytest
 
 from mt5copier.config import AppConfig, NoStopPolicy, Role, SizingMode, TerminalConfig
 from mt5copier.engine import Engine
+from mt5copier.history import Step
 from mt5copier.protocol import (
     COPIER_MAGIC,
     OrderCommand,
@@ -2505,6 +2506,24 @@ def test_what_was_given_up_is_reported_as_orphans_and_the_slave_is_not_held(
     (orphan,) = eng.orphans(TID_SLAVE)
     assert (orphan.slave_ticket, orphan.symbol, orphan.volume) == (900, "EURUSD", 0.5)
     assert eng.holds() == {}
+
+
+def test_a_given_up_copy_ends_its_history_as_orphaned(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    """Nothing is recorded for a copy after it is given up, so without a step saying so its
+    history would read "open" for as long as it is kept."""
+    seed_live_store(tmp_path, stale_row())
+    eng = live_engine(engine_cfg, tmp_path)
+    eng._history.record(
+        Step(time.time(), TID_SLAVE, 11, "EURUSD", "buy", "open", "done", False, "", "opened")
+    )
+    assert eng.apply_settings(edited(eng, risk_percent=0.5), orphan={TID_SLAVE: [11]}) is None
+
+    (trade,) = eng.trade_history(TID_SLAVE)
+    assert trade.status == "orphaned"
+    assert trade.steps[-1].action == "orphaned"
+    assert "stays open" in trade.steps[-1].slave
 
 
 def test_the_orphans_survive_the_next_reconciliation_still_acknowledged(

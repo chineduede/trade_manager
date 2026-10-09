@@ -61,6 +61,10 @@ _ADDED_COLUMNS = (("lots", "REAL"), ("action", "TEXT NOT NULL DEFAULT ''"))
 """Columns added after the table first shipped, added on open to a file that lacks them."""
 
 _ENTRIES = (ActionKind.OPEN.value, ActionKind.PLACE.value)
+
+ORPHANED = "orphaned"
+"""The action of the note written when a settings change gives a copy up. It ends the trade's
+history on that slave: nothing is recorded for it afterwards, because nothing manages it."""
 _TAKEN = (Outcome.DONE.value, Outcome.DRY_RUN.value)
 
 
@@ -125,6 +129,8 @@ class Trade:
         done = {s.kind for s in self.steps if s.outcome in (Outcome.DONE, Outcome.DRY_RUN)}
         if ActionKind.CLOSE in done or ActionKind.CANCEL in done:
             return "closed" if ActionKind.CLOSE in done else "cancelled"
+        if any(s.kind == NOTE and s.action == ORPHANED for s in self.steps):
+            return ORPHANED
         if ActionKind.OPEN in done or ActionKind.ORDER_FILLED in done:
             return "open"
         if ActionKind.PLACE in done:

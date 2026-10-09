@@ -14,7 +14,15 @@ from tui_support import TID_MASTER, TID_SLAVE, make_app, make_cfg, plain
 from mt5copier.config import AppConfig, Role
 from mt5copier.day_book import DayBook, MasterEvent, Outcome, SlaveOutcome
 from mt5copier.engine import Engine
-from mt5copier.history import NOTE, HistoryStore, Step, Trade, describe_step, step_for
+from mt5copier.history import (
+    NOTE,
+    ORPHANED,
+    HistoryStore,
+    Step,
+    Trade,
+    describe_step,
+    step_for,
+)
 from mt5copier.protocol import ActionKind
 from mt5copier.reconcile import Action
 from mt5copier.tui.history import HistoryScreen, card_body, card_title
@@ -96,6 +104,8 @@ def test_where_a_trade_stands_is_read_from_its_steps() -> None:
     assert trade(step(1.0)).status == "open"
     assert trade(step(1.0), step(2.0, ActionKind.CLOSE)).status == "closed"
     assert trade(step(1.0, outcome=Outcome.SKIPPED)).status == "not copied"
+    given_up = replace(step(2.0, NOTE, outcome=""), action=ORPHANED)
+    assert trade(step(1.0), given_up).status == "orphaned"
     assert trade(step(1.0, outcome=Outcome.REFUSED, problem=True)).problems == 1
 
 

@@ -41,7 +41,7 @@ from .copy_stats import StatsBook, TerminalStats
 from .ctrader.worker import run_ctrader_worker
 from .day_book import DayBook, MasterEvent, Outcome, SlaveOutcome
 from .guards import NO_VERDICT, GuardBook, GuardReport, GuardsDoc, Verdict
-from .history import HistoryStore, Trade, step_for
+from .history import ORPHANED, HistoryStore, Trade, step_for
 from .logging_setup import get_logger
 from .news import NewsCalendar
 from .paths import dryrun_store_path, history_db_path, log_dir, mapping_db_path
@@ -1688,6 +1688,23 @@ class Engine:
         """
         let_go = self._ledger.abandon(terminal_id)
         label = self._cfg.terminals[terminal_id].label or terminal_id[:8]
+        for copy in let_go:
+            # Its history would otherwise go on saying "open": nothing after this is recorded
+            # for it on this slave, because nothing here manages it any more.
+            self._history.note(
+                terminal_id,
+                copy.master_ticket,
+                copy.symbol,
+                "",
+                ORPHANED,
+                (
+                    "settings changed: the copier no longer moves or cancels this order, "
+                    "which stays resting on the slave"
+                    if copy.resting
+                    else "settings changed: the copier no longer closes, moves or partly "
+                    "closes this copy, which stays open on the slave"
+                ),
+            )
         if self._cfg.dry_run:
             log.warning("dry run: %d simulated copies on %s let go", len(let_go), label)
             return
