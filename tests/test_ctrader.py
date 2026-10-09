@@ -38,13 +38,19 @@ from mt5copier.protocol import (
 
 ACCOUNT = 4_200_001
 EURUSD = cv.SymbolInfo(symbol_id=1, name="EURUSD", digits=5, lot_size=10_000_000)
-USD, EUR, GBP, JPY = 15, 1, 2, 3
+USD, EUR, GBP, JPY, CHF = 15, 1, 2, 3, 4
+_ASSETS = {USD: "USD", EUR: "EUR", GBP: "GBP", JPY: "JPY", CHF: "CHF"}
 _SYMBOLS = {
     1: ("EURUSD", EUR, USD, 5),
     2: ("EURGBP", EUR, GBP, 5),
     3: ("USDJPY", USD, JPY, 3),
+    4: ("GBPUSD", GBP, USD, 5),
+    5: ("GBPJPY", GBP, JPY, 3),
+    6: ("EURCHF", EUR, CHF, 5),
 }
 """The fake server's symbols: name, base and quote asset, digits. The account is kept in USD."""
+_CHAINS = {GBP: [4], JPY: [3]}
+"""The symbols the fake server names to convert an asset into USD. CHF has none."""
 
 
 # --- framing -------------------------------------------------------------------------------------
@@ -355,6 +361,12 @@ class FakeOpenApi:
                 usedMargin=2_500,
             )
         }
+        self.prices: dict[int, tuple[int, int]] = {
+            1: (110_050, 110_062),
+            3: (12_500_000, 12_501_000),
+            4: (125_000, 125_010),
+        }
+        """``(bid, ask)`` by symbol, in cTrader's 1/100000, sent on subscribing."""
         self.server: asyncio.Server | None = None
         self.port = 0
 
@@ -391,7 +403,22 @@ class FakeOpenApi:
             )
         if isinstance(msg, oa.ProtoOAAssetListReq):
             return oa.ProtoOAAssetListRes(
-                ctidTraderAccountId=ACCOUNT, asset=[om.ProtoOAAsset(assetId=15, name="USD")]
+                ctidTraderAccountId=ACCOUNT,
+                asset=[om.ProtoOAAsset(assetId=a, name=n) for a, n in _ASSETS.items()],
+            )
+        if isinstance(msg, oa.ProtoOASymbolsForConversionReq):
+            assert msg.lastAssetId == USD
+            return oa.ProtoOASymbolsForConversionRes(
+                ctidTraderAccountId=ACCOUNT,
+                symbol=[
+                    om.ProtoOALightSymbol(
+                        symbolId=sid,
+                        symbolName=_SYMBOLS[sid][0],
+                        baseAssetId=_SYMBOLS[sid][1],
+                        quoteAssetId=_SYMBOLS[sid][2],
+                    )
+                    for sid in _CHAINS.get(msg.firstAssetId, [])
+                ],
             )
         if isinstance(msg, oa.ProtoOASymbolsListReq):
             return oa.ProtoOASymbolsListRes(
@@ -426,14 +453,22 @@ class FakeOpenApi:
                 order=list(self.orders.values()),
             )
         if isinstance(msg, oa.ProtoOASubscribeSpotsReq):
-            return [
-                oa.ProtoOASubscribeSpotsRes(ctidTraderAccountId=ACCOUNT),
+            spots = [
                 oa.ProtoOASpotEvent(
-                    ctidTraderAccountId=ACCOUNT, symbolId=1, bid=110_050, ask=110_062
-                ),
-                # Only the side that moved.
-                oa.ProtoOASpotEvent(ctidTraderAccountId=ACCOUNT, symbolId=1, bid=110_055),
+                    ctidTraderAccountId=ACCOUNT,
+                    symbolId=sid,
+                    bid=self.prices[sid][0],
+                    ask=self.prices[sid][1],
+                )
+                for sid in msg.symbolId
+                if sid in self.prices
             ]
+            if 1 in msg.symbolId:
+                # Only the side that moved.
+                spots.append(
+                    oa.ProtoOASpotEvent(ctidTraderAccountId=ACCOUNT, symbolId=1, bid=110_055)
+                )
+            return [oa.ProtoOASubscribeSpotsRes(ctidTraderAccountId=ACCOUNT), *spots]
         if isinstance(msg, oa.ProtoOAAmendOrderReq):
             order = next((o for o in self.orders.values() if o.orderId == msg.orderId), None)
             if order is None:
@@ -702,8 +737,31 @@ def test_a_lot_is_valued_in_the_quote_or_through_the_symbols_own_price() -> None
     assert cv.loss_per_lot(eurusd, USD, 1.1000, 1.0990) == pytest.approx(100.0)
     # 10 pips of USDJPY is 10,000 yen, worth $66.67 at a stop of 150.
     assert cv.loss_per_lot(usdjpy, USD, 150.10, 150.00) == pytest.approx(10_000 / 150.0)
-    # A cross needs a third price, which is not read.
+    # A cross needs a third price.
     assert cv.loss_per_lot(eurgbp, USD, 0.85, 0.849) is None
+    # 10 pips of EURGBP is 100 pounds, worth $125 when a pound is $1.25.
+    assert cv.loss_per_lot(eurgbp, USD, 0.85, 0.849, 1.25) == pytest.approx(125.0)
+    assert cv.is_cross(eurgbp, USD) and not cv.is_cross(usdjpy, USD)
+
+
+def test_a_conversion_chain_is_walked_at_the_side_that_values_a_loss_high() -> None:
+    gbpusd, usdjpy = cv.Link(4, GBP, USD), cv.Link(3, USD, JPY)
+    spots: dict[int, tuple[float | None, float | None]] = {
+        4: (1.2500, 1.2502),
+        3: (150.00, 150.02),
+    }
+    # From a link's base: times its ask.
+    assert cv.conversion_rate((gbpusd,), GBP, USD, spots) == pytest.approx(1.2502)
+    # From its quote: divided by its bid.
+    assert cv.conversion_rate((usdjpy,), JPY, USD, spots) == pytest.approx(1 / 150.00)
+    # Two links, taken as they connect rather than as listed.
+    assert cv.conversion_rate((gbpusd, usdjpy), JPY, GBP, spots) == pytest.approx(
+        1 / 150.00 / 1.2500
+    )
+    assert cv.conversion_rate((), USD, USD, spots) == 1.0
+    # No price, or a chain that leads elsewhere: no rate.
+    assert cv.conversion_rate((gbpusd,), GBP, USD, {4: (1.25, None)}) is None
+    assert cv.conversion_rate((gbpusd,), JPY, USD, spots) is None
 
 
 def test_symbol_bounds_become_lots_and_distances_relative_units() -> None:
@@ -738,14 +796,87 @@ async def test_an_open_is_risk_sized_filled_and_given_its_exact_stops() -> None:
     assert (amend.positionId, amend.stopLoss, amend.takeProfit) == (88, 1.099, 1.103)
 
 
-async def test_a_cross_is_refused_before_anything_is_sent() -> None:
+def _cross(symbol: str, entry: float, sl: float, risk: float, n: int = 0) -> OrderCommand:
+    return _command(
+        ActionKind.OPEN,
+        command_id=3 + n,
+        master_ticket=11 + n,
+        master_symbol=symbol,
+        entry=entry,
+        sl=sl,
+        risk_amount=risk,
+    )
+
+
+async def test_a_cross_is_risk_sized_through_its_conversion_chain() -> None:
+    api = FakeOpenApi()
+    results = await _results(api, _cross("EURGBP", 0.85, 0.849, 250))
+    r = results[0]
+    assert r.ok, r.error
+    # 100 pounds a lot at the stop, at GBPUSD's ask of 1.2501: $125.01, so 1.99 lots.
+    (order,) = _sent(api, oa.ProtoOANewOrderReq)
+    assert order.volume == 19_900_000
+    assert r.price_value == pytest.approx(100_000 * 1.2501)
+    (chain,) = _sent(api, oa.ProtoOASymbolsForConversionReq)
+    assert (chain.firstAssetId, chain.lastAssetId) == (GBP, USD)
+
+
+async def test_a_cross_quoted_in_yen_divides_by_usdjpy() -> None:
+    api = FakeOpenApi()
+    results = await _results(api, _cross("GBPJPY", 190.00, 189.50, 1_000))
+    assert results[0].ok, results[0].error
+    # 50,000 yen a lot at the stop, at USDJPY's bid of 125: $400, so 2.5 lots.
+    (order,) = _sent(api, oa.ProtoOANewOrderReq)
+    assert order.volume == 25_000_000
+
+
+async def test_a_chain_is_asked_for_once_per_currency() -> None:
     api = FakeOpenApi()
     results = await _results(
-        api, _command(ActionKind.OPEN, master_symbol="EURGBP", entry=0.85, sl=0.849, risk_amount=50)
+        api,
+        _cross("EURGBP", 0.85, 0.849, 250),
+        _cross("GBPUSD", 1.25, 1.249, 100, 1),
+        _cross("EURGBP", 0.85, 0.849, 250, 2),
     )
+    assert len(results) == 3 and all(r.ok for r in results), [r.error for r in results]
+    assert len(_sent(api, oa.ProtoOASymbolsForConversionReq)) == 1
+
+
+async def test_a_cross_with_no_way_to_convert_is_refused_before_anything_is_sent() -> None:
+    api = FakeOpenApi()
+    results = await _results(api, _cross("EURCHF", 0.95, 0.949, 50))
     assert results[0].ok is False
-    assert results[0].error is not None and "live prices" in results[0].error
+    assert results[0].error is not None and "no way to convert CHF to USD" in results[0].error
     assert not _sent(api, oa.ProtoOANewOrderReq)
+
+
+async def test_a_cross_without_a_price_yet_is_refused_not_guessed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ct_worker, "SPOT_WAIT_S", 0.1)
+    api = FakeOpenApi()
+    del api.prices[4]
+    results = await _results(api, _cross("EURGBP", 0.85, 0.849, 50))
+    assert results[0].ok is False
+    assert results[0].error is not None and "no price for GBPUSD yet" in results[0].error
+    assert not _sent(api, oa.ProtoOANewOrderReq)
+
+
+async def test_a_lot_multiple_cross_goes_ahead_without_a_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(ct_worker, "SPOT_WAIT_S", 0.1)
+    api = FakeOpenApi()
+    del api.prices[4]
+    cmd = _command(
+        ActionKind.OPEN,
+        master_symbol="EURGBP",
+        sizing_basis=SizingBasis.MASTER_LOT_MULTIPLE,
+        master_volume=0.2,
+    )
+    results = await _results(api, cmd)
+    assert results[0].ok, results[0].error
+    assert results[0].price_value is None
 
 
 async def test_a_lot_multiple_open_needs_no_stop() -> None:

@@ -82,7 +82,15 @@ def relative(distance: float, digits: int) -> int:
     return round(round(abs(distance), digits) * 100_000)
 
 
-def price_value(symbol: SymbolInfo, deposit_asset_id: int, rate: float) -> float | None:
+def is_cross(symbol: SymbolInfo, deposit_asset_id: int) -> bool:
+    """Whether valuing the symbol's moves in the account's currency needs other symbols' prices:
+    it is quoted in neither that currency nor its own base (EURGBP on a USD account)."""
+    return deposit_asset_id not in (symbol.quote_asset_id, symbol.base_asset_id)
+
+
+def price_value(
+    symbol: SymbolInfo, deposit_asset_id: int, rate: float, conversion: float | None = None
+) -> float | None:
     """What a 1.0 move in price is worth on one lot, in the account's currency -- the number
     MT5's ``order_calc_profit`` gives and cTrader does not.
 
@@ -90,27 +98,80 @@ def price_value(symbol: SymbolInfo, deposit_asset_id: int, rate: float) -> float
     units of the **quote** asset. That is the answer when the account is kept in the quote
     asset (EURUSD or XAUUSD on a USD account). When it is kept in the base asset instead
     (USDJPY on a USD account), quote money becomes the account's by dividing by the symbol's
-    own price, given as ``rate``. Anything else (EURGBP on a USD account) needs a third
-    symbol's price, which is not read, so it is None.
+    own price, given as ``rate``. Anything else (EURGBP on a USD account) is a cross, valued
+    through ``conversion`` -- one unit of the quote asset in the account's currency, from
+    :func:`conversion_rate` -- or None without one.
     """
     units = symbol.lot_size / 100.0
     if symbol.quote_asset_id == deposit_asset_id:
         return units
-    if symbol.base_asset_id == deposit_asset_id and rate > 0:
-        return units / rate
-    return None
+    if symbol.base_asset_id == deposit_asset_id:
+        return units / rate if rate > 0 else None
+    return units * conversion if conversion else None
 
 
 def loss_per_lot(
-    symbol: SymbolInfo, deposit_asset_id: int, entry: float, sl: float
+    symbol: SymbolInfo,
+    deposit_asset_id: int,
+    entry: float,
+    sl: float,
+    conversion: float | None = None,
 ) -> float | None:
     """What one lot loses between ``entry`` and ``sl``, in the account's currency. Converted
-    at the stop's price, which is the rate in force when the loss is taken.
+    at the stop's price, which is the rate in force when the loss is taken; a cross through
+    ``conversion`` (see :func:`price_value`).
 
     The distance is rounded to the symbol's digits first: 1.1000 - 1.0990 is a hair over
     0.001 in floating point, which would size an exact one-lot risk down to 0.99."""
-    value = price_value(symbol, deposit_asset_id, sl)
+    value = price_value(symbol, deposit_asset_id, sl, conversion)
     return round(abs(entry - sl), symbol.digits) * value if value is not None else None
+
+
+@dataclass(frozen=True, slots=True)
+class Link:
+    """One symbol of a conversion chain: cTrader's ``ProtoOALightSymbol``, reduced to what
+    walking the chain needs."""
+
+    symbol_id: int
+    base_asset_id: int
+    quote_asset_id: int
+
+
+def conversion_rate(
+    chain: tuple[Link, ...],
+    from_asset_id: int,
+    to_asset_id: int,
+    spots: dict[int, tuple[float | None, float | None]],
+) -> float | None:
+    """What one unit of ``from_asset_id`` is worth in ``to_asset_id``, walking ``chain`` with
+    the ``(bid, ask)`` prices in ``spots``. None if a link has no price or the chain does not
+    lead there.
+
+    Each link is crossed from whichever of its assets the walk stands on: from its base by
+    multiplying by its price, from its quote by dividing. The price is the side that makes the
+    rate larger -- the ask to multiply, the bid to divide -- because the rate values a loss,
+    and a loss valued high sizes a trade small rather than over its risk. The links are taken
+    as they connect, not in the order cTrader lists them."""
+    rate = 1.0
+    asset = from_asset_id
+    left = list(chain)
+    while asset != to_asset_id:
+        link = next((x for x in left if asset in (x.base_asset_id, x.quote_asset_id)), None)
+        if link is None:
+            return None
+        left.remove(link)
+        bid, ask = spots.get(link.symbol_id, (None, None))
+        if link.base_asset_id == asset:
+            if not ask:
+                return None
+            rate *= ask
+            asset = link.quote_asset_id
+        else:
+            if not bid:
+                return None
+            rate /= bid
+            asset = link.base_asset_id
+    return rate
 
 
 def money(value: int, digits: int) -> float:

@@ -10,7 +10,8 @@ Order commands go to a :class:`~mt5copier.ctrader.executor.CTraderExecutor`, on 
 and connection, between ticks.
 
 A position's current price comes from a spot subscription, taken out for each symbol the account
-holds a position in and kept until the connection ends. What a snapshot leaves unknown is
+holds a position in and kept until the connection ends. So do the prices that convert a cross's
+money into the account's currency (:meth:`_Account.conversion`). What a snapshot leaves unknown is
 ``deals``: deposits and withdrawals come from a different request than trades, and a guard
 rebuilding a balance from half the history would be wrong rather than blank.
 """
@@ -59,6 +60,10 @@ _MIN_INTERVAL_S = 0.5
 _TRADER_EVERY_S = 2.0
 """How often the balance is re-read when nothing has happened. An execution re-reads it at once."""
 
+SPOT_WAIT_S = 2.0
+"""How long the first trade needing a currency conversion waits for its symbols' first prices.
+cTrader sends a symbol's price right after the subscription, even with its market closed."""
+
 _TOKEN_CODES = frozenset({"CH_ACCESS_TOKEN_INVALID", "OA_AUTH_TOKEN_EXPIRED", "ACCESS_DENIED"})
 
 
@@ -90,6 +95,7 @@ class _Account:
         self.trader: Any = None
         self.currency: str | None = None
         self.symbol_names: dict[int, str] = {}
+        self.asset_names: dict[int, str] = {}
         self.symbol_ids: dict[str, int] = {}
         self._assets: dict[int, tuple[int, int]] = {}
         """Each symbol's ``(base, quote)`` asset ids, from the symbol list."""
@@ -99,6 +105,8 @@ class _Account:
         self.spots: dict[int, tuple[float | None, float | None]] = {}
         """``(bid, ask)`` by symbol id, from the spot subscriptions."""
         self._subscribed: set[int] = set()
+        self._chains: dict[int, tuple[cv.Link, ...]] = {}
+        """The conversion chain from each asset to the account's, as cTrader gave it."""
 
     @property
     def connected(self) -> bool:
@@ -131,11 +139,8 @@ class _Account:
             assets = await client.request(
                 oa.ProtoOAAssetListReq(ctidTraderAccountId=self.account_id)
             )
-            deposit = int(self.trader.depositAssetId)
-            self.currency = next(
-                (a.name for a in assets.asset if int(a.assetId) == deposit),
-                None,
-            )
+            self.asset_names = {int(a.assetId): a.name for a in assets.asset}
+            self.currency = self.asset_names.get(int(self.trader.depositAssetId))
             listed = await client.request(
                 oa.ProtoOASymbolsListReq(ctidTraderAccountId=self.account_id)
             )
@@ -236,7 +241,7 @@ class _Account:
             base, quote = self._assets.get(sid, (0, 0))
             self.symbols[sid] = cv.SymbolInfo(
                 symbol_id=sid,
-                name=self.symbol_names.get(sid, f"#{sid}"),
+                name=self._symbol_name(sid),
                 digits=int(s.digits),
                 lot_size=int(s.lotSize),
                 min_volume=int(s.minVolume),
@@ -245,6 +250,100 @@ class _Account:
                 base_asset_id=base,
                 quote_asset_id=quote,
             )
+
+    async def conversion(self, asset_id: int) -> float | str:
+        """What one unit of ``asset_id`` is worth in the account's currency, valued high (see
+        :func:`~mt5copier.ctrader.convert.conversion_rate`), or why it is not known.
+
+        The chain of symbols linking the two is asked of cTrader once per asset, and their
+        prices subscribed to. Their first prices are waited for, up to :data:`SPOT_WAIT_S`;
+        without them the answer is "no price yet", never a guess. A refusal is an answer
+        here, not an error, so that a caller who can do without the rate carries on."""
+        deposit = self.deposit_asset_id
+        if asset_id == deposit:
+            return 1.0
+        assert self.client is not None
+        chain = self._chains.get(asset_id)
+        if chain is None:
+            try:
+                answer = await self.client.request(
+                    oa.ProtoOASymbolsForConversionReq(
+                        ctidTraderAccountId=self.account_id,
+                        firstAssetId=asset_id,
+                        lastAssetId=deposit,
+                    )
+                )
+            except OpenApiError as exc:
+                return f"cTrader cannot convert {self._asset(asset_id)} to {self._asset(deposit)}: {exc}"
+            chain = tuple(self._link(s) for s in answer.symbol)
+            self._chains[asset_id] = chain
+            log.info(
+                "converting %s to %s through %s",
+                self._asset(asset_id),
+                self._asset(deposit),
+                ", ".join(self._symbol_name(x.symbol_id) for x in chain) or "nothing",
+            )
+        if not chain:
+            return (
+                f"cTrader knows no way to convert {self._asset(asset_id)} to {self._asset(deposit)}"
+            )
+        ids = {x.symbol_id for x in chain}
+        await self._subscribe(ids)
+        await self._await_spots(ids, SPOT_WAIT_S)
+        rate = cv.conversion_rate(chain, asset_id, deposit, self.spots)
+        if rate is not None:
+            return rate
+        unpriced = sorted(self._symbol_name(i) for i in ids if not self._priced(i))
+        if unpriced:
+            return f"no price for {', '.join(unpriced)} yet"
+        return (
+            f"cTrader's symbols do not lead from {self._asset(asset_id)} to {self._asset(deposit)}"
+        )
+
+    def _link(self, light: Any) -> cv.Link:
+        sid = int(light.symbolId)
+        if light.HasField("baseAssetId") and light.HasField("quoteAssetId"):
+            return cv.Link(sid, int(light.baseAssetId), int(light.quoteAssetId))
+        base, quote = self._assets.get(sid, (0, 0))
+        return cv.Link(sid, base, quote)
+
+    def _asset(self, asset_id: int) -> str:
+        return self.asset_names.get(asset_id, f"asset #{asset_id}")
+
+    def _symbol_name(self, symbol_id: int) -> str:
+        return self.symbol_names.get(symbol_id, f"#{symbol_id}")
+
+    def _priced(self, symbol_id: int) -> bool:
+        bid, ask = self.spots.get(symbol_id, (None, None))
+        return bool(bid) and bool(ask)
+
+    async def _await_spots(self, ids: set[int], timeout: float) -> bool:
+        """Wait until every symbol in ``ids`` has a bid and an ask. Spot events are read as they
+        come; every other event is put back, in order, for the next tick to read."""
+        assert self.client is not None
+        client = self.client
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        kept: list[Any] = []
+        try:
+            while not all(self._priced(i) for i in ids):
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    return False
+                try:
+                    event = await asyncio.wait_for(client.events.get(), remaining)
+                except TimeoutError:
+                    return False
+                if isinstance(event, oa.ProtoOASpotEvent):
+                    self._on_spot(event)
+                    continue
+                kept.append(event)
+                if isinstance(event, DISCONNECT_EVENTS):
+                    return False
+            return True
+        finally:
+            for event in kept:
+                client.events.put_nowait(event)
 
     def _drain_events(self) -> bool:
         """Read what the server sent unasked. True if an execution happened."""

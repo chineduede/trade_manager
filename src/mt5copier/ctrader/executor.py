@@ -17,8 +17,10 @@ Where cTrader differs:
   entry-to-target distances as *relative* levels, so the copy is never unprotected, and moved
   to the exact levels once it has filled.
 * **No ``order_calc_profit``.** Risk sizing works out a lot's value itself (see
-  :func:`~mt5copier.ctrader.convert.price_value`), which it can only do for a symbol quoted
-  in the account's currency or based on it. Any other symbol is refused until prices are read.
+  :func:`~mt5copier.ctrader.convert.price_value`). A cross is valued through the chain of
+  symbols cTrader names to convert its quote currency into the account's, at their live prices
+  (:meth:`~mt5copier.ctrader.worker._Account.conversion`); without those prices it is refused,
+  never sized on a guess.
 * **A resting order is known by its position's id**, not its own (see
   :func:`~mt5copier.ctrader.convert.order_ticket`), so it is looked up by that before it is
   moved or cancelled. Stop-limit orders are never placed: the diff refuses them for every
@@ -149,9 +151,12 @@ class CTraderExecutor:
 
     # --- opening ----------------------------------------------------------------------------
 
-    async def _prepare(self, cmd: OrderCommand) -> tuple[str, cv.SymbolInfo, float] | OrderResult:
-        """What every new order starts with: the slave's symbol and the lots to send, or the
-        failure that stops it."""
+    async def _prepare(
+        self, cmd: OrderCommand
+    ) -> tuple[str, cv.SymbolInfo, float, float | None] | OrderResult:
+        """What every new order starts with: the slave's symbol, the lots to send and, for a
+        cross, the rate converting its quote currency into the account's -- or the failure
+        that stops it."""
         account = self._account
         resolved = self._symbols.resolve(
             self._terminal_id,
@@ -172,7 +177,20 @@ class CTraderExecutor:
             return self._fail(cmd, slave_symbol=name, error=f"cTrader gave no details for {name}")
         facts = cv.facts(symbol)
 
-        sizing = self._size(cmd, symbol, facts)
+        conversion: float | str | None = None
+        if cv.is_cross(symbol, account.deposit_asset_id):
+            conversion = await account.conversion(symbol.quote_asset_id)
+        if isinstance(conversion, str):
+            if cmd.sizing_basis is not SizingBasis.MASTER_LOT_MULTIPLE:
+                return self._fail(
+                    cmd, slave_symbol=name, error=f"cannot risk-size {name}: {conversion}"
+                )
+            # Lots copied by a multiple need no rate; only breakeven's commission buffer goes
+            # without one.
+            log.warning("#%s on %s: %s", cmd.master_ticket, name, conversion)
+            conversion = None
+
+        sizing = self._size(cmd, symbol, facts, conversion)
         if isinstance(sizing, str):
             return self._fail(cmd, slave_symbol=name, error=sizing)
         if not sizing.ok or sizing.lots is None:
@@ -184,14 +202,14 @@ class CTraderExecutor:
             if isinstance(fitted, str):
                 return self._fail(cmd, slave_symbol=name, error=fitted)
             lots = fitted
-        return name, symbol, lots
+        return name, symbol, lots, conversion
 
     async def _open(self, cmd: OrderCommand) -> OrderResult:
         account = self._account
         prepared = await self._prepare(cmd)
         if isinstance(prepared, OrderResult):
             return prepared
-        name, symbol, lots = prepared
+        name, symbol, lots, conversion = prepared
         request = oa.ProtoOANewOrderReq(
             ctidTraderAccountId=account.account_id,
             symbolId=symbol.symbol_id,
@@ -273,7 +291,7 @@ class CTraderExecutor:
             attempts=1,
             point=symbol.point,
             digits=symbol.digits,
-            price_value=cv.price_value(symbol, account.deposit_asset_id, price),
+            price_value=cv.price_value(symbol, account.deposit_asset_id, price, conversion),
         )
 
     # --- resting orders -------------------------------------------------------------------------
@@ -290,7 +308,7 @@ class CTraderExecutor:
         prepared = await self._prepare(cmd)
         if isinstance(prepared, OrderResult):
             return prepared
-        name, symbol, lots = prepared
+        name, symbol, lots, conversion = prepared
         digits = symbol.digits
         request = oa.ProtoOANewOrderReq(
             ctidTraderAccountId=self._account.account_id,
@@ -332,7 +350,9 @@ class CTraderExecutor:
             attempts=1,
             point=symbol.point,
             digits=digits,
-            price_value=cv.price_value(symbol, self._account.deposit_asset_id, cmd.entry),
+            price_value=cv.price_value(
+                symbol, self._account.deposit_asset_id, cmd.entry, conversion
+            ),
         )
 
     async def _modify_order(self, cmd: OrderCommand) -> OrderResult:
@@ -438,7 +458,11 @@ class CTraderExecutor:
         )
 
     def _size(
-        self, cmd: OrderCommand, symbol: cv.SymbolInfo, facts: SymbolFacts
+        self,
+        cmd: OrderCommand,
+        symbol: cv.SymbolInfo,
+        facts: SymbolFacts,
+        conversion: float | None,
     ) -> SizingResult | str:
         if cmd.sizing_basis is SizingBasis.MASTER_LOT_MULTIPLE:
             return lots_for_master_multiple(
@@ -450,13 +474,9 @@ class CTraderExecutor:
         entry, sl = widen_for_slippage(
             cmd.entry, cmd.sl, cmd.direction, cmd.slippage_points, facts.point
         )
-        loss = cv.loss_per_lot(symbol, self._account.deposit_asset_id, entry, sl)
+        loss = cv.loss_per_lot(symbol, self._account.deposit_asset_id, entry, sl, conversion)
         if loss is None:
-            currency = self._account.currency or "the account's currency"
-            return (
-                f"cannot risk-size {symbol.name} on cTrader yet: it is quoted in neither "
-                f"{currency} nor its own base, and converting needs live prices"
-            )
+            return f"cannot risk-size {symbol.name}: no value for its price moves"
         return lots_for_risk(
             risk_amount=cmd.risk_amount,
             loss_per_lot=loss,
