@@ -19,6 +19,7 @@ from mt5copier import role_actions
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.ctrader import auth
 from mt5copier.ctrader import convert as cv
+from mt5copier.ctrader import executor as ct_executor
 from mt5copier.ctrader import worker as ct_worker
 from mt5copier.ctrader.client import CTraderClient, OpenApiError, decode, encode
 from mt5copier.ctrader.proto import OpenApiMessages_pb2 as oa
@@ -31,12 +32,20 @@ from mt5copier.protocol import (
     OrderResult,
     OrderType,
     PositionType,
+    SizingBasis,
     Snapshot,
     WorkerState,
 )
 
 ACCOUNT = 4_200_001
 EURUSD = cv.SymbolInfo(symbol_id=1, name="EURUSD", digits=5, lot_size=10_000_000)
+USD, EUR, GBP, JPY = 15, 1, 2, 3
+_SYMBOLS = {
+    1: ("EURUSD", EUR, USD, 5),
+    2: ("EURGBP", EUR, GBP, 5),
+    3: ("USDJPY", USD, JPY, 3),
+}
+"""The fake server's symbols: name, base and quote asset, digits. The account is kept in USD."""
 
 
 # --- framing -------------------------------------------------------------------------------------
@@ -329,9 +338,23 @@ def test_ctrader_settings_survive_a_save_and_load(tmp_path: Path) -> None:
 class FakeOpenApi:
     """Answers the requests a worker makes, from canned state."""
 
-    def __init__(self, *, refuse_account: str | None = None) -> None:
+    def __init__(
+        self, *, refuse_account: str | None = None, refuse_order: str | None = None
+    ) -> None:
         self.refuse_account = refuse_account
+        self.refuse_order = refuse_order
         self.seen: list[str] = []
+        self.requests: list[Any] = []
+        self.positions: dict[int, Any] = {
+            77: om.ProtoOAPosition(
+                positionId=77,
+                tradeData=_trade(om.BUY, 5_000_000, label=cv.COPIER_LABEL),
+                positionStatus=om.POSITION_STATUS_OPEN,
+                swap=-150,
+                price=1.1,
+                usedMargin=2_500,
+            )
+        }
         self.server: asyncio.Server | None = None
         self.port = 0
 
@@ -346,6 +369,7 @@ class FakeOpenApi:
     def _answer(self, msg: Any) -> Any:
         name = type(msg).__name__
         self.seen.append(name)
+        self.requests.append(msg)
         if isinstance(msg, oa.ProtoOAApplicationAuthReq):
             return oa.ProtoOAApplicationAuthRes()
         if isinstance(msg, oa.ProtoOAAccountAuthReq):
@@ -372,27 +396,44 @@ class FakeOpenApi:
         if isinstance(msg, oa.ProtoOASymbolsListReq):
             return oa.ProtoOASymbolsListRes(
                 ctidTraderAccountId=ACCOUNT,
-                symbol=[om.ProtoOALightSymbol(symbolId=1, symbolName="EURUSD")],
+                symbol=[
+                    om.ProtoOALightSymbol(
+                        symbolId=sid, symbolName=n, baseAssetId=base, quoteAssetId=quote
+                    )
+                    for sid, (n, base, quote, _) in _SYMBOLS.items()
+                ],
             )
         if isinstance(msg, oa.ProtoOASymbolByIdReq):
             return oa.ProtoOASymbolByIdRes(
                 ctidTraderAccountId=ACCOUNT,
-                symbol=[om.ProtoOASymbol(symbolId=1, digits=5, pipPosition=4, lotSize=10_000_000)],
+                symbol=[
+                    om.ProtoOASymbol(
+                        symbolId=sid,
+                        digits=_SYMBOLS[sid][3],
+                        pipPosition=_SYMBOLS[sid][3] - 1,
+                        lotSize=10_000_000,
+                        minVolume=100_000,
+                        maxVolume=1_000_000_000,
+                        stepVolume=100_000,
+                    )
+                    for sid in msg.symbolId
+                ],
             )
         if isinstance(msg, oa.ProtoOAReconcileReq):
             return oa.ProtoOAReconcileRes(
-                ctidTraderAccountId=ACCOUNT,
-                position=[
-                    om.ProtoOAPosition(
-                        positionId=77,
-                        tradeData=_trade(om.BUY, 5_000_000, label=cv.COPIER_LABEL),
-                        positionStatus=om.POSITION_STATUS_OPEN,
-                        swap=-150,
-                        price=1.1,
-                        usedMargin=2_500,
-                    )
-                ],
+                ctidTraderAccountId=ACCOUNT, position=list(self.positions.values())
             )
+        if isinstance(msg, oa.ProtoOANewOrderReq):
+            return self._new_order(msg)
+        if isinstance(msg, oa.ProtoOAClosePositionReq):
+            return self._close(msg)
+        if isinstance(msg, oa.ProtoOAAmendPositionSLTPReq):
+            if msg.positionId not in self.positions:
+                return self._order_error("POSITION_NOT_FOUND")
+            pos = self.positions[msg.positionId]
+            pos.stopLoss = msg.stopLoss
+            pos.takeProfit = msg.takeProfit
+            return self._execution(om.ORDER_ACCEPTED, pos, 900)
         if isinstance(msg, oa.ProtoOAGetPositionUnrealizedPnLReq):
             return oa.ProtoOAGetPositionUnrealizedPnLRes(
                 ctidTraderAccountId=ACCOUNT,
@@ -405,6 +446,87 @@ class FakeOpenApi:
             )
         return oa.ProtoOAErrorRes(errorCode="UNEXPECTED", description=name)
 
+    def _order_error(self, code: str) -> Any:
+        return oa.ProtoOAOrderErrorEvent(ctidTraderAccountId=ACCOUNT, errorCode=code)
+
+    def _execution(self, kind: int, position: Any, order_id: int, deal: Any = None) -> Any:
+        event = oa.ProtoOAExecutionEvent(
+            ctidTraderAccountId=ACCOUNT,
+            executionType=kind,  # type: ignore[arg-type]
+            position=position,
+            order=om.ProtoOAOrder(
+                orderId=order_id,
+                tradeData=position.tradeData,
+                orderType=om.MARKET,
+                orderStatus=om.ORDER_STATUS_ACCEPTED,
+            ),
+        )
+        if deal is not None:
+            event.deal.CopyFrom(deal)
+        return event
+
+    def _deal(self, order_id: int, position_id: int, volume: int, price: float) -> Any:
+        return om.ProtoOADeal(
+            dealId=order_id + 1,
+            orderId=order_id,
+            positionId=position_id,
+            volume=volume,
+            filledVolume=volume,
+            symbolId=1,
+            createTimestamp=1,
+            executionTimestamp=1,
+            executionPrice=price,
+            tradeSide=om.BUY,
+            dealStatus=om.FILLED,
+        )
+
+    def _new_order(self, msg: Any) -> Any:
+        if self.refuse_order:
+            return self._order_error(self.refuse_order)
+        position = om.ProtoOAPosition(
+            positionId=88,
+            tradeData=om.ProtoOATradeData(
+                symbolId=msg.symbolId,
+                volume=msg.volume,
+                tradeSide=msg.tradeSide,
+                label=msg.label,
+                openTimestamp=1,
+            ),
+            positionStatus=om.POSITION_STATUS_CREATED,
+            swap=0,
+            price=0.0,
+        )
+        accepted = self._execution(om.ORDER_ACCEPTED, position, 500)
+        filled = om.ProtoOAPosition()
+        filled.CopyFrom(position)
+        filled.positionStatus = om.POSITION_STATUS_OPEN
+        filled.price = 1.10012
+        self.positions[88] = filled
+        return [
+            accepted,
+            # Something unrelated in between, which must reach the worker untouched.
+            oa.ProtoOAMarginChangedEvent(
+                ctidTraderAccountId=ACCOUNT, positionId=77, usedMargin=1, moneyDigits=2
+            ),
+            self._execution(om.ORDER_FILLED, filled, 500, self._deal(500, 88, msg.volume, 1.10012)),
+        ]
+
+    def _close(self, msg: Any) -> Any:
+        pos = self.positions.get(msg.positionId)
+        if pos is None:
+            return self._order_error("POSITION_NOT_FOUND")
+        left = int(pos.tradeData.volume) - msg.volume
+        if left <= 0:
+            del self.positions[msg.positionId]
+        else:
+            pos.tradeData.volume = left
+        return [
+            self._execution(om.ORDER_ACCEPTED, pos, 600),
+            self._execution(
+                om.ORDER_FILLED, pos, 600, self._deal(600, msg.positionId, msg.volume, 1.1003)
+            ),
+        ]
+
     async def _serve(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             while True:
@@ -413,7 +535,9 @@ class FakeOpenApi:
                 msg, client_msg_id = decode(await reader.readexactly(length))
                 if msg is None or client_msg_id is None:
                     continue
-                writer.write(encode(self._answer(msg), client_msg_id))
+                answer = self._answer(msg)
+                for each in answer if isinstance(answer, list) else [answer]:
+                    writer.write(encode(each, client_msg_id))
                 await writer.drain()
         except (asyncio.IncompleteReadError, ConnectionError):
             writer.close()
@@ -423,14 +547,14 @@ def _creds() -> auth.CTraderCredentials:
     return auth.CTraderCredentials(client_id="i", client_secret="s", access_token="tok")
 
 
-async def _run_worker(api: FakeOpenApi, commands: list[object], ticks: float = 1.2) -> list[object]:
+async def _run_worker(
+    api: FakeOpenApi, commands: list[object], ticks: float = 1.2, is_live: bool = False
+) -> list[object]:
     out_q: queue.Queue[object] = queue.Queue()
     cmd_q: queue.Queue[object] = queue.Queue()
-    for c in commands:
-        cmd_q.put(c)
     account = ct_worker._Account(
         ACCOUNT,
-        False,
+        is_live,
         "Broker-cTrader-Demo",
         lambda host: CTraderClient("127.0.0.1", api.port, tls=False),
         _creds,
@@ -438,6 +562,14 @@ async def _run_worker(api: FakeOpenApi, commands: list[object], ticks: float = 1
     task = asyncio.create_task(
         ct_worker._run("CTRADER:1", account, out_q, cmd_q, 0.05, [0.05])  # type: ignore[arg-type]
     )
+    if commands:
+        # A command that arrives before the connection is refused, as on MT5.
+        for _ in range(100):
+            if account.connected and account.trader is not None:
+                break
+            await asyncio.sleep(0.02)
+        for c in commands:
+            cmd_q.put(c)
     await asyncio.sleep(ticks)
     cmd_q.put(None)
     await asyncio.wait_for(task, 5)
@@ -477,27 +609,162 @@ async def test_the_worker_reports_the_account_like_an_mt5_terminal() -> None:
     assert isinstance(got[-1], Snapshot) and got[-1].state is WorkerState.STOPPED
 
 
-async def test_the_worker_refuses_every_order_for_now() -> None:
-    api = FakeOpenApi()
+def _command(op: ActionKind, **kw: Any) -> OrderCommand:
+    defaults: dict[str, Any] = {
+        "command_id": 3,
+        "op": op,
+        "master_ticket": 11,
+        "master_symbol": "EURUSD",
+        "direction": PositionType.BUY,
+    }
+    return OrderCommand(**(defaults | kw))
+
+
+async def _results(
+    api: FakeOpenApi, *cmds: OrderCommand, is_live: bool = False
+) -> list[OrderResult]:
     await api.start()
-    cmd = OrderCommand(
-        command_id=3,
-        op=ActionKind.OPEN,
-        master_ticket=11,
-        master_symbol="EURUSD",
-        direction=PositionType.BUY,
-    )
     try:
-        got = await _run_worker(api, [cmd], ticks=0.3)
+        got = await _run_worker(api, list(cmds), ticks=0.4, is_live=is_live)
     finally:
         await api.stop()
-    results = [r for r in got if isinstance(r, OrderResult)]
+    return [r for r in got if isinstance(r, OrderResult)]
+
+
+def _sent(api: FakeOpenApi, kind: type) -> list[Any]:
+    return [r for r in api.requests if isinstance(r, kind)]
+
+
+def test_a_lot_is_valued_in_the_quote_or_through_the_symbols_own_price() -> None:
+    eurusd = cv.SymbolInfo(1, "EURUSD", 5, 10_000_000, base_asset_id=EUR, quote_asset_id=USD)
+    usdjpy = cv.SymbolInfo(3, "USDJPY", 3, 10_000_000, base_asset_id=USD, quote_asset_id=JPY)
+    eurgbp = cv.SymbolInfo(2, "EURGBP", 5, 10_000_000, base_asset_id=EUR, quote_asset_id=GBP)
+    # 10 pips on a standard lot of EURUSD is $100.
+    assert cv.loss_per_lot(eurusd, USD, 1.1000, 1.0990) == pytest.approx(100.0)
+    # 10 pips of USDJPY is 10,000 yen, worth $66.67 at a stop of 150.
+    assert cv.loss_per_lot(usdjpy, USD, 150.10, 150.00) == pytest.approx(10_000 / 150.0)
+    # A cross needs a third price, which is not read.
+    assert cv.loss_per_lot(eurgbp, USD, 0.85, 0.849) is None
+
+
+def test_symbol_bounds_become_lots_and_distances_relative_units() -> None:
+    sym = cv.SymbolInfo(1, "EURUSD", 5, 10_000_000, 100_000, 1_000_000_000, 100_000)
+    facts = cv.facts(sym)
+    assert (facts.volume_min, facts.volume_max, facts.volume_step) == (0.01, 100.0, 0.01)
+    assert facts.point == pytest.approx(0.00001)
+    assert sym.volume(0.3) == 3_000_000
+    assert cv.relative(1.10000 - 1.09900, 5) == 100
+
+
+async def test_an_open_is_risk_sized_filled_and_given_its_exact_stops() -> None:
+    api = FakeOpenApi()
+    cmd = _command(
+        ActionKind.OPEN, entry=1.1000, sl=1.0990, tp=1.1030, risk_amount=100.0, comment="cp"
+    )
+    results = await _results(api, cmd)
     assert len(results) == 1
+    r = results[0]
+    assert r.ok, r.error
+    assert (r.slave_ticket, r.slave_symbol, r.filled_volume) == (88, "EURUSD", 1.0)
+    assert r.price == pytest.approx(1.10012)
+    assert r.point == pytest.approx(0.00001) and r.digits == 5
+    assert r.price_value == pytest.approx(100_000.0)
+    (order,) = _sent(api, oa.ProtoOANewOrderReq)
+    assert order.orderType == om.MARKET and order.tradeSide == om.BUY
+    assert order.volume == 10_000_000
+    assert order.label == cv.COPIER_LABEL
+    # Protected from the moment it fills, by distance; then exact.
+    assert (order.relativeStopLoss, order.relativeTakeProfit) == (100, 300)
+    (amend,) = _sent(api, oa.ProtoOAAmendPositionSLTPReq)
+    assert (amend.positionId, amend.stopLoss, amend.takeProfit) == (88, 1.099, 1.103)
+
+
+async def test_a_cross_is_refused_before_anything_is_sent() -> None:
+    api = FakeOpenApi()
+    results = await _results(
+        api, _command(ActionKind.OPEN, master_symbol="EURGBP", entry=0.85, sl=0.849, risk_amount=50)
+    )
     assert results[0].ok is False
-    assert results[0].retryable is False
-    assert results[0].error == ct_worker.NOT_TRADING_YET
-    # Nothing reached the server that could place an order.
-    assert not any("Order" in name and "Req" in name for name in api.seen)
+    assert results[0].error is not None and "live prices" in results[0].error
+    assert not _sent(api, oa.ProtoOANewOrderReq)
+
+
+async def test_a_lot_multiple_open_needs_no_stop() -> None:
+    api = FakeOpenApi()
+    cmd = _command(
+        ActionKind.OPEN,
+        master_symbol="EURGBP",
+        sizing_basis=SizingBasis.MASTER_LOT_MULTIPLE,
+        master_volume=0.2,
+        lot_multiple=1.5,
+    )
+    results = await _results(api, cmd)
+    assert results[0].ok, results[0].error
+    (order,) = _sent(api, oa.ProtoOANewOrderReq)
+    assert order.volume == 3_000_000
+    assert not order.HasField("relativeStopLoss")
+    assert not _sent(api, oa.ProtoOAAmendPositionSLTPReq)
+
+
+async def test_a_refused_order_is_a_final_failure() -> None:
+    api = FakeOpenApi(refuse_order="NOT_ENOUGH_MONEY")
+    results = await _results(api, _command(ActionKind.OPEN, entry=1.1, sl=1.099, risk_amount=100))
+    assert results[0].ok is False and results[0].retryable is False
+    assert results[0].error is not None and "NOT_ENOUGH_MONEY" in results[0].error
+
+
+async def test_a_close_takes_the_volume_ctrader_holds() -> None:
+    api = FakeOpenApi()
+    results = await _results(api, _command(ActionKind.CLOSE, slave_ticket=77))
+    assert results[0].ok, results[0].error
+    assert results[0].filled_volume == 0.5
+    (close,) = _sent(api, oa.ProtoOAClosePositionReq)
+    assert (close.positionId, close.volume) == (77, 5_000_000)
+    assert 77 not in api.positions
+
+
+async def test_a_reduce_closes_its_fraction() -> None:
+    api = FakeOpenApi()
+    results = await _results(api, _command(ActionKind.REDUCE, slave_ticket=77, close_fraction=0.4))
+    assert results[0].ok, results[0].error
+    (close,) = _sent(api, oa.ProtoOAClosePositionReq)
+    assert close.volume == 2_000_000
+
+
+async def test_closing_a_position_already_gone_is_done() -> None:
+    api = FakeOpenApi()
+    results = await _results(api, _command(ActionKind.CLOSE, slave_ticket=12345))
+    assert results[0].ok and results[0].outcome == "already closed"
+    assert not _sent(api, oa.ProtoOAClosePositionReq)
+
+
+async def test_stops_follow_the_master_and_a_zero_clears_one() -> None:
+    api = FakeOpenApi()
+    results = await _results(
+        api, _command(ActionKind.MODIFY_SLTP, slave_ticket=77, sl=1.095, tp=0.0)
+    )
+    assert results[0].ok, results[0].error
+    (amend,) = _sent(api, oa.ProtoOAAmendPositionSLTPReq)
+    assert amend.stopLoss == 1.095
+    assert not amend.HasField("takeProfit")
+
+
+async def test_moving_the_stops_of_a_gone_copy_says_so() -> None:
+    api = FakeOpenApi()
+    results = await _results(api, _command(ActionKind.MODIFY_SLTP, slave_ticket=999, sl=1.09))
+    assert results[0].ok and results[0].target_gone
+
+
+async def test_resting_orders_and_live_accounts_are_refused() -> None:
+    api = FakeOpenApi()
+    place = _command(ActionKind.PLACE, order_type=OrderType.BUY_LIMIT, entry=1.09)
+    (result,) = await _results(api, place)
+    assert result.ok is False and result.error == ct_executor.PENDINGS_NOT_YET
+
+    api = FakeOpenApi()
+    (result,) = await _results(api, _command(ActionKind.CLOSE, slave_ticket=77), is_live=True)
+    assert result.ok is False and result.error is not None and "not a demo" in result.error
+    assert not _sent(api, oa.ProtoOAClosePositionReq)
 
 
 async def test_an_expired_login_says_to_log_in_again() -> None:

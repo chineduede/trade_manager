@@ -72,6 +72,14 @@ _ERROR_TYPES = {
 }
 
 
+DISCONNECT_EVENTS = (
+    OpenApiMessages_pb2.ProtoOAAccountsTokenInvalidatedEvent,
+    OpenApiMessages_pb2.ProtoOAClientDisconnectEvent,
+    OpenApiMessages_pb2.ProtoOAAccountDisconnectEvent,
+)
+"""Events after which the session is over."""
+
+
 class OpenApiError(Exception):
     """The server answered a request with an error."""
 

@@ -1691,12 +1691,34 @@ are the design, not a limitation waiting to be lifted.
     `ctrader/worker.py`, which sends the same snapshots as an MT5 worker: positions, resting
     orders, balance, equity, margin, P/L. Volumes in lots, label `mt5copier` read as the magic.
     Left unknown: deals (deposits come from another request) and the current price.
-  - **Every order command is refused** ("not built yet"), not retryable. Next phases: market
-    open/close and SL/TP on demo (fixed lots), then pendings, partials and breakeven, then
-    risk-% sizing (no `order_calc_profit`: pip value and conversion rates).
+  - Phase 1's refusal of every order is replaced by phase 2, below.
   - *Demo check:* `t`, log in, tick a demo account; it appears under NOT YET OPENED; `s` makes
     it a slave; its card shows the balance, and a position opened by hand in cTrader shows on
     its page in lots. With copying on in a dry run, a master trade is reported for it.
+- **cTrader slaves, phase 2 of 5 — built 2026-10-09 on `ctrader`; the user ran the demo check the same day and found it good.**
+  Market positions are copied: `ctrader/executor.py`, run by the worker between ticks.
+  - Open: a MARKET order labelled `mt5copier`. Market orders take no absolute SL/TP, so it goes
+    with the master's entry-to-stop and entry-to-target *distances* (protected from the fill),
+    then the exact levels are set once it fills; if that fails it stays ok, logged as approximate.
+    The request is answered on acceptance; the worker waits up to 10 s for the fill event.
+  - Close, reduce and book: `ClosePositionReq` at the volume cTrader holds now; a position
+    already gone is done. Stops: `AmendPositionSLTPReq`, a zero leaves the level out (clears it).
+  - Sizing (decided 2026-10-09): risk sizing without `order_calc_profit`. A lot is `lotSize/100`
+    units, so a 1.0 move is worth that many units of the quote asset — the answer when the account
+    is kept in it (EURUSD, XAUUSD on USD); divided by the stop's price when the account is kept in
+    the base (USDJPY on USD). **Any other symbol is refused** until live prices are read (phase 4).
+    The no-stop lot multiple works for every symbol. Margin caps ask `ExpectedMarginReq`.
+  - Refused: placing, moving and cancelling resting orders (phase 3), and live accounts unless
+    `allow_live_trading`, as on MT5. Commands arriving while disconnected fail, as on MT5.
+  - Next: phase 3 pendings (and breakeven checks), phase 4 live prices (cross-currency sizing,
+    a position's current price), phase 5 deals.
+  - *Demo check:* make the cTrader demo a slave and copy for real. (1) Master buys EURUSD with
+    SL and TP: the copy's lots match the slave's risk, it carries label `mt5copier`, and its
+    SL/TP equal the master's exactly. (2) Move the master's SL: the copy follows. (3) Remove the
+    master's TP: the copy's TP goes (**unverified: that leaving `takeProfit` out clears it**).
+    (4) Partially close the master, then close it: the copy follows both. (5) USDJPY sizes;
+    EURGBP is refused with "converting needs live prices". (6) A master trade with no stop
+    copies at the lot multiple when the no-stop policy allows it.
 - **Not handled: an account switched by hand in MT5 while the terminal has a role — noted
   2026-10-05, nothing built.** If a slave is switched to another account inside MT5 while
   the copier is connected, nothing notices: its copies are filed by terminal, not account, so

@@ -6,9 +6,9 @@ It speaks the same messages to the supervisor -- a :class:`Snapshot` every tick,
 treat the account like any other slave. Underneath it is an asyncio loop around one
 :class:`CTraderClient`, re-reading the account's positions and orders each tick.
 
-**It does not trade yet.** Every order command is refused with a final (not retryable) failure
-that says so, which is what lets an account be followed in a dry run, and makes certain nothing
-reaches the broker before sending is built and tested.
+Order commands go to a :class:`~mt5copier.ctrader.executor.CTraderExecutor`, on the same loop
+and connection, between ticks. It opens, closes and moves the stops of positions; resting orders
+are refused until they are built.
 
 What a snapshot leaves unknown (None), and why:
 
@@ -43,7 +43,8 @@ from ..protocol import (
 )
 from . import auth
 from . import convert as cv
-from .client import CTraderClient, OpenApiError, host_for
+from .client import DISCONNECT_EVENTS, CTraderClient, OpenApiError, host_for
+from .executor import CTraderExecutor
 from .proto import OpenApiMessages_pb2 as oa
 
 if TYPE_CHECKING:
@@ -60,17 +61,7 @@ _MIN_INTERVAL_S = 0.5
 _TRADER_EVERY_S = 2.0
 """How often the balance is re-read when nothing has happened. An execution re-reads it at once."""
 
-NOT_TRADING_YET = (
-    "trading on cTrader is not built yet: this account can only be followed in a dry run"
-)
-
 _TOKEN_CODES = frozenset({"CH_ACCESS_TOKEN_INVALID", "OA_AUTH_TOKEN_EXPIRED", "ACCESS_DENIED"})
-
-_EVENT_DISCONNECTS = (
-    oa.ProtoOAAccountsTokenInvalidatedEvent,
-    oa.ProtoOAClientDisconnectEvent,
-    oa.ProtoOAAccountDisconnectEvent,
-)
 
 
 def _backoff_delay(schedule: list[float], attempt: int) -> float:
@@ -101,6 +92,9 @@ class _Account:
         self.trader: Any = None
         self.currency: str | None = None
         self.symbol_names: dict[int, str] = {}
+        self.symbol_ids: dict[str, int] = {}
+        self._assets: dict[int, tuple[int, int]] = {}
+        """Each symbol's ``(base, quote)`` asset ids, from the symbol list."""
         self.symbols: dict[int, cv.SymbolInfo] = {}
         self._trader_read_at = 0.0
         self.error: str | None = None
@@ -142,6 +136,10 @@ class _Account:
                 oa.ProtoOASymbolsListReq(ctidTraderAccountId=self.account_id)
             )
             self.symbol_names = {int(s.symbolId): s.symbolName for s in listed.symbol}
+            self.symbol_ids = {name: sid for sid, name in self.symbol_names.items()}
+            self._assets = {
+                int(s.symbolId): (int(s.baseAssetId), int(s.quoteAssetId)) for s in listed.symbol
+            }
         except OpenApiError as exc:
             await self.disconnect()
             await client.close()
@@ -168,7 +166,23 @@ class _Account:
         self.trader = answer.trader
         self._trader_read_at = time.monotonic()
 
-    async def _symbols_for(self, ids: set[int]) -> None:
+    @property
+    def deposit_asset_id(self) -> int:
+        return int(self.trader.depositAssetId) if self.trader is not None else 0
+
+    def refresh_soon(self) -> None:
+        """Re-read the balance on the next tick: something was just executed."""
+        self._trader_read_at = 0.0
+
+    async def open_positions(self) -> dict[int, Any]:
+        """The account's open positions as cTrader reports them now, by position id."""
+        assert self.client is not None
+        state = await self.client.request(
+            oa.ProtoOAReconcileReq(ctidTraderAccountId=self.account_id)
+        )
+        return {int(p.positionId): p for p in state.position}
+
+    async def symbols_for(self, ids: set[int]) -> None:
         missing = sorted(i for i in ids if i not in self.symbols)
         if not missing:
             return
@@ -178,11 +192,17 @@ class _Account:
         )
         for s in answer.symbol:
             sid = int(s.symbolId)
+            base, quote = self._assets.get(sid, (0, 0))
             self.symbols[sid] = cv.SymbolInfo(
                 symbol_id=sid,
                 name=self.symbol_names.get(sid, f"#{sid}"),
                 digits=int(s.digits),
                 lot_size=int(s.lotSize),
+                min_volume=int(s.minVolume),
+                max_volume=int(s.maxVolume),
+                step_volume=int(s.stepVolume),
+                base_asset_id=base,
+                quote_asset_id=quote,
             )
 
     def _drain_events(self) -> bool:
@@ -194,7 +214,7 @@ class _Account:
                 event = self.client.events.get_nowait()
             except asyncio.QueueEmpty:
                 return executed
-            if isinstance(event, _EVENT_DISCONNECTS):
+            if isinstance(event, DISCONNECT_EVENTS):
                 reason = getattr(event, "reason", "") or type(event).__name__
                 raise ConnectionError(f"cTrader ended the session: {reason}")
             if isinstance(event, oa.ProtoOAExecutionEvent):
@@ -231,7 +251,7 @@ class _Account:
         )
         raw_positions = list(state.position)
         raw_orders = list(state.order)
-        await self._symbols_for(
+        await self.symbols_for(
             {int(p.tradeData.symbolId) for p in raw_positions}
             | {int(o.tradeData.symbolId) for o in raw_orders}
         )
@@ -319,19 +339,6 @@ class _Account:
         )
 
 
-def refusal(terminal_id: str, cmd: OrderCommand) -> OrderResult:
-    """The answer to every order command until sending is built."""
-    return OrderResult(
-        command_id=cmd.command_id,
-        terminal_id=terminal_id,
-        op=cmd.op,
-        master_ticket=cmd.master_ticket,
-        ok=False,
-        retryable=False,
-        error=NOT_TRADING_YET,
-    )
-
-
 def run_ctrader_worker(
     terminal_id: str,
     account_id: int,
@@ -376,6 +383,7 @@ async def _run(
     backoff: list[float],
 ) -> None:
     wlog = get_logger(f"worker.{terminal_id[:16]}")
+    executor = CTraderExecutor(terminal_id, account)
     pid = os.getpid()
     seq = 0
     attempts = 0
@@ -411,13 +419,14 @@ async def _run(
                     running = False
                     break
                 if isinstance(cmd, OrderCommand):
-                    result = refusal(terminal_id, cmd)
+                    result = await executor.execute(cmd)
                     wlog.info("%s", result.describe())
                     publish_result(result)
                     continue
                 if isinstance(cmd, Command) and cmd.kind is CommandKind.RECONNECT:
                     wlog.info("reconnect requested")
                     await account.disconnect()
+                    executor.forget_symbols()
                     attempts = 0
                     next_retry_at = 0.0
             if not running:
