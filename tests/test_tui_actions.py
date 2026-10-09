@@ -22,6 +22,7 @@ from tui_support import (
     make_app,
     make_cfg,
     plain,
+    toasted,
     toasts,
     wire_copying,
 )
@@ -781,12 +782,11 @@ async def test_a_message_appears_under_its_field_and_goes_when_fixed(app: Copier
         assert message.display is False
 
 
-# --- open copies: asked about, then given up ------------------------------------------------
+# --- open copies -----------------------------------------------------------------------------
 #
-# An edit to a terminal that holds copies stops the copier managing them, for every setting alike,
-# so it is asked about first. The question lists what would be given up and rests on Cancel, and
-# nothing has happened until it is answered: declining leaves the form open, the edit still typed
-# in, and the copies tracked.
+# A settings edit keeps a slave's copies managed, so saving asks nothing. Unassigning gives them up,
+# and asks first: the question lists what would be given up and rests on Cancel, and nothing has
+# happened until it is answered.
 
 
 def _text(screen: object, selector: str) -> str:
@@ -798,110 +798,18 @@ def _go(question: OrphanDialog) -> str:
     return str(question.query_one("#go", Button).label)
 
 
-async def _save_with_copies(
-    app: CopierApp, pilot: object, *copies: OpenCopy
-) -> tuple[SettingsForm, OrphanDialog]:
-    """Open the form, change a setting, save it, and return both screens: the form, and the
-    question it provoked."""
-    form = await _open_editor(app, pilot)
+async def _unassign_with_copies(app: CopierApp, pilot: object, *copies: OpenCopy) -> OrphanDialog:
+    """Make the slave hold ``copies``, press u on it, and return the question it provoked."""
+    app._cfg.set_role(TID_MASTER, Role.MASTER)
+    app._cfg.set_role(TID_SLAVE, Role.SLAVE)
+    app._refresh()
     hold(app, *copies)
-    form.query_one("#f-risk_percent", Input).value = "0.3"
-    await pilot.press("ctrl+s")  # type: ignore[attr-defined]
+    app._select(TID_SLAVE)
+    await pilot.press("u")  # type: ignore[attr-defined]
     await pilot.pause()  # type: ignore[attr-defined]
     question = app.screen
     assert isinstance(question, OrphanDialog)
-    return form, question
-
-
-async def test_a_slave_with_no_copies_saves_without_being_asked(
-    app: CopierApp, cfg: AppConfig
-) -> None:
-    async with app.run_test() as pilot:
-        screen = await _open_editor(app, pilot)
-        screen.query_one("#f-invert", Choice).value = "opposite"
-        await pilot.press("ctrl+s")
-        await pilot.pause()
-        assert cfg.terminals[TID_SLAVE].invert is True
-        assert not isinstance(app.screen, SettingsForm | OrphanDialog)
-
-
-async def test_saving_over_open_copies_asks_first_and_names_them(
-    app: CopierApp, cfg: AppConfig
-) -> None:
-    async with app.run_test(size=(100, 40)) as pilot:
-        _, question = await _save_with_copies(
-            app,
-            pilot,
-            copy_of(11, 900, "EURGBPp", 13.77),
-            copy_of(12, 901, "EURUSDp", 0.5, resting=True),
-        )
-        assert "CHANGE BETA BROKER'S SETTINGS?" in _dialog_text(question)
-        assert "orphan 2 copies" in _go(question)
-        listing = _text(question, "#copies")
-        assert "#900" in listing and "EURGBPp" in listing and "13.77" in listing
-        assert "#901" in listing and "resting order" in listing
-        assert "stay open" in _text(question, "#consequence")
-        assert "risk_percent 1 -> 0.3" in _text(question, "#changes")
-        assert cfg.terminals[TID_SLAVE].risk_percent == 1.0, "nothing has happened yet"
-        assert app._engine.given_up == []  # type: ignore[attr-defined]
-
-
-async def test_the_question_rests_on_cancel(app: CopierApp) -> None:
-    """Confirming abandons real positions, so the resting choice is the one that changes nothing."""
-    async with app.run_test(size=(100, 40)) as pilot:
-        _, question = await _save_with_copies(app, pilot, copy_of(11))
-        assert app.focused is question.query_one("#cancel")
-
-
-async def test_enter_on_the_question_declines(app: CopierApp, cfg: AppConfig) -> None:
-    async with app.run_test(size=(100, 40)) as pilot:
-        await _save_with_copies(app, pilot, copy_of(11))
-        await pilot.press("enter")
-        await pilot.pause()
-        assert isinstance(app.screen, SettingsForm)
-        assert cfg.terminals[TID_SLAVE].risk_percent == 1.0
-        assert app._engine.given_up == []  # type: ignore[attr-defined]
-
-
-async def test_declining_returns_to_the_form_with_nothing_changed(
-    app: CopierApp, cfg: AppConfig
-) -> None:
-    async with app.run_test(size=(100, 40)) as pilot:
-        form, _ = await _save_with_copies(app, pilot, copy_of(11))
-        on_disk = app._saved_to.read_bytes()  # type: ignore[attr-defined]
-
-        await pilot.press("escape")
-        await pilot.pause()
-
-        assert isinstance(app.screen, SettingsForm), "the form is still open"
-        assert form.query_one("#f-risk_percent", Input).value == "0.3", "with the edit still typed"
-        assert cfg.terminals[TID_SLAVE].risk_percent == 1.0
-        assert app._engine.given_up == []  # type: ignore[attr-defined]
-        assert app._engine.copies[TID_SLAVE], "the copies are still tracked"  # type: ignore[attr-defined]
-        assert app._saved_to.read_bytes() == on_disk  # type: ignore[attr-defined]
-        assert not any("orphan" in t for t in toasts(app))
-
-
-async def test_agreeing_gives_the_copies_up_applies_the_edit_and_says_so(
-    app: CopierApp, cfg: AppConfig
-) -> None:
-    from mt5copier import config as config_mod
-
-    cfg.dry_run = False
-    async with app.run_test(size=(100, 40)) as pilot:
-        _, question = await _save_with_copies(app, pilot, copy_of(11, 900), copy_of(12, 901))
-
-        question.query_one("#go", Button).press()
-        await pilot.pause()
-
-        assert cfg.terminals[TID_SLAVE].risk_percent == 0.3
-        assert app._engine.given_up == [(TID_SLAVE, [11, 12])]  # type: ignore[attr-defined]
-        assert not isinstance(app.screen, SettingsForm | OrphanDialog), "both close"
-        reloaded = config_mod.load(app._saved_to)  # type: ignore[attr-defined]
-        assert reloaded.terminals[TID_SLAVE].risk_percent == 0.3
-        (said,) = [t for t in toasts(app) if "orphaned" in t]
-        assert "2 open copies" in said and "#900" in said and "#901" in said
-        assert "by hand" in said, "and what it means for them"
+    return question
 
 
 @pytest.mark.parametrize(
@@ -915,63 +823,28 @@ async def test_agreeing_gives_the_copies_up_applies_the_edit_and_says_so(
         ("f-copy_pending", True),
     ],
 )
-async def test_every_setting_is_asked_about_alike(
-    app: CopierApp, field: str, value: object
+async def test_saving_over_open_copies_asks_nothing_and_keeps_them(
+    app: CopierApp, cfg: AppConfig, field: str, value: object
 ) -> None:
-    """Which settings are safe under an open copy is not something a person should have to know."""
+    """Each copy keeps what it was opened with, so no setting has to give it up."""
     async with app.run_test(size=(100, 40)) as pilot:
         screen = await _open_editor(app, pilot)
         hold(app, copy_of(11))
         screen.query_one(f"#{field}").value = value  # type: ignore[attr-defined]
         await pilot.press("ctrl+s")
         await pilot.pause()
-        assert isinstance(app.screen, OrphanDialog), field
+        assert not isinstance(app.screen, SettingsForm | OrphanDialog), field
+        assert app._engine.given_up == []  # type: ignore[attr-defined]
+        assert app._engine.copies[TID_SLAVE], "still tracked"  # type: ignore[attr-defined]
+        assert not any("orphan" in t for t in toasts(app))
 
 
-async def test_saving_a_form_that_changed_nothing_asks_nothing(app: CopierApp) -> None:
+async def test_saving_a_form_that_changed_nothing_says_so(app: CopierApp) -> None:
     async with app.run_test() as pilot:
         await _open_editor(app, pilot)
-        hold(app, copy_of(11))
         await pilot.press("ctrl+s")
         await pilot.pause()
-        assert not isinstance(app.screen, OrphanDialog)
         assert any("no changes" in t for t in toasts(app))
-
-
-async def test_a_slave_whose_copies_cannot_be_read_is_refused_and_not_changed(
-    app: CopierApp, cfg: AppConfig
-) -> None:
-    """'We could not tell' is not a reason to change a slave that may be holding copies."""
-    async with app.run_test() as pilot:
-        screen = await _open_editor(app, pilot)
-        app._engine.copies[TID_SLAVE] = None  # type: ignore[attr-defined]
-        screen.query_one("#f-risk_percent", Input).value = "0.3"
-        await pilot.press("ctrl+s")
-        await pilot.pause()
-
-        assert isinstance(app.screen, SettingsForm)
-        general = screen.query_one("#general-error", Static)
-        assert general.display is True
-        assert "could not be read" in str(general.render())
-        assert cfg.terminals[TID_SLAVE].risk_percent == 1.0
-
-
-async def test_a_refusal_after_agreeing_reaches_the_form(app: CopierApp, cfg: AppConfig) -> None:
-    """A copy opened while the person was deciding is one they were not told about. The engine
-    checks what they agreed to against what is held now, and the refusal has to be seen."""
-    async with app.run_test(size=(100, 40)) as pilot:
-        form, question = await _save_with_copies(app, pilot, copy_of(11))
-        hold(app, copy_of(11), copy_of(13))
-
-        question.query_one("#go", Button).press()
-        await pilot.pause()
-
-        assert isinstance(app.screen, SettingsForm)
-        general = form.query_one("#general-error", Static)
-        assert general.display is True
-        assert "changed while you were deciding" in str(general.render())
-        assert cfg.terminals[TID_SLAVE].risk_percent == 1.0
-        assert app._engine.given_up == []  # type: ignore[attr-defined]
 
 
 async def test_the_engines_own_refusal_keeps_the_form_open_and_says_why(
@@ -979,9 +852,7 @@ async def test_the_engines_own_refusal_keeps_the_form_open_and_says_why(
 ) -> None:
     async with app.run_test() as pilot:
         screen = await _open_editor(app, pilot)
-        monkeypatch.setattr(
-            app._engine, "apply_settings", lambda new, orphan=None: "a copy opened a moment ago"
-        )
+        monkeypatch.setattr(app._engine, "apply_settings", lambda new: "a copy opened a moment ago")
         screen.query_one("#f-risk_percent", Input).value = "0.3"
         await pilot.press("ctrl+s")
         await pilot.pause()
@@ -993,25 +864,62 @@ async def test_the_engines_own_refusal_keeps_the_form_open_and_says_why(
         assert cfg.terminals[TID_SLAVE].risk_percent == 1.0
 
 
+async def test_the_question_names_what_would_be_given_up(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test(size=(100, 40)) as pilot:
+        question = await _unassign_with_copies(
+            app,
+            pilot,
+            copy_of(11, 900, "EURGBPp", 13.77),
+            copy_of(12, 901, "EURUSDp", 0.5, resting=True),
+        )
+        assert "orphan 2 copies" in _go(question)
+        listing = _text(question, "#copies")
+        assert "#900" in listing and "EURGBPp" in listing and "13.77" in listing
+        assert "#901" in listing and "resting order" in listing
+        assert "stay open" in _text(question, "#consequence")
+        assert cfg.terminals[TID_SLAVE].role is Role.SLAVE, "nothing has happened yet"
+        assert app._engine.given_up == []  # type: ignore[attr-defined]
+
+
+async def test_the_question_rests_on_cancel(app: CopierApp) -> None:
+    """Confirming abandons real positions, so the resting choice is the one that changes nothing."""
+    async with app.run_test(size=(100, 40)) as pilot:
+        question = await _unassign_with_copies(app, pilot, copy_of(11))
+        assert app.focused is question.query_one("#cancel")
+
+
+async def test_enter_on_the_question_declines(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test(size=(100, 40)) as pilot:
+        await _unassign_with_copies(app, pilot, copy_of(11))
+        await pilot.press("enter")
+        await pilot.pause()
+        assert not isinstance(app.screen, OrphanDialog)
+        assert cfg.terminals[TID_SLAVE].role is Role.SLAVE
+        assert app._engine.given_up == []  # type: ignore[attr-defined]
+
+
 async def test_the_panic_key_works_from_the_question(app: CopierApp, cfg: AppConfig) -> None:
     async with app.run_test(size=(100, 40)) as pilot:
-        await _save_with_copies(app, pilot, copy_of(11))
+        await _unassign_with_copies(app, pilot, copy_of(11))
         cfg.copying_enabled = True
         await pilot.press("f9")
         await pilot.pause()
         assert cfg.copying_enabled is False
         assert not isinstance(app.screen, OrphanDialog)
-        assert cfg.terminals[TID_SLAVE].risk_percent == 1.0, "and it agreed to nothing"
+        assert cfg.terminals[TID_SLAVE].role is Role.SLAVE, "and it agreed to nothing"
         assert app._engine.given_up == []  # type: ignore[attr-defined]
 
 
 async def test_a_dry_run_says_the_copies_are_simulated(app: CopierApp, cfg: AppConfig) -> None:
     cfg.dry_run = True
     async with app.run_test(size=(100, 40)) as pilot:
-        _, question = await _save_with_copies(app, pilot, copy_of(11))
+        question = await _unassign_with_copies(app, pilot, copy_of(11))
         assert "simulated" in _dialog_text(question)
         question.query_one("#go", Button).press()
-        await pilot.pause()
+        for _ in range(20):
+            await pilot.pause(0.05)
+            if any("simulated" in t for t in toasts(app)):
+                break
         (said,) = [t for t in toasts(app) if "simulated" in t]
         assert "by hand" not in said, "there is nothing real to close"
 
@@ -1021,13 +929,13 @@ async def test_a_live_session_does_not_call_the_copies_simulated(
 ) -> None:
     cfg.dry_run = False
     async with app.run_test(size=(100, 40)) as pilot:
-        _, question = await _save_with_copies(app, pilot, copy_of(11))
+        question = await _unassign_with_copies(app, pilot, copy_of(11))
         assert "simulated" not in _dialog_text(question)
 
 
 async def test_a_long_list_is_cut_but_the_count_is_whole(app: CopierApp) -> None:
     async with app.run_test(size=(100, 60)) as pilot:
-        _, question = await _save_with_copies(app, pilot, *(copy_of(i) for i in range(20, 32)))
+        question = await _unassign_with_copies(app, pilot, *(copy_of(i) for i in range(20, 32)))
         assert "orphan 12 copies" in _go(question)
         listing = _text(question, "#copies")
         assert "#1027" in listing and "#1028" not in listing
@@ -1039,7 +947,7 @@ async def test_the_question_is_usable_on_an_80_by_24_terminal(app: CopierApp) ->
     import html
 
     async with app.run_test(size=(80, 24)) as pilot:
-        _, question = await _save_with_copies(
+        question = await _unassign_with_copies(
             app, pilot, copy_of(11), copy_of(12), copy_of(13), copy_of(14)
         )
         question.query_one("#go").focus()
@@ -1048,7 +956,7 @@ async def test_the_question_is_usable_on_an_80_by_24_terminal(app: CopierApp) ->
         assert region.y >= 0
         assert region.y + region.height <= 24
         drawn = html.unescape(app.export_screenshot()).replace("\xa0", " ")
-        assert "Apply and orphan 4 copies" in drawn
+        assert "Unassign and orphan 4 copies" in drawn
 
 
 # --- warnings and the record ---------------------------------------------------------------
@@ -1290,10 +1198,10 @@ async def test_turning_it_off_works_after_the_terminal_stopped_being_a_slave(
         assert not screen.is_attached
 
 
-async def test_the_override_dialog_asks_about_open_copies_too(
+async def test_the_override_goes_in_without_asking_about_open_copies(
     app: CopierApp, cfg: AppConfig
 ) -> None:
-    """It is a settings change like any other, so the same question comes first."""
+    """A settings change like any other, so it keeps the copies managed."""
     cfg.dry_run = False
     async with app.run_test(size=(100, 40)) as pilot:
         screen = await _open_override(app, pilot)
@@ -1302,54 +1210,29 @@ async def test_the_override_dialog_asks_about_open_copies_too(
         await pilot.press("enter")
         await pilot.pause()
 
-        question = app.screen
-        assert isinstance(question, OrphanDialog)
-        assert "allow_live_trading off -> on" in _text(question, "#changes")
-        assert cfg.terminals[TID_SLAVE].allow_live_trading is False, "not yet"
-
-        question.query_one("#go", Button).press()
-        await pilot.pause()
-
         assert cfg.terminals[TID_SLAVE].allow_live_trading is True
-        assert app._engine.given_up == [(TID_SLAVE, [11])]  # type: ignore[attr-defined]
+        assert app._engine.given_up == []  # type: ignore[attr-defined]
         assert not isinstance(app.screen, LiveDialog | OrphanDialog)
 
 
-async def test_declining_leaves_the_override_dialog_open_and_the_guard_where_it_was(
+async def test_putting_the_guard_back_over_copies_on_a_real_account_warns(
     app: CopierApp, cfg: AppConfig
 ) -> None:
-    async with app.run_test(size=(100, 40)) as pilot:
-        screen = await _open_override(app, pilot)
-        hold(app, copy_of(11))
-        screen.query_one("#typed", Input).value = "Beta Broker"
-        await pilot.press("enter")
-        await pilot.pause()
-        await pilot.press("escape")
-        await pilot.pause()
-
-        assert isinstance(app.screen, LiveDialog)
-        assert cfg.terminals[TID_SLAVE].allow_live_trading is False
-        assert app._engine.given_up == []  # type: ignore[attr-defined]
-
-
-async def test_putting_the_guard_back_over_open_copies_is_asked_about_too(
-    app: CopierApp, cfg: AppConfig
-) -> None:
+    """Nothing is given up, but from now on the guard refuses to close or move those copies."""
+    cfg.dry_run = False
     cfg.set_role(TID_SLAVE, Role.SLAVE)
     cfg.terminals[TID_SLAVE].allow_live_trading = True
     async with app.run_test(size=(100, 40)) as pilot:
         await _open_override(app, pilot, role_key=None)
         hold(app, copy_of(11), copy_of(12))
+        app._engine.real_account_copies[TID_SLAVE] = 2  # type: ignore[attr-defined]
         await pilot.press("enter")
         await pilot.pause()
 
-        question = app.screen
-        assert isinstance(question, OrphanDialog)
-        assert "orphan 2 copies" in _go(question)
-
-        question.query_one("#go", Button).press()
-        await pilot.pause()
+        assert not isinstance(app.screen, OrphanDialog)
         assert cfg.terminals[TID_SLAVE].allow_live_trading is False
+        assert app._engine.given_up == []  # type: ignore[attr-defined]
+        assert await toasted(pilot, "refuse to close or move them")
 
 
 async def test_turning_it_off_with_nothing_open_is_not_asked_about(

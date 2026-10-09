@@ -27,12 +27,11 @@ a ``MASTER=BROKER`` map out of free text.
   here, and gives nothing up (see ``Engine.set_paused``).
 * ``enabled`` is no longer offered at all. Pausing replaced it.
 
-**Nothing here knows which edits are safe under an open copy, and nothing needs to.** An edit to
-a terminal that holds copies is not judged setting by setting: the copies are given up (see
-``Engine.apply_settings``), after the person has been shown them and agreed. The one exception
-is an edit to the breakeven settings alone (``config.BREAKEVEN_FIELDS``), which keeps them. That is what
-``invert`` needed -- a believed copy records the direction it opened in -- and it is what the
-sizing settings need too, and it is one rule instead of a list.
+**An edit keeps the copies a slave holds, and goes on managing them.** Each copy keeps what it
+was opened with -- size, symbol and direction, ``invert`` included, since a copy's reversal is
+read back from the copy -- so most settings reach only new trades, and the few that act on open
+copies (copying stops, partials and pending orders, the breakeven and its buffer) are meant to.
+Only disabling a terminal gives copies up (see ``Engine.apply_settings``).
 """
 
 from __future__ import annotations
@@ -598,13 +597,15 @@ def describe_changes(changes: tuple[Change, ...], limit: int | None = None) -> s
     return text
 
 
-def advisories(outcome: EditOutcome) -> list[str]:
+def advisories(outcome: EditOutcome, copies_on_real_account: int = 0) -> list[str]:
     """Warnings for an edit that is allowed but widens what a slave can lose or leaves it exposed.
 
     None is a reason to refuse. Each is something the editor makes one keypress away that was a
-    deliberate hand edit before, so the moment it happens is the moment to say so. What an edit
-    does to copies that are already open is not here: that is asked about beforehand, for every
-    setting alike.
+    deliberate hand edit before, so the moment it happens is the moment to say so.
+
+    ``copies_on_real_account`` is how many copies the slave holds on an account not known to be
+    a demo (``Engine.copies_on_real_account``): turning the live override off leaves them open
+    with every close and stop move refused by the demo-only guard.
     """
     if outcome.config is None:
         return []
@@ -627,5 +628,12 @@ def advisories(outcome: EditOutcome) -> list[str]:
         out.append(
             f"{cfg.label or 'this terminal'} will now be traded whatever its account is, a real "
             "or prop-firm account included. It stays that way until the override is turned off."
+        )
+    if live is not None and not cfg.allow_live_trading and copies_on_real_account:
+        out.append(
+            f"{cfg.label or 'this terminal'} holds {copies_on_real_account} open "
+            f"cop{'y' if copies_on_real_account == 1 else 'ies'} on a real account, and the "
+            "copier will now refuse to close or move them. Close them by hand, or turn the "
+            "override back on."
         )
     return out

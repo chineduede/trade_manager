@@ -1740,6 +1740,20 @@ are the design, not a limitation waiting to be lifted.
     the slave's position is then followed (move the master's SL, then close it) and no second copy
     opens. (6) A sell stop the same way. (7) Breakeven on the cTrader slave: its positions show a
     current price, the stop moves when the trigger is reached, and booking closes its share.
+- **Settings edits keep open copies — decided and built 2026-10-09.** Before, any edit to a
+  slave holding copies (except breakeven alone) gave them up, after asking: one rule instead of
+  knowing which settings were safe. Traced setting by setting, only `invert` broke an open copy
+  (the next tick read the current setting and sent the master's target as the copy's stop). Now:
+  - A copy keeps the reversal it was opened with, read back from the copy (its direction against
+    the master's, or a resting order's type against the master order's), so `invert` reaches new
+    trades only. A filled order hands over with its own direction.
+  - So no settings edit gives copies up; the settings form never asks. Unassigning (and loading a
+    setup that does), or disabling a terminal, still do, after the same question.
+  - Sizing, filters and symbol decoration reach new trades only; copy SL/TP, partials, pending,
+    breakeven and its commission/slippage buffer act on open copies too, by design.
+  - Turning `allow_live_trading` off while a slave holds copies on an account not known to be a
+    demo warns that the copier will refuse to close or move them (nothing is given up).
+  - Copies given up get a final ORPHANED step in their history (`46b8796`).
 - **Not handled: an account switched by hand in MT5 while the terminal has a role — noted
   2026-10-05, nothing built.** If a slave is switched to another account inside MT5 while
   the copier is connected, nothing notices: its copies are filed by terminal, not account, so

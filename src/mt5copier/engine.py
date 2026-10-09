@@ -28,7 +28,6 @@ from . import role_actions
 from . import setups as setups_mod
 from .breakeven import breakeven_level, buffer_distance, check_breakeven_price
 from .config import (
-    BREAKEVEN_FIELDS,
     AppConfig,
     BreakevenMode,
     Role,
@@ -46,6 +45,7 @@ from .logging_setup import get_logger
 from .news import NewsCalendar
 from .paths import dryrun_store_path, history_db_path, log_dir, mapping_db_path
 from .protocol import (
+    ACCOUNT_TRADE_MODE_DEMO,
     COPIER_MAGIC,
     DISPATCHABLE_KINDS,
     ActionKind,
@@ -169,14 +169,6 @@ def _undecorated(
         [replace(p, symbol=undecorate(p.symbol, prefix, suffix)) for p in positions],
         [replace(o, symbol=undecorate(o.symbol, prefix, suffix)) for o in orders],
     )
-
-
-def _only_breakeven_changed(old: TerminalConfig, new: TerminalConfig) -> bool:
-    """Whether an edit touches nothing but the breakeven settings (see ``BREAKEVEN_FIELDS``)."""
-    changed = {
-        name for name in TerminalConfig.model_fields if getattr(old, name) != getattr(new, name)
-    }
-    return changed <= BREAKEVEN_FIELDS
 
 
 class Engine:
@@ -1455,6 +1447,15 @@ class Engine:
             log.exception("could not read the copies open on %s", terminal_id[:8])
             return None
 
+    def copies_on_real_account(self, terminal_id: str) -> int:
+        """How many copies this slave holds when its account is not known to be a demo -- the
+        ones the demo-only guard will refuse to close or move once its override is off."""
+        with self._lock:
+            snap = self._snapshots.get(terminal_id)
+            if snap is not None and snap.trade_mode == ACCOUNT_TRADE_MODE_DEMO:
+                return 0
+            return len(self._open_copies(terminal_id) or [])
+
     def copies_at_stake(
         self, terminal_id: str, new: TerminalConfig | None = None
     ) -> dict[str, list[OpenCopy]] | None:
@@ -1469,20 +1470,23 @@ class Engine:
     def _stake_ids(self, terminal_id: str, new: TerminalConfig | None) -> list[str]:
         """Which slaves' copies a change to this terminal gives up.
 
-        A slave (or anything not the master) only ever stakes its own. The master holds no
-        copies, but every slave's copies hang off it: unassigning it sweeps the slaves along
-        (see :func:`role_actions.unassign`), and disabling it stops anything being mirrored. Any
-        other edit to the master leaves the copies managed, so stakes nothing.
+        Only a change that stops copies being managed at all: unassigning the terminal, or
+        disabling it, which stops its worker (or, for the master, stops anything being
+        mirrored). A slave only ever stakes its own; every slave's copies hang off the master,
+        so unassigning or disabling it sweeps them all along (see :func:`role_actions.unassign`).
+
+        **A settings edit stakes nothing.** Each copy keeps what it was opened with -- its
+        size, symbol and direction, read back from the copy rather than the setting, so even
+        ``invert`` only reaches new trades -- and the settings that act on open copies (copying
+        stops, partials and pending orders, the breakeven and its buffer) are meant to.
         """
         cfg = self._cfg.terminals[terminal_id]
-        if cfg.role is not Role.MASTER:
-            if new is not None and _only_breakeven_changed(cfg, new):
-                # How a stop is managed from here on, never a copy's direction or size: the
-                # copies stay, and the new settings apply to them too.
-                return []
-            return [terminal_id]
         losing = new is None or (cfg.enabled and not new.enabled)
-        return [t.terminal_id for t in self._cfg.slaves] if losing else []
+        if not losing:
+            return []
+        if cfg.role is not Role.MASTER:
+            return [terminal_id]
+        return [t.terminal_id for t in self._cfg.slaves]
 
     def _stake(
         self, terminal_id: str, new: TerminalConfig | None
@@ -1538,14 +1542,11 @@ class Engine:
 
         Every edit is one atomic swap, so the drain thread never sees half of one.
 
-        **A change that would stop copies being managed is only made by giving them up.** For a
-        slave that is any edit except one to the breakeven settings alone, which only changes how
-        a stop is managed from here on: the copier stops managing its copies -- nothing closes
-        them when the master does, moves their stops, or mirrors a partial close -- and they
-        stay open on the slave. That replaces a rule per setting -- which ones were safe to
-        change under an open copy, which had to be refused -- with one rule that does not depend
-        on knowing the answer. For the master it is disabling it, which strands every slave's
-        copies the same way. See :meth:`_give_up_agreed` for what ``orphan`` must hold.
+        **A change that would stop copies being managed is only made by giving them up**: the
+        copier stops managing them -- nothing closes them when the master does, moves their
+        stops, or mirrors a partial close -- and they stay open on the slave. Only disabling
+        does that (see :meth:`_stake_ids`); any other edit keeps the copies managed. See
+        :meth:`_give_up_agreed` for what ``orphan`` must hold.
 
         The check, the giving up and the swap happen under one hold of the lock, and the drain
         thread dispatches under the same lock. Doing them in turn would leave a gap for an open

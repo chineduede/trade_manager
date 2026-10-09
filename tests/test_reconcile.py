@@ -23,6 +23,7 @@ from mt5copier.config import AppConfig, NoStopPolicy, Role, SizingMode, Terminal
 from mt5copier.engine import Engine
 from mt5copier.history import Step
 from mt5copier.protocol import (
+    ACCOUNT_TRADE_MODE_DEMO,
     COPIER_MAGIC,
     OrderCommand,
     OrderResult,
@@ -370,7 +371,9 @@ def test_an_inverted_slave_is_disarmed_by_the_master_removing_its_target() -> No
     """effective_levels swaps the pair, so on a reversed copy it is the take-profit that is
     the stop. Surprising enough that the flag is the only thing making it visible."""
     actions = reconcile_slave(
-        [pos(sl=1.08, tp=0.0)], [copied(sl=1.09, tp=1.08)], slave(invert=True)
+        [pos(sl=1.08, tp=0.0)],
+        [copied(ptype=PositionType.SELL, sl=1.09, tp=1.08)],
+        slave(invert=True),
     )
     assert [a.kind for a in actions] == [ActionKind.MODIFY_SLTP]
     assert actions[0].sl == 0.0, "the master's absent target is the reversed copy's stop"
@@ -2447,7 +2450,6 @@ def test_an_edit_to_a_slave_with_no_copies_goes_in_without_being_asked_about(
         {"invert": True},
         {"risk_percent": 0.25},
         {"max_lot": 3.0},
-        {"enabled": False},
         {"copy_sltp": False},
         {"copy_partials": False},
         {"copy_pending": True},
@@ -2457,15 +2459,32 @@ def test_an_edit_to_a_slave_with_no_copies_goes_in_without_being_asked_about(
     ],
     ids=lambda c: next(iter(c)),
 )
-def test_every_setting_is_refused_under_a_copy_until_it_is_agreed_to(
+def test_a_settings_edit_keeps_the_open_copies_managed(
     engine_cfg: AppConfig, tmp_path: Path, change: dict[str, object]
 ) -> None:
-    """One rule for all of them. Which are safe under an open copy is not something to know."""
+    """Each copy keeps what it was opened with, so no edit has to give it up to be safe."""
+    seed_live_store(tmp_path, stale_row())
+    seed_live_store(tmp_path, order_row())
+    eng = live_engine(engine_cfg, tmp_path)
+    new = edited(eng, **change)
+
+    assert eng.copies_at_stake(TID_SLAVE, new) == {}
+    assert eng.apply_settings(new) is None
+
+    assert eng.config.terminals[TID_SLAVE] is new
+    assert held_by(eng) == [11, 12], "still tracked"
+    assert eng.orphans() == []
+
+
+def test_disabling_a_slave_is_refused_under_a_copy_until_it_is_agreed_to(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    """Its worker stops, so nothing could close or move its copies."""
     seed_live_store(tmp_path, stale_row())
     eng = live_engine(engine_cfg, tmp_path)
     before = eng.config.terminals[TID_SLAVE]
 
-    refusal = eng.apply_settings(edited(eng, **change))
+    refusal = eng.apply_settings(edited(eng, enabled=False))
 
     assert refusal is not None
     assert "1 open copy" in refusal
@@ -2477,7 +2496,7 @@ def test_every_setting_is_refused_under_a_copy_until_it_is_agreed_to(
 def test_a_resting_order_alone_is_enough_to_ask(engine_cfg: AppConfig, tmp_path: Path) -> None:
     seed_live_store(tmp_path, order_row())
     eng = live_engine(engine_cfg, tmp_path)
-    assert eng.apply_settings(edited(eng, invert=True)) is not None
+    assert eng.apply_settings(edited(eng, enabled=False)) is not None
 
 
 def test_agreeing_gives_the_copies_up_and_applies_the_edit(
@@ -2486,7 +2505,7 @@ def test_agreeing_gives_the_copies_up_and_applies_the_edit(
     seed_live_store(tmp_path, stale_row())
     seed_live_store(tmp_path, order_row())
     eng = live_engine(engine_cfg, tmp_path)
-    new = edited(eng, invert=True)
+    new = edited(eng, enabled=False)
 
     assert eng.apply_settings(new, orphan={TID_SLAVE: [11, 12]}) is None
 
@@ -2501,11 +2520,28 @@ def test_what_was_given_up_is_reported_as_orphans_and_the_slave_is_not_held(
     the person agreed to it. So the slave goes on copying under its new settings."""
     seed_live_store(tmp_path, stale_row())
     eng = live_engine(engine_cfg, tmp_path)
-    assert eng.apply_settings(edited(eng, risk_percent=0.5), orphan={TID_SLAVE: [11]}) is None
+    assert eng.apply_settings(edited(eng, enabled=False), orphan={TID_SLAVE: [11]}) is None
 
     (orphan,) = eng.orphans(TID_SLAVE)
     assert (orphan.slave_ticket, orphan.symbol, orphan.volume) == (900, "EURUSD", 0.5)
     assert eng.holds() == {}
+
+
+def test_copies_on_a_real_account_are_counted_and_a_demos_are_not(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    """Those the demo-only guard would refuse to close once its override is off. An account
+    whose kind is not known yet counts, as the guard treats it."""
+    seed_live_store(tmp_path, stale_row())
+    eng = live_engine(engine_cfg, tmp_path)
+    assert eng.copies_on_real_account(TID_SLAVE) == 1, "not reported yet"
+    wire_slave(eng)
+    eng._snapshots[TID_SLAVE] = replace(eng._snapshots[TID_SLAVE], trade_mode=2)
+    assert eng.copies_on_real_account(TID_SLAVE) == 1
+    eng._snapshots[TID_SLAVE] = replace(
+        eng._snapshots[TID_SLAVE], trade_mode=ACCOUNT_TRADE_MODE_DEMO
+    )
+    assert eng.copies_on_real_account(TID_SLAVE) == 0
 
 
 def test_a_given_up_copy_ends_its_history_as_orphaned(
@@ -2518,7 +2554,7 @@ def test_a_given_up_copy_ends_its_history_as_orphaned(
     eng._history.record(
         Step(time.time(), TID_SLAVE, 11, "EURUSD", "buy", "open", "done", False, "", "opened")
     )
-    assert eng.apply_settings(edited(eng, risk_percent=0.5), orphan={TID_SLAVE: [11]}) is None
+    assert eng.apply_settings(edited(eng, enabled=False), orphan={TID_SLAVE: [11]}) is None
 
     (trade,) = eng.trade_history(TID_SLAVE)
     assert trade.status == "orphaned"
@@ -2535,7 +2571,7 @@ def test_the_orphans_survive_the_next_reconciliation_still_acknowledged(
     eng = live_engine(engine_cfg, tmp_path)
     cmd_q = arm_slave(eng)
     wire_slave(eng, open_positions=(pos(ticket=900, volume=0.5, magic=COPIER_MAGIC),))
-    assert eng.apply_settings(edited(eng, risk_percent=0.5), orphan={TID_SLAVE: [11]}) is None
+    assert eng.apply_settings(edited(eng, enabled=False), orphan={TID_SLAVE: [11]}) is None
 
     eng._reconcile(snap(open_positions=(pos(ticket=11, sl=0.0),)))
 
@@ -2564,22 +2600,38 @@ def test_the_master_trade_is_not_copied_again_after_the_engine_gives_it_up(
     appear, and its row is gone: the next tick would open it again. The master gives it a stop so
     that the re-derived open is a different action from anything reported before."""
     eng, cmd_q = watched_copy_of_11(engine_cfg, tmp_path)
-    assert eng.apply_settings(edited(eng, risk_percent=0.5), orphan={TID_SLAVE: [11]}) is None
+    assert eng.apply_settings(edited(eng, enabled=False), orphan={TID_SLAVE: [11]}) is None
 
     eng._reconcile(snap(open_positions=(pos(ticket=11, sl=1.08),)))
 
     assert cmd_q.sent == [], "nothing may be sent for a trade that was let go"
 
 
-def test_a_trade_opened_after_giving_up_is_copied_under_the_new_settings(
+def test_after_an_edit_a_new_trade_is_copied_and_the_old_copy_stays_managed(
     engine_cfg: AppConfig, tmp_path: Path
 ) -> None:
     eng, cmd_q = watched_copy_of_11(engine_cfg, tmp_path)
-    assert eng.apply_settings(edited(eng, risk_percent=0.5), orphan={TID_SLAVE: [11]}) is None
+    assert eng.apply_settings(edited(eng, risk_percent=0.5)) is None
 
     eng._reconcile(snap(open_positions=(pos(ticket=11, sl=0.0), pos(ticket=12, sl=1.08))))
 
     assert [c.master_ticket for c in cmd_q.sent] == [12]  # type: ignore[attr-defined]
+    assert 11 in held_by(eng)
+
+
+def test_flipping_invert_leaves_an_open_copy_the_way_it_was_opened() -> None:
+    """Read from the setting, the master's target would become this copy's stop -- above a buy."""
+    copy = copied(sl=1.08, tp=1.12)
+    actions = reconcile_slave([pos(sl=1.07, tp=1.12)], [copy], slave(invert=True))
+    assert [(a.kind, a.type, a.sl, a.tp) for a in actions] == [
+        (ActionKind.MODIFY_SLTP, PositionType.BUY, 1.07, 1.12)
+    ]
+
+
+def test_turning_invert_off_leaves_a_reversed_copy_reversed() -> None:
+    copy = copied(ptype=PositionType.SELL, sl=1.12, tp=1.08)
+    actions = reconcile_slave([pos(sl=1.07, tp=1.12)], [copy], slave(invert=False))
+    assert [(a.type, a.sl, a.tp) for a in actions] == [(PositionType.SELL, 1.12, 1.07)]
 
 
 def test_agreeing_to_a_different_set_of_copies_is_refused(
@@ -2592,7 +2644,7 @@ def test_agreeing_to_a_different_set_of_copies_is_refused(
     eng = live_engine(engine_cfg, tmp_path)
     before = eng.config.terminals[TID_SLAVE]
 
-    refusal = eng.apply_settings(edited(eng, invert=True), orphan={TID_SLAVE: [11]})
+    refusal = eng.apply_settings(edited(eng, enabled=False), orphan={TID_SLAVE: [11]})
 
     assert refusal is not None
     assert "changed while you were deciding" in refusal
@@ -2605,7 +2657,7 @@ def test_agreeing_to_a_copy_that_is_gone_is_refused_too(
 ) -> None:
     seed_live_store(tmp_path, stale_row())
     eng = live_engine(engine_cfg, tmp_path)
-    refusal = eng.apply_settings(edited(eng, invert=True), orphan={TID_SLAVE: [11, 99]})
+    refusal = eng.apply_settings(edited(eng, enabled=False), orphan={TID_SLAVE: [11, 99]})
     assert refusal is not None
     assert held_by(eng) == [11]
 
@@ -2622,7 +2674,7 @@ def test_it_is_refused_while_a_command_is_still_in_flight(engine: Engine) -> Non
     assert len(cmd_q.sent) == 2, "the second open is out and unanswered"
     before = engine.config.terminals[TID_SLAVE]
 
-    refusal = engine.apply_settings(edited(engine, invert=True), orphan={TID_SLAVE: [11]})
+    refusal = engine.apply_settings(edited(engine, enabled=False), orphan={TID_SLAVE: [11]})
 
     assert refusal is not None
     assert "in flight" in refusal
@@ -2640,7 +2692,7 @@ def test_an_open_in_flight_does_not_stop_an_edit_that_gives_nothing_up(engine: E
     engine._reconcile(snap(open_positions=(pos(ticket=11),)))
     assert engine.believed_copies() == 0
 
-    assert engine.apply_settings(edited(engine, invert=True)) is None
+    assert engine.apply_settings(edited(engine, enabled=False)) is None
 
 
 def test_it_is_refused_when_the_copies_cannot_be_read(
@@ -2650,7 +2702,7 @@ def test_it_is_refused_when_the_copies_cannot_be_read(
     eng = live_engine(engine_cfg, tmp_path)
     monkeypatch.setattr(eng, "_ensure_store", lambda: (_ for _ in ()).throw(OSError("locked")))
     before = eng.config.terminals[TID_SLAVE]
-    refusal = eng.apply_settings(edited(eng, invert=True))
+    refusal = eng.apply_settings(edited(eng, enabled=False))
     assert refusal is not None
     assert "could not be read" in refusal
     assert eng.config.terminals[TID_SLAVE] is before
@@ -2668,7 +2720,7 @@ def test_a_failure_part_way_is_a_refusal_and_not_a_crash(
 
     monkeypatch.setattr(CopyLedger, "abandon", boom)
 
-    refusal = eng.apply_settings(edited(eng, invert=True), orphan={TID_SLAVE: [11]})
+    refusal = eng.apply_settings(edited(eng, enabled=False), orphan={TID_SLAVE: [11]})
 
     assert refusal is not None
     assert "part-way" in refusal
@@ -2695,7 +2747,7 @@ def test_a_dry_run_lets_go_of_its_simulated_copies_and_reports_no_orphans(engine
     assert engine.believed_copies() == 1
     seen = engine.action_total
 
-    assert engine.apply_settings(edited(engine, risk_percent=0.5), orphan={TID_SLAVE: [11]}) is None
+    assert engine.apply_settings(edited(engine, enabled=False), orphan={TID_SLAVE: [11]}) is None
 
     assert engine.believed_copies() == 0
     assert engine.orphans() == []

@@ -97,9 +97,9 @@ class OrphanDialog(ModalScreen[bool]):
     """Before open copies are given up. Esc, and the button that rests focused, keep them.
     Dismisses with True if agreed.
 
-    ``copies`` is keyed by the name of the slave that holds them. ``unassigning`` words the
-    screen for a role being taken away rather than a settings edit, and ``loading`` -- a saved
-    setup's name -- for that setup being loaded.
+    ``copies`` is keyed by the name of the slave that holds them. Worded for the selected
+    terminal being unassigned, or with ``loading`` -- a saved setup's name -- for that setup
+    being loaded. A settings edit never gives copies up, so it never asks.
     """
 
     BINDINGS = [
@@ -115,7 +115,6 @@ class OrphanDialog(ModalScreen[bool]):
         live: bool,
         halt: Callable[[], None],
         *,
-        unassigning: bool = False,
         loading: str | None = None,
     ) -> None:
         super().__init__()
@@ -123,7 +122,6 @@ class OrphanDialog(ModalScreen[bool]):
         self._changes = changes
         self._live = live
         self._halt = halt
-        self._unassigning = unassigning
         self._loading = loading
 
     @property
@@ -163,15 +161,11 @@ class OrphanDialog(ModalScreen[bool]):
                 title = f"Load setup {self._loading}?"
                 lead = "Loading it takes these slaves off what they copied from their master:"
                 go = f"Load and orphan {total} cop{'y' if total == 1 else 'ies'}"
-            elif self._unassigning:
+            else:
                 role = cfg.terminals[tid].role if tid else Role.SLAVE
                 title = f"Unassign {name}?"
                 lead = unassign_lead(role, len(cfg.slaves), len(self._copies))
                 go = f"Unassign and orphan {total} cop{'y' if total == 1 else 'ies'}"
-            else:
-                title = f"Change {name}'s settings?"
-                lead = "Changing these settings stops the copier managing what it has open:"
-                go = f"Apply and orphan {total} cop{'y' if total == 1 else 'ies'}"
             yield Static(Text(title.upper(), style="bold"), classes="dialog-title")
             if not self._live:
                 yield Static(
@@ -202,12 +196,9 @@ class OrphanDialog(ModalScreen[bool]):
                 style=MUTED,
             )
             yield Static(said, id="consequence")
-            if not self._unassigning:
+            if self._loading is not None:
                 change = Text("The change: ", style=MUTED)
-                if self._loading is not None:
-                    change.append(f"{self._changes}.")
-                else:
-                    change.append(f"{self._changes}. It applies to every trade copied from now on.")
+                change.append(f"{self._changes}.")
                 yield Static(change, id="changes")
             with ButtonRow(id="buttons"):
                 yield Button("Keep everything  esc", id="cancel", classes="keep")

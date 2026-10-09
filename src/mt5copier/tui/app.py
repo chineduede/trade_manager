@@ -495,7 +495,6 @@ class CopierApp(App[None]):
                 changes=f"unassign {self._cfg.display_name(tid)}",
                 live=not self._cfg.dry_run,
                 halt=self.action_panic,
-                unassigning=True,
             ),
             decided,
         )
@@ -934,14 +933,12 @@ class CopierApp(App[None]):
         )
 
     def _apply_settings(self, outcome: EditOutcome, done: Callable[[str | None], None]) -> None:
-        """Take a validated edit -- asking first if it would give up open copies -- and apply it.
+        """Take a validated edit and apply it. ``done`` is told how it ended: None if the edit
+        went in (or there was nothing to do), otherwise why it was refused.
 
-        ``done`` is told how it ended: None if the edit went in (or there was nothing to do),
-        otherwise why it was refused. It is *not* called when the person declines to give the
-        copies up: the form is still open and nothing has happened, so there is nothing to say.
-
-        The question exists for every setting alike. What each one does to a copy that is already
-        open is not something a person should have to know, and not something this has to decide.
+        Nothing is asked about open copies: a settings edit keeps them managed (see
+        ``Engine._stake_ids``). Only unassigning a terminal, or loading a setup that does, gives
+        copies up, and those ask first.
         """
         new = outcome.config
         if new is None:
@@ -952,46 +949,19 @@ class CopierApp(App[None]):
             done(None)
             return
 
-        # An unreadable store reads as "nothing to ask about" here, and that is safe: the engine
-        # reads it again under its lock and refuses an edit it cannot account for. What is asked
-        # about is only ever a courtesy; the engine is the one that cannot be raced. For the
-        # master this is every slave's copies when the edit disables it, and nothing otherwise.
-        stake = self._engine.copies_at_stake(new.terminal_id, new) or {}
-        if not stake:
-            done(self._commit_settings(new, outcome, {}))
-            return
+        done(self._commit_settings(new, outcome))
 
-        def decided(agreed: bool | None) -> None:
-            if agreed:
-                done(self._commit_settings(new, outcome, stake))
-
-        self.push_screen(
-            OrphanDialog(
-                copies=self._by_name(stake),
-                changes=describe_changes(outcome.changes, limit=160),
-                live=not self._cfg.dry_run,
-                halt=self.action_panic,
-            ),
-            decided,
-        )
-
-    def _commit_settings(
-        self,
-        new: TerminalConfig,
-        outcome: EditOutcome,
-        given_up: Mapping[str, Sequence[OpenCopy]],
-    ) -> str | None:
-        """Swap the edit in, record it, save it, and say what changed and what was given up.
+    def _commit_settings(self, new: TerminalConfig, outcome: EditOutcome) -> str | None:
+        """Swap the edit in, record it, save it, and say what changed.
 
         Returns why the engine refused it, or None if it went in. The engine is the one that
-        swaps, because it can check and swap under the lock the drain thread dispatches under,
-        and ``given_up`` is what it checks the person agreed to against what is held now.
+        swaps, because it can do so under the lock the drain thread dispatches under.
 
         The change goes in the log in full as well as on screen. A risk setting altered while
         copying is live is the kind of thing that has to be findable afterwards -- and a change
         to the demo-only guard's override is logged as a warning, so it stands out from one.
         """
-        refusal = self._engine.apply_settings(new, orphan=self._agreed(given_up))
+        refusal = self._engine.apply_settings(new)
         if refusal is not None:
             return refusal
         guard_moved = any(c.name == LIVE_OVERRIDE for c in outcome.changes)
@@ -1004,8 +974,8 @@ class CopierApp(App[None]):
         )
         self._persist_and_sync()
         self.notify(f"{new.label}: {describe_changes(outcome.changes, limit=160)}")
-        self._report_given_up(given_up)
-        for warning in advisories(outcome):
+        real = 0 if self._cfg.dry_run else self._engine.copies_on_real_account(new.terminal_id)
+        for warning in advisories(outcome, real):
             self.notify(warning, severity="warning", timeout=12)
         return None
 

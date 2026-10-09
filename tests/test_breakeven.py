@@ -612,15 +612,13 @@ def test_an_exempt_copy_never_moves(live: Engine) -> None:
     assert _tick(live) == []
 
 
-def test_editing_only_breakeven_settings_keeps_the_open_copies(live: Engine) -> None:
+def test_editing_breakeven_settings_keeps_the_open_copies(live: Engine) -> None:
     _slave_at(live, 1.08550)
     _tick(live)
     cfg = live.config.terminals[TID_SLAVE]
     assert (
         live.copies_at_stake(TID_SLAVE, cfg.model_copy(update={"breakeven_trigger_r": 0.5})) == {}
     )
-    staked = live.copies_at_stake(TID_SLAVE, cfg.model_copy(update={"risk_percent": 2.0}))
-    assert staked is not None and TID_SLAVE in staked
     assert live.apply_settings(cfg.model_copy(update={"breakeven_mode": BreakevenMode.OFF})) is None
     assert live.believed_copies() == 1
 

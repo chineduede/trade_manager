@@ -329,7 +329,12 @@ def effective_levels(sl: float, tp: float, cfg: TerminalConfig) -> tuple[float, 
     trade -- so a slave set to both ``invert`` and ``SKIP`` will quietly copy nothing from a
     master that does not set targets. That is correct, but it is worth knowing.
     """
-    return (tp, sl) if cfg.invert else (sl, tp)
+    return swap_levels(sl, tp, cfg.invert)
+
+
+def swap_levels(sl: float, tp: float, inverted: bool) -> tuple[float, float]:
+    """:func:`effective_levels` for a copy whose reversal is already known."""
+    return (tp, sl) if inverted else (sl, tp)
 
 
 def protective_sl(sl: float, floor: float, ptype: PositionType) -> float:
@@ -534,9 +539,13 @@ def reconcile_slave(
     for ticket in sorted(master_by_ticket):
         p = master_by_ticket[ticket]
         slave_symbol = map_symbol(p.symbol, cfg)
-        ptype = invert_type(p.type) if cfg.invert else p.type
-        slave_sl, slave_tp = effective_levels(p.sl, p.tp, cfg)
         c = copied_by_ticket.get(ticket)
+        # A copy stays the way it was opened: reversed if its direction is not the master's,
+        # whatever ``invert`` says now. Read from the setting instead, flipping it under an open
+        # copy would send the master's target as that copy's stop, on the wrong side of price.
+        inverted = cfg.invert if c is None else c.type is not p.type
+        ptype = invert_type(p.type) if inverted else p.type
+        slave_sl, slave_tp = swap_levels(p.sl, p.tp, inverted)
 
         if c is None:
             if ticket in excluded:
@@ -737,9 +746,11 @@ def reconcile_slave_orders(
     for ticket in sorted(resting):
         o = resting[ticket]
         slave_symbol = map_symbol(o.symbol, cfg)
-        slave_sl, slave_tp = effective_levels(o.sl, o.tp, cfg)
-        otype = invert_order_type(o.type) if cfg.invert else o.type
         c = copied_by_ticket.get(ticket)
+        # As for a position: a resting copy keeps the reversal it was placed with.
+        inverted = cfg.invert if c is None else c.order_type is not o.type
+        slave_sl, slave_tp = swap_levels(o.sl, o.tp, inverted)
+        otype = invert_order_type(o.type) if inverted else o.type
 
         if c is None:
             if ticket in excluded:
@@ -1525,7 +1536,9 @@ class CopyLedger:
             terminal_id=action.terminal_id,
             master_ticket=action.master_ticket,
             slave_symbol=order.slave_symbol,
-            direction=invert_type(position.type) if cfg.invert else position.type,
+            # The order's own direction: it was placed reversed or not, whatever the setting
+            # says now.
+            direction=order.order_type.direction,
             master_volume=position.volume,
             slave_ticket=order.slave_ticket,
             slave_volume=order.volume,

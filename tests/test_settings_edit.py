@@ -507,6 +507,15 @@ def test_the_override_is_turned_on_by_typing_the_name() -> None:
     assert cfg.allow_live_trading is False, "the live object is not edited in place"
 
 
+def test_turning_the_override_off_over_copies_on_a_real_account_warns() -> None:
+    outcome = set_live_override(make(allow_live_trading=True), False)
+    assert outcome.ok
+    (warning,) = advisories(outcome, copies_on_real_account=2)
+    assert "2 open copies on a real account" in warning
+    assert "refuse to close or move them" in warning
+    assert advisories(outcome) == [], "nothing held there, nothing to say"
+
+
 @pytest.mark.parametrize("typed", ["slave", "  Slave  ", "SLAVE"])
 def test_case_and_surrounding_space_do_not_matter(typed: str) -> None:
     assert set_live_override(make(), True, typed=typed).ok

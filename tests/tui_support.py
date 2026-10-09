@@ -16,7 +16,7 @@ from rich.console import Console
 from textual.pilot import Pilot
 
 from mt5copier import setups as setups_mod
-from mt5copier.config import BREAKEVEN_FIELDS, AppConfig, Role, TerminalConfig, account_key
+from mt5copier.config import AppConfig, Role, TerminalConfig, account_key
 from mt5copier.copy_stats import TerminalStats
 from mt5copier.day_book import MasterEvent
 from mt5copier.engine import RecordedAction, RecordedResult, TerminalView
@@ -65,6 +65,8 @@ class StubEngine:
         """What the stub says each slave holds. ``None`` is a read that failed."""
         self.given_up: list[tuple[str, list[int]]] = []
         """Each time the engine was agreed a slave's copies could be given up: (slave, tickets)."""
+        self.real_account_copies: dict[str, int] = {}
+        """What ``copies_on_real_account`` answers, by slave."""
         self.snapshots: dict[str, Snapshot] = {}
         self.stats: dict[str, TerminalStats] = {}
         self.events: list[MasterEvent] = []
@@ -172,24 +174,21 @@ class StubEngine:
         copies = self.copies.get(terminal_id, [])
         return None if copies is None else list(copies)
 
+    def copies_on_real_account(self, terminal_id: str) -> int:
+        return self.real_account_copies.get(terminal_id, 0)
+
     def copies_at_stake(
         self, terminal_id: str, new: TerminalConfig | None = None
     ) -> dict[str, list[OpenCopy]] | None:
-        """The real engine's rule: a slave stakes its own copies, unless only its breakeven
-        settings changed; the master stakes every slave's when unassigned (``new`` None) or
-        disabled, and nothing otherwise."""
+        """The real engine's rule: only unassigning (``new`` None) or disabling stakes anything --
+        a slave its own copies, the master every slave's."""
         cfg = self._cfg.terminals[terminal_id]
-        if cfg.role is not Role.MASTER:
-            only_be = new is not None and all(
-                getattr(cfg, f) == getattr(new, f)
-                for f in TerminalConfig.model_fields
-                if f not in BREAKEVEN_FIELDS
-            )
-            ids = [] if only_be else [terminal_id]
-        elif new is None or (cfg.enabled and not new.enabled):
-            ids = [t.terminal_id for t in self._cfg.slaves]
+        if not (new is None or (cfg.enabled and not new.enabled)):
+            ids: list[str] = []
+        elif cfg.role is not Role.MASTER:
+            ids = [terminal_id]
         else:
-            ids = []
+            ids = [t.terminal_id for t in self._cfg.slaves]
         stake: dict[str, list[OpenCopy]] = {}
         for tid in ids:
             held = self.open_copies(tid)
