@@ -7,7 +7,9 @@ the app's redirect URI -- here a loopback address, ``http://127.0.0.1:<port>/...
 this module listens for the one request the browser makes -- and is exchanged for an access
 token (about 30 days) and a refresh token (no expiry, but replaced on every refresh).
 
-All of it lives in :func:`mt5copier.paths.ctrader_path`, never in ``config.json``.
+All of it lives in :func:`mt5copier.paths.ctrader_path`, never in ``config.json``, encrypted
+for the Windows user on this machine (:mod:`mt5copier.dpapi`): a copy of the file taken anywhere
+else is useless. A portable copy moved to another machine therefore has to log in again.
 
 Only the supervisor refreshes tokens, never a worker: a refresh invalidates the old refresh
 token, so two processes refreshing at once would leave one of them holding a dead one.
@@ -16,8 +18,10 @@ token, so two processes refreshing at once would leave one of them holding a dea
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
+import secrets
 import select
 import socket
 import threading
@@ -29,8 +33,9 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
+from .. import dpapi
 from ..guards.model import write_json
 from ..logging_setup import get_logger
 from ..paths import ctrader_path
@@ -48,6 +53,11 @@ REFRESH_BEFORE_S = 7 * 24 * 3600
 least weekly never sees one expire."""
 
 LOGIN_TIMEOUT_S = 300.0
+
+_FORMAT = "dpapi"
+"""The saved file is ``{"format": "dpapi", "data": <base64 of the encrypted JSON>}``. A file
+without it is the plain JSON written before encryption, read as it is until
+:func:`encrypt_saved` rewrites it."""
 
 
 class CTraderAccount(BaseModel):
@@ -90,39 +100,96 @@ class LoginCancelled(LoginError):  # noqa: N818 -- a subclass of one, not a new 
     """The person gave the login up, by starting another."""
 
 
+def _read(target: Path) -> tuple[CTraderCredentials, bool]:
+    """The saved credentials, and whether they were encrypted."""
+    raw = json.loads(target.read_text(encoding="utf-8"))
+    if isinstance(raw, dict) and raw.get("format") == _FORMAT:
+        try:
+            plain = dpapi.unprotect(base64.b64decode(str(raw["data"])))
+        except OSError as exc:
+            raise ValueError(
+                "they were encrypted by another Windows user or on another machine, or are "
+                f"damaged ({exc.strerror or exc})"
+            ) from None
+        return CTraderCredentials.model_validate(json.loads(plain)), True
+    return CTraderCredentials.model_validate(raw), False
+
+
+def _why(exc: Exception) -> str:
+    """Why the file could not be read, in words that never quote it: a validation error names
+    the values it refused, and those may be secrets."""
+    if isinstance(exc, ValidationError):
+        fields = sorted(
+            {".".join(str(p) for p in e["loc"]) or "the whole file" for e in exc.errors()}
+        )
+        return f"invalid {', '.join(fields)}"
+    if isinstance(exc, json.JSONDecodeError):
+        return f"not JSON (line {exc.lineno}, column {exc.colno})"
+    if isinstance(exc, ValueError):
+        return str(exc)
+    return type(exc).__name__
+
+
 def load(path: Path | None = None) -> CTraderCredentials:
     target = path or ctrader_path()
     if not target.exists():
         return CTraderCredentials()
     try:
-        return CTraderCredentials.model_validate(json.loads(target.read_text(encoding="utf-8")))
+        return _read(target)[0]
     except Exception as exc:
         backup = target.with_suffix(f".bad-{os.getpid()}.json")
         try:
             target.replace(backup)
             log.error(
-                "cTrader credentials at %s were invalid (%s); moved to %s", target, exc, backup
+                "cTrader credentials at %s could not be read (%s); moved to %s; press t to "
+                "log in again",
+                target,
+                _why(exc),
+                backup,
             )
         except OSError:
-            log.error("cTrader credentials at %s were invalid (%s)", target, exc)
+            log.error("cTrader credentials at %s could not be read (%s)", target, _why(exc))
         return CTraderCredentials()
 
 
 def save(creds: CTraderCredentials, path: Path | None = None) -> Path:
     target = path or ctrader_path()
-    write_json(target, creds.model_dump(mode="json"))
+    blob = dpapi.protect(creds.model_dump_json().encode("utf-8"))
+    write_json(target, {"format": _FORMAT, "data": base64.b64encode(blob).decode("ascii")})
     return target
 
 
-def authorize_url(creds: CTraderCredentials) -> str:
-    query = urllib.parse.urlencode(
-        {
-            "client_id": creds.client_id,
-            "redirect_uri": creds.redirect_uri,
-            "scope": "trading",
-            "product": "web",
-        }
-    )
+def encrypt_saved(path: Path | None = None) -> bool:
+    """Rewrite credentials saved in plain JSON, encrypted. True if it did.
+
+    Only the supervisor calls this, at start-up, before any worker reads the file: a worker
+    rewriting it could put back tokens the supervisor had just refreshed."""
+    target = path or ctrader_path()
+    if not target.exists():
+        return False
+    try:
+        creds, encrypted = _read(target)
+    except Exception:
+        return False  # load() deals with it, and says why.
+    if encrypted:
+        return False
+    save(creds, target)
+    log.info("cTrader credentials at %s are now encrypted", target)
+    return True
+
+
+def authorize_url(creds: CTraderCredentials, state: str = "") -> str:
+    """The login page. ``state`` is a one-off value for the redirect to carry back, so that a
+    redirect from a login this app did not start can be told apart (see :func:`wait_for_code`)."""
+    params = {
+        "client_id": creds.client_id,
+        "redirect_uri": creds.redirect_uri,
+        "scope": "trading",
+        "product": "web",
+    }
+    if state:
+        params["state"] = state
+    query = urllib.parse.urlencode(params)
     return f"{AUTHORIZE_URL}?{query}"
 
 
@@ -166,12 +233,18 @@ def wait_for_code(
     redirect_uri: str,
     timeout: float = LOGIN_TIMEOUT_S,
     cancel: threading.Event | None = None,
+    state: str = "",
 ) -> str:
     """Listen on the redirect URI's port for the browser's one request and return its code.
 
     Any path is accepted: cTrader only ever sends the browser to the URI the app registered,
     and what matters is the ``code`` (or ``error``) on it. Setting ``cancel`` gives up within
-    half a second, with :class:`LoginCancelled`."""
+    half a second, with :class:`LoginCancelled`.
+
+    A redirect carrying a ``state`` other than the one given is turned away and the wait goes
+    on: it is not from this login, and taking its code would link someone else's cTrader
+    accounts. One carrying no state is taken, since cTrader's documentation does not promise
+    to send it back; whether it did is logged."""
     parsed = urllib.parse.urlparse(redirect_uri)
     host = parsed.hostname or "127.0.0.1"
     port = parsed.port or 80
@@ -180,8 +253,23 @@ def wait_for_code(
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 -- the stdlib's name
             query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            came_back = query.get("state", [None])[0]
+            if state and came_back is not None and came_back != state:
+                log.warning("turned away a login redirect that was not from this login")
+                body = b"This link is not from the login the copier started."
+                self.send_response(400)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if "code" in query:
                 found["code"] = query["code"][0]
+                if state:
+                    log.info(
+                        "cTrader %s the login's state",
+                        "sent back" if came_back is not None else "did not send back",
+                    )
                 words = "cTrader is linked. You can close this tab and go back to the copier."
             elif "error" in query:
                 found["error"] = query.get("error_description", query["error"])[0]
@@ -199,7 +287,9 @@ def wait_for_code(
             self.wfile.write(body)
 
         def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-            log.debug("redirect listener: " + format, *args)
+            # Not the request line: its query carries the authorisation code.
+            path = urllib.parse.urlparse(getattr(self, "path", "")).path
+            log.debug("redirect listener: %s %s", getattr(self, "command", "?"), path)
 
     servers = _listen(host, port, Handler)
     deadline = time.monotonic() + timeout
@@ -335,11 +425,12 @@ def log_in(
     Saves the credentials when it succeeds and returns the accounts the person allowed."""
     if not creds.has_app:
         raise LoginError("the cTrader app's client id and secret are not set")
-    url = authorize_url(creds)
+    state = secrets.token_urlsafe(16)
+    url = authorize_url(creds, state)
     log.info("opening the browser for the cTrader login")
     if not webbrowser.open(url):
         log.warning("could not open a browser; the login page is %s", url)
-    code = wait_for_code(creds.redirect_uri, cancel=cancel)
+    code = wait_for_code(creds.redirect_uri, cancel=cancel, state=state)
     exchange_code(creds, code)
     creds.accounts = fetch_accounts(creds)
     save(creds, path)

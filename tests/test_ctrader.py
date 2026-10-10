@@ -8,6 +8,7 @@ import queue
 import struct
 import threading
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -203,34 +204,133 @@ def test_the_listener_reports_a_refusal() -> None:
         _wait_with(redirect, f"{redirect}?error=access_denied")
 
 
+def test_a_redirect_from_another_login_is_turned_away_and_the_wait_goes_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    port = _free_port()
+    redirect = f"http://127.0.0.1:{port}/callback"
+    result: dict[str, Any] = {}
+
+    def listen() -> None:
+        result["code"] = auth.wait_for_code(redirect, timeout=10, state="ours")
+
+    thread = threading.Thread(target=listen)
+    with caplog.at_level("DEBUG", logger="mt5copier.ctrader.auth"):
+        thread.start()
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                urllib.request.urlopen(f"{redirect}?code=THEIRS&state=theirs", timeout=2)
+                raise AssertionError("a foreign state was accepted")
+            except urllib.error.HTTPError as exc:
+                assert exc.code == 400
+                break
+            except urllib.error.URLError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.05)
+        urllib.request.urlopen(f"{redirect}?code=OURS&state=ours", timeout=2).read()
+        thread.join(10)
+    assert result["code"] == "OURS"
+    assert any("sent back the login's state" in r.getMessage() for r in caplog.records)
+    # The code is a credential while it lasts: the listener's log leaves the query out.
+    assert not any("OURS" in r.getMessage() or "THEIRS" in r.getMessage() for r in caplog.records)
+
+
+def test_a_redirect_without_a_state_is_taken() -> None:
+    """cTrader's documentation does not promise to send the state back."""
+    port = _free_port()
+    redirect = f"http://127.0.0.1:{port}/callback"
+    result: dict[str, Any] = {}
+
+    def listen() -> None:
+        result["code"] = auth.wait_for_code(redirect, timeout=10, state="ours")
+
+    thread = threading.Thread(target=listen)
+    thread.start()
+    deadline = time.monotonic() + 5
+    while True:
+        try:
+            urllib.request.urlopen(f"{redirect}?code=XYZ", timeout=2).read()
+            break
+        except urllib.error.URLError:
+            if time.monotonic() > deadline:
+                raise
+            time.sleep(0.05)
+    thread.join(10)
+    assert result["code"] == "XYZ"
+
+
 def test_the_authorise_url_names_the_app_and_its_redirect() -> None:
     creds = auth.CTraderCredentials(client_id="123_abc", redirect_uri="http://127.0.0.1:9290/cb")
-    url = auth.authorize_url(creds)
+    url = auth.authorize_url(creds, "s1")
     assert url.startswith(auth.AUTHORIZE_URL)
     assert "client_id=123_abc" in url
     assert "redirect_uri=http%3A%2F%2F127.0.0.1%3A9290%2Fcb" in url
     assert "scope=trading" in url
+    assert "state=s1" in url
 
 
-def test_credentials_round_trip(tmp_path: Path) -> None:
-    path = tmp_path / "ctrader.json"
-    creds = auth.CTraderCredentials(
+def _secret_creds() -> auth.CTraderCredentials:
+    return auth.CTraderCredentials(
         client_id="id",
-        client_secret="secret",
-        access_token="a",
+        client_secret="the-client-secret",
+        access_token="the-access-token",
+        refresh_token="the-refresh-token",
         accounts=[auth.CTraderAccount(account_id=ACCOUNT, is_live=False, login=9, broker="X")],
     )
+
+
+def test_credentials_round_trip_encrypted(tmp_path: Path) -> None:
+    path = tmp_path / "ctrader.json"
+    creds = _secret_creds()
     auth.save(creds, path)
+    text = path.read_text(encoding="utf-8")
+    assert '"format": "dpapi"' in text
+    for secret in ("the-client-secret", "the-access-token", "the-refresh-token"):
+        assert secret not in text
     again = auth.load(path)
     assert again == creds
     assert again.account(ACCOUNT) is not None
 
 
-def test_a_corrupt_credentials_file_is_moved_aside(tmp_path: Path) -> None:
+def test_plain_credentials_are_read_and_then_encrypted_once(tmp_path: Path) -> None:
+    path = tmp_path / "ctrader.json"
+    creds = _secret_creds()
+    path.write_text(creds.model_dump_json(), encoding="utf-8")
+    assert auth.load(path) == creds
+    assert auth.encrypt_saved(path) is True
+    assert "the-access-token" not in path.read_text(encoding="utf-8")
+    assert auth.load(path) == creds
+    assert auth.encrypt_saved(path) is False
+    assert auth.encrypt_saved(tmp_path / "missing.json") is False
+
+
+def test_credentials_encrypted_elsewhere_say_to_log_in_again(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "ctrader.json"
+    path.write_text('{"format": "dpapi", "data": "bm90IGEgYmxvYg=="}', encoding="utf-8")
+    with caplog.at_level("ERROR"):
+        assert auth.load(path) == auth.CTraderCredentials()
+    assert not path.exists()
+    assert any("another machine" in r.getMessage() for r in caplog.records)
+
+
+def test_a_corrupt_credentials_file_is_moved_aside_without_quoting_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
     path = tmp_path / "ctrader.json"
     path.write_text("{not json", encoding="utf-8")
     assert auth.load(path) == auth.CTraderCredentials()
     assert not path.exists()
+    # A value refused by validation is named by its field, never quoted.
+    path.write_text('{"access_token": ["the-access-token"]}', encoding="utf-8")
+    with caplog.at_level("ERROR"):
+        assert auth.load(path) == auth.CTraderCredentials()
+    messages = " ".join(r.getMessage() for r in caplog.records)
+    assert "invalid access_token" in messages
+    assert "the-access-token" not in messages
 
 
 def test_a_token_is_refreshed_only_when_close_to_expiring(
@@ -894,6 +994,7 @@ async def test_a_lot_multiple_open_needs_no_stop() -> None:
     assert order.volume == 3_000_000
     assert not order.HasField("relativeStopLoss")
     assert not _sent(api, oa.ProtoOAAmendPositionSLTPReq)
+
 
 
 async def test_a_refused_order_is_a_final_failure() -> None:

@@ -1897,6 +1897,7 @@ def run() -> None:
         log.exception("initial discovery failed; starting with saved config only")
     # Before any cTrader worker starts and reads the token: only this process refreshes it.
     try:
+        ctrader_auth.encrypt_saved()
         ctrader_auth.refresh_if_due()
     except Exception as exc:
         log.warning("could not refresh the cTrader login (%s); press t to log in again", exc)
