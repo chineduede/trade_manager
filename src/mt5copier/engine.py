@@ -26,7 +26,12 @@ from pathlib import Path
 
 from . import role_actions
 from . import setups as setups_mod
-from .breakeven import breakeven_level, buffer_distance, check_breakeven_price
+from .breakeven import (
+    breakeven_level,
+    buffer_distance,
+    check_breakeven_price,
+    master_breakeven_due,
+)
 from .config import (
     AppConfig,
     BreakevenMode,
@@ -62,7 +67,14 @@ from .reconcile import Action, CopiedPosition, CopyLedger, GuardGate, OpenCopy, 
 from .settings_edit import copies_word
 from .setups import Setup
 from .sizing import risk_budget
-from .store import MappingStore, Orphan, find_missing, find_missing_orders, find_orphans
+from .store import (
+    MappingStore,
+    MasterTrade,
+    Orphan,
+    find_missing,
+    find_missing_orders,
+    find_orphans,
+)
 from .symbols import undecorate
 from .worker import run_worker
 
@@ -145,6 +157,11 @@ class _Worker:
     cmd_q: mp.Queue
     started_at: float = field(default_factory=time.monotonic)
 
+
+_MASTER_BE_RETRY_S = 15.0
+"""After the master's breakeven was not set -- the price fell back inside it, a busy server --
+how long before it is asked again. A refusal that is not about the moment waits far longer."""
+_MASTER_BE_GIVE_UP_S = 300.0
 
 _BE_RETRY_FACTOR = 1.5
 """After a refused breakeven, how much more room than the refused attempt the price needs
@@ -233,6 +250,9 @@ class Engine:
         self._be_min_room: dict[tuple[str, int], float] = {}
         """Per copy: the room the price must have from the breakeven stop before trying again,
         after a refusal. Session only: after a restart the first attempt is made as usual."""
+        self._master_be_wait: dict[int, float] = {}
+        """Per master trade: not before this monotonic time is its breakeven asked for again,
+        after an attempt that did not set it."""
         self._stats = StatsBook()
         """Copy-health numbers for the detail page. Display only; nothing here decides."""
         self._day = DayBook()
@@ -563,6 +583,8 @@ class Engine:
         # Before the links, not after: deciding whether a slave may be copied to now includes
         # reconciling it against the store, so the store has to exist first.
         self._ensure_store()
+        if not self._cfg.dry_run:
+            self._master_breakeven(master, snap)
         links = self._slave_links()
         if not links:
             return
@@ -736,6 +758,148 @@ class Engine:
                     price,
                     level,
                 )
+
+    # --- the master's own breakeven ---------------------------------------------------------
+
+    def _master_breakeven(self, master: TerminalConfig, snap: Snapshot) -> None:
+        """Move the master's own stop to breakeven, and book part of it, as its settings ask.
+
+        The only trading the copier does on the master, and only when that is switched on.
+        Each trade's R is the distance to the first stop it was seen with; once it is that many
+        R in profit its worker is asked to set the stop (see ``Executor._to_breakeven``), which
+        never loosens one. That is done once per trade, remembered across restarts: after it,
+        the stop is the person's again, and nothing puts it back if they move it. Slaves the
+        master manages follow the move and the booking like any other.
+
+        Caller must hold the lock, with the store open.
+        """
+        if master.breakeven_mode is BreakevenMode.OFF:
+            return
+        if snap.open_positions is None or snap.live_positions is None:
+            return
+        store = self._store
+        assert store is not None
+        tid = master.terminal_id
+        known = store.master_trades(tid)
+        store.forget_master_trades(tid, keep=[p.ticket for p in snap.open_positions])
+        current = {p.ticket: p.price_current for p in snap.live_positions}
+        now = time.monotonic()
+        for p in snap.open_positions:
+            trade = known.get(p.ticket) or MasterTrade(tid, p.ticket)
+            if trade.risk_distance <= 0 and p.sl and not trade.breakeven_done:
+                trade = store.remember_master_trade(
+                    replace(trade, risk_distance=abs(p.price_open - p.sl))
+                )
+            elif p.ticket not in known:
+                store.remember_master_trade(trade)
+            if now < self._master_be_wait.get(p.ticket, 0.0):
+                continue
+            if trade.breakeven_done:
+                if master.breakeven_book_percent > 0 and not trade.booked:
+                    sent = self._send_to_master(
+                        master,
+                        p,
+                        ActionKind.BOOK,
+                        close_fraction=master.breakeven_book_percent / 100.0,
+                    )
+                    if sent:
+                        # Marked as it goes, so a restart while it is out does not send it again.
+                        store.remember_master_trade(replace(trade, booked=True))
+                continue
+            price = current.get(p.ticket)
+            if price is None or not master_breakeven_due(
+                p.type, p.price_open, price, trade.risk_distance, master.breakeven_trigger_r
+            ):
+                continue
+            self._send_to_master(master, p, ActionKind.MODIFY_SLTP, to_breakeven=True)
+
+    def _send_to_master(
+        self, master: TerminalConfig, p: Position, op: ActionKind, **kw: object
+    ) -> bool:
+        """Put one command for the master's own position on its queue, unless one is out.
+        True if it went."""
+        key = (master.terminal_id, p.ticket, op)
+        if key in self._pending_cmd:
+            return False
+        worker = self._workers.get(master.terminal_id)
+        if worker is None:
+            return False
+        command_id = next(self._command_ids)
+        cmd = OrderCommand(
+            command_id=command_id,
+            op=op,
+            master_ticket=p.ticket,
+            master_symbol=p.symbol,
+            direction=p.type,
+            entry=p.price_open,
+            sl=p.sl,
+            tp=p.tp,
+            master_volume=p.volume,
+            slave_ticket=p.ticket,
+            commission_per_lot=master.commission_per_lot_round_turn,
+            slippage_points=master.slippage_buffer_points,
+            deviation_points=master.max_deviation_points,
+            magic=COPIER_MAGIC,
+            comment="breakeven",
+            allow_live=master.allow_live_trading,
+            **kw,  # type: ignore[arg-type]
+        )
+        try:
+            worker.cmd_q.put_nowait(cmd)
+        except Exception as exc:
+            log.error("could not send the master's %s for #%s: %r", op, p.ticket, exc)
+            self._master_be_wait[p.ticket] = time.monotonic() + _MASTER_BE_RETRY_S
+            return False
+        self._pending_cmd[key] = (command_id, time.monotonic())
+        log.info(
+            "-> master %s #%s (cmd %s)",
+            "breakeven" if op is ActionKind.MODIFY_SLTP else "booking",
+            p.ticket,
+            command_id,
+        )
+        return True
+
+    def _on_master_result(self, master: TerminalConfig, result: OrderResult) -> None:
+        """The answer to the master's own breakeven or booking. Caller must hold the lock."""
+        key = (result.terminal_id, result.master_ticket, result.op)
+        expected = self._pending_cmd.get(key)
+        if result.ok or not result.retryable:
+            # "Not past the level yet" is the routine answer while a trade hovers about its
+            # trigger, and is not a failure to count.
+            self._record_result(result)
+        if expected is None or expected[0] != result.command_id:
+            log.error(
+                "dropping the master's result for #%s: it answers command %s",
+                result.master_ticket,
+                result.command_id,
+            )
+            return
+        del self._pending_cmd[key]
+        store = self._ensure_store()
+        trade = store.master_trades(master.terminal_id).get(result.master_ticket)
+        ticket = result.master_ticket
+        if result.op is ActionKind.BOOK:
+            if result.ok:
+                log.info("master #%s: booked %s lots at breakeven", ticket, result.filled_volume)
+            else:
+                log.error("master #%s: the booking at breakeven failed: %s", ticket, result.error)
+            return
+        if result.ok:
+            self._master_be_wait.pop(ticket, None)
+            if trade is not None and not result.target_gone:
+                store.remember_master_trade(replace(trade, breakeven_done=True))
+            log.info(
+                "master #%s: breakeven %s at %s; from now on its stop is left to you",
+                ticket,
+                "already in place" if result.outcome == "already past breakeven" else "set",
+                result.price,
+            )
+            return
+        wait = _MASTER_BE_RETRY_S if result.retryable else _MASTER_BE_GIVE_UP_S
+        self._master_be_wait[ticket] = time.monotonic() + wait
+        (log.info if result.retryable else log.error)(
+            "master #%s: breakeven not set (%s); asked again in %.0fs", ticket, result.error, wait
+        )
 
     def _warn_unpriced(self, cfg: TerminalConfig, copy: CopiedPosition) -> None:
         """Say once that a copy will never go to breakeven because its commission cannot be
@@ -1011,6 +1175,10 @@ class Engine:
 
         Caller must hold the lock.
         """
+        master = self._cfg.master
+        if master is not None and result.terminal_id == master.terminal_id:
+            self._on_master_result(master, result)
+            return
         key = (result.terminal_id, result.master_ticket, result.op)
         expected = self._pending_cmd.get(key)
         if expected is None or expected[0] != result.command_id:

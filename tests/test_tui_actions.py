@@ -1598,6 +1598,34 @@ async def test_the_master_form_sets_who_manages_open_trades(app: CopierApp, cfg:
         assert cfg.terminals[TID_MASTER].management.value == "slaves"
 
 
+async def test_the_master_form_turns_on_its_own_breakeven_and_says_what_that_means(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    async with app.run_test(size=(160, 50)) as pilot:
+        app._cfg.set_role(TID_MASTER, Role.MASTER)  # type: ignore[attr-defined]
+        app._refresh()
+        app._select(TID_MASTER)
+        await pilot.press("e")
+        await pilot.pause()
+        form = app.screen
+        assert isinstance(form, MasterForm)
+        assert not form.query_one("#m-trigger-part").display, "off: nothing to set"
+        assert "only read from" in str(form.query_one("#m-be-says").render())
+        form.query_one("#f-breakeven_mode", Choice).value = "r"
+        await pilot.pause()
+        assert form.query_one("#m-trigger-part").display
+        said = str(form.query_one("#m-be-says").render())
+        assert "will trade the master" in said
+        assert "not known to be a demo" in said
+        form.query_one("#f-breakeven_trigger_r", Input).value = "0.5"
+        form.query_one("#f-breakeven_book_percent", Input).value = "25"
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert not isinstance(app.screen, MasterForm)
+        master = cfg.terminals[TID_MASTER]
+        assert (master.breakeven_trigger_r, master.breakeven_book_percent) == (0.5, 25.0)
+
+
 async def test_a_slaves_breakeven_is_greyed_while_the_master_manages_its_trades(
     app: CopierApp, cfg: AppConfig
 ) -> None:

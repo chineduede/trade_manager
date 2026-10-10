@@ -90,6 +90,12 @@ class FakeSession:
     ) -> float | None:
         return self.loss
 
+    position_paid: tuple[float, float] | None = None
+    """The opening deal's ``(commission, volume)`` for any position, as MT5 records it."""
+
+    def position_commission(self, ticket: int) -> tuple[float, float] | None:
+        return self.position_paid
+
     def deal_commission(self, deal: int) -> float | None:
         self.deals_read.append(deal)
         if deal < 0:

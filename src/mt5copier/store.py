@@ -69,6 +69,14 @@ CREATE TABLE IF NOT EXISTS copies (
 );
 CREATE INDEX IF NOT EXISTS copies_by_slave_ticket
     ON copies (terminal_id, slave_ticket);
+CREATE TABLE IF NOT EXISTS master_trades (
+    terminal_id    TEXT    NOT NULL,
+    ticket         INTEGER NOT NULL,
+    risk_distance  REAL    NOT NULL DEFAULT 0,
+    breakeven_done INTEGER NOT NULL DEFAULT 0,
+    booked         INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (terminal_id, ticket)
+);
 """
 
 _ADDED_COLUMNS = (
@@ -88,6 +96,21 @@ _ADDED_COLUMNS = (
 """Columns added after the table first shipped, for breakeven and booking at it. ``CREATE TABLE
 IF NOT EXISTS`` leaves an older file's table as it was, so each is added on open when it is
 missing. The defaults read as "not known" and "not triggered", which is what an older copy is."""
+
+
+@dataclass(frozen=True, slots=True)
+class MasterTrade:
+    """What the master's own breakeven remembers about one of its trades, so that it fires
+    once, survives a restart, and measures R from the stop the trade first had."""
+
+    terminal_id: str
+    ticket: int
+    risk_distance: float = 0.0
+    """The distance from its entry to the first stop it was seen with: one R. 0 while it has
+    had none."""
+    breakeven_done: bool = False
+    booked: bool = False
+    """The booking at breakeven has gone out, answered or not: it is never sent twice."""
 
 
 class CopyKind(StrEnum):
@@ -401,6 +424,49 @@ class MappingStore:
                 settled += cursor.rowcount
             self._db.commit()
         return settled
+
+    def master_trades(self, terminal_id: str) -> dict[int, MasterTrade]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM master_trades WHERE terminal_id = ?", (terminal_id,)
+            ).fetchall()
+        return {
+            int(r["ticket"]): MasterTrade(
+                terminal_id=r["terminal_id"],
+                ticket=int(r["ticket"]),
+                risk_distance=float(r["risk_distance"]),
+                breakeven_done=bool(r["breakeven_done"]),
+                booked=bool(r["booked"]),
+            )
+            for r in rows
+        }
+
+    def remember_master_trade(self, trade: MasterTrade) -> MasterTrade:
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO master_trades "
+                "(terminal_id, ticket, risk_distance, breakeven_done, booked) VALUES (?,?,?,?,?)",
+                (
+                    trade.terminal_id,
+                    trade.ticket,
+                    trade.risk_distance,
+                    int(trade.breakeven_done),
+                    int(trade.booked),
+                ),
+            )
+            self._db.commit()
+        return trade
+
+    def forget_master_trades(self, terminal_id: str, keep: Iterable[int]) -> None:
+        """Drop the master's trades that are no longer open: every one not in ``keep``."""
+        kept = sorted(set(keep))
+        marks = ",".join("?" * len(kept))
+        where = f" AND ticket NOT IN ({marks})" if kept else ""
+        with self._lock:
+            self._db.execute(
+                f"DELETE FROM master_trades WHERE terminal_id = ?{where}", (terminal_id, *kept)
+            )
+            self._db.commit()
 
     def update(self, terminal_id: str, master_ticket: int, **changes: object) -> Copy | None:
         """Read-modify-write one copy. Returns the new row, or None if it was not there.

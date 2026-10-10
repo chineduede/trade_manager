@@ -53,14 +53,40 @@ def buffer_distance(copy: CopiedPosition, cfg: TerminalConfig) -> float | None:
 def breakeven_stop(copy: CopiedPosition, price_open: float, buffer: float) -> float:
     """Entry plus the buffer on the profitable side, rounded to the symbol's point *away* from
     entry, so the rounding never eats into what the buffer was there to pay for."""
-    sign = 1.0 if copy.type is PositionType.BUY else -1.0
+    return stop_past_entry(copy.type, price_open, buffer, copy.point, copy.digits)
+
+
+def stop_past_entry(
+    direction: PositionType, price_open: float, buffer: float, point: float, digits: int
+) -> float:
+    """:func:`breakeven_stop` for any position: also the master's, which has no copy record."""
+    sign = 1.0 if direction is PositionType.BUY else -1.0
     raw = price_open + sign * buffer
-    if copy.point <= 0:
+    if point <= 0:
         return raw
-    steps = raw / copy.point
+    steps = raw / point
     # A hair of tolerance, so a level already on the grid is not pushed a whole point out.
     snapped = math.ceil(steps - 1e-6) if sign > 0 else math.floor(steps + 1e-6)
-    return round(snapped * copy.point, copy.digits or 10)
+    return round(snapped * point, digits or 10)
+
+
+def master_breakeven_due(
+    direction: PositionType,
+    price_open: float,
+    price_current: float,
+    risk_distance: float,
+    trigger_r: float,
+) -> bool:
+    """Whether a master trade is far enough in profit for its breakeven: ``trigger_r`` times
+    its opening stop distance. A trade that opened with no stop has no R, and never is.
+
+    Only *when*: where the stop goes is worked out by the master's own worker, which has the
+    fill's commission and the symbol's point to hand (see ``Executor._to_breakeven``)."""
+    if risk_distance <= 0 or price_current <= 0:
+        return False
+    sign = 1.0 if direction is PositionType.BUY else -1.0
+    # Half a point's worth of slack is not known here; a hair of float tolerance is.
+    return (price_current - price_open) * sign + 1e-9 >= trigger_r * risk_distance
 
 
 def check_breakeven_price(

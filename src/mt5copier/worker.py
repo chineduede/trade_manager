@@ -305,6 +305,23 @@ class _Session:
                 time.sleep(0.1)
         return None
 
+    def position_commission(self, ticket: int) -> tuple[float, float] | None:
+        """``(commission, volume)`` of the deal that opened position ``ticket``, the
+        commission as MT5 records it: negative for a charge. None when it cannot be read."""
+        try:
+            found = self._mt5.history_deals_get(position=ticket)
+        except Exception as exc:
+            log.debug("history_deals_get(position=%s) raised: %r", ticket, exc)
+            return None
+        # DEAL_ENTRY_IN: the deal that opened it, rather than a later partial close.
+        opening = next((d for d in found or () if int(getattr(d, "entry", -1)) == 0), None)
+        if opening is None:
+            return None
+        try:
+            return float(getattr(opening, "commission", 0.0) or 0.0), float(opening.volume)
+        except (AttributeError, TypeError, ValueError):
+            return None
+
     def margin_for(
         self, direction: PositionType, symbol: str, volume: float, price: float
     ) -> float | None:

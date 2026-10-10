@@ -30,6 +30,7 @@ from dataclasses import replace
 from enum import Enum
 from typing import Any, Protocol
 
+from .breakeven import stop_past_entry
 from .execution import (
     OrderFilling,
     Outcome,
@@ -50,6 +51,7 @@ from .protocol import (
     PositionType,
     SizingBasis,
 )
+from .reconcile import round_turn_per_lot
 from .sizing import (
     SizingFailure,
     SizingResult,
@@ -113,6 +115,7 @@ class Session(Protocol):
         self, direction: PositionType, symbol: str, volume: float, price: float
     ) -> float | None: ...
     def deal_commission(self, deal: int) -> float | None: ...
+    def position_commission(self, ticket: int) -> tuple[float, float] | None: ...
 
 
 class Executor:
@@ -154,6 +157,8 @@ class Executor:
             return self._close_or_reduce(cmd)
         if cmd.op is ActionKind.CANCEL:
             return self._cancel(cmd)
+        if cmd.op is ActionKind.MODIFY_SLTP and cmd.to_breakeven:
+            return self._to_breakeven(cmd)
         if cmd.op is ActionKind.MODIFY_SLTP:
             return self._modify_sltp(cmd)
         if cmd.op is ActionKind.MODIFY_ORDER:
@@ -450,6 +455,85 @@ class Executor:
             "tp": float(cmd.tp),
         }
         return self._send_modification(cmd, request, symbol, f"sl {cmd.sl:g} tp {cmd.tp:g}")
+
+    def _to_breakeven(self, cmd: OrderCommand) -> OrderResult:
+        """Move the master's own stop to breakeven: past its entry by its round-turn commission
+        -- its opening deal's, doubled, else ``commission_per_lot`` -- and ``slippage_points``.
+
+        Worked out here rather than by the engine because this is where the fill's commission,
+        the symbol's point and a lot's value can be read. Never loosens: a stop already at or
+        past the level is left where it is, as done. And sent only once the closing price is
+        past the level, since a stop on the wrong side of the price is refused; until then it
+        fails as transient, and the engine asks again later. The result's ``price`` is the
+        level."""
+        ticket = cmd.slave_ticket
+        if ticket is None:
+            return self._fail(cmd, error="no ticket to move to breakeven")
+        live = self._session.position(ticket)
+        if live is UNREADABLE:
+            return self._fail(cmd, retryable=True, error=f"could not read position {ticket}")
+        if live is None:
+            return self._ok(cmd, slave_ticket=ticket, outcome=Outcome.GONE.value, target_gone=True)
+        symbol, direction, _ = live
+        facts = self._session.symbol_facts(symbol)
+        if facts is None:
+            return self._fail(
+                cmd, slave_symbol=symbol, retryable=True, error=f"no symbol_info for {symbol!r}"
+            )
+
+        commission = cmd.commission_per_lot
+        try:
+            paid = self._session.position_commission(ticket)
+        except Exception:
+            log.exception("could not read the commission of position %s", ticket)
+            paid = None
+        if paid is not None:
+            charged, lots = paid
+            commission = round_turn_per_lot(-charged, lots) or commission
+        buffer = cmd.slippage_points * facts.point
+        if commission > 0:
+            value = self._price_value(direction, symbol, cmd.entry, facts.point)
+            if not value:
+                return self._fail(
+                    cmd,
+                    slave_symbol=symbol,
+                    retryable=True,
+                    error=f"could not price a move on {symbol}, so its commission has no distance",
+                )
+            buffer += commission / value
+        level = stop_past_entry(direction, cmd.entry, buffer, facts.point, facts.digits)
+
+        buy = direction is PositionType.BUY
+        if cmd.sl and (cmd.sl >= level if buy else cmd.sl <= level):
+            return self._ok(
+                cmd,
+                slave_ticket=ticket,
+                slave_symbol=symbol,
+                price=cmd.sl,
+                outcome="already past breakeven",
+            )
+        quote = self._session.tick(symbol)
+        if quote is None:
+            return self._fail(
+                cmd, slave_symbol=symbol, retryable=True, error=f"no tick for {symbol!r}"
+            )
+        closing = quote[0] if buy else quote[1]
+        if not (closing > level if buy else closing < level):
+            return self._fail(
+                cmd,
+                slave_symbol=symbol,
+                retryable=True,
+                error=f"the price {closing:g} is not past the breakeven stop {level:g} yet",
+            )
+        request = {
+            "action": int(TradeAction.SLTP),
+            "symbol": symbol,
+            "position": ticket,
+            "sl": float(level),
+            "tp": float(cmd.tp),
+        }
+        result = self._send_modification(cmd, request, symbol, f"breakeven sl {level:g}")
+        return replace(result, price=level) if result.ok else result
 
     def _modify_order(self, cmd: OrderCommand) -> OrderResult:
         """Move a copied resting order -- its entry price as well as its stop and target.

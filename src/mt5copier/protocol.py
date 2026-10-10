@@ -374,6 +374,11 @@ class OrderCommand:
     margin_cap: str = ""
     """What the worker does with a trade over ``max_margin``: ``"decline"`` it, ``"shrink"``
     it to fit, or ``"warn"`` and send it as sized."""
+    to_breakeven: bool = False
+    """MODIFY_SLTP on the master only: move its stop to breakeven, past ``entry`` by the
+    position's own commission and ``slippage_points``, worked out by the worker. ``sl`` and
+    ``tp`` are the master's levels now: a stop already past breakeven is left alone, never
+    loosened, and the target is kept."""
 
 
 @dataclass(frozen=True, slots=True)
