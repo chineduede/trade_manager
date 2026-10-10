@@ -223,6 +223,11 @@ class CopiedPosition:
     price_value: float = 0.0
     """What a 1.0 price move is worth on one lot, from the fill; 0 when unknown. Turns the
     slave's commission into a breakeven distance."""
+    commission_per_lot: float = 0.0
+    """The round-turn commission per lot this copy pays, from its own opening deal: what that
+    deal was charged, doubled for the way out, over the lots it filled. 0 when unknown -- a
+    resting order's fill, a deal that showed none -- and the slave's setting is used instead.
+    See :func:`round_turn_per_lot`."""
     breakeven_sl: float = 0.0
     """The breakeven floor, once triggered; 0 until then. The diff sends whichever of this
     and the master's stop is more protective -- see :func:`protective_sl`."""
@@ -269,6 +274,16 @@ class CopiedOrder:
 
 
 # --- pure helpers ---------------------------------------------------------------------------
+
+
+def round_turn_per_lot(commission: float | None, lots: float | None) -> float:
+    """A fill's round-turn commission per lot, from what its opening deal was charged: doubled,
+    for every broker, on the reading that the way out costs what the way in did. A broker that
+    charges the whole round turn on entry is then over-counted, which only puts a breakeven
+    stop a little further out. 0 when there is nothing to go on."""
+    if not commission or commission <= 0 or not lots or lots <= 0:
+        return 0.0
+    return 2.0 * commission / lots
 
 
 def map_symbol(master_symbol: str, cfg: TerminalConfig) -> str:
@@ -878,6 +893,7 @@ class BeliefStore(Protocol):
         digits: int = 0,
         risk_distance: float = 0.0,
         price_value: float = 0.0,
+        commission_per_lot: float = 0.0,
     ) -> object: ...
 
     def remember_order(
@@ -948,6 +964,7 @@ class _MemoryBeliefs:
         digits: int = 0,
         risk_distance: float = 0.0,
         price_value: float = 0.0,
+        commission_per_lot: float = 0.0,
     ) -> CopiedPosition:
         key = (terminal_id, master_ticket)
         self._orders.pop(key, None)
@@ -965,6 +982,7 @@ class _MemoryBeliefs:
             digits=digits,
             risk_distance=risk_distance,
             price_value=price_value,
+            commission_per_lot=commission_per_lot,
         )
         self._positions[key] = copy
         return copy
@@ -1715,6 +1733,7 @@ class CopyLedger:
                 digits=result.digits or 0,
                 risk_distance=_risk_distance(result.price, last.sl),
                 price_value=result.price_value or 0.0,
+                commission_per_lot=round_turn_per_lot(result.commission, result.filled_volume),
             )
         elif result.op is ActionKind.PLACE:
             self._store.remember_order(

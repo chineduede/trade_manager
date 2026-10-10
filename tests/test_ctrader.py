@@ -467,6 +467,8 @@ class FakeOpenApi:
             4: (125_000, 125_010),
         }
         """``(bid, ask)`` by symbol, in cTrader's 1/100000, sent on subscribing."""
+        self.commission = 3.5
+        """What each deal is charged, in dollars."""
         self.server: asyncio.Server | None = None
         self.port = 0
 
@@ -641,6 +643,9 @@ class FakeOpenApi:
             executionPrice=price,
             tradeSide=om.BUY,
             dealStatus=om.FILLED,
+            # $3.50, in the deal's own digits rather than the account's 2.
+            commission=-round(self.commission * 10_000),
+            moneyDigits=4,
         )
 
     def _shell(self, order: Any) -> Any:
@@ -886,6 +891,7 @@ async def test_an_open_is_risk_sized_filled_and_given_its_exact_stops() -> None:
     assert r.price == pytest.approx(1.10012)
     assert r.point == pytest.approx(0.00001) and r.digits == 5
     assert r.price_value == pytest.approx(100_000.0)
+    assert r.commission == pytest.approx(3.5)
     (order,) = _sent(api, oa.ProtoOANewOrderReq)
     assert order.orderType == om.MARKET and order.tradeSide == om.BUY
     assert order.volume == 10_000_000
@@ -995,6 +1001,13 @@ async def test_a_lot_multiple_open_needs_no_stop() -> None:
     assert not order.HasField("relativeStopLoss")
     assert not _sent(api, oa.ProtoOAAmendPositionSLTPReq)
 
+
+async def test_a_fill_charged_nothing_reports_no_commission() -> None:
+    api = FakeOpenApi()
+    api.commission = 0.0
+    results = await _results(api, _command(ActionKind.OPEN, entry=1.1, sl=1.099, risk_amount=100))
+    assert results[0].ok, results[0].error
+    assert results[0].commission is None
 
 
 async def test_a_refused_order_is_a_final_failure() -> None:

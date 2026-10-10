@@ -43,6 +43,7 @@ from mt5copier.reconcile import (
     SlaveLink,
     protective_sl,
     reconcile_slave,
+    round_turn_per_lot,
 )
 from mt5copier.settings_edit import apply_edits
 from mt5copier.store import Copy, CopyKind, MappingStore
@@ -120,6 +121,21 @@ def test_commission_is_the_same_distance_whatever_the_lot_size() -> None:
     small = replace(copy_of(), volume=0.01)
     big = replace(copy_of(), volume=50.0)
     assert buffer_distance(small, slave(**COSTS)) == buffer_distance(big, slave(**COSTS))
+
+
+def test_a_copys_own_commission_comes_before_the_setting() -> None:
+    """$3 a lot from the fill is 3 points of EURUSD; the setting's $7 is only the fallback."""
+    own = copy_of(commission_per_lot=3.0)
+    assert buffer_distance(own, slave(**COSTS)) == pytest.approx(0.00006)
+    assert buffer_distance(own, slave(slippage_buffer_points=3)) == pytest.approx(0.00006)
+    assert buffer_distance(copy_of(), slave(**COSTS)) == pytest.approx(0.00010)
+    assert buffer_distance(copy_of(commission_per_lot=3.0, price_value=0.0), slave()) is None
+
+
+def test_a_fills_commission_is_doubled_for_the_way_out_and_spread_per_lot() -> None:
+    assert round_turn_per_lot(1.75, 0.5) == pytest.approx(7.0)
+    for commission, lots in ((None, 0.5), (0.0, 0.5), (-1.0, 0.5), (1.75, None), (1.75, 0.0)):
+        assert round_turn_per_lot(commission, lots) == 0.0
 
 
 def test_a_commission_that_cannot_be_priced_gives_no_buffer_rather_than_a_guess() -> None:
@@ -349,6 +365,17 @@ def test_a_filled_open_records_point_digits_one_r_and_price_value() -> None:
     assert (copy.point, copy.digits) == (0.00001, 5)
     assert copy.risk_distance == pytest.approx(0.00520)
     assert copy.price_value == EURUSD_VALUE
+    assert copy.commission_per_lot == 0.0, "no commission read: the setting stands in"
+
+
+def test_a_filled_open_records_its_round_turn_commission_per_lot() -> None:
+    ledger = CopyLedger()
+    ledger.step([], [SlaveLink(slave())], now=0.0)
+    ledger.step([master_pos()], [SlaveLink(slave())], now=1.0, simulate=False)
+    ledger.apply_result(replace(_result(ActionKind.OPEN, price=1.08520), commission=1.75))
+    (copy,) = ledger.believed(TID_SLAVE)
+    # $1.75 in on 0.5 lots: $3.50 a lot each way, $7 a lot there and back.
+    assert copy.commission_per_lot == pytest.approx(7.0)
 
 
 def test_exempting_drops_a_floor_and_a_hand_set_price() -> None:
@@ -382,6 +409,7 @@ def test_the_store_keeps_every_breakeven_field(tmp_path: Path) -> None:
             digits=5,
             risk_distance=0.005,
             price_value=EURUSD_VALUE,
+            commission_per_lot=7.0,
         )
         store.update(TID_SLAVE, 11, breakeven_sl=1.0851, breakeven_at=1.087)
     with MappingStore(tmp_path / "m.db") as store:
@@ -389,6 +417,7 @@ def test_the_store_keeps_every_breakeven_field(tmp_path: Path) -> None:
     assert copy is not None
     assert (copy.point, copy.digits, copy.risk_distance) == (0.00001, 5, 0.005)
     assert copy.price_value == EURUSD_VALUE
+    assert copy.commission_per_lot == 7.0
     assert (copy.breakeven_sl, copy.breakeven_at, copy.breakeven_exempt) == (1.0851, 1.087, False)
 
 
@@ -416,6 +445,7 @@ def test_an_older_mapping_file_gains_the_columns_and_keeps_its_rows(tmp_path: Pa
     assert copy is not None
     assert copy.synced_sl == 1.08
     assert (copy.point, copy.price_value, copy.breakeven_sl) == (0.0, 0.0, 0.0)
+    assert copy.commission_per_lot == 0.0
 
 
 # --- settings -------------------------------------------------------------------------------

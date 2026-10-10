@@ -533,6 +533,14 @@ class SettingsForm(ModalScreen[bool]):
                     self._input("breakeven_book_percent", v["breakeven_book_percent"], "n5"),
                     words("% of the copy to book profit (0: none)."),
                 ),
+                rows(
+                    lead("Past entry by"),
+                    words(
+                        "the commission each fill was charged, doubled for the way out, plus "
+                        "the slippage points. The commission above is only a backup here, for "
+                        "a fill that shows none."
+                    ),
+                ),
                 *self._errors("breakeven_mode", "breakeven_trigger_r", "breakeven_book_percent"),
             )
             yield section(

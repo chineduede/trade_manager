@@ -286,6 +286,25 @@ class _Session:
         except (TypeError, ValueError):
             return None
 
+    def deal_commission(self, deal: int) -> float | None:
+        """The ``commission`` field of one deal, as MT5 records it: negative for a charge. None
+        when the deal cannot be read. A just-made deal can take a moment to reach the history,
+        so a miss is tried again, briefly."""
+        for attempt in range(3):
+            try:
+                found = self._mt5.history_deals_get(ticket=deal)
+            except Exception as exc:
+                log.debug("history_deals_get(ticket=%s) raised: %r", deal, exc)
+                return None
+            if found:
+                try:
+                    return float(getattr(found[0], "commission", 0.0) or 0.0)
+                except (TypeError, ValueError):
+                    return None
+            if attempt < 2:
+                time.sleep(0.1)
+        return None
+
     def margin_for(
         self, direction: PositionType, symbol: str, volume: float, price: float
     ) -> float | None:

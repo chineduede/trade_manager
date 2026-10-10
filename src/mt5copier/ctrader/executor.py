@@ -253,6 +253,7 @@ class CTraderExecutor:
         ticket = int(position.positionId)
         filled = symbol.lots(int(position.tradeData.volume))
         price = float(event.deal.executionPrice) if event.HasField("deal") else 0.0
+        commission = _commission(event, account.money_digits)
         price = price or float(position.price)
         partial = int(event.executionType) not in _FILLED
         if partial:
@@ -292,6 +293,7 @@ class CTraderExecutor:
             point=symbol.point,
             digits=symbol.digits,
             price_value=cv.price_value(symbol, account.deposit_asset_id, price, conversion),
+            commission=commission,
         )
 
     # --- resting orders -------------------------------------------------------------------------
@@ -819,6 +821,18 @@ def _opened(event: Any) -> bool:
         int(position.positionStatus) == om.POSITION_STATUS_OPEN
         and int(position.tradeData.volume) > 0
     )
+
+
+def _commission(event: Any, money_digits: int) -> float | None:
+    """What the opening deal was charged, as a positive cost in the account currency; None when
+    the event carries no deal or the deal shows none. cTrader keeps a deal's money as a scaled
+    integer, negative for a charge, in the deal's own ``moneyDigits`` when it gives them."""
+    if event is None or not event.HasField("deal"):
+        return None
+    deal = event.deal
+    digits = int(deal.moneyDigits) if deal.HasField("moneyDigits") else money_digits
+    charged = cv.money(int(deal.commission), digits)
+    return -charged if charged < 0 else None
 
 
 def _refusal(answer: _Answer) -> str | None:

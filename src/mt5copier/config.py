@@ -191,7 +191,10 @@ class TerminalConfig(BaseModel):
 
     It belongs in sizing because it is money lost on a trade that hits its stop, so it comes
     out of the risk budget before lots are derived -- otherwise every trade risks the
-    configured amount *plus* commission, and the smaller the stop, the worse the overshoot."""
+    configured amount *plus* commission, and the smaller the stop, the worse the overshoot.
+
+    Breakeven mostly does without it: a copy's stop goes past entry by the commission its own
+    opening deal was charged, doubled. This is the fallback for a copy whose deal showed none."""
 
     slippage_buffer_points: int = Field(default=0, ge=0)
     """Points of adverse fill to assume when sizing, on entry and on the stop together.
@@ -238,7 +241,8 @@ class TerminalConfig(BaseModel):
     breakeven_trigger_r: float = Field(default=1.0, gt=0)
     """How far in profit, in multiples of the copy's opening stop distance, before its stop
     moves: 0.3 is 0.3R. Where it moves to is not a setting of its own: entry, plus enough to
-    pay ``commission_per_lot_round_turn``, plus ``slippage_buffer_points``. See
+    pay the copy's commission (its fill's, else ``commission_per_lot_round_turn``), plus
+    ``slippage_buffer_points``. See
     :mod:`mt5copier.breakeven`."""
     breakeven_book_percent: float = Field(default=0.0, ge=0, lt=100)
     """The percent of a copy's volume to close when its breakeven fires, booking that much of

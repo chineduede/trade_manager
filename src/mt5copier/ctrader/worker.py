@@ -411,7 +411,7 @@ class _Account:
             cv.position_live(
                 p,
                 pnl.get(int(p.positionId)),
-                self._money_digits,
+                self.money_digits,
                 self.spots.get(int(p.tradeData.symbolId)),
             )
             for p in raw_positions
@@ -431,11 +431,11 @@ class _Account:
             attempts,
             (positions, live, orders),
             sum(pnl.values()),
-            cv.money(used, self._money_digits),
+            cv.money(used, self.money_digits),
         )
 
     @property
-    def _money_digits(self) -> int:
+    def money_digits(self) -> int:
         return int(self.trader.moneyDigits) if self.trader is not None else 2
 
     def _snapshot(
@@ -449,7 +449,7 @@ class _Account:
         margin: float | None,
     ) -> Snapshot:
         trader = self.trader
-        balance = cv.money(int(trader.balance), self._money_digits) if trader else None
+        balance = cv.money(int(trader.balance), self.money_digits) if trader else None
         equity = balance + profit if balance is not None and profit is not None else None
         positions, live, orders = book if book is not None else (None, None, None)
         broker = str(trader.brokerName) if trader is not None else ""

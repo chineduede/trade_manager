@@ -28,6 +28,7 @@ class FakeResult:
     order: int = 555_001
     volume: float = 0.0
     price: float = 1.08510
+    deal: int = 777_001
 
 
 @dataclass
@@ -47,6 +48,9 @@ class FakeSession:
     resting_orders: set[int] = field(default_factory=set)
     position_unreadable: bool = False
     """The terminal refusing the read, which is not the same as the position being gone."""
+    commissions: dict[int, float] = field(default_factory=dict)
+    """Each deal's ``commission`` as MT5 records it, negative for a charge."""
+    deals_read: list[int] = field(default_factory=list)
 
     def account_trade_mode(self) -> int | None:
         return self.trade_mode
@@ -85,6 +89,12 @@ class FakeSession:
         self, direction: PositionType, symbol: str, entry: float, sl: float
     ) -> float | None:
         return self.loss
+
+    def deal_commission(self, deal: int) -> float | None:
+        self.deals_read.append(deal)
+        if deal < 0:
+            raise RuntimeError("the terminal fell over")
+        return self.commissions.get(deal)
 
     def order_send(self, request: dict[str, Any]) -> Any:
         self.sent.append(dict(request))
@@ -571,6 +581,38 @@ def test_a_pending_order_is_placed_at_its_own_price_not_the_market() -> None:
     assert request["type"] == int(OrderType.BUY_LIMIT)
     assert request["price"] == pytest.approx(1.07000)
     assert request["type_filling"] == int(OrderFilling.RETURN)
+
+
+def test_an_open_reports_its_opening_deals_commission_as_a_cost() -> None:
+    session = FakeSession(commissions={777_001: -3.5})
+    result = run(session)
+    assert result.ok
+    assert result.commission == pytest.approx(3.5)
+    assert session.deals_read == [777_001]
+
+
+@pytest.mark.parametrize(
+    ("deal", "recorded"),
+    [(777_001, None), (777_001, 0.0), (777_001, 1.2), (0, None), (-1, None)],
+    ids=["unreadable", "free", "a rebate", "no deal", "the read raises"],
+)
+def test_an_open_whose_commission_shows_nothing_reports_none_and_still_succeeds(
+    deal: int, recorded: float | None
+) -> None:
+    session = FakeSession(results=[FakeResult(deal=deal)])
+    if recorded is not None:
+        session.commissions[deal] = recorded
+    result = run(session)
+    assert result.ok
+    assert result.commission is None
+
+
+def test_a_resting_order_reads_no_commission_it_has_not_been_charged() -> None:
+    session = FakeSession(commissions={777_001: -3.5})
+    result = run(session, cmd(op=ActionKind.PLACE, order_type=OrderType.BUY_LIMIT, entry=1.07))
+    assert result.ok
+    assert result.commission is None
+    assert session.deals_read == []
 
 
 def test_a_market_order_uses_a_filling_mode_the_symbol_permits() -> None:

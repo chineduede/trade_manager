@@ -112,6 +112,7 @@ class Session(Protocol):
     def margin_for(
         self, direction: PositionType, symbol: str, volume: float, price: float
     ) -> float | None: ...
+    def deal_commission(self, deal: int) -> float | None: ...
 
 
 class Executor:
@@ -648,6 +649,18 @@ class Executor:
             price_value=self._price_value(cmd.direction, symbol, fill, facts.point),
         )
 
+    def _commission(self, deal: int | None) -> float | None:
+        """What the opening deal was charged, as a positive cost; None when there is no deal to
+        read, it shows nothing, or the read fails. After the fill, so never allowed to fail it."""
+        if not deal:
+            return None
+        try:
+            charged = self._session.deal_commission(deal)
+        except Exception:
+            log.exception("could not read the commission of deal %s", deal)
+            return None
+        return -charged if charged is not None and charged < 0 else None
+
     def _price_value(
         self, direction: PositionType, symbol: str, price: float, point: float
     ) -> float | None:
@@ -718,6 +731,11 @@ class Executor:
                     filled_volume=filled,
                     price=_float_or_none(getattr(last, "price", None)) or price,
                     attempts=attempts,
+                    commission=(
+                        self._commission(_int_or_none(getattr(last, "deal", None)))
+                        if cmd.op is ActionKind.OPEN
+                        else None
+                    ),
                 )
 
             if outcome is Outcome.GONE and cmd.op in (

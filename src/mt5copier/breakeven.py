@@ -12,10 +12,15 @@ price whose loss a breakeven is meant to rule out.
 
 **Where the stop goes** is entry plus a buffer, and the buffer is the slave's own costs rather
 than a setting of its own: the price move that pays its round-turn commission, plus its
-slippage buffer in points. A breakeven exit then really does come out at nothing lost. On a
-symbol with no commission it is the slippage alone; a slave whose commission setting does not
-apply to every symbol it trades will over-buffer the ones that are free, which errs the safe
-way. **When** it goes is either a fraction of R or a price set by hand on that one position.
+slippage buffer in points. A breakeven exit then really does come out at nothing lost. The
+commission is the copy's own, read from its opening deal and doubled for the way out; the
+slave's ``commission_per_lot_round_turn`` is the fallback for a copy whose deal showed none (a
+resting order's fill, an older copy), and over-buffers a free symbol, which errs the safe way.
+
+The spread needs no allowance of its own: a copy's fill is already on the far side of it (a buy
+opens at the ask) and its stop is hit on the near side (a buy's at the bid), so a stop at entry
+plus the buffer exits having paid it. **When** it goes is either a fraction of R or a price
+set by hand on that one position.
 """
 
 from __future__ import annotations
@@ -30,18 +35,19 @@ from .reconcile import CopiedPosition
 def buffer_distance(copy: CopiedPosition, cfg: TerminalConfig) -> float | None:
     """How far past entry the stop goes, in price: commission plus slippage.
 
-    The commission is the slave's ``commission_per_lot_round_turn``, which is per lot, divided
-    by what a 1.0 price move is worth per lot -- so the lot size cancels and the distance is
-    the same for any size of copy. None when a commission is set but this copy's price value
-    is unknown (it was recorded before that was kept): guessing would put the stop a loss away
-    from where it should be.
+    The commission is per lot -- the copy's own from its fill, else the slave's
+    ``commission_per_lot_round_turn`` -- divided by what a 1.0 price move is worth per lot, so
+    the lot size cancels and the distance is the same for any size of copy. None when there is
+    a commission but this copy's price value is unknown (it was recorded before that was kept):
+    guessing would put the stop a loss away from where it should be.
     """
     slippage = cfg.slippage_buffer_points * copy.point
-    if cfg.commission_per_lot_round_turn <= 0:
+    commission = copy.commission_per_lot or cfg.commission_per_lot_round_turn
+    if commission <= 0:
         return slippage
     if copy.price_value <= 0:
         return None
-    return cfg.commission_per_lot_round_turn / copy.price_value + slippage
+    return commission / copy.price_value + slippage
 
 
 def breakeven_stop(copy: CopiedPosition, price_open: float, buffer: float) -> float:

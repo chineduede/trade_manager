@@ -410,6 +410,10 @@ class OrderResult:
     """On a filled OPEN or PLACE: what a 1.0 move in price is worth on one lot, in the account
     currency. Kept on the copy record, where it turns the slave's commission into a breakeven
     distance."""
+    commission: float | None = None
+    """On a filled OPEN: the commission charged on the opening deal, as a positive cost in the
+    account currency. None when it could not be read or none was charged; the copy then falls
+    back to the slave's ``commission_per_lot_round_turn``."""
 
     unsplittable: bool = False
     """A ``BOOK`` that was not sent because the slice, or what it would leave open, is under
