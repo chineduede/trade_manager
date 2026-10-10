@@ -143,6 +143,17 @@ class BreakevenMode(StrEnum):
     fill. A copy opened with no stop has no R, so it never triggers."""
 
 
+class Management(StrEnum):
+    """Who manages a copy once it is open. Set on the master; each slave can still keep its own
+    trades (``TerminalConfig.master_manages``). See :meth:`AppConfig.manages`."""
+
+    MASTER = "master"
+    """Slaves follow the master's stop and target moves and partial closes."""
+    SLAVES = "slaves"
+    """Slaves copy only the master's opens and closes, and manage the rest themselves: their
+    own breakeven and booking, none of the master's stop moves or partial closes."""
+
+
 BREAKEVEN_FIELDS = frozenset({"breakeven_mode", "breakeven_trigger_r", "breakeven_book_percent"})
 """The settings an edit may change without giving up the slave's open copies. They change how
 a copy's stop is managed from here on, never its direction or size."""
@@ -231,8 +242,12 @@ class TerminalConfig(BaseModel):
 
     # --- Stage 2: copy behaviour -----------------------------------------------------------
     invert: bool = False
-    copy_sltp: bool = True
-    copy_partials: bool = True
+    management: Management = Management.MASTER
+    """The master's: who manages copies once they are open. Ignored on a slave."""
+    master_manages: bool = True
+    """A slave's: whether it lets the master manage its copies, when the master is set to.
+    Off, it manages its own whatever the master says. Replaced ``copy_sltp`` and
+    ``copy_partials``, taking ``copy_sltp``'s value."""
     copy_pending: bool = False
     """Mirror pending orders (limit/stop) as well as open positions. Stage 4; unused so far."""
 
@@ -443,6 +458,15 @@ class AppConfig(BaseModel):
     def slaves(self) -> list[TerminalConfig]:
         return [t for t in self.terminals.values() if t.role is Role.SLAVE]
 
+    def manages(self, slave: TerminalConfig) -> bool:
+        """Whether a trade this slave opens now is managed by the master: both gates open, the
+        master set to manage and the slave letting it. Fixed on each copy when it opens, so a
+        change reaches only trades opened after it."""
+        master = self.master
+        return (
+            master is not None and master.management is Management.MASTER and (slave.master_manages)
+        )
+
     def assigned(self) -> list[TerminalConfig]:
         """Terminals we should hold a connection to: any with a role, and enabled."""
         return [t for t in self.terminals.values() if t.role is not Role.UNASSIGNED and t.enabled]
@@ -548,6 +572,13 @@ def _migrate(raw: dict[str, object]) -> dict[str, object]:
         for field_name in _REMOVED_TERMINAL_FIELDS:
             if entry.pop(field_name, None) is not None:
                 log.info("dropped retired config field %r", field_name)
+        # copy_sltp and copy_partials became one switch (2026-10-10), the master managing a
+        # slave's copies or not. It takes copy_sltp's value: following the master's stops was
+        # what most of that management was.
+        if "copy_sltp" in entry or "copy_partials" in entry:
+            follow = entry.pop("copy_sltp", True)
+            entry.pop("copy_partials", None)
+            entry.setdefault("master_manages", bool(follow))
         # Breakeven briefly had a pips trigger (2026-10-03), replaced by R or a hand-set price
         # per position the same day. Turned off rather than guessed at as some R.
         if entry.get("breakeven_mode") == "pips":

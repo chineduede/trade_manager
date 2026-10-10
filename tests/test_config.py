@@ -15,6 +15,7 @@ from pydantic import ValidationError
 from mt5copier.config import (
     SCHEMA_VERSION,
     AppConfig,
+    Management,
     NoStopPolicy,
     Role,
     SizingMode,
@@ -590,3 +591,53 @@ def test_setting_the_same_role_again_keeps_the_pause() -> None:
     )
     cfg.set_role("B", Role.SLAVE)
     assert cfg.terminals["B"].paused is True
+
+
+# --- who manages open trades ----------------------------------------------------------------
+
+
+def test_copying_stops_and_partials_became_one_switch_taking_copy_sltps_value(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "config.json"
+    master, a, b, c = "M" * 32, "A" * 32, "B" * 32, "C" * 32
+    path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "terminals": {
+                    master: {"terminal_id": master, "role": "master"},
+                    a: {"terminal_id": a, "role": "slave", "copy_sltp": False},
+                    b: {"terminal_id": b, "role": "slave", "copy_partials": False},
+                    c: {"terminal_id": c, "role": "slave"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = load(path)
+    assert [cfg.terminals[t].master_manages for t in (a, b, c)] == [False, True, True]
+    assert cfg.terminals[master].management is Management.MASTER, "the master manages by default"
+
+
+@pytest.mark.parametrize(
+    ("management", "letting", "manages"),
+    [
+        (Management.MASTER, True, True),
+        (Management.MASTER, False, False),
+        (Management.SLAVES, True, False),
+        (Management.SLAVES, False, False),
+    ],
+)
+def test_the_master_manages_a_slaves_trades_only_with_both_gates_open(
+    management: Management, letting: bool, manages: bool
+) -> None:
+    master = TerminalConfig(terminal_id="M" * 32, role=Role.MASTER, management=management)
+    slave = TerminalConfig(terminal_id="S" * 32, role=Role.SLAVE, master_manages=letting)
+    cfg = AppConfig(terminals={master.terminal_id: master, slave.terminal_id: slave})
+    assert cfg.manages(slave) is manages
+
+
+def test_with_no_master_nothing_is_managed_by_one() -> None:
+    slave = TerminalConfig(terminal_id="S" * 32, role=Role.SLAVE)
+    assert AppConfig(terminals={slave.terminal_id: slave}).manages(slave) is False

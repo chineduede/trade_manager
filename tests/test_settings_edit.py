@@ -21,6 +21,7 @@ from mt5copier.config import (
 )
 from mt5copier.settings_edit import (
     EDITABLE,
+    MASTER_FIELDS,
     Kind,
     advisories,
     apply_edits,
@@ -85,7 +86,7 @@ def test_the_fields_that_must_not_be_edited_here_are_not(name: str) -> None:
 def test_every_setting_is_either_editable_or_deliberately_not() -> None:
     """A field added to the model must force a decision about the form, not be forgotten by it.
     If this fails, either put the new field in a section or in NOT_EDITABLE with the reason."""
-    editable = {f.name for f in EDITABLE}
+    editable = {f.name for f in (*EDITABLE, *MASTER_FIELDS)}
     assert editable.isdisjoint(NOT_EDITABLE)
     assert editable | NOT_EDITABLE == set(TerminalConfig.model_fields)
 
@@ -143,11 +144,11 @@ def test_a_choice_is_changed_by_value() -> None:
 
 
 def test_a_switch_is_changed() -> None:
-    outcome = apply_edits(make(), {"copy_pending": True, "copy_partials": False})
+    outcome = apply_edits(make(), {"copy_pending": True, "master_manages": False})
     assert outcome.config is not None
     assert outcome.config.copy_pending is True
-    assert outcome.config.copy_partials is False
-    assert describe_changes(outcome.changes) == "copy_pending off -> on, copy_partials on -> off"
+    assert outcome.config.master_manages is False
+    assert describe_changes(outcome.changes) == "copy_pending off -> on, master_manages on -> off"
 
 
 def test_a_blank_max_lot_means_no_ceiling() -> None:

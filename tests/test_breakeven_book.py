@@ -178,11 +178,11 @@ def test_an_answer_after_a_restart_still_marks_it_booked(booking: Engine) -> Non
     assert _tick(booking) == []
 
 
-def test_a_master_partial_after_booking_closes_its_fraction_of_what_is_left(
+def test_a_master_partial_is_not_copied_to_a_copy_whose_slave_books_its_own(
     booking: Engine,
 ) -> None:
-    """Booking leaves the copy's anchor -- the master volume it was sized against -- alone,
-    so the master halving its trade closes half of what the slave has left."""
+    """A slave that books at its own breakeven manages the copy, so the master halving its
+    trade closes nothing more of it: the two would otherwise close the same profit twice."""
     sent = _fire(booking)
     _answer(booking, sent[ActionKind.BOOK], filled=0.25)
     _answer(booking, sent[ActionKind.MODIFY_SLTP])
@@ -199,9 +199,7 @@ def test_a_master_partial_after_booking_closes_its_fraction_of_what_is_left(
         )
     )
     q = booking._workers[TID_SLAVE].cmd_q
-    (reduce,) = [c for c in q.sent if isinstance(c, OrderCommand)]  # type: ignore[attr-defined]
-    assert reduce.op is ActionKind.REDUCE
-    assert reduce.close_fraction == pytest.approx(0.5)
+    assert [c for c in q.sent if isinstance(c, OrderCommand)] == []  # type: ignore[attr-defined]
 
 
 # --- belief and settings --------------------------------------------------------------------

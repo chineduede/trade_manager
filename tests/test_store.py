@@ -271,3 +271,34 @@ def test_clearing_empties_the_table() -> None:
     store.record(position_copy())
     store.clear()
     assert store.all() == []
+
+
+# --- who manages a copy ---------------------------------------------------------------------
+
+
+def test_who_manages_a_copy_is_kept(store: MappingStore) -> None:
+    store.record(position_copy(1, master_managed=False))
+    store.record(position_copy(2, master_managed=True))
+    assert [c.master_managed for c in store.positions(TID_A)] == [False, True]
+
+
+def test_a_copy_from_before_management_is_settled_once(store: MappingStore) -> None:
+    """A row written before who manages it was kept is decided once, per slave, and then left
+    alone: a later call, or a different answer, changes nothing already decided."""
+    store.record(position_copy(1, terminal_id=TID_A))
+    store.record(position_copy(2, terminal_id=TID_B))
+    store.record(position_copy(3, terminal_id=TID_B, master_managed=True))
+    assert store.get(TID_A, 1).master_managed is None  # type: ignore[union-attr]
+
+    asked: list[str] = []
+
+    def decide(terminal_id: str) -> bool:
+        asked.append(terminal_id)
+        return terminal_id == TID_B
+
+    assert store.settle_management(decide) == 2
+    assert sorted(asked) == [TID_A, TID_B]
+    assert store.get(TID_A, 1).master_managed is False  # type: ignore[union-attr]
+    assert store.get(TID_B, 2).master_managed is True  # type: ignore[union-attr]
+    assert store.settle_management(lambda _: False) == 0
+    assert store.get(TID_B, 3).master_managed is True  # type: ignore[union-attr]

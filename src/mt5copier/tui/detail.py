@@ -26,7 +26,15 @@ from textual.geometry import Region
 from textual.screen import Screen
 from textual.widgets import DataTable, Input, Sparkline, Static
 
-from ..config import AppConfig, BreakevenMode, NoStopPolicy, Role, SizingMode, TerminalConfig
+from ..config import (
+    AppConfig,
+    BreakevenMode,
+    Management,
+    NoStopPolicy,
+    Role,
+    SizingMode,
+    TerminalConfig,
+)
 from ..copy_stats import TerminalStats
 from ..engine import Engine, TerminalView
 from ..presentation import RowInfo
@@ -274,21 +282,20 @@ def symbol_rows(cfg: TerminalConfig, example: str = "EURUSD") -> list[Row]:
     return rows
 
 
-def rule_rows(cfg: TerminalConfig, currency: str | None, example: str = "EURUSD") -> list[Row]:
-    """How trades are copied to it, in the words of its settings form."""
+def rule_rows(
+    cfg: TerminalConfig, currency: str | None, example: str = "EURUSD", managed: bool = True
+) -> list[Row]:
+    """How trades are copied to it, in the words of its settings form. ``managed`` is whether
+    the master manages the trades it opens now (:meth:`~mt5copier.config.AppConfig.manages`)."""
     if cfg.no_stop_policy is NoStopPolicy.SKIP:
         no_stop = "skip the trade"
     else:
         no_stop = f"copy {cfg.no_stop_lot_multiple:g}x its lots"
-    if cfg.copy_partials and cfg.copy_pending:
-        partials = "followed"
-    elif cfg.copy_partials:
-        partials = "partials only"
-    elif cfg.copy_pending:
-        partials = "pending orders only"
-    else:
-        partials = "not followed"
     rule = breakeven_rule(cfg)
+    if managed:
+        breakeven = "the master's stop moves"
+    else:
+        breakeven = "off" if rule == "off" else f"at {rule}"
     rows: list[Row] = [
         ("Risk per trade", _v(risk_text(cfg, currency))),
     ]
@@ -300,9 +307,16 @@ def rule_rows(cfg: TerminalConfig, currency: str | None, example: str = "EURUSD"
             "Direction",
             _v("reversed" if cfg.invert else "same as master", YELLOW if cfg.invert else ""),
         ),
-        ("Stop and target moves", _v("followed" if cfg.copy_sltp else "not followed")),
-        ("Partials, pending orders", _v(partials)),
-        ("Breakeven", _v("off" if rule == "off" else f"at {rule}")),
+        (
+            "Once open",
+            _v(
+                "the master manages it: stop and target moves, partial closes"
+                if managed
+                else "this slave manages it"
+            ),
+        ),
+        ("Pending orders", _v("copied" if cfg.copy_pending else "not copied")),
+        ("Breakeven", _v(breakeven)),
     ]
     rows += symbol_rows(cfg, example)
     if cfg.allow_live_trading:
@@ -808,12 +822,20 @@ class DetailScreen(Screen[None]):
 
         if cfg.role is Role.MASTER:
             slaves = [v for v in views if v.cfg.role is Role.SLAVE]
-            self._head("#td-rule-head", "COPIED TO", f"{len(slaves)} slaves")
+            who = "master manages" if cfg.management is Management.MASTER else "slaves manage"
+            self._head("#td-rule-head", "COPIED TO", f"{len(slaves)} slaves · {who}")
             self.query_one("#td-rule", Static).update(ruled(self._slave_rows(slaves, numbers)))
         else:
             self._head("#td-rule-head", "RULE", "e change", key="e")
             self.query_one("#td-rule", Static).update(
-                ruled(rule_rows(cfg, snap.currency if snap else None, self._example(views)))
+                ruled(
+                    rule_rows(
+                        cfg,
+                        snap.currency if snap else None,
+                        self._example(views),
+                        managed=self.copier._cfg.manages(cfg),
+                    )
+                )
             )
 
         spark = self.query_one("#td-latency", Sparkline)

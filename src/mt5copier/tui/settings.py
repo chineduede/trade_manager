@@ -38,7 +38,7 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, Checkbox, Input, Static
 
-from ..config import BreakevenMode, NoStopPolicy, Role, SizingMode, TerminalConfig
+from ..config import BreakevenMode, Management, NoStopPolicy, Role, SizingMode, TerminalConfig
 from ..day_book import MasterEvent
 from ..protocol import ACCOUNT_TRADE_MODE_DEMO, ActionKind, PositionType
 from ..settings_edit import (
@@ -137,7 +137,9 @@ class Choice(Widget, can_focus=True):
         """Each option's text and style, in order."""
         out = []
         for label, value in self._options:
-            if value == self.value:
+            if self.disabled:
+                style = f"bold {MUTED} on {CHIP_BG}" if value == self.value else MUTED
+            elif value == self.value:
                 style = f"bold {BG} on {FG}"
             elif self.has_focus:
                 style = f"{FG} on {CHIP_BG}"
@@ -487,19 +489,17 @@ class SettingsForm(ModalScreen[bool]):
             yield section(
                 "follow",
                 rows(
+                    lead("Once a trade is open,"),
+                    Tick(
+                        "let the master manage it: its stop and target moves, partial closes",
+                        value=bool(v["master_manages"]),
+                        id=f"{_F}master_manages",
+                        compact=True,
+                    ),
+                ),
+                Static("", id="follow-note", classes="note"),
+                rows(
                     lead("Also copy the master's"),
-                    Tick(
-                        "stop and target moves",
-                        value=bool(v["copy_sltp"]),
-                        id=f"{_F}copy_sltp",
-                        compact=True,
-                    ),
-                    Tick(
-                        "partial closes",
-                        value=bool(v["copy_partials"]),
-                        id=f"{_F}copy_partials",
-                        compact=True,
-                    ),
                     Tick(
                         "pending orders",
                         value=bool(v["copy_pending"]),
@@ -507,7 +507,7 @@ class SettingsForm(ModalScreen[bool]):
                         compact=True,
                     ),
                 ),
-                *self._errors("copy_sltp", "copy_partials", "copy_pending"),
+                *self._errors("master_manages", "copy_pending"),
             )
             yield section(
                 "direction",
@@ -519,6 +519,7 @@ class SettingsForm(ModalScreen[bool]):
             )
             yield section(
                 "breakeven",
+                Static("", id="be-note", classes="note"),
                 rows(
                     lead("Move the stop past entry:"),
                     self._select("breakeven_mode", _BREAKEVEN, str(v["breakeven_mode"])),
@@ -527,11 +528,13 @@ class SettingsForm(ModalScreen[bool]):
                         words("R in profit."),
                         id="trigger-part",
                     ),
+                    classes="be-row",
                 ),
                 rows(
                     lead("Then close"),
                     self._input("breakeven_book_percent", v["breakeven_book_percent"], "n5"),
                     words("% of the copy to book profit (0: none)."),
+                    classes="be-row",
                 ),
                 rows(
                     lead("Past entry by"),
@@ -595,13 +598,12 @@ class SettingsForm(ModalScreen[bool]):
             )
         if not held:
             return Text("Nothing is open on this slave, so a change gives nothing up.", style=MUTED)
-        out = Text(
-            f"{copies_word(len(held))} on this slave {'is' if len(held) == 1 else 'are'} "
-            "orphaned if you save a change.",
-            style=RED,
+        return Text(
+            f"{copies_word(len(held))} on this slave "
+            f"{'stays' if len(held) == 1 else 'stay'} managed through a change, each as it was "
+            "opened.",
+            style=MUTED,
         )
-        out.append(" A breakeven change keeps them.", style=MUTED)
-        return out
 
     def on_mount(self) -> None:
         self._show_parts()
@@ -652,6 +654,41 @@ class SettingsForm(ModalScreen[bool]):
         self.query_one("#multiple-part").display = policy == NoStopPolicy.LOT_MULTIPLE.value
         be = self.query_one(f"#{_F}breakeven_mode", Choice).value
         self.query_one("#trigger-part").display = be == BreakevenMode.R.value
+        self._show_management()
+
+    def _show_management(self) -> None:
+        """Grey out the slave's own breakeven while the master manages its trades: both gates
+        open, the master set to manage and this slave letting it. Said in words either way."""
+        master = self.copier._cfg.master
+        master_says = master is not None and master.management is Management.MASTER
+        letting = bool(self.query_one(f"#{_F}master_manages", Checkbox).value)
+        managed = master_says and letting
+        for row in self.query(".be-row"):
+            row.disabled = managed
+        follow_note = self.query_one("#follow-note", Static)
+        if not master_says:
+            follow_note.update(
+                Text(
+                    "The master is set to Slaves manage, so this slave manages its own trades "
+                    "whatever this says.",
+                    style=MUTED,
+                )
+            )
+        else:
+            follow_note.update("")
+        follow_note.display = not master_says
+        be_note = self.query_one("#be-note", Static)
+        be_note.update(
+            Text(
+                "The master manages this slave's trades, so they follow the master's stop and "
+                "this breakeven is off. Untick the master managing them, or set the master to "
+                "Slaves manage, to use it.",
+                style=MUTED,
+            )
+            if managed
+            else ""
+        )
+        be_note.display = managed
 
     def _rework(self) -> None:
         outcome = apply_edits(self._current(), self._collect())
@@ -672,6 +709,7 @@ class SettingsForm(ModalScreen[bool]):
     @on(Checkbox.Changed)
     def _on_ticked(self) -> None:
         if self.is_mounted:
+            self._show_management()
             self._rework()
 
     # --- help follows focus -----------------------------------------------------------------

@@ -83,8 +83,10 @@ class SkipReason(StrEnum):
     NO_STOP_LOSS = "no stop loss on master; cannot size"
     SYMBOL_BLACKLISTED = "symbol blacklisted for this slave"
     SYMBOL_NOT_WHITELISTED = "symbol not in this slave's whitelist"
-    PARTIALS_DISABLED = "copy_partials is off for this slave"
-    SLTP_SYNC_DISABLED = "copy_sltp is off for this slave"
+    PARTIALS_DISABLED = "its slave manages this copy, so the master's partial close is not copied"
+    SLTP_SYNC_DISABLED = (
+        "its slave manages this copy, so the master's stop and target are not copied"
+    )
     PENDING_DISABLED = "copy_pending is off for this slave"
     STOP_LIMIT_UNSUPPORTED = "stop-limit orders carry two prices and are not mirrored"
     NOTHING_TO_SEND = "the slave's own order fills by itself"
@@ -137,6 +139,10 @@ class Action:
     lot_multiple: float | None = None
     """OPEN with MASTER_LOT_MULTIPLE: the configured multiplier, so the log shows the concrete
     target lots rather than leaving the reader to look the setting up."""
+
+    master_managed: bool = True
+    """OPEN and PLACE: whether the master will manage the copy, fixed on it once it opens. See
+    :meth:`mt5copier.config.AppConfig.manages`."""
 
     skip_reason: SkipReason | None = None
     unprotected: bool = False
@@ -223,6 +229,10 @@ class CopiedPosition:
     price_value: float = 0.0
     """What a 1.0 price move is worth on one lot, from the fill; 0 when unknown. Turns the
     slave's commission into a breakeven distance."""
+    master_managed: bool = True
+    """Whether the master manages this copy: it follows the master's stop and target moves and
+    partial closes, and its slave's own breakeven leaves it alone. Otherwise its slave manages
+    it. Fixed when the copy opens, so a settings change reaches only trades opened after it."""
     commission_per_lot: float = 0.0
     """The round-turn commission per lot this copy pays, from its own opening deal: what that
     deal was charged, doubled for the way out, over the lots it filled. 0 when unknown -- a
@@ -271,6 +281,8 @@ class CopiedOrder:
     risk_distance: float = 0.0
     price_value: float = 0.0
     """Carried over to the position on a fill; see :class:`CopiedPosition`."""
+    master_managed: bool = True
+    """Carried over to the position on a fill. A resting order itself is always mirrored."""
 
 
 # --- pure helpers ---------------------------------------------------------------------------
@@ -511,8 +523,12 @@ def reconcile_slave(
     cfg: TerminalConfig,
     excluded: Collection[int] = (),
     gate: GuardGate | None = None,
+    master_manages: bool = True,
 ) -> list[Action]:
     """Derive the intended actions for one slave. Pure and order-deterministic.
+
+    ``master_manages`` is whether a copy opened now will be managed by the master; each copy
+    already open carries its own answer.
 
     ``excluded`` holds master tickets this slave may never open -- positions that were already
     on the master when we started watching it. They are ignored silently here; the ledger
@@ -590,6 +606,7 @@ def reconcile_slave(
                     lot_multiple=sizing.lot_multiple,
                     skip_reason=reason,
                     unprotected=sizing.unprotected and reason is None,
+                    master_managed=master_manages,
                 )
             )
             continue
@@ -618,7 +635,7 @@ def reconcile_slave(
                     tp=slave_tp,
                     slave_ticket=c.slave_ticket,
                     close_fraction=fraction,
-                    skip_reason=None if cfg.copy_partials else SkipReason.PARTIALS_DISABLED,
+                    skip_reason=None if c.master_managed else SkipReason.PARTIALS_DISABLED,
                 )
             )
 
@@ -645,10 +662,10 @@ def reconcile_slave(
         # SL/TP change, compared in slave-facing terms so an inverted copy is measured against
         # the levels it actually carries.
         #
-        # A breakeven floor applies whether or not stops are being copied: with copy_sltp off
-        # it is raised against the stop the copy already carries, and the target stays put.
-        # Only a change that is *not* the floor's doing is subject to copy_sltp.
-        follow = cfg.copy_sltp
+        # A breakeven floor applies whoever manages the copy: on one its slave manages it is
+        # raised against the stop the copy already carries, and the target stays put. Only a
+        # change that is *not* the floor's doing waits on the master managing the copy.
+        follow = c.master_managed
         masters_sl = slave_sl
         if not follow and c.breakeven_sl != 0.0:
             floored = protective_sl(c.synced_sl, c.breakeven_sl, c.type)
@@ -715,6 +732,7 @@ def reconcile_slave_orders(
     cfg: TerminalConfig,
     excluded: Collection[int] = (),
     gate: GuardGate | None = None,
+    master_manages: bool = True,
 ) -> list[Action]:
     """Derive the intended pending-order actions for one slave. Pure, like its sibling.
 
@@ -798,6 +816,7 @@ def reconcile_slave_orders(
                     lot_multiple=sizing.lot_multiple,
                     skip_reason=reason,
                     unprotected=sizing.unprotected and reason is None,
+                    master_managed=master_manages,
                 )
             )
             continue
@@ -894,6 +913,7 @@ class BeliefStore(Protocol):
         risk_distance: float = 0.0,
         price_value: float = 0.0,
         commission_per_lot: float = 0.0,
+        master_managed: bool = True,
     ) -> object: ...
 
     def remember_order(
@@ -914,6 +934,7 @@ class BeliefStore(Protocol):
         digits: int = 0,
         risk_distance: float = 0.0,
         price_value: float = 0.0,
+        master_managed: bool = True,
     ) -> object: ...
 
     def update(self, terminal_id: str, master_ticket: int, **changes: object) -> object: ...
@@ -965,6 +986,7 @@ class _MemoryBeliefs:
         risk_distance: float = 0.0,
         price_value: float = 0.0,
         commission_per_lot: float = 0.0,
+        master_managed: bool = True,
     ) -> CopiedPosition:
         key = (terminal_id, master_ticket)
         self._orders.pop(key, None)
@@ -983,6 +1005,7 @@ class _MemoryBeliefs:
             risk_distance=risk_distance,
             price_value=price_value,
             commission_per_lot=commission_per_lot,
+            master_managed=master_managed,
         )
         self._positions[key] = copy
         return copy
@@ -1005,6 +1028,7 @@ class _MemoryBeliefs:
         digits: int = 0,
         risk_distance: float = 0.0,
         price_value: float = 0.0,
+        master_managed: bool = True,
     ) -> CopiedOrder:
         copy = CopiedOrder(
             terminal_id=terminal_id,
@@ -1021,6 +1045,7 @@ class _MemoryBeliefs:
             digits=digits,
             risk_distance=risk_distance,
             price_value=price_value,
+            master_managed=master_managed,
         )
         self._orders[(terminal_id, master_ticket)] = copy
         return copy
@@ -1101,6 +1126,9 @@ class SlaveLink:
     connected: bool = True
     gate: GuardGate | None = None
     """What its guards allow in new trades; None when it has none."""
+    master_manages: bool = True
+    """Whether the master manages the trades this slave opens now: see
+    :meth:`mt5copier.config.AppConfig.manages`."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -1432,6 +1460,7 @@ class CopyLedger:
                 link.cfg,
                 excluded=excluded_orders,
                 gate=link.gate,
+                master_manages=link.master_manages,
             )
             for action in self._emit(
                 order_actions, fresh, simulate=simulate, dispatchable=dispatchable, now=now
@@ -1448,6 +1477,7 @@ class CopyLedger:
                     link.cfg,
                     excluded=excluded,
                     gate=link.gate,
+                    master_manages=link.master_manages,
                 ),
                 fresh,
                 simulate=simulate,
@@ -1566,6 +1596,7 @@ class CopyLedger:
             digits=order.digits,
             risk_distance=order.risk_distance,
             price_value=order.price_value,
+            master_managed=order.master_managed,
         )
 
     def _warn_on_growth(self, terminal_id: str, master_positions: Sequence[Position]) -> None:
@@ -1734,6 +1765,7 @@ class CopyLedger:
                 risk_distance=_risk_distance(result.price, last.sl),
                 price_value=result.price_value or 0.0,
                 commission_per_lot=round_turn_per_lot(result.commission, result.filled_volume),
+                master_managed=last.master_managed,
             )
         elif result.op is ActionKind.PLACE:
             self._store.remember_order(
@@ -1753,6 +1785,7 @@ class CopyLedger:
                 # A resting order fills at its own price, give or take a stop order's slippage.
                 risk_distance=_risk_distance(last.entry, last.sl),
                 price_value=result.price_value or 0.0,
+                master_managed=last.master_managed,
             )
         elif result.op is ActionKind.REDUCE:
             # master_volume moves to what the master now holds, so the next partial is measured

@@ -97,6 +97,7 @@ def copied(
     sl: float = 1.08000,
     tp: float = 0.0,
     terminal_id: str = TID_SLAVE,
+    master_managed: bool = True,
 ) -> CopiedPosition:
     return CopiedPosition(
         terminal_id=terminal_id,
@@ -106,6 +107,7 @@ def copied(
         master_volume=master_volume,
         synced_sl=sl,
         synced_tp=tp,
+        master_managed=master_managed,
     )
 
 
@@ -304,9 +306,9 @@ def test_partial_close_fraction_is_measured_against_the_sized_volume() -> None:
     assert actions[0].close_fraction == pytest.approx(0.75)
 
 
-def test_partials_can_be_turned_off_per_slave() -> None:
+def test_a_partial_is_not_copied_to_a_copy_its_slave_manages() -> None:
     actions = reconcile_slave(
-        [pos(volume=0.5)], [copied(master_volume=1.0)], slave(copy_partials=False)
+        [pos(volume=0.5)], [copied(master_volume=1.0, master_managed=False)], slave()
     )
     assert actions[0].kind is ActionKind.REDUCE
     assert actions[0].skip_reason is SkipReason.PARTIALS_DISABLED
@@ -382,14 +384,54 @@ def test_an_inverted_slave_is_disarmed_by_the_master_removing_its_target() -> No
 
 def test_a_skipped_stop_removal_is_not_flagged_as_unprotected() -> None:
     """An action that will not be sent disarms nothing."""
-    actions = reconcile_slave([pos(sl=0.0)], [copied(sl=1.08)], slave(copy_sltp=False))
+    actions = reconcile_slave([pos(sl=0.0)], [copied(sl=1.08, master_managed=False)], slave())
     assert actions[0].skip_reason is SkipReason.SLTP_SYNC_DISABLED
     assert not actions[0].unprotected
 
 
-def test_sltp_sync_can_be_turned_off_per_slave() -> None:
-    actions = reconcile_slave([pos(sl=1.09)], [copied(sl=1.08)], slave(copy_sltp=False))
+def test_a_stop_move_is_not_copied_to_a_copy_its_slave_manages() -> None:
+    actions = reconcile_slave([pos(sl=1.09)], [copied(sl=1.08, master_managed=False)], slave())
     assert actions[0].skip_reason is SkipReason.SLTP_SYNC_DISABLED
+
+
+def test_each_copy_goes_by_its_own_mode_not_the_slaves_setting_now() -> None:
+    """Who manages a copy is fixed when it opens: one the master managed goes on following it
+    after the slave is set to manage its own, and the other way round."""
+    kept = reconcile_slave(
+        [pos(ticket=1, sl=1.09), pos(ticket=2, sl=1.09)],
+        [copied(ticket=1, sl=1.08), copied(ticket=2, sl=1.08, master_managed=False)],
+        slave(master_manages=False),
+        master_manages=False,
+    )
+    assert [(a.master_ticket, a.executable) for a in kept] == [(1, True), (2, False)]
+
+
+def test_an_open_says_who_will_manage_the_copy() -> None:
+    (managed,) = reconcile_slave([pos()], [], slave())
+    (own,) = reconcile_slave([pos()], [], slave(), master_manages=False)
+    assert (managed.master_managed, own.master_managed) == (True, False)
+
+
+def test_a_filled_open_keeps_who_manages_it() -> None:
+    ledger = CopyLedger()
+    link = SlaveLink(slave(), master_manages=False)
+    ledger.step([], [link], now=0.0)
+    (opened,) = ledger.step([pos()], [link], now=1.0, simulate=False)
+    assert opened.master_managed is False
+    ledger.apply_result(
+        OrderResult(
+            command_id=1,
+            terminal_id=TID_SLAVE,
+            op=ActionKind.OPEN,
+            master_ticket=1,
+            ok=True,
+            slave_ticket=900,
+            filled_volume=1.0,
+            price=1.085,
+        )
+    )
+    (copy,) = ledger.believed(TID_SLAVE)
+    assert copy.master_managed is False
 
 
 def test_an_unchanged_position_produces_nothing() -> None:
@@ -2078,9 +2120,10 @@ def test_moving_a_resting_order_is_dispatched_and_belief_follows(engine: Engine)
     assert engine._ledger.believed_orders(TID_SLAVE)[0].entry == pytest.approx(1.079)
 
 
-def test_sltp_sync_off_derives_the_action_and_sends_nothing(engine: Engine) -> None:
-    """copy_sltp is the switch, and a skip is a record rather than an instruction."""
-    engine.config.terminals[TID_SLAVE].copy_sltp = False
+def test_a_slave_managing_its_own_derives_the_stop_move_and_sends_nothing(engine: Engine) -> None:
+    """A copy its slave manages does not follow the master's stop, and a skip is a record
+    rather than an instruction."""
+    engine.config.terminals[TID_SLAVE].master_manages = False
     go_live(engine)
     wire_slave(engine)
     cmd_q = arm_slave(engine)
@@ -2450,8 +2493,7 @@ def test_an_edit_to_a_slave_with_no_copies_goes_in_without_being_asked_about(
         {"invert": True},
         {"risk_percent": 0.25},
         {"max_lot": 3.0},
-        {"copy_sltp": False},
-        {"copy_partials": False},
+        {"master_manages": False},
         {"copy_pending": True},
         {"symbol_suffix": "p"},
         {"symbol_blacklist": ["EURUSD"]},

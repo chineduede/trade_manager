@@ -29,8 +29,9 @@ a ``MASTER=BROKER`` map out of free text.
 
 **An edit keeps the copies a slave holds, and goes on managing them.** Each copy keeps what it
 was opened with -- size, symbol and direction, ``invert`` included, since a copy's reversal is
-read back from the copy -- so most settings reach only new trades, and the few that act on open
-copies (copying stops, partials and pending orders, the breakeven and its buffer) are meant to.
+read back from the copy, and who manages it, the master or its slave -- so most settings reach
+only new trades, and the few that act on open copies (copying pending orders, the breakeven and
+its buffer) are meant to.
 Only disabling a terminal gives copies up (see ``Engine.apply_settings``).
 """
 
@@ -47,6 +48,7 @@ from pydantic import ValidationError
 from .config import (
     AppConfig,
     BreakevenMode,
+    Management,
     NoStopPolicy,
     Role,
     SizingMode,
@@ -179,8 +181,15 @@ SECTIONS: tuple[Section, ...] = (
                 "Buy becomes sell. Stop and target swap places, so the copy is sized from the "
                 "master's TAKE-PROFIT and a trade with no target copies with no stop.",
             ),
-            EditableField("copy_sltp", "Copy stop / target moves", Kind.FLAG, ""),
-            EditableField("copy_partials", "Copy partial closes", Kind.FLAG, ""),
+            EditableField(
+                "master_manages",
+                "Let the master manage it",
+                Kind.FLAG,
+                "Once a trade is open, follow the master's stop and target moves and partial "
+                "closes, when the master is set to manage. Off, this slave manages its own trades "
+                "after the entry: its breakeven and booking, none of the master's moves. Opens and "
+                "closes are copied either way. Applies to trades opened from now on.",
+            ),
             EditableField(
                 "copy_pending",
                 "Copy pending orders",
@@ -198,9 +207,9 @@ SECTIONS: tuple[Section, ...] = (
                 Kind.CHOICE,
                 "Move a copy's stop past its entry by its commission and slippage buffer once it "
                 "is this far in profit, measured on this slave's own fill. After that the stop "
-                "only tightens: the master's stop is copied only when tighter, a looser or "
-                "removed one is ignored, and the target still follows. Changing these keeps "
-                "open copies and applies to them too.",
+                "only tightens. Only on trades this slave manages: one the master manages "
+                "follows the master's stop instead. Changing these keeps open copies and applies "
+                "to them too.",
                 (
                     ("off", BreakevenMode.OFF.value),
                     ("after a multiple of the risk (R)", BreakevenMode.R.value),
@@ -274,7 +283,26 @@ SECTIONS: tuple[Section, ...] = (
 )
 
 EDITABLE: tuple[EditableField, ...] = tuple(f for s in SECTIONS for f in s.fields)
-BY_NAME: dict[str, EditableField] = {f.name: f for f in EDITABLE}
+"""A slave's fields, every one of which its form shows."""
+
+MASTER_FIELDS: tuple[EditableField, ...] = (
+    EditableField(
+        "management",
+        "Who manages open trades",
+        Kind.CHOICE,
+        "Master manages: slaves follow the master's stop and target moves and partial closes, "
+        "and their own breakeven is off. Slaves manage: slaves copy only opens and closes, and "
+        "manage the rest with their own breakeven. A slave can always keep its own trades. "
+        "Applies to trades opened from now on.",
+        (
+            ("Master manages", Management.MASTER.value),
+            ("Slaves manage", Management.SLAVES.value),
+        ),
+    ),
+)
+"""The master's own fields, beside its symbol decoration (which a slave has too)."""
+
+BY_NAME: dict[str, EditableField] = {f.name: f for f in (*EDITABLE, *MASTER_FIELDS)}
 """Every editable field by name, for callers that need one field rather than a section."""
 
 

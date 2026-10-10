@@ -27,7 +27,7 @@ from tui_support import (
     wire_copying,
 )
 
-from mt5copier.config import AppConfig, NoStopPolicy, Role, SizingMode
+from mt5copier.config import AppConfig, Management, NoStopPolicy, Role, SizingMode
 from mt5copier.engine import TerminalView
 from mt5copier.reconcile import OpenCopy
 from mt5copier.store import Orphan
@@ -320,7 +320,7 @@ async def test_the_form_starts_at_the_terminals_current_values(
         assert screen.query_one("#f-risk_percent", Input).value == "0.35"
         assert screen.query_one("#f-max_lot", Input).value == "4"
         assert screen.query_one("#f-sizing_mode", Choice).value == "percent_of_balance"
-        assert screen.query_one("#f-copy_sltp", Checkbox).value is True
+        assert screen.query_one("#f-master_manages", Checkbox).value is True
         assert screen.query_one("#f-copy_pending", Checkbox).value is False
 
 
@@ -819,7 +819,7 @@ async def _unassign_with_copies(app: CopierApp, pilot: object, *copies: OpenCopy
         ("f-max_lot", "2"),
         ("f-symbol_suffix", "p"),
         ("f-invert", "opposite"),
-        ("f-copy_sltp", False),
+        ("f-master_manages", False),
         ("f-copy_pending", True),
     ],
 )
@@ -1576,6 +1576,50 @@ async def test_the_master_form_sets_only_its_symbol_decoration(
         await pilot.pause()
         assert not isinstance(app.screen, MasterForm)
         assert cfg.terminals[TID_MASTER].symbol_suffix == "p"
+
+
+async def test_the_master_form_sets_who_manages_open_trades(app: CopierApp, cfg: AppConfig) -> None:
+    async with app.run_test(size=(160, 50)) as pilot:
+        app._cfg.set_role(TID_MASTER, Role.MASTER)  # type: ignore[attr-defined]
+        app._refresh()
+        app._select(TID_MASTER)
+        await pilot.press("e")
+        await pilot.pause()
+        form = app.screen
+        assert isinstance(form, MasterForm)
+        choice = form.query_one("#f-management", Choice)
+        assert choice.value == "master"
+        choice.value = "slaves"
+        await pilot.pause()
+        assert "manage the trade themselves" in str(form.query_one("#management-says").render())
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+        assert not isinstance(app.screen, MasterForm)
+        assert cfg.terminals[TID_MASTER].management.value == "slaves"
+
+
+async def test_a_slaves_breakeven_is_greyed_while_the_master_manages_its_trades(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await _open_editor(app, pilot)
+
+        def greyed() -> list[bool]:
+            return [row.disabled for row in screen.query(".be-row")]
+
+        assert greyed() == [True, True], "both gates open by default"
+        assert screen.query_one("#be-note").display
+        screen.query_one("#f-master_manages", Checkbox).value = False
+        await pilot.pause()
+        assert greyed() == [False, False]
+        assert not screen.query_one("#be-note").display
+
+        screen.query_one("#f-master_manages", Checkbox).value = True
+        app._cfg.terminals[TID_MASTER].management = Management.SLAVES  # type: ignore[attr-defined]
+        screen._show_management()
+        await pilot.pause()
+        assert greyed() == [False, False], "the master's gate closed"
+        assert screen.query_one("#follow-note").display
 
 
 async def test_the_form_no_longer_offers_enabled(app: CopierApp) -> None:

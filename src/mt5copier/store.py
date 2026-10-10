@@ -26,7 +26,7 @@ import os
 import sqlite3
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
@@ -56,6 +56,7 @@ CREATE TABLE IF NOT EXISTS copies (
     risk_distance REAL    NOT NULL DEFAULT 0,
     price_value   REAL    NOT NULL DEFAULT 0,
     commission_per_lot REAL NOT NULL DEFAULT 0,
+    master_managed INTEGER NOT NULL DEFAULT -1,
     breakeven_sl  REAL    NOT NULL DEFAULT 0,
     breakeven_exempt INTEGER NOT NULL DEFAULT 0,
     breakeven_at  REAL    NOT NULL DEFAULT 0,
@@ -82,6 +83,7 @@ _ADDED_COLUMNS = (
     ("book_tries", "INTEGER NOT NULL DEFAULT 0"),
     ("booked", "INTEGER NOT NULL DEFAULT 0"),
     ("commission_per_lot", "REAL NOT NULL DEFAULT 0"),
+    ("master_managed", "INTEGER NOT NULL DEFAULT -1"),
 )
 """Columns added after the table first shipped, for breakeven and booking at it. ``CREATE TABLE
 IF NOT EXISTS`` leaves an older file's table as it was, so each is added on open when it is
@@ -119,6 +121,9 @@ class Copy:
     risk_distance: float = 0.0
     price_value: float = 0.0
     commission_per_lot: float = 0.0
+    master_managed: bool | None = None
+    """Whether the master manages the copy. None for a row written before that was kept,
+    until :meth:`MappingStore.settle_management` decides it once."""
     breakeven_sl: float = 0.0
     breakeven_exempt: bool = False
     breakeven_at: float = 0.0
@@ -144,6 +149,7 @@ class Copy:
             risk_distance=self.risk_distance,
             price_value=self.price_value,
             commission_per_lot=self.commission_per_lot,
+            master_managed=self.master_managed is not False,
             breakeven_sl=self.breakeven_sl,
             breakeven_exempt=self.breakeven_exempt,
             breakeven_at=self.breakeven_at,
@@ -168,6 +174,7 @@ class Copy:
             digits=self.digits,
             risk_distance=self.risk_distance,
             price_value=self.price_value,
+            master_managed=self.master_managed is not False,
         )
 
 
@@ -251,9 +258,9 @@ class MappingStore:
                     terminal_id, master_ticket, kind, slave_ticket, slave_symbol, direction,
                     order_type, master_volume, slave_volume, entry, synced_sl, synced_tp,
                     point, digits, risk_distance, price_value, commission_per_lot,
-                    breakeven_sl, breakeven_exempt, breakeven_at, book_fraction, book_tries,
-                    booked, opened_at, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    master_managed, breakeven_sl, breakeven_exempt, breakeven_at,
+                    book_fraction, book_tries, booked, opened_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     stamped.terminal_id,
@@ -273,6 +280,7 @@ class MappingStore:
                     stamped.risk_distance,
                     stamped.price_value,
                     stamped.commission_per_lot,
+                    -1 if stamped.master_managed is None else int(stamped.master_managed),
                     stamped.breakeven_sl,
                     int(stamped.breakeven_exempt),
                     stamped.breakeven_at,
@@ -303,6 +311,7 @@ class MappingStore:
         risk_distance: float = 0.0,
         price_value: float = 0.0,
         commission_per_lot: float = 0.0,
+        master_managed: bool = True,
     ) -> Copy:
         """Record a copied position. Keeps the original ``opened_at`` if there is one."""
         existing = self.get(terminal_id, master_ticket)
@@ -323,6 +332,7 @@ class MappingStore:
                 risk_distance=risk_distance,
                 price_value=price_value,
                 commission_per_lot=commission_per_lot,
+                master_managed=master_managed,
                 opened_at=existing.opened_at if existing else 0.0,
             )
         )
@@ -345,6 +355,7 @@ class MappingStore:
         digits: int = 0,
         risk_distance: float = 0.0,
         price_value: float = 0.0,
+        master_managed: bool = True,
     ) -> Copy:
         existing = self.get(terminal_id, master_ticket)
         return self.record(
@@ -365,9 +376,31 @@ class MappingStore:
                 digits=digits,
                 risk_distance=risk_distance,
                 price_value=price_value,
+                master_managed=master_managed,
                 opened_at=existing.opened_at if existing else 0.0,
             )
         )
+
+    def settle_management(self, decide: Callable[[str], bool]) -> int:
+        """Decide, once, who manages each copy recorded before that was kept: ``decide`` is
+        given the slave's terminal id. How many rows were settled."""
+        with self._lock:
+            tids = [
+                str(r[0])
+                for r in self._db.execute(
+                    "SELECT DISTINCT terminal_id FROM copies WHERE master_managed = -1"
+                )
+            ]
+            settled = 0
+            for tid in tids:
+                cursor = self._db.execute(
+                    "UPDATE copies SET master_managed = ? "
+                    "WHERE terminal_id = ? AND master_managed = -1",
+                    (int(decide(tid)), tid),
+                )
+                settled += cursor.rowcount
+            self._db.commit()
+        return settled
 
     def update(self, terminal_id: str, master_ticket: int, **changes: object) -> Copy | None:
         """Read-modify-write one copy. Returns the new row, or None if it was not there.
@@ -560,6 +593,7 @@ def _from_row(row: sqlite3.Row) -> Copy:
         risk_distance=float(row["risk_distance"]),
         price_value=float(row["price_value"]),
         commission_per_lot=float(row["commission_per_lot"]),
+        master_managed=None if int(row["master_managed"]) < 0 else bool(row["master_managed"]),
         breakeven_sl=float(row["breakeven_sl"]),
         breakeven_exempt=bool(row["breakeven_exempt"]),
         breakeven_at=float(row["breakeven_at"]),

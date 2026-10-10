@@ -674,6 +674,10 @@ class Engine:
             copies = self._ledger.believed(cfg.terminal_id)
             if not link.connected or not copies:
                 continue
+            # The master manages some copies: their slave's breakeven leaves them alone.
+            copies = [c for c in copies if not c.master_managed]
+            if not copies:
+                continue
             if cfg.breakeven_mode is BreakevenMode.OFF and not any(c.breakeven_at for c in copies):
                 continue
             snap = self._snapshots.get(cfg.terminal_id)
@@ -790,6 +794,11 @@ class Engine:
             copy = self._ledger.get_position(terminal_id, master_ticket)
             if copy is None:
                 return "that position is not one of the copier's copies"
+            if price and copy.master_managed:
+                return (
+                    "the master manages this copy, so it follows the master's stop rather than "
+                    "a breakeven of its own"
+                )
             if price:
                 snap = self._snapshots.get(terminal_id)
                 positions = (snap.open_positions if snap is not None else None) or ()
@@ -1365,7 +1374,12 @@ class Engine:
                 if hold is not None:
                     connected = False
             links.append(
-                SlaveLink(cfg=cfg, connected=connected, gate=self._gate(cfg.terminal_id, snap))
+                SlaveLink(
+                    cfg=cfg,
+                    connected=connected,
+                    gate=self._gate(cfg.terminal_id, snap),
+                    master_manages=self._cfg.manages(cfg),
+                )
             )
         return links
 
@@ -1777,6 +1791,7 @@ class Engine:
                 )
         path = self._dryrun_path if dry else self._mapping_path
         self._store = MappingStore(path)
+        self._settle_management(self._store)
         self._ledger = CopyLedger(self._store)
         self._store_is_dry = dry
         # The rows in the new store are a different set of claims about the world, so every
@@ -1790,6 +1805,19 @@ class Engine:
             len(self._ledger.believed()),
         )
         return self._store
+
+    def _settle_management(self, store: MappingStore) -> None:
+        """Decide who manages each copy recorded before that was kept, once: as a trade
+        opened now would be, from the settings as they are. A row whose terminal is no longer
+        a slave is left to the master, which is what a slave starts out with."""
+
+        def decide(terminal_id: str) -> bool:
+            cfg = self._cfg.terminals.get(terminal_id)
+            return self._cfg.manages(cfg) if cfg is not None else True
+
+        settled = store.settle_management(decide)
+        if settled:
+            log.info("decided who manages %d copy record(s) from before that was kept", settled)
 
     def views(self) -> list[TerminalView]:
         """Snapshot of all known terminals, ordered by label, for rendering.

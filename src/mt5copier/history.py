@@ -173,7 +173,7 @@ _NOUN = {
     ActionKind.MODIFY_ORDER: "order change",
     ActionKind.CANCEL: "cancel",
 }
-"""What a step that did not go through was, so ``skipped: copy_sltp is off`` says what it was
+"""What a step that did not go through was, so ``skipped: its slave manages this copy`` says what it was
 that was skipped."""
 
 

@@ -323,16 +323,16 @@ def test_a_floor_applies_on_a_reversed_copy_in_its_own_direction() -> None:
     assert a.sl == pytest.approx(1.08490)
 
 
-def test_a_floor_moves_the_stop_even_when_stop_moves_are_not_copied() -> None:
-    copy = copy_of(sl=1.08000, synced_tp=1.09000, breakeven_sl=1.08510)
-    a = _modify(reconcile_slave([master_pos(sl=1.07000)], [copy], slave(copy_sltp=False)))
+def test_a_floor_moves_the_stop_of_a_copy_its_slave_manages() -> None:
+    copy = copy_of(sl=1.08000, synced_tp=1.09000, breakeven_sl=1.08510, master_managed=False)
+    a = _modify(reconcile_slave([master_pos(sl=1.07000)], [copy], slave()))
     assert a.executable
     assert (a.sl, a.tp) == (pytest.approx(1.08510), 1.09000), "the master's levels stay ignored"
 
 
-def test_with_stop_moves_not_copied_a_synced_floor_still_reports_the_masters_change() -> None:
-    copy = copy_of(sl=1.08510, breakeven_sl=1.08510)
-    a = _modify(reconcile_slave([master_pos(sl=1.08700)], [copy], slave(copy_sltp=False)))
+def test_on_a_copy_its_slave_manages_a_synced_floor_still_reports_the_masters_change() -> None:
+    copy = copy_of(sl=1.08510, breakeven_sl=1.08510, master_managed=False)
+    a = _modify(reconcile_slave([master_pos(sl=1.08700)], [copy], slave()))
     assert a.skip_reason is SkipReason.SLTP_SYNC_DISABLED
 
 
@@ -533,6 +533,8 @@ def live(tmp_path: Path) -> Engine:
                 label="Slave",
                 exe_path=exe,
                 role=Role.SLAVE,
+                # Its own breakeven only runs on trades it manages, not the master.
+                master_manages=False,
                 breakeven_mode=BreakevenMode.R,
                 breakeven_trigger_r=0.2,  # 10 pips of the 50-pip stop
                 commission_per_lot_round_turn=7.0,
@@ -693,20 +695,19 @@ def test_a_refused_breakeven_is_tried_again_once_the_price_has_more_room(
     assert live._ledger.get_position(TID_SLAVE, 11).synced_sl == pytest.approx(1.08510)  # type: ignore[union-attr]
 
 
-def test_a_breakeven_set_again_at_a_level_already_tried_is_still_sent(live: Engine) -> None:
-    """Exempting and re-enabling re-arms the same level. That move must go out, not be
-    mistaken for a repeat of the one already reported."""
+def test_exempting_a_copy_its_slave_manages_leaves_the_stop_where_breakeven_put_it(
+    live: Engine,
+) -> None:
+    """The copy does not follow the master's stop, so there is nothing to go back to: exempting
+    only stops breakeven firing again. Re-enabling arms the same level, already in place."""
     _slave_at(live, 1.08610)
     (cmd,) = _tick(live)
     _answer(live, cmd)
     live.set_breakeven_exempt(TID_SLAVE, 11, True)
-    (back,) = _tick(live)
-    assert back.sl == pytest.approx(1.08000), "exempt: back on the master's stop"
-    _answer(live, back)
-
+    assert _tick(live) == []
     live.set_breakeven_exempt(TID_SLAVE, 11, False)
-    (rearmed,) = _tick(live)
-    assert rearmed.sl == pytest.approx(1.08510)
+    assert _tick(live) == []
+    assert live._ledger.get_position(TID_SLAVE, 11).synced_sl == pytest.approx(1.08510)  # type: ignore[union-attr]
 
 
 def test_a_copy_whose_commission_cannot_be_priced_says_so_once(
@@ -720,3 +721,33 @@ def test_a_copy_whose_commission_cannot_be_priced_says_so_once(
         _tick(live)
     warned = [r for r in caplog.records if "will not go to breakeven" in r.getMessage()]
     assert len(warned) == 1
+
+
+# --- who manages the copy ---------------------------------------------------------------------
+
+
+def test_a_copy_the_master_manages_gets_no_breakeven_of_its_own(live: Engine) -> None:
+    """The copy recorded before management was kept is settled as the slave's settings say on
+    the first tick: here, the master's. Its slave's breakeven then never fires on it."""
+    live.config.terminals[TID_SLAVE].master_manages = True
+    _slave_at(live, 1.08610)
+    assert _tick(live) == []
+    copy = live._ledger.get_position(TID_SLAVE, 11)
+    assert copy is not None and copy.master_managed and copy.breakeven_sl == 0.0
+    refusal = live.set_breakeven_at(TID_SLAVE, 11, 1.08700)
+    assert refusal is not None and "the master manages this copy" in refusal
+    assert live.set_breakeven_at(TID_SLAVE, 11, 0.0) is None, "clearing one is always fine"
+
+
+def test_a_copy_keeps_its_slaves_breakeven_after_the_master_is_set_to_manage(
+    live: Engine,
+) -> None:
+    """A trade keeps the mode it opened under: switching the master to manage reaches only
+    trades opened after it."""
+    _slave_at(live, 1.08550)
+    assert _tick(live) == []  # settled: the slave manages it
+    live.config.terminals[TID_SLAVE].master_manages = True  # the master already manages
+    _slave_at(live, 1.08610)
+    (cmd,) = _tick(live)
+    assert cmd.op is ActionKind.MODIFY_SLTP
+    assert cmd.sl == pytest.approx(1.08510)

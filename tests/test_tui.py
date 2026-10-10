@@ -624,7 +624,9 @@ def test_the_rule_column_says_how_a_slave_is_copied_in_words() -> None:
     assert said["Risk per trade"] == "1% of balance"
     assert said["Master has no stop"] == "skip the trade"
     assert said["Direction"] == "same as master"
-    assert said["Partials, pending orders"] == "partials only"
+    assert said["Pending orders"] == "not copied"
+    assert said["Once open"].startswith("the master manages it")
+    assert said["Breakeven"] == "the master's stop moves"
     assert said["Symbols copied"] == "all"
     assert said["Name on this broker"] == "EURUSD is traded as EURUSDp"
     assert "Live trading" not in said
@@ -639,7 +641,9 @@ def test_the_rule_column_says_how_a_slave_is_copied_in_words() -> None:
         invert=True,
         allow_live_trading=True,
     )
-    said = {label: value.plain for label, value in rule_rows(t, "EUR")}
+    said = {label: value.plain for label, value in rule_rows(t, "EUR", managed=False)}
+    assert said["Once open"] == "this slave manages it"
+    assert said["Breakeven"] == "off"
     assert said["Risk per trade"] == "250 EUR a trade"
     assert said["Master has no stop"] == "copy 0.5x its lots"
     assert said["Direction"] == "reversed"
@@ -894,7 +898,7 @@ async def test_settings_are_written_as_sentences_with_a_worked_example(
         assert "this slave buys about 3.21 lots" in example()
         said = " ".join(plain(s.content, width=200) for s in form.query(Static))
         assert "slave 1 of A · demo account" in said
-        assert "1 open copy on this slave is orphaned" in said
+        assert "1 open copy on this slave stays managed through a change" in said
 
         await pilot.press("backspace", "2")
         await pilot.pause()
