@@ -430,3 +430,123 @@ async def test_a_terminal_that_cannot_log_in_is_left_unassigned(
         assert cfg.terminals[TID_THIRD].last_login == 444, "still on the account it was on"
         assert cfg.terminals[TID_SLAVE].role is Role.SLAVE, "the rest is loaded"
         assert await toasted(pilot, "Delta Broker was not logged in"), toasts(app)
+
+
+# --- settings and the mode -------------------------------------------------------------------
+
+
+def test_capture_takes_every_terminals_settings_and_the_mode(cfg: AppConfig) -> None:
+    cfg.terminals[TID_SLAVE].risk_percent = 0.4
+    cfg.terminals[TID_SLAVE].paused = True
+    setup = setups_mod.capture(cfg)
+    assert setup is not None
+    assert set(setup.settings) == {TID_MASTER, TID_SLAVE}, "the unassigned one is not in it"
+    assert setup.settings[TID_SLAVE]["risk_percent"] == 0.4
+    assert setup.settings[TID_SLAVE]["paused"] is True
+    assert setup.dry_run is True
+    assert "terminal_id" not in setup.settings[TID_SLAVE], "the terminal's own, not a setting"
+
+
+def test_loading_puts_every_setting_back(cfg: AppConfig) -> None:
+    cfg.terminals[TID_SLAVE].risk_percent = 0.4
+    cfg.terminals[TID_SLAVE].symbol_suffix = "p"
+    setup = setups_mod.capture(cfg)
+    assert setup is not None
+    cfg.terminals[TID_SLAVE].risk_percent = 2.0
+    cfg.terminals[TID_SLAVE].symbol_suffix = ""
+    assert setups_mod.changed_settings(setup, cfg) == [TID_SLAVE]
+    assert not setups_mod.in_place(setup, cfg)
+    setups_mod.restore_settings(setup, cfg)
+    assert (cfg.terminals[TID_SLAVE].risk_percent, cfg.terminals[TID_SLAVE].symbol_suffix) == (
+        0.4,
+        "p",
+    )
+    assert setups_mod.in_place(setup, cfg)
+
+
+def test_a_setup_turns_live_trading_off_but_never_on(cfg: AppConfig) -> None:
+    cfg.terminals[TID_SLAVE].allow_live_trading = True
+    with_live = setups_mod.capture(cfg)
+    cfg.terminals[TID_SLAVE].allow_live_trading = False
+    without = setups_mod.capture(cfg)
+    assert with_live is not None and without is not None
+
+    assert setups_mod.held_back(with_live, cfg) == [TID_SLAVE]
+    setups_mod.restore_settings(with_live, cfg)
+    assert cfg.terminals[TID_SLAVE].allow_live_trading is False
+    assert setups_mod.in_place(with_live, cfg), "held back is as loading leaves it"
+
+    cfg.terminals[TID_SLAVE].allow_live_trading = True
+    assert setups_mod.held_back(without, cfg) == []
+    setups_mod.restore_settings(without, cfg)
+    assert cfg.terminals[TID_SLAVE].allow_live_trading is False
+
+
+def test_a_setup_from_before_settings_were_kept_leaves_them_alone(cfg: AppConfig) -> None:
+    cfg.terminals[TID_SLAVE].risk_percent = 0.4
+    old = Setup.model_validate({"master": TID_MASTER, "slaves": [TID_SLAVE]})
+    assert old.settings == {} and old.dry_run is None
+    setups_mod.restore_settings(old, cfg)
+    assert cfg.terminals[TID_SLAVE].risk_percent == 0.4
+    assert cfg.dry_run is True
+
+
+def test_a_saved_setting_this_version_no_longer_has_is_passed_over(cfg: AppConfig) -> None:
+    setup = Setup(
+        master=TID_MASTER,
+        slaves=(TID_SLAVE,),
+        settings={TID_SLAVE: {"risk_percent": 0.3, "retired_setting": 5}},
+    )
+    setups_mod.restore_settings(setup, cfg)
+    assert cfg.terminals[TID_SLAVE].risk_percent == 0.3
+
+
+def test_going_live_takes_live_typed_and_going_dry_does_not(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    eng = live_engine(engine_cfg, tmp_path)
+    eng.config.dry_run = True
+    live = Setup(master=TID_MASTER, slaves=(TID_SLAVE,), dry_run=False)
+    refusal = eng.load_setup(live)
+    assert refusal is not None and "LIVE" in refusal
+    assert eng.config.dry_run is True, "nothing changed"
+    assert eng.load_setup(live, go_live=True) is None
+    assert eng.config.dry_run is False
+    assert eng.load_setup(replace_dry(live)) is None
+    assert eng.config.dry_run is True
+
+
+def replace_dry(setup: Setup) -> Setup:
+    return setup.model_copy(update={"dry_run": True})
+
+
+async def test_loading_a_live_setup_from_a_dry_run_asks_for_live_typed(
+    cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mt5copier.tui.dialogs import GoLiveDialog
+
+    app = make_app(cfg, tmp_path, monkeypatch)
+    cfg.dry_run = True
+    app._setups.setups["live"] = Setup(
+        master=TID_MASTER, slaves=(TID_SLAVE,), copying=True, dry_run=False
+    )
+    async with app.run_test(size=(140, 50)) as pilot:
+        await pilot.press("w", "enter")
+        await pilot.pause()
+        question = app.screen
+        assert isinstance(question, GuardConfirm)
+        question.query_one("#go", Button).press()
+        await pilot.pause()
+        assert isinstance(app.screen, GoLiveDialog)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert cfg.dry_run and not cfg.copying_enabled, "backing out changes nothing"
+
+        await pilot.press("enter")
+        await pilot.pause()
+        app.screen.query_one("#go", Button).press()
+        await pilot.pause()
+        await pilot.press(*"live", "enter")
+        await pilot.pause()
+        assert cfg.dry_run is False and cfg.copying_enabled
+        assert await toasted(pilot, "COPYING LIVE"), toasts(app)

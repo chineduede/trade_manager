@@ -285,6 +285,7 @@ class StubEngine:
         *,
         orphan: Mapping[str, Collection[int]] | None = None,
         leave_out: Collection[str] = (),
+        go_live: bool = False,
     ) -> str | None:
         logins = self.logins()
         found = setups_mod.problems(setup, self._cfg, logins)
@@ -292,10 +293,13 @@ class StubEngine:
             return "; ".join(found)
         if set(setups_mod.switches(setup, logins)) - set(leave_out):
             return "not logged into the setup's account"
+        if setups_mod.goes_live(setup, self._cfg) and not go_live:
+            return "it copies live, which needs LIVE typed"
         refusal = self._give_up(self.setup_stake(setup), orphan)
         if refusal is not None:
             return refusal
         setups_mod.apply_roles(setup, self._cfg, leave_out)
+        setups_mod.restore_settings(setup, self._cfg)
         return None
 
 

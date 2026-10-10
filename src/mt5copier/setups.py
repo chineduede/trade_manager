@@ -1,12 +1,16 @@
 """``setups.json``: saved setups, each one a master, its slaves, the account each was logged
-into and whether copying was on.
+into, each one's settings, whether copying was on and whether it was a dry run.
 
-A setup holds **roles and accounts only**. Each terminal's settings stay with the terminal and
-each account's guards stay with the account, so loading a setup changes who copies from whom, on
-which accounts, and nothing about how. Terminals are named by ``terminal_id``, as the config
+Loading one puts all of that back as it was saved. Each account's guards stay with the account,
+and come along because the account does. Terminals are named by ``terminal_id``, as the config
 keys them, so a setup survives a terminal being moved or renamed. An account is kept by its
 login alone: the server is found again, when it is needed, from the accounts the terminal has
 (:func:`account_switch.known_accounts`).
+
+**Two settings only ever go the safe way.** A setup can turn a terminal's live-trading override
+off but never on, since turning it on takes the terminal's name typed out; and it can go to a
+dry run freely but to live copying only with ``LIVE`` typed, as the copier's own settings ask
+(see :meth:`Engine.load_setup`).
 
 Loading one is the engine's (:meth:`Engine.load_setup`), because it can strand open copies the
 same way unassigning does. A terminal logged into another account than the one saved is logged
@@ -21,19 +25,26 @@ import os
 import time
 from collections.abc import Collection, Mapping
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import account_switch
 from .account_switch import Account
-from .config import AppConfig, Role
+from .config import AppConfig, Role, TerminalConfig
 from .guards.model import write_json
 from .logging_setup import get_logger
 from .paths import setups_path
+from .settings_edit import BY_NAME
 
 log = get_logger(__name__)
 
 SETUPS_VERSION = 1
+
+SAVED_SETTINGS: tuple[str, ...] = (*BY_NAME, "paused", "allow_live_trading")
+"""Each terminal's settings a setup keeps: everything its settings forms edit, whether it is
+paused, and its live-trading override. Not what describes the terminal itself -- its id, path,
+label and accounts -- which is the terminal's, not the setup's."""
 
 Logins = Mapping[str, int | None]
 """The account each terminal is logged into now, by ``terminal_id``: None where it is not known."""
@@ -51,6 +62,12 @@ class Setup(BaseModel):
     left out -- its account was not known, or the setup was saved before accounts were kept --
     is loaded on whatever account it is on."""
     saved_at: float = Field(default_factory=time.time)
+    settings: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    """Each terminal's :data:`SAVED_SETTINGS` when it was saved, by ``terminal_id``, as JSON. A
+    setup saved before settings were kept has none, and loading it leaves them as they are."""
+    dry_run: bool | None = None
+    """Whether the copier was in a dry run when it was saved. None for a setup saved before
+    that was kept: loading it leaves the mode as it is."""
 
     @property
     def terminals(self) -> tuple[str, ...]:
@@ -95,7 +112,89 @@ def capture(cfg: AppConfig, logins: Logins | None = None) -> Setup | None:
             for tid in (master.terminal_id, *slaves)
             if (login := logins.get(tid)) is not None
         },
+        settings={tid: settings_of(cfg.terminals[tid]) for tid in (master.terminal_id, *slaves)},
+        dry_run=cfg.dry_run,
     )
+
+
+def settings_of(terminal: TerminalConfig) -> dict[str, Any]:
+    """The settings of one terminal a setup keeps, as JSON."""
+    return terminal.model_dump(mode="json", include=set(SAVED_SETTINGS))
+
+
+def _restored(saved: Mapping[str, Any], current: TerminalConfig) -> dict[str, Any]:
+    """What loading puts back on one terminal: the saved settings this version still has,
+    with the live-trading override never turned on."""
+    wanted = {k: v for k, v in saved.items() if k in SAVED_SETTINGS}
+    if wanted.get("allow_live_trading") and not current.allow_live_trading:
+        wanted["allow_live_trading"] = False
+    return wanted
+
+
+def held_back(setup: Setup, cfg: AppConfig) -> list[str]:
+    """The terminals the setup was saved with live trading allowed on, where it is not now: it
+    stays off, and the person turns it on the usual way."""
+    return [
+        tid
+        for tid, saved in setup.settings.items()
+        if saved.get("allow_live_trading")
+        and tid in cfg.terminals
+        and not cfg.terminals[tid].allow_live_trading
+    ]
+
+
+def goes_live(setup: Setup, cfg: AppConfig) -> bool:
+    """Whether loading it turns a dry run into live copying, which takes ``LIVE`` typed."""
+    return setup.dry_run is False and cfg.dry_run
+
+
+def restore_settings(setup: Setup, cfg: AppConfig) -> None:
+    """Put back each terminal's saved settings, and the dry run or live mode. A terminal whose
+    saved settings no longer validate keeps its own, which is said. The caller has checked
+    :func:`goes_live`."""
+    for tid, saved in setup.settings.items():
+        current = cfg.terminals.get(tid)
+        if current is None:
+            continue
+        try:
+            new = TerminalConfig.model_validate(
+                {**current.model_dump(), **_restored(saved, current)}
+            )
+        except ValidationError as exc:
+            log.warning(
+                "%s keeps its own settings: the setup's are not valid here (%s)",
+                cfg.display_name(tid),
+                exc.error_count(),
+            )
+            continue
+        if new != current:
+            cfg.replace_terminal(new)
+    if setup.dry_run is not None:
+        cfg.dry_run = setup.dry_run
+
+
+def in_place(setup: Setup, cfg: AppConfig, logins: Logins | None = None) -> bool:
+    """Whether everything the setup would put back is already so: roles and accounts, copying,
+    the mode and every terminal's settings (as loading would leave them)."""
+    now = capture(cfg, logins)
+    if now is None or not setup.same_roles(now) or now.copying != setup.copying:
+        return False
+    if setup.dry_run is not None and setup.dry_run != cfg.dry_run:
+        return False
+    return not changed_settings(setup, cfg)
+
+
+def changed_settings(setup: Setup, cfg: AppConfig) -> list[str]:
+    """The terminals whose settings now differ from what loading the setup would give them."""
+    found = []
+    for tid, saved in setup.settings.items():
+        current = cfg.terminals.get(tid)
+        if current is None:
+            continue
+        now = settings_of(current)
+        if any(now.get(k) != v for k, v in _restored(saved, current).items()):
+            found.append(tid)
+    return found
 
 
 def current_name(doc: SetupsDoc, cfg: AppConfig, logins: Logins | None = None) -> str | None:

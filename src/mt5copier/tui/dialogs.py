@@ -436,10 +436,15 @@ class GoLiveDialog(ModalScreen[str | None]):
         Binding("f9", "panic", "PANIC halt"),
     ]
 
-    def __init__(self, slaves: Sequence[str], halt: Callable[[], None]) -> None:
+    def __init__(
+        self, slaves: Sequence[str], halt: Callable[[], None], note: str | None = None
+    ) -> None:
         super().__init__()
         self._slaves = list(slaves)
         self._halt = halt
+        self._note = note
+        """What happens to copying once it is live, when it is not the settings form's "it
+        stays stopped" -- a setup loaded with copying on starts it."""
 
     def compose(self) -> ComposeResult:
         with VerticalScroll(id="dialog", classes="dialog", can_focus=False):
@@ -456,8 +461,9 @@ class GoLiveDialog(ModalScreen[str | None]):
             )
             yield Static(
                 Text(
-                    "Copying is stopped, and stays stopped: nothing is sent until you press d. "
-                    "Going back to a dry run is one choice in these settings.",
+                    self._note
+                    or "Copying is stopped, and stays stopped: nothing is sent until you press "
+                    "d. Going back to a dry run is one choice in these settings.",
                     style=MUTED,
                 )
             )

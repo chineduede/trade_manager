@@ -1821,9 +1821,17 @@ class Engine:
         *,
         orphan: Mapping[str, Collection[int]] | None = None,
         leave_out: Collection[str] = (),
+        go_live: bool = False,
     ) -> str | None:
-        """Put a saved setup's roles in place, and copying on or off as it was saved. None means
-        done; otherwise why not, with nothing changed.
+        """Put a saved setup back: its roles, every terminal's settings, copying on or off and
+        the dry run or live mode, as it was saved. None means done; otherwise why not, with
+        nothing changed.
+
+        **Going live takes** ``go_live``, given only once the person has typed ``LIVE``, as the
+        copier's own settings ask; a setup that would turn a dry run into live copying without
+        it is refused. Nor is the mode switched while commands are out, whose answers would be
+        matched against the other set of beliefs. The live-trading override is never turned on
+        (see :func:`setups.restore_settings`).
 
         The same rule as :meth:`unassign`, for the same reason: a slave taken off its master --
         or left on while the master changes under it, or logged into another account -- has its
@@ -1848,10 +1856,16 @@ class Engine:
             ]
             if unswitched:
                 return f"{', '.join(unswitched)} is not logged into the setup's account"
+            if setups_mod.goes_live(setup, self._cfg) and not go_live:
+                return "it copies live, which needs LIVE typed to switch from the dry run"
+            switching = setup.dry_run is not None and setup.dry_run != self._cfg.dry_run
+            if switching and self._ledger.inflight_count:
+                return "commands are still in flight; try again in a moment"
             refusal = self._give_up_agreed(self._setup_stake(setup), orphan)
             if refusal is not None:
                 return refusal
             setups_mod.apply_roles(setup, self._cfg, leave_out)
+            setups_mod.restore_settings(setup, self._cfg)
         return None
 
     def _give_up_copies(self, terminal_id: str) -> None:

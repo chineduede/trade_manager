@@ -1,5 +1,6 @@
-"""The setups page: ``w``. Saved setups -- a master, its slaves, the account each is logged into
-and whether copying was on -- to save the one in place now as, and to load another in its place.
+"""The setups page: ``w``. Saved setups -- a master, its slaves, the account each is logged into,
+their settings, and whether copying was on and live -- to save the one in place now as, and to
+load another in its place.
 
 What a setup holds, and what loading one does, are :mod:`mt5copier.setups`' and the engine's;
 loading goes through the app (:meth:`CopierApp.load_setup`), which asks first if it would
@@ -22,7 +23,7 @@ from textual.screen import Screen
 from textual.widgets import DataTable, Input, Static
 
 from ..config import AppConfig
-from ..setups import Setup, capture, current_name, name_of, problems
+from ..setups import Setup, capture, changed_settings, current_name, name_of, problems
 from .guards import GuardConfirm
 from .style import FG, GREEN, MUTED, RED, YELLOW, key_hint, left_right, spaced
 from .widgets import KeyBar, QuickInput, TopBar
@@ -31,10 +32,11 @@ if TYPE_CHECKING:
     from .app import CopierApp
 
 ABOUT = (
-    "A setup is who copies from whom: the master, its slaves, the account each is logged into, "
-    "and whether copying was on. Loading one logs a terminal into its account if it is on "
-    "another. Each terminal keeps its own settings and each account its own guards, whichever "
-    "setup is loaded."
+    "A setup is everything about who copies from whom: the master, its slaves, the account each "
+    "is logged into, every one's settings, and whether copying was on and live. Loading one puts "
+    "all of it back, logging a terminal into its account if it is on another; each account's "
+    "guards come with it. Live trading on a terminal is never turned on by a setup, and going "
+    "from a dry run to live asks for LIVE typed."
 )
 
 _COLUMNS = ("SETUP", "MASTER", "SLAVES", "COPYING")
@@ -70,6 +72,10 @@ def describe(setup: Setup, cfg: AppConfig) -> str:
     said = f"master {on_account(setup, cfg, setup.master)}, "
     said += f"{n} slave{'' if n == 1 else 's'}" + (f" ({slaves_cell(setup, cfg)})" if n else "")
     said += ", copying " + ("on" if setup.copying else "off")
+    if setup.dry_run is not None:
+        said += " (dry run)" if setup.dry_run else " (LIVE)"
+    if setup.settings:
+        said += ", settings as saved"
     return said
 
 
@@ -169,6 +175,10 @@ class SetupsScreen(Screen[None]):
                 now.append("not saved as a setup", style=YELLOW)
             else:
                 now.append(f"setup {current}", style=f"bold {GREEN}")
+                changed = changed_settings(doc.setups[current], cfg)
+                if changed:
+                    who = ", ".join(name_of(cfg, tid) for tid in changed)
+                    now.append(f"  ·  settings changed since saved: {who}", style=YELLOW)
         self.query_one("#st-now", Static).update(now)
         self.query_one("#st-head", Static).update(
             left_right(Text("SAVED SETUPS", style="bold"), Text("● the roles in place now"))

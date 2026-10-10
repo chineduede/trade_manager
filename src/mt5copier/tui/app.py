@@ -75,7 +75,7 @@ from ..settings_edit import (
 from . import cards
 from .ctrader import CTraderDialog
 from .detail import DetailScreen
-from .dialogs import LiveDialog, OrphanDialog
+from .dialogs import GoLiveDialog, LiveDialog, OrphanDialog
 from .general import GeneralForm
 from .guards import GuardConfirm, GuardPick, GuardsScreen
 from .history import HistoryScreen
@@ -590,8 +590,7 @@ class CopierApp(App[None]):
         if busy:
             self.notify(f"{', '.join(busy)} is logging in; wait for it to finish")
             return
-        now = setups_mod.capture(self._cfg, logins)
-        if now is not None and setup.same_roles(now) and now.copying == setup.copying:
+        if setups_mod.in_place(setup, self._cfg, logins):
             self.notify(f"setup {name} is already in place")
             return
         accounts: dict[str, account_mod.Account] = {}
@@ -602,14 +601,51 @@ class CopierApp(App[None]):
         # Unreadable reads as nothing to ask about; the engine reads again and refuses.
         stake = self._engine.setup_stake(setup) or {}
 
-        def decided(agreed: bool | None) -> None:
-            if agreed:
-                self._commit_setup(name, setup, stake, accounts)
-            if done is not None:
-                done()
+        going_live = setups_mod.goes_live(setup, self._cfg)
 
-        live = setup.copying and not self._cfg.dry_run
+        def decided(agreed: bool | None) -> None:
+            if not agreed:
+                if done is not None:
+                    done()
+                return
+            if not going_live:
+                self._commit_setup(name, setup, stake, accounts)
+                if done is not None:
+                    done()
+                return
+
+            def typed(word: str | None) -> None:
+                if word is not None:
+                    self._commit_setup(name, setup, stake, accounts, go_live=True)
+                if done is not None:
+                    done()
+
+            self.push_screen(
+                GoLiveDialog(
+                    [self._cfg.display_name(t) for t in setup.slaves],
+                    self.action_panic,
+                    note=(
+                        f"Setup {name} was saved copying live"
+                        + (
+                            ", with copying on: it starts as soon as the setup is loaded."
+                            if setup.copying
+                            else ", with copying off: nothing is sent until you press d."
+                        )
+                    ),
+                ),
+                typed,
+            )
+
+        dry_after = self._cfg.dry_run if setup.dry_run is None else setup.dry_run
+        live = setup.copying and not dry_after
         changes = describe(setup, self._cfg)
+        held = setups_mod.held_back(setup, self._cfg)
+        if held:
+            changes += (
+                "; live trading stays off on "
+                + ", ".join(self._cfg.display_name(t) for t in held)
+                + " (a setup never turns it on: l)"
+            )
         if accounts:
             changes += "; " + ", ".join(
                 f"{self._cfg.display_name(tid)} logs in to "
@@ -639,17 +675,29 @@ class CopierApp(App[None]):
         setup: setups_mod.Setup,
         given_up: Mapping[str, Sequence[OpenCopy]],
         accounts: Mapping[str, account_mod.Account],
+        *,
+        go_live: bool = False,
     ) -> None:
         """Load the setup, leaving the terminals that have to log in unassigned; they are logged
         in off the UI thread, and the setup loaded again once they are (:meth:`_setup_logged_in`).
+        ``go_live`` once LIVE has been typed, for a setup that turns a dry run into live copying.
         """
+        held = setups_mod.held_back(setup, self._cfg)
         refusal = self._engine.load_setup(
-            setup, orphan=self._agreed(given_up), leave_out=list(accounts)
+            setup, orphan=self._agreed(given_up), leave_out=list(accounts), go_live=go_live
         )
         if refusal is not None:
             self.notify(f"setup {name} was not loaded: {refusal}", severity="error")
             return
         self._persist_and_sync()
+        if held:
+            self.notify(
+                "live trading was allowed on "
+                + ", ".join(self._cfg.display_name(t) for t in held)
+                + " when the setup was saved; it stays off until you allow it (l)",
+                severity="warning",
+                timeout=12,
+            )
         if accounts:
             self._switching.update(accounts)
             self.notify(
