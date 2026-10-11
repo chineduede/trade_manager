@@ -27,7 +27,7 @@ from enum import StrEnum
 
 from .config import SizingMode, TerminalConfig
 from .logging_setup import get_logger
-from .protocol import PositionType
+from .protocol import GuardNote, PositionType
 
 log = get_logger(__name__)
 
@@ -160,6 +160,109 @@ def quantize_volume(raw: float, facts: SymbolFacts, max_lot: float | None = None
         capped_by = None
 
     return SizingResult(lots=stepped, raw_lots=raw, capped_by=capped_by)
+
+
+@dataclass(frozen=True, slots=True)
+class MarginFit:
+    """What a guard's margin cap makes of one trade: the lots to send, or why it is refused,
+    and what the guard did, to be said back with the answer."""
+
+    lots: float | None
+    """None: refused."""
+    error: str = ""
+    note: GuardNote | None = None
+
+
+def fit_margin(
+    *,
+    lots: float,
+    margin: float | None,
+    cap: float,
+    mode: str,
+    symbol: str,
+    facts: SymbolFacts,
+    rule: str = "",
+    rule_id: str = "",
+    allowed: str = "",
+) -> MarginFit:
+    """The lots to send under a prop-firm guard's margin cap.
+
+    Margin is linear in lots, so a trade over the cap shrinks by the ratio and is rounded down
+    to the symbol's step -- never up, which would put it back over. One whose ``margin`` could
+    not be priced is refused rather than sent unmeasured: the cap exists because a trade once
+    went out at a size nobody meant. Set only to warn, the trade goes as sized either way.
+    """
+    rule = rule or "A guard"
+
+    def note(action: str, detail: str) -> GuardNote:
+        return GuardNote(rule, action, detail, rule_id)
+
+    if margin is None:
+        if mode == "warn":
+            said = f"could not price the margin of {lots:g} lots on {symbol}; sent as sized"
+            return MarginFit(lots, note=note("warned", said))
+        why = f"could not price the margin of {lots:g} lots on {symbol}, which it limits"
+        declined = note("declined", why)
+        return MarginFit(None, declined.text(), declined)
+    if margin <= cap:
+        return MarginFit(lots)
+    over = f"{margin:,.2f} margin needed, {allowed or f'{cap:,.2f} allowed'}"
+    if mode == "warn":
+        return MarginFit(lots, note=note("warned", f"{lots:g} lots sent as sized: {over}"))
+    if mode == "shrink":
+        fitted = floor_to_step(lots * cap / margin, facts.volume_step)
+        if fitted >= facts.volume_min:
+            return MarginFit(
+                fitted, note=note("shrunk", f"from {lots:g} to {fitted:g} lots: {over}")
+            )
+        why = (
+            f"even {facts.volume_min:g} lots on {symbol} needs more than the {cap:,.2f} margin "
+            f"allowed ({lots:g} lots: {margin:,.2f})"
+        )
+        declined = note("declined", why)
+        return MarginFit(None, declined.text(), declined)
+    why = f"{lots:g} lots on {symbol}: {over}"
+    declined = note("declined", why)
+    return MarginFit(None, declined.text(), declined)
+
+
+def fit_total_margin(
+    *,
+    lots: float,
+    margin: float | None,
+    total: float,
+    in_use: float | None,
+    mode: str,
+    symbol: str,
+    facts: SymbolFacts,
+    rule: str = "",
+    rule_id: str = "",
+) -> MarginFit:
+    """The lots to send under a cap on every open trade's margin and this one's together:
+    :func:`fit_margin` against what is left of ``total`` once ``in_use`` is taken off."""
+    if in_use is None:
+        name = rule or "A guard"
+        if mode == "warn":
+            said = "could not read the margin in use; sent as sized"
+            return MarginFit(lots, note=GuardNote(name, "warned", said, rule_id))
+        note = GuardNote(name, "declined", "could not read the margin in use", rule_id)
+        return MarginFit(None, note.text(), note)
+    left = total - in_use
+    if left <= 0 and mode != "warn":
+        why = f"{in_use:,.2f} margin is already in use, at or over the {total:,.2f} total"
+        note = GuardNote(rule or "A guard", "declined", why, rule_id)
+        return MarginFit(None, note.text(), note)
+    return fit_margin(
+        lots=lots,
+        margin=margin,
+        cap=left,
+        mode=mode,
+        symbol=symbol,
+        facts=facts,
+        rule=rule,
+        rule_id=rule_id,
+        allowed=f"{max(left, 0.0):,.2f} left of the {total:,.2f} total ({in_use:,.2f} in use)",
+    )
 
 
 def floor_to_step(value: float, step: float) -> float:

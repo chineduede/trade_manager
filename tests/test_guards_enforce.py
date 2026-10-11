@@ -170,9 +170,13 @@ def test_a_held_slave_still_closes_what_it_holds() -> None:
 @dataclass
 class MarginSession(FakeSession):
     margin_per_lot: float | None = 1_000.0
+    in_use: float | None = 0.0
 
     def margin_for(self, direction: Any, symbol: str, volume: float, price: float) -> float | None:
         return None if self.margin_per_lot is None else self.margin_per_lot * volume
+
+    def margin_used(self) -> float | None:
+        return self.in_use
 
 
 def test_under_the_margin_cap_the_trade_goes_as_sized() -> None:
@@ -184,20 +188,96 @@ def test_under_the_margin_cap_the_trade_goes_as_sized() -> None:
 def test_over_the_cap_a_decline_sends_nothing() -> None:
     session = MarginSession()
     result = run(session, cmd(max_margin=1_500.0, margin_cap="decline"))
-    assert not result.ok and "over the 1500.00 a guard allows" in (result.error or "")
+    assert not result.ok
+    assert (
+        result.error
+        == "A guard declined it: 2 lots on EURUSD: 2,000.00 margin needed, 1,500.00 allowed"
+    )
+    assert [n.action for n in result.guard] == ["declined"]
     assert session.sent == []
 
 
 def test_over_the_cap_a_shrink_fits_it() -> None:
     session = MarginSession()
-    assert run(session, cmd(max_margin=1_555.0, margin_cap="shrink")).ok
+    result = run(
+        session, cmd(max_margin=1_555.0, margin_cap="shrink", margin_rule="Margin per trade")
+    )
+    assert result.ok
     assert session.sent[-1]["volume"] == 1.55
+    # The answer says what the guard did, so the app can show it: the log alone hid it.
+    [note] = result.guard
+    assert note.text() == (
+        "Margin per trade shrunk it: from 2 to 1.55 lots: 2,000.00 margin needed, 1,555.00 allowed"
+    )
 
 
 def test_a_warning_sends_as_sized() -> None:
     session = MarginSession()
-    assert run(session, cmd(max_margin=100.0, margin_cap="warn")).ok
+    result = run(session, cmd(max_margin=100.0, margin_cap="warn"))
+    assert result.ok and [n.action for n in result.guard] == ["warned"]
     assert session.sent[-1]["volume"] == 2.0
+
+
+# --- the total margin cap ------------------------------------------------------------------------
+
+
+def _total(**kw: object) -> object:
+    return cmd(max_total_margin=5_000.0, total_margin_rule="Total margin in use", **kw)
+
+
+def test_the_total_counts_the_margin_already_in_use() -> None:
+    # 2 lots need 2,000: alone they fit the 5,000 total, but 3,800 is in use already.
+    session = MarginSession(in_use=3_800.0)
+    result = run(session, _total(total_margin_cap="shrink"))
+    assert result.ok
+    assert session.sent[-1]["volume"] == 1.2
+    [note] = result.guard
+    assert note.text() == (
+        "Total margin in use shrunk it: from 2 to 1.2 lots: 2,000.00 margin needed, "
+        "1,200.00 left of the 5,000.00 total (3,800.00 in use)"
+    )
+
+
+def test_under_the_total_the_trade_goes_as_sized() -> None:
+    session = MarginSession(in_use=1_000.0)
+    result = run(session, _total(total_margin_cap="decline"))
+    assert result.ok and result.guard == ()
+    assert session.sent[-1]["volume"] == 2.0
+
+
+def test_a_total_already_used_up_declines_even_a_shrink() -> None:
+    session = MarginSession(in_use=5_200.0)
+    result = run(session, _total(total_margin_cap="shrink"))
+    assert not result.ok and session.sent == []
+    assert result.error == (
+        "Total margin in use declined it: 5,200.00 margin is already in use, at or over the "
+        "5,000.00 total"
+    )
+
+
+def test_an_unreadable_margin_in_use_declines() -> None:
+    session = MarginSession(in_use=None)
+    result = run(session, _total(total_margin_cap="shrink"))
+    assert not result.ok and "could not read the margin in use" in (result.error or "")
+
+
+def test_both_caps_shrink_in_turn_and_both_are_said() -> None:
+    # Per trade: 1,500 allowed -> 1.5 lots. Total: 1,000 left -> 1 lot.
+    session = MarginSession(in_use=4_000.0)
+    result = run(
+        session,
+        _total(
+            total_margin_cap="shrink",
+            max_margin=1_500.0,
+            margin_cap="shrink",
+            margin_rule="Margin per trade",
+        ),
+    )
+    assert result.ok and session.sent[-1]["volume"] == 1.0
+    assert [(n.rule, n.action) for n in result.guard] == [
+        ("Margin per trade", "shrunk"),
+        ("Total margin in use", "shrunk"),
+    ]
 
 
 def test_margin_that_cannot_be_priced_is_refused() -> None:

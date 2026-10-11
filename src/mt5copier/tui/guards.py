@@ -10,6 +10,8 @@ Display only, in this stage: the page says so, and nothing on it can stop or clo
 
 from __future__ import annotations
 
+import time
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from rich.text import Text
@@ -26,7 +28,8 @@ from textual.widgets.option_list import Option
 from ..config import Role, account_key
 from ..guards import REGISTRY, AccountGuards, GuardReport, GuardRule, Level, RuleStatus
 from ..guards.base import money
-from ..guards.params import Param, ParamKind, ParamValue, resolve
+from ..guards.params import Param, ParamKind, ParamValue
+from ..history import GuardAction
 from ..terminal_detail import bar
 from .settings import Choice, Tick, lead, rows, section, words
 from .style import BLUE, FG, MUTED, RED, YELLOW, key_hint, left_right, spaced
@@ -46,9 +49,11 @@ LEVEL_COLOR = {
 _F = "f-"
 _E = "e-"
 
-_COLUMNS = ("RULE · WHEN REACHED", "STANDING", "NOW")
+_COLUMNS = ("RULE", "LIMIT RIGHT NOW", "USED", "IF EXCEEDED", "LAST ACTED")
 _WIDE = 120
-"""The page width from which the table has room for what each rule found, NOW."""
+"""The page width from which the table has room for LAST ACTED; narrower, the list of guard
+actions under it says the same."""
+_ACTIONS_SHOWN = 30
 
 ACTS = (
     "The guards act on new trades: past the point a rule acts at, the slave takes no new "
@@ -83,13 +88,110 @@ def standing(status: RuleStatus, width: int = 12) -> Text:
     return out
 
 
-def used_of(status: RuleStatus, currency: str) -> Text:
-    """``412.00 of 500.00 USD``, or just the limit where nothing is used yet."""
-    if status.limit is None:
-        return Text("")
-    if status.used is None:
-        return Text(f"up to {money(status.limit, currency)}", style=MUTED)
-    return Text(f"{money(status.used)} of {money(status.limit, currency)}", style=MUTED)
+def limit_cell(status: RuleStatus, currency: str) -> Text:
+    """The limit in money as it stands now, and what it is taken of under it."""
+    out = Text()
+    if status.limit is not None:
+        out.append(money(status.limit, currency), style=f"bold {FG}" if status.enabled else MUTED)
+        if status.type == "total_margin":
+            out.append(" in all", style=MUTED)
+        elif status.per_trade:
+            out.append(" a trade", style=MUTED)
+    elif status.type == "stop_required":
+        out.append("a stop on every trade", style=FG if status.enabled else MUTED)
+    elif status.level is Level.UNKNOWN and status.enabled and not status.basis:
+        out.append(status.detail or "unknown", style=YELLOW)
+    else:
+        out.append("not known yet" if status.basis and status.enabled else "", style=MUTED)
+    if status.basis:
+        out.append(f"\n{status.basis}", style=MUTED)
+    return out
+
+
+def used_cell(status: RuleStatus, currency: str) -> Text:
+    """How much of the limit is used, or what the rule found, for one that is no fraction."""
+    color = YELLOW if status.level is Level.UNKNOWN and status.enabled else MUTED
+    if status.latched is not None and status.enabled:
+        held = "held until the reset" if status.latched == "reset" else "held until cleared"
+        out = Text("NO NEW TRADES", style=f"bold {RED}")
+        out.append(f"\n{held} · r clears it", style=RED)
+        return out
+    if not status.enabled or status.level is Level.OFF:
+        return Text("off", style=MUTED)
+    if status.fraction is not None and status.used is not None:
+        out = standing(status, width=10)
+        if status.holds_back:
+            out.append("  NO NEW TRADES", style=f"bold {RED}")
+        word = "in use" if status.type == "total_margin" else "used"
+        out.append(f"\n{money(status.used)} {word}", style=MUTED)
+        return out
+    if status.type == "margin_per_trade":
+        return Text("checked as each\ntrade is sent", style=MUTED)
+    if status.level is Level.UNKNOWN:
+        return Text(two_lines(status.detail, 28) if status.detail else "unknown", style=color)
+    return Text(two_lines(status.detail, 28), style=LEVEL_COLOR[status.level])
+
+
+def breach_cell(status: RuleStatus) -> Text:
+    """What the rule does once reached, and at what share of the limit."""
+    out = Text(status.on_breach, style=FG if status.enabled else MUTED)
+    if status.act_at is not None:
+        out.append(f"\nat {status.act_at:.0%} of it", style=MUTED)
+    return out
+
+
+def when_text(ts: float, now: float) -> str:
+    """``13:35`` today, ``Oct 10 13:35`` before."""
+    here, today = time.localtime(ts), time.localtime(now)
+    if here[:3] == today[:3]:
+        return time.strftime("%H:%M", here)
+    return time.strftime("%b %d %H:%M", here)
+
+
+def last_cell(action: GuardAction | None, now: float) -> Text:
+    """When the rule last did something, and what."""
+    if action is None:
+        return Text("nothing yet", style=MUTED)
+    out = Text(when_text(action.ts, now), style=MUTED)
+    if action.master_ticket is not None:
+        out.append(f" #{action.master_ticket}", style=MUTED)
+    out.append(f" {action.action}", style=f"bold {ACTION_COLOR.get(action.action, YELLOW)}")
+    if action.detail:
+        out.append(f"\n{_clip(action.detail, 34)}", style=MUTED)
+    return out
+
+
+def _clip(text: str, width: int) -> str:
+    """The part before a colon when it fits -- ``from 3.5 to 1.2 lots`` -- else cut short."""
+    head = text.split(": ")[0]
+    if len(head) <= width:
+        return head
+    return text[: width - 1] + "…"
+
+
+ACTION_COLOR = {
+    "shrunk": YELLOW,
+    "warned": YELLOW,
+    "declined": RED,
+    "stopped new trades": RED,
+    "let new trades through": BLUE,
+}
+
+
+def rule_cells(
+    status: RuleStatus, currency: str, last: GuardAction | None = None, now: float = 0.0
+) -> list[Text]:
+    """A rule's row: what it is, its limit, how much is used, what it does, when it acted."""
+    title = Text(status.title, style=f"bold {FG if status.enabled else MUTED}")
+    if not status.enabled:
+        title.append("\noff", style=MUTED)
+    return [
+        title,
+        limit_cell(status, currency),
+        used_cell(status, currency),
+        breach_cell(status),
+        last_cell(last, now or time.time()),
+    ]
 
 
 def two_lines(detail: str, width: int = 46) -> str:
@@ -103,27 +205,27 @@ def two_lines(detail: str, width: int = 46) -> str:
     return first + ("\n" + " · ".join(rest) if rest else "")
 
 
-def rule_cells(status: RuleStatus, currency: str) -> list[Text]:
-    """A rule's row: what it is and what it will do, how it stands, and what it found."""
-    title = Text(status.title, style=f"bold {FG if status.enabled else MUTED}")
-    if status.on_breach:
-        title.append(f"\n{status.on_breach}", style=MUTED)
-        if status.act_at is not None:
-            title.append(f" at {status.act_at:.0%}", style=MUTED)
-    stands = standing(status)
-    if status.holds_back:
-        stands.append("  NO NEW TRADES", style=f"bold {RED}")
-    stands.append("\n")
-    stands.append_text(used_of(status, currency))
-    color = YELLOW if status.level is Level.UNKNOWN and status.enabled else MUTED
-    now = Text()
-    if status.latched is not None and status.enabled:
-        held = "held until the reset" if status.latched == "reset" else "held until cleared"
-        now.append(f"{held} · r clears it\n", style=f"bold {RED}")
-        now.append(status.detail.split(" · ")[0], style=color)
-    else:
-        now.append(two_lines(status.detail), style=color)
-    return [title, stands, now]
+def actions_list(actions: list[GuardAction], now: float) -> Text:
+    """What the guards did on the account, newest first: two lines each."""
+    if not actions:
+        return Text(
+            "Nothing yet. When a rule declines, shrinks or warns about a trade, or stops new "
+            "trades, it is listed here.",
+            style=MUTED,
+        )
+    out = Text()
+    rule_w = max(len(a.rule) for a in actions)
+    for n, action in enumerate(actions):
+        if n:
+            out.append("\n")
+        out.append(f"{when_text(action.ts, now):>12}  ", style=MUTED)
+        out.append(f"{action.rule:<{rule_w}}  ", style=f"bold {FG}")
+        if action.master_ticket is not None:
+            out.append(f"#{action.master_ticket} {action.symbol} {action.label}  ", style=FG)
+        out.append(action.action.upper(), style=f"bold {ACTION_COLOR.get(action.action, YELLOW)}")
+        if action.detail:
+            out.append(f"\n{'':>12}  {action.detail}", style=MUTED)
+    return out
 
 
 def rule_summary(report: GuardReport) -> Text:
@@ -162,7 +264,7 @@ class GuardsScreen(Screen[None]):
         self._ids: list[str] = []
         """The rule ids, in the order the table lists them."""
         self._wide: bool | None = None
-        """Whether the table was laid out with its NOW column."""
+        """Whether the table was laid out with its LAST ACTED column."""
         self._shown: GuardReport | None = None
         """The report the table was last drawn from."""
         self._asking: str | None = None
@@ -182,6 +284,8 @@ class GuardsScreen(Screen[None]):
             yield DataTable(id="gd-rules", cursor_type="row", zebra_stripes=False)
             yield Static("", id="gd-said")
             yield Static("", id="gd-empty")
+            yield Static("", id="gd-actions-head", classes="heading")
+            yield Static("", id="gd-actions")
             with Horizontal(id="gd-ask"):
                 yield Static("", id="gd-ask-what")
                 yield QuickInput(id="gd-ask-box", compact=True)
@@ -250,15 +354,20 @@ class GuardsScreen(Screen[None]):
         if wide != self._wide:
             self._wide = wide
             table.clear(columns=True)
-            for label in _COLUMNS[: 3 if wide else 2]:
+            for label in _COLUMNS[: 5 if wide else 4]:
                 table.add_column(Text(label, style=f"bold {FG}"), key=label)
         cursor = table.cursor_row
         table.clear()
         self._ids = [s.rule_id for s in report.rules]
+        now = time.time()
+        actions = self._actions(now)
+        last: dict[str, GuardAction] = {}
+        for action in actions:  # newest first: the first seen per rule is its latest
+            last.setdefault(action.rule_id, action)
         for status in report.rules:
-            cells = rule_cells(status, report.currency)
+            cells = rule_cells(status, report.currency, last.get(status.rule_id), now)
             # Two lines of a rule and a blank one, so where one rule ends is plain to see.
-            table.add_row(*cells[: 3 if wide else 2], key=status.rule_id, height=3)
+            table.add_row(*cells[: 5 if wide else 4], key=status.rule_id, height=3)
         if self._ids:
             table.move_cursor(row=min(cursor, len(self._ids) - 1), animate=False)
         table.display = bool(self._ids)
@@ -284,7 +393,19 @@ class GuardsScreen(Screen[None]):
                 said.append(key, style=f"bold underline {FG}")
                 said.append(f" {words}  ", style=MUTED)
             empty.update(said)
+        days = app._cfg.history_days
+        self.query_one("#gd-actions-head", Static).update(
+            left_right(
+                Text("GUARD ACTIONS ON THIS ACCOUNT", style="bold"),
+                Text(f"last {days} day{'' if days == 1 else 's'}", style=MUTED),
+            )
+        )
+        self.query_one("#gd-actions", Static).update(actions_list(actions[:_ACTIONS_SHOWN], now))
         self._refresh_keybar(report)
+
+    def _actions(self, now: float) -> list[GuardAction]:
+        days = self.copier._cfg.history_days
+        return self.copier._engine.guard_actions(self.terminal_id, since=now - days * 86400.0)
 
     @on(DataTable.RowHighlighted, "#gd-rules")
     def _show_said(self) -> None:
@@ -297,7 +418,7 @@ class GuardsScreen(Screen[None]):
         if chosen is not None:
             line = Text(f"{chosen.title}: ", style=f"bold {FG}")
             line.append(chosen.sentence, style=MUTED)
-            if not self._wide and chosen.detail:
+            if chosen.detail and chosen.enabled:
                 line.append(f"\nNow: {chosen.detail}", style=MUTED)
             said.update(line)
 
@@ -342,10 +463,17 @@ class GuardsScreen(Screen[None]):
     def action_add(self) -> None:
         if not self._need_account():
             return
-        options = [
-            (t, f"{r.title} · {r.sentence(resolve(r.params, {})[0], '')}")
-            for t, r in REGISTRY.items()
-        ]
+        width = max(len(r.title) for r in REGISTRY.values()) + 3
+        options: list[tuple[str | None, str | Text]] = []
+        for heading, per_trade in (("THE ACCOUNT", False), ("EACH NEW TRADE", True)):
+            if options:
+                options.append((None, ""))
+            options.append((None, Text(heading, style=f"bold {MUTED}")))
+            options += [
+                (t, Text.assemble((r.title.ljust(width), "bold"), (r.blurb, MUTED)))
+                for t, r in REGISTRY.items()
+                if r.per_trade() == per_trade
+            ]
 
         def picked(type_name: str | None) -> None:
             if type_name is not None:
@@ -610,15 +738,17 @@ class GuardsScreen(Screen[None]):
 
 
 class GuardPick(ModalScreen[str | None]):
-    """A short list in a box; enter picks, esc leaves. Returns the picked option's value."""
+    """A short list in a box; enter picks, esc leaves. Returns the picked option's value.
+    An option whose value is None is a heading, or a gap, that cannot be picked."""
 
     DEFAULT_CSS = """
     GuardPick { background: #0c0b09 80%; align: center middle; }
-    GuardPick #pick { width: 90; max-width: 100%; height: auto; max-height: 100%;
+    GuardPick #pick { width: 76; max-width: 100%; height: auto; max-height: 100%;
         border: solid $foreground; background: $background; padding: 1 2; }
     GuardPick #pick-title { margin-bottom: 1; }
-    GuardPick OptionList { background: $background; border: none; height: auto;
-        max-height: 20; padding: 0; }
+    GuardPick OptionList, GuardPick OptionList:focus { background: $background; border: none;
+        height: auto; max-height: 24; padding: 0; }
+    GuardPick #pick-keys { margin-top: 1; }
     GuardPick OptionList > .option-list--option-highlighted,
     GuardPick OptionList:focus > .option-list--option-highlighted {
         background: $foreground; color: $background; text-style: bold; }
@@ -626,7 +756,7 @@ class GuardPick(ModalScreen[str | None]):
 
     BINDINGS = [Binding("escape", "close", "Close")]
 
-    def __init__(self, title: str, options: list[tuple[str, str]]) -> None:
+    def __init__(self, title: str, options: Sequence[tuple[str | None, str | Text]]) -> None:
         super().__init__()
         self._heading = title
         self._options = options
@@ -635,7 +765,16 @@ class GuardPick(ModalScreen[str | None]):
         with Vertical(id="pick"):
             yield Static(Text(self._heading, style="bold"), id="pick-title")
             yield OptionList(
-                *(Option(words, id=str(n)) for n, (_, words) in enumerate(self._options))
+                *(
+                    Option(words, id=str(n), disabled=value is None)
+                    for n, (value, words) in enumerate(self._options)
+                )
+            )
+            yield Static(
+                Text("   ").join(
+                    [key_hint("enter", "pick", primary=True), key_hint("esc", "back")]
+                ),
+                id="pick-keys",
             )
 
     def on_mount(self) -> None:
@@ -647,7 +786,9 @@ class GuardPick(ModalScreen[str | None]):
     @on(OptionList.OptionSelected)
     def _on_picked(self, event: OptionList.OptionSelected) -> None:
         event.stop()
-        self.dismiss(self._options[int(event.option.id or 0)][0])
+        value = self._options[int(event.option.id or 0)][0]
+        if value is not None:
+            self.dismiss(value)
 
 
 class GuardConfirm(ModalScreen[bool]):

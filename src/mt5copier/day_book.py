@@ -24,7 +24,15 @@ from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 from .copy_stats import slippage_in_points
-from .protocol import ActionKind, OrderResult, OrderType, PendingOrder, Position, PositionType
+from .protocol import (
+    ActionKind,
+    GuardNote,
+    OrderResult,
+    OrderType,
+    PendingOrder,
+    Position,
+    PositionType,
+)
 from .reconcile import Action, SkipReason, SlaveLink, invert_type
 
 EVENT_HISTORY = 200
@@ -96,6 +104,8 @@ class SlaveOutcome:
     """Wall-clock time it was settled, or None while it is still waiting for an answer."""
     price: float | None = None
     """What the broker filled at, when it says."""
+    guard: tuple[GuardNote, ...] = ()
+    """What the slave's guards did to it: sized it down, shrunk it, declined it, warned."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -148,6 +158,7 @@ class _Slot:
     head: MasterEvent | None = None
     """The event it belongs to, for :attr:`DayBook.listener`."""
     action: Action | None = None
+    guard: tuple[GuardNote, ...] = ()
 
     def frozen(self) -> SlaveOutcome:
         return SlaveOutcome(
@@ -161,6 +172,7 @@ class _Slot:
             self.slippage_points,
             self.ts,
             self.price,
+            self.guard,
         )
 
 
@@ -219,6 +231,7 @@ class DayBook:
         reason: str | None = None,
         *,
         invert: bool = False,
+        guard: tuple[GuardNote, ...] = (),
     ) -> None:
         """File one slave's action under this tick's event for its master trade.
 
@@ -245,6 +258,7 @@ class DayBook:
             entry=action.entry,
             head=event.head,
             action=action,
+            guard=guard,
         )
         event.slots[action.terminal_id] = slot
         if outcome.settled:
@@ -281,10 +295,19 @@ class DayBook:
             slot.outcome, slot.reason, slot.ts = outcome, reason, self._tick_ts
             self._tell(slot)
 
-    def on_sent(self, action: Action, command_id: int, *, sent_at: float) -> None:
+    def on_sent(
+        self,
+        action: Action,
+        command_id: int,
+        *,
+        sent_at: float,
+        guard: tuple[GuardNote, ...] = (),
+    ) -> None:
+        """``guard`` is what a guard did before it was sent, such as sizing it to less risk."""
         slot = self._tick_slot(action)
         if slot is not None:
             slot.sent_at = sent_at
+            slot.guard += guard
             self._pending[command_id] = slot
 
     def on_result(self, result: OrderResult, *, now: float, ts: float) -> None:
@@ -298,6 +321,7 @@ class DayBook:
             return
         slot.ts = ts
         slot.attempts = result.attempts
+        slot.guard += result.guard
         if slot.sent_at is not None:
             slot.latency_ms = max(0.0, (now - slot.sent_at) * 1000.0)
         if result.ok:
@@ -553,3 +577,10 @@ def describe_outcome(kind: ActionKind, outcome: SlaveOutcome) -> str:
         return "never copied: it was there before this slave was watched"
     reason = outcome.reason or "no reason given"
     return f"{o.value}: {reason}"
+
+
+def describe_guard(outcome: SlaveOutcome) -> str:
+    """What the slave's guards did to it, said after the outcome: empty when nothing. A note
+    its outcome's reason already says -- a margin cap's decline -- is not said twice."""
+    said = outcome.reason or ""
+    return "; ".join(n.text() for n in outcome.guard if n.text() not in said)

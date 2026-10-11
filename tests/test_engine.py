@@ -522,7 +522,9 @@ def test_a_guard_holds_a_slave_back_and_caps_its_risk(cfg: AppConfig, tmp_path: 
         sl=1.09,
     )
     verdict = eng._verdicts[TID_B]
-    assert eng._capped_risk(action, cfg.terminals[TID_B], 100.0, verdict) == 40.0
+    risk, note = eng._capped_risk(action, cfg.terminals[TID_B], 100.0, verdict)
+    assert risk == 40.0
+    assert note is not None and note.action == "shrunk" and note.rule == "Risk per trade"
 
 
 def test_a_moving_loss_is_announced_once(

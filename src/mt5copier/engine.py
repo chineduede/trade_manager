@@ -45,7 +45,7 @@ from .copy_stats import StatsBook, TerminalStats
 from .ctrader.worker import run_ctrader_worker
 from .day_book import DayBook, MasterEvent, Outcome, SlaveOutcome
 from .guards import NO_VERDICT, GuardBook, GuardReport, GuardsDoc, Verdict
-from .history import ORPHANED, HistoryStore, Trade, step_for
+from .history import ORPHANED, GuardAction, HistoryStore, Trade, step_for
 from .logging_setup import get_logger
 from .news import NewsCalendar
 from .paths import dryrun_store_path, history_db_path, log_dir, mapping_db_path
@@ -56,6 +56,7 @@ from .protocol import (
     ActionKind,
     Command,
     CommandKind,
+    GuardNote,
     OrderCommand,
     OrderResult,
     PendingOrder,
@@ -63,7 +64,15 @@ from .protocol import (
     Snapshot,
     WorkerState,
 )
-from .reconcile import Action, CopiedPosition, CopyLedger, GuardGate, OpenCopy, SlaveLink
+from .reconcile import (
+    Action,
+    CopiedPosition,
+    CopyLedger,
+    GuardGate,
+    OpenCopy,
+    SkipReason,
+    SlaveLink,
+)
 from .settings_edit import copies_word
 from .setups import Setup
 from .sizing import risk_budget
@@ -643,7 +652,8 @@ class Engine:
 
             if not action.executable:
                 reason = action.skip_reason.value if action.skip_reason else None
-                self._day.add(action, Outcome.SKIPPED, reason, invert=invert)
+                guard = self._gate_notes(action)
+                self._day.add(action, Outcome.SKIPPED, reason, invert=invert, guard=guard)
                 continue
             if action.kind not in DISPATCHABLE_KINDS:
                 self._warn_undispatchable(action.kind)
@@ -1026,8 +1036,9 @@ class Engine:
             self._day.settle(action, Outcome.NOT_SENT, "its risk budget cannot be sized")
             return
         verdict = self._verdicts.get(cfg.terminal_id, NO_VERDICT)
-        risk = self._capped_risk(action, cfg, risk, verdict)
+        risk, risk_note = self._capped_risk(action, cfg, risk, verdict)
         margin = verdict.max_margin
+        total = verdict.max_total_margin
         opening = action.kind in (ActionKind.OPEN, ActionKind.PLACE)
 
         command_id = next(self._command_ids)
@@ -1064,10 +1075,21 @@ class Engine:
             allow_live=cfg.allow_live_trading,
             max_margin=margin.amount if opening and margin is not None else None,
             margin_cap=margin.mode if opening and margin is not None else "",
+            margin_rule=margin.rule if opening and margin is not None else "",
+            margin_rule_id=margin.rule_id if opening and margin is not None else "",
+            max_total_margin=total.amount if opening and total is not None else None,
+            total_margin_cap=total.mode if opening and total is not None else "",
+            total_margin_rule=total.rule if opening and total is not None else "",
+            total_margin_rule_id=total.rule_id if opening and total is not None else "",
         )
 
         # Before sending, because an order that cannot be sent is answered on the spot.
-        self._day.on_sent(action, command_id, sent_at=time.monotonic())
+        self._day.on_sent(
+            action,
+            command_id,
+            sent_at=time.monotonic(),
+            guard=(risk_note,) if risk_note is not None else (),
+        )
         worker = self._workers.get(cfg.terminal_id)
         if worker is None:
             self._abandon(cmd, cfg.terminal_id, "no worker is running for this terminal")
@@ -1096,8 +1118,9 @@ class Engine:
 
     def _capped_risk(
         self, action: Action, cfg: TerminalConfig, risk: float, verdict: Verdict
-    ) -> float:
-        """The risk budget to size a new trade from, after its guards' risk cap.
+    ) -> tuple[float, GuardNote | None]:
+        """The risk budget to size a new trade from, after its guards' risk cap, and what the
+        cap did to it, if anything.
 
         A cap set to decline never gets here: the slave's budget is the same for every trade
         sized from its stop, so the gate refused the trade already, where a dry run shows it
@@ -1106,29 +1129,51 @@ class Engine:
         """
         cap = verdict.max_risk
         if cap is None or action.kind not in (ActionKind.OPEN, ActionKind.PLACE):
-            return risk
+            return risk, None
         if risk <= cap.amount:
-            return risk
+            return risk, None
         name = self._cfg.display_name(cfg.terminal_id)
         if cap.mode == "shrink":
-            log.warning(
-                "guards: #%s on %s sized to risk %.2f, not %.2f: %s",
-                action.master_ticket,
-                name,
-                cap.amount,
-                risk,
+            note = GuardNote(
                 cap.rule,
+                "shrunk",
+                f"sized to risk {cap.amount:,.2f}, not the slave's {risk:,.2f}",
+                cap.rule_id,
             )
-            return cap.amount
-        log.warning(
-            "guards: #%s on %s risks %.2f, over the %.2f %s allows (set only to warn)",
-            action.master_ticket,
-            name,
-            risk,
-            cap.amount,
+            log.warning("guards: #%s on %s: %s", action.master_ticket, name, note.text())
+            return cap.amount, note
+        note = GuardNote(
             cap.rule,
+            "warned",
+            f"risks {risk:,.2f}, over the {cap.amount:,.2f} allowed; sent as sized",
+            cap.rule_id,
         )
-        return risk
+        log.warning("guards: #%s on %s: %s", action.master_ticket, name, note.text())
+        return risk, note
+
+    def _gate_notes(self, action: Action) -> tuple[GuardNote, ...]:
+        """Which guard declined a trade the gate refused, read off the slave's verdict."""
+        reason = action.skip_reason
+        verdict = self._verdicts.get(action.terminal_id, NO_VERDICT)
+        key = self._account_of(action.terminal_id)
+        title = self._guards.title
+        if reason is SkipReason.GUARD_HOLDS:
+            held = zip(verdict.held_by, verdict.held_back, strict=True)
+            notes = tuple(GuardNote(title(key, r), "declined", why, r) for r, why in held)
+            return notes or (GuardNote("A guard", "declined", reason.value),)
+        if reason is SkipReason.GUARD_NEWS:
+            return tuple(
+                GuardNote(title(key, r), "declined", verdict.news_why, r)
+                for r in verdict.news_by or ("",)
+            )
+        if reason is SkipReason.GUARD_NEEDS_STOP:
+            name = verdict.stop_required or "A guard"
+            return (GuardNote(name, "declined", "it has no stop loss", verdict.stop_by),)
+        if reason is SkipReason.GUARD_RISK and verdict.max_risk is not None:
+            cap = verdict.max_risk
+            why = f"this slave risks more on a trade than the {cap.amount:,.2f} allowed"
+            return (GuardNote(cap.rule, "declined", why, cap.rule_id),)
+        return ()
 
     def _abandon(self, cmd: OrderCommand, terminal_id: str, error: str) -> None:
         """Fail a command we could not even send, immediately.
@@ -1201,6 +1246,13 @@ class Engine:
             log.info("%s", result.describe())
         else:
             log.error("%s", result.describe())
+        for note in result.guard:
+            log.warning(
+                "guards: #%s on %s: %s",
+                result.master_ticket,
+                self._cfg.display_name(result.terminal_id),
+                note.text(),
+            )
         self._ledger.apply_result(result)
 
     def _record_result(self, result: OrderResult) -> None:
@@ -1243,8 +1295,50 @@ class Engine:
         try:
             self._history.keep_days = self._cfg.history_days
             self._history.record(step_for(head, outcome, action))
+            if outcome.guard:
+                account = self._account_of(outcome.terminal_id) or ""
+                for note in outcome.guard:
+                    self._history.record_guard(
+                        GuardAction(
+                            ts=outcome.ts if outcome.ts is not None else head.ts,
+                            account=account,
+                            terminal_id=outcome.terminal_id,
+                            rule_id=note.rule_id,
+                            rule=note.rule,
+                            action=note.action,
+                            detail=note.detail,
+                            master_ticket=head.master_ticket,
+                            symbol=head.symbol,
+                            label=head.label,
+                        )
+                    )
         except Exception:
             log.exception("could not record a step in the trade history")
+
+    def guard_actions(self, terminal_id: str, *, since: float | None = None) -> list[GuardAction]:
+        """What the guards did on the account logged into this terminal, newest first. Read
+        from disk, so it reaches back past this session."""
+        with self._lock:
+            key = self._account_of(terminal_id)
+        if key is None:
+            return []
+        return self._history.guard_actions(key, since=since)
+
+    def _record_guard(self, key: str | None, terminal_id: str, note: GuardNote) -> None:
+        """Something a guard did to the slave as a whole, rather than to one trade."""
+        if key is None:
+            return
+        self._history.record_guard(
+            GuardAction(
+                time.time(),
+                key,
+                terminal_id,
+                note.rule_id,
+                note.rule,
+                note.action,
+                note.detail,
+            )
+        )
 
     @property
     def day_book_since(self) -> float:
@@ -1275,6 +1369,7 @@ class Engine:
         before = self._verdicts.get(tid, NO_VERDICT)
         self._verdicts[tid] = verdict
         name = self._cfg.display_name(tid)
+        self._record_changes(account_key(snap.login, snap.server), tid, before, verdict)
         # The hold's text carries the live measurement, which moves with every tick of a
         # floating loss; only the slave being held back or let go is news.
         if (verdict.hold is None) != (before.hold is None):
@@ -1290,6 +1385,28 @@ class Engine:
         for rule_id, line in zip(verdict.warned_by, verdict.warnings, strict=True):
             if rule_id not in before.warned_by:
                 log.warning("guards: %s: %s", name, line)
+
+    def _record_changes(self, key: str | None, tid: str, before: Verdict, now: Verdict) -> None:
+        """Keep the moments a rule started or stopped holding the slave back, and a warning
+        first given: the slave-wide half of what the guards page lists."""
+        title = self._guards.title
+        started = zip(now.held_by, now.held_back, strict=True)
+        for rule_id, why in started:
+            if rule_id not in before.held_by:
+                note = GuardNote(title(key, rule_id), "stopped new trades", why, rule_id)
+                self._record_guard(key, tid, note)
+        for rule_id in now.news_by:
+            if rule_id not in before.news_by:
+                note = GuardNote(title(key, rule_id), "stopped new trades", now.news_why, rule_id)
+                self._record_guard(key, tid, note)
+        for rule_id in (*before.held_by, *before.news_by):
+            if rule_id not in now.held_by and rule_id not in now.news_by:
+                note = GuardNote(title(key, rule_id), "let new trades through", "", rule_id)
+                self._record_guard(key, tid, note)
+        for rule_id, line in zip(now.warned_by, now.warnings, strict=True):
+            if rule_id not in before.warned_by:
+                note = GuardNote(title(key, rule_id), "warned", line, rule_id)
+                self._record_guard(key, tid, note)
 
     def _gate(self, terminal_id: str, snap: Snapshot | None) -> GuardGate | None:
         verdict = self._verdicts.get(terminal_id)

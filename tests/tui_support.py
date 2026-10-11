@@ -21,7 +21,7 @@ from mt5copier.copy_stats import TerminalStats
 from mt5copier.day_book import MasterEvent
 from mt5copier.engine import RecordedAction, RecordedResult, TerminalView
 from mt5copier.guards import GuardBook, GuardReport, GuardsDoc
-from mt5copier.history import Trade
+from mt5copier.history import GuardAction, Trade
 from mt5copier.protocol import (
     COPIER_MAGIC,
     Position,
@@ -72,6 +72,7 @@ class StubEngine:
         self.events: list[MasterEvent] = []
         """What the stub's day book holds, oldest first."""
         self.history: dict[str, list[Trade]] = {}
+        self.guard_log: dict[str, list[GuardAction]] = {}
         """Each slave's trade history, the most recently active first."""
 
     def trade_history(self, terminal_id: str, *, since: float | None = None) -> list[Trade]:
@@ -157,6 +158,9 @@ class StubEngine:
     def clear_guard_latch(self, terminal_id: str, rule_id: str) -> bool:
         key = self.guard_report(terminal_id).account_key
         return key is not None and self.guard_book.clear_latch(key, rule_id)
+
+    def guard_actions(self, terminal_id: str, *, since: float | None = None) -> list[GuardAction]:
+        return self.guard_log.get(terminal_id, [])
 
     def guard_report(self, terminal_id: str) -> GuardReport:
         snap = self.snapshots.get(terminal_id)

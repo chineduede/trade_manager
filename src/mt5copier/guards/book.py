@@ -53,6 +53,10 @@ class RuleStatus:
     latched: str | None = None
     """When a breach is being held: ``"reset"`` until the next reset, ``"hand"`` until
     cleared. None when nothing is held."""
+    basis: str = ""
+    """What its limit is taken of, in a few words: ``30% of the free margin``."""
+    per_trade: bool = False
+    """A rule about each new trade, rather than about the account as it stands."""
 
     @property
     def fraction(self) -> float | None:
@@ -107,6 +111,7 @@ class Cap:
     """``"decline"``, ``"shrink"`` or ``"warn"``."""
     rule: str
     """The rule's title, for the log."""
+    rule_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +120,8 @@ class Verdict:
 
     held_back: tuple[str, ...] = ()
     """Why the slave takes no new trades, one line per rule; empty when it takes them."""
+    held_by: tuple[str, ...] = ()
+    """The rule behind each line of ``held_back``, in step."""
     warnings: tuple[str, ...] = ()
     """Rules past their point that are set only to warn."""
     warned_by: tuple[str, ...] = ()
@@ -128,8 +135,14 @@ class Verdict:
     """The currencies whose new trades a news rule declines now; ``"*"`` for every new trade."""
     news_why: str = ""
     """Which news, and until when, for the log."""
+    news_by: tuple[str, ...] = ()
+    """The news rules declining trades now."""
+    stop_by: str = ""
+    """The rule behind ``stop_required``."""
     max_risk: Cap | None = None
     max_margin: Cap | None = None
+    max_total_margin: Cap | None = None
+    """The most margin every open trade and a new one may use together."""
 
     @property
     def hold(self) -> str | None:
@@ -261,6 +274,14 @@ class GuardBook:
         )
         self._save()
 
+    def title(self, key: str | None, rule_id: str) -> str:
+        """A rule's title, by its id on this account; ``a guard`` once it is gone."""
+        for given in self.doc.for_account(key).rules:
+            if given.id == rule_id:
+                rule = REGISTRY.get(given.type)
+                return rule.title if rule is not None else given.type
+        return "A guard"
+
     def clear_latch(self, key: str, rule_id: str) -> bool:
         """Let go of a held breach by hand. False if there was none."""
         if self._latched.get(key, {}).pop(rule_id, None) is None:
@@ -313,6 +334,9 @@ class GuardBook:
             return NO_VERDICT
         rules = {r.id: r for r in self.doc.for_account(key).rules}
         held: list[str] = []
+        held_by: list[str] = []
+        news_by: list[str] = []
+        stop_by = ""
         warnings: list[str] = []
         warned_by: list[str] = []
         stop_required = stop_warning = None
@@ -328,6 +352,7 @@ class GuardBook:
                     stop_warning = status.title
                 else:
                     stop_required = status.title
+                    stop_by = status.rule_id
                 continue
             if rule.news:
                 given = rules.get(status.rule_id)
@@ -343,10 +368,11 @@ class GuardBook:
                 else:
                     news |= on_news
                     news_why.append(why)
+                    news_by.append(status.rule_id)
                 continue
             if rule.cap is not None:
                 if status.limit is not None:
-                    cap = Cap(status.limit, status.action, status.title)
+                    cap = Cap(status.limit, status.action, status.title, status.rule_id)
                     current = caps.get(rule.cap)
                     if current is None or cap.amount < current.amount:
                         caps[rule.cap] = cap
@@ -360,19 +386,24 @@ class GuardBook:
             line = _why(status)
             if status.action in _HOLDS_BACK:
                 held.append(line)
+                held_by.append(status.rule_id)
             else:
                 warnings.append(line)
                 warned_by.append(status.rule_id)
         return Verdict(
             held_back=tuple(held),
+            held_by=tuple(held_by),
             warnings=tuple(warnings),
             warned_by=tuple(warned_by),
             stop_required=stop_required,
             stop_warning=stop_warning,
             news=frozenset(news),
             news_why="; ".join(news_why),
+            news_by=tuple(news_by),
+            stop_by=stop_by,
             max_risk=caps.get("risk"),
             max_margin=caps.get("margin"),
+            max_total_margin=caps.get("total_margin"),
         )
 
 
@@ -417,6 +448,8 @@ def _status(
         act_at=float(buffer) / 100 if buffer is not None else None,
         enabled=enabled,
         action=str(params.get("on_breach", "")),
+        basis=rule.basis(params),
+        per_trade=rule.per_trade(),
     )
     if not enabled:
         return replace(status, level=Level.OFF)

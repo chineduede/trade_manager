@@ -53,6 +53,8 @@ class Memory(Protocol):
 class Rule:
     type: ClassVar[str]
     title: ClassVar[str]
+    blurb: ClassVar[str]
+    """What the rule does, in a few words with no numbers, for the list a rule is added from."""
     params: ClassVar[tuple[Param, ...]]
 
     latch: ClassVar[str | None] = None
@@ -75,6 +77,11 @@ class Rule:
         """The rule as it is set, in words, for the guards page."""
         raise NotImplementedError
 
+    def basis(self, p: dict[str, ParamValue]) -> str:
+        """What its limit is taken of, in a few words, under the amount on the guards page:
+        ``5% of the initial balance``. Empty for a rule with no amount."""
+        return ""
+
     def measure(
         self, view: AccountView, p: dict[str, ParamValue], rule_id: str, memory: Memory
     ) -> Measure:
@@ -95,6 +102,13 @@ def money(amount: float, currency: str = "") -> str:
     """Money as the rest of the app shows it: thousands commas, two places."""
     text = f"{amount:,.2f}"
     return f"{text} {currency}".rstrip()
+
+
+def basis_words(p: dict[str, ParamValue], of: str) -> str:
+    """``5% of the initial balance``, or ``a fixed amount`` for a limit set in money."""
+    if p.get("unit") == "money":
+        return "a fixed amount"
+    return f"{float(p['limit']):g}% of {of}"
 
 
 def amount_words(p: dict[str, ParamValue], of: str, currency: str) -> str:

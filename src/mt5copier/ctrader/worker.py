@@ -191,6 +191,15 @@ class _Account:
         )
         return [p for p in state.position if cv.is_open(p)], list(state.order)
 
+    async def used_margin(self) -> float | None:
+        """The margin the open positions use now, asked of cTrader. None if it cannot say."""
+        try:
+            positions, _ = await self._reconcile()
+        except (OpenApiError, OSError, TimeoutError, ConnectionError) as exc:
+            log.warning("could not read the margin in use: %r", exc)
+            return None
+        return cv.money(sum(int(p.usedMargin) for p in positions), self.money_digits)
+
     async def open_positions(self) -> dict[int, Any]:
         """The account's open positions, by position id."""
         positions, _ = await self._reconcile()

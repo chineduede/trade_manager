@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..account import AccountView
-from ..base import Measure, Memory, Rule, amount_words, money, register
+from ..base import Measure, Memory, Rule, amount_words, basis_words, money, register
 from ..params import BUFFER, UNIT, Param, ParamKind, ParamValue, on_breach
 
 
@@ -11,6 +11,7 @@ from ..params import BUFFER, UNIT, Param, ParamKind, ParamValue, on_breach
 class MaxDrawdown(Rule):
     type = "max_drawdown"
     title = "Max drawdown"
+    blurb = "caps the fall below the initial balance"
     latch = "hand"
     params = (
         Param("limit", "Limit", ParamKind.NUMBER, 10.0, minimum=0),
@@ -18,6 +19,9 @@ class MaxDrawdown(Rule):
         BUFFER,
         on_breach("block_new", "warn", "block_new", "close_worst", "flatten"),
     )
+
+    def basis(self, p: dict[str, ParamValue]) -> str:
+        return basis_words(p, "the initial balance")
 
     def sentence(self, p: dict[str, ParamValue], currency: str) -> str:
         return (

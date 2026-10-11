@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ..account import AccountView
-from ..base import Measure, Memory, Rule, amount_words, money, register
+from ..base import Measure, Memory, Rule, amount_words, basis_words, money, register
 from ..params import BUFFER, UNIT, Param, ParamKind, ParamValue, on_breach
 
 
@@ -11,6 +11,7 @@ from ..params import BUFFER, UNIT, Param, ParamKind, ParamValue, on_breach
 class FloatingLoss(Rule):
     type = "floating_loss"
     title = "Floating loss"
+    blurb = "caps how far the open trades may be down"
     params = (
         Param("limit", "Limit", ParamKind.NUMBER, 2.0, minimum=0),
         UNIT,
@@ -35,6 +36,11 @@ class FloatingLoss(Rule):
         BUFFER,
         on_breach("close_worst", "warn", "block_new", "close_worst", "flatten"),
     )
+
+    def basis(self, p: dict[str, ParamValue]) -> str:
+        return basis_words(
+            p, "the initial balance" if p["percent_of"] == "initial_balance" else "the balance"
+        )
 
     def sentence(self, p: dict[str, ParamValue], currency: str) -> str:
         of = "the initial balance" if p["percent_of"] == "initial_balance" else "the balance"

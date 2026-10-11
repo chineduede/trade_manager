@@ -27,6 +27,7 @@ ALL = "*"
 class NewsWindow(Rule):
     type = "news"
     title = "High-impact news"
+    blurb = "no new trades around big news"
     news = True
     params = (
         Param(
@@ -57,6 +58,9 @@ class NewsWindow(Rule):
         ),
         on_breach("decline", "warn", "decline"),
     )
+
+    def basis(self, p: dict[str, ParamValue]) -> str:
+        return f"{float(p['before']):g} min before to {float(p['after']):g} min after"
 
     def sentence(self, p: dict[str, ParamValue], currency: str) -> str:
         impact = "high-impact" if p["impact"] == "high" else "high- or medium-impact"

@@ -22,6 +22,8 @@ class AccountView:
     balance: float | None
     equity: float | None
     margin_free: float | None
+    margin: float | None
+    """The margin the open positions use now."""
     currency: str
     positions: tuple[Position, ...] | None
     live: dict[int, PositionLive]
@@ -49,6 +51,7 @@ class AccountView:
             balance=snap.balance,
             equity=snap.equity,
             margin_free=snap.margin_free,
+            margin=snap.margin,
             currency=snap.currency or "",
             positions=snap.open_positions,
             live={p.ticket: p for p in snap.live_positions or ()},

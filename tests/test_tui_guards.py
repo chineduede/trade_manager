@@ -133,7 +133,7 @@ async def test_adding_a_rule_saves_it_and_shows_how_it_stands(
         table = screen.query_one("#gd-rules", DataTable)
         assert table.row_count == 1
         row = " ".join(plain(cell) for cell in table.get_row_at(0))
-        assert "Max drawdown" in row and "500.00 of 800.00" in row
+        assert "Max drawdown" in row and "800.00 USD" in row and "500.00 used" in row
 
 
 async def test_a_bad_value_keeps_the_form_open_and_says_why(app: CopierApp) -> None:

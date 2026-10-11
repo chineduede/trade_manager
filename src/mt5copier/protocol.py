@@ -374,11 +374,41 @@ class OrderCommand:
     margin_cap: str = ""
     """What the worker does with a trade over ``max_margin``: ``"decline"`` it, ``"shrink"``
     it to fit, or ``"warn"`` and send it as sized."""
+    margin_rule: str = ""
+    """The title of the guard behind ``max_margin``, so the worker's answer can name it."""
+    margin_rule_id: str = ""
+    max_total_margin: float | None = None
+    """OPEN / PLACE only: the most margin every open position and this trade may use together,
+    in the account's money. The worker takes off the margin in use when it sends, read then,
+    so a trade sent just before this one is counted. None for no limit."""
+    total_margin_cap: str = ""
+    """``"decline"``, ``"shrink"`` or ``"warn"``, as ``margin_cap``."""
+    total_margin_rule: str = ""
+    total_margin_rule_id: str = ""
     to_breakeven: bool = False
     """MODIFY_SLTP on the master only: move its stop to breakeven, past ``entry`` by the
     position's own commission and ``slippage_points``, worked out by the worker. ``sl`` and
     ``tp`` are the master's levels now: a stop already past breakeven is left alone, never
     loosened, and the target is kept."""
+
+
+@dataclass(frozen=True, slots=True)
+class GuardNote:
+    """What a prop-firm guard did to one trade, or to the slave: ``Margin per trade shrunk it
+    from 3.5 to 1.2 lots: 6,130.40 margin needed, 2,101.97 allowed``.
+
+    Said wherever the trade is shown -- the day book, its history card, the guards page -- so
+    a trade a guard changed never looks like one the copier sized that way by itself."""
+
+    rule: str
+    """The rule's title."""
+    action: str
+    """What it did, in a word or two: ``shrunk``, ``declined``, ``warned``."""
+    detail: str
+    rule_id: str = ""
+
+    def text(self) -> str:
+        return f"{self.rule} {self.action} it: {self.detail}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -433,6 +463,10 @@ class OrderResult:
     levels were not applied to anything, so belief must not record them. Without this the
     ledger would write a stop the slave never carried -- and since the diff compares the
     master against belief and never against the slave, nothing would look again."""
+
+    guard: tuple[GuardNote, ...] = ()
+    """What the guards' margin caps did to an OPEN or a PLACE: shrunk it, declined it, or
+    warned and sent it as sized. Empty when no cap was reached."""
 
     retryable: bool = False
     """Whether a failure was transient -- a link that was down, a queue that would not take

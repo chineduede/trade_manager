@@ -313,12 +313,12 @@ ActionMenu OptionList:focus > .option-list--option-highlighted {
     height: auto;
 }
 
-#gd-note, #gd-account, #gd-empty, #gd-said {
+#gd-note, #gd-account, #gd-empty, #gd-said, #gd-actions {
     height: auto;
     margin-top: 1;
 }
 
-#gd-rules-head {
+#gd-rules-head, #gd-actions-head {
     margin-top: 2;
 }
 

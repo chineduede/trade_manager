@@ -46,6 +46,7 @@ from .logging_setup import get_logger
 from .protocol import (
     ACCOUNT_TRADE_MODE_DEMO,
     ActionKind,
+    GuardNote,
     OrderCommand,
     OrderResult,
     PositionType,
@@ -53,10 +54,12 @@ from .protocol import (
 )
 from .reconcile import round_turn_per_lot
 from .sizing import (
+    MarginFit,
     SizingFailure,
     SizingResult,
     SymbolFacts,
-    floor_to_step,
+    fit_margin,
+    fit_total_margin,
     lots_for_master_multiple,
     lots_for_risk,
     quantize_volume,
@@ -114,6 +117,7 @@ class Session(Protocol):
     def margin_for(
         self, direction: PositionType, symbol: str, volume: float, price: float
     ) -> float | None: ...
+    def margin_used(self) -> float | None: ...
     def deal_commission(self, deal: int) -> float | None: ...
     def position_commission(self, ticket: int) -> tuple[float, float] | None: ...
 
@@ -189,65 +193,64 @@ class Executor:
         log.info("#%s on %s: %s", cmd.master_ticket, symbol, sizing.describe())
 
         lots = sizing.lots
-        if cmd.max_margin is not None:
-            fitted = self._fit_margin(cmd, symbol, facts, lots, cmd.max_margin)
-            if isinstance(fitted, str):
-                return self._fail(cmd, slave_symbol=symbol, error=fitted)
-            lots = fitted
-        return self._send_with_retries(cmd, symbol, facts, lots)
+        notes: tuple[GuardNote, ...] = ()
+        for fit_to in (self._fit_margin, self._fit_total_margin):
+            fit = fit_to(cmd, symbol, facts, lots)
+            if fit is None:
+                continue
+            if fit.note is not None:
+                notes += (fit.note,)
+                log.warning("#%s on %s: %s", cmd.master_ticket, symbol, fit.note.text())
+            if fit.lots is None:
+                return self._fail(cmd, slave_symbol=symbol, error=fit.error, guard=notes)
+            lots = fit.lots
+        result = self._send_with_retries(cmd, symbol, facts, lots)
+        return replace(result, guard=notes) if notes else result
 
     # --- a guard's margin cap -------------------------------------------------------------
 
-    def _fit_margin(
-        self, cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float, cap: float
-    ) -> float | str:
-        """The lots to send under a prop-firm guard's margin cap, or why the trade is refused.
-
-        Margin is linear in lots, so a trade over the cap shrinks by the ratio and is rounded
-        down to the symbol's step -- never up, which would put it back over. One that cannot be
-        priced is refused rather than sent unmeasured: the cap exists because a trade once went
-        out at a size nobody meant. Set only to warn, the trade goes as sized either way.
-        """
+    def _new_margin(self, cmd: OrderCommand, symbol: str, lots: float) -> float | None:
+        """The margin ``lots`` of this new trade would take, asked of the terminal."""
         price = (
             cmd.entry if cmd.op is ActionKind.PLACE else self._market_price(symbol, cmd.direction)
         )
-        margin = self._session.margin_for(cmd.direction, symbol, lots, price) if price else None
-        warn_only = cmd.margin_cap == "warn"
-        if margin is None:
-            if warn_only:
-                log.warning("#%s: could not price its margin on %s", cmd.master_ticket, symbol)
-                return lots
-            return f"could not price the margin of {lots:g} lots on {symbol}, which a guard limits"
-        if margin <= cap:
-            return lots
-        if warn_only:
-            log.warning(
-                "#%s: %g lots on %s use %.2f margin, over the %.2f a guard allows",
-                cmd.master_ticket,
-                lots,
-                symbol,
-                margin,
-                cap,
-            )
-            return lots
-        if cmd.margin_cap == "shrink":
-            fitted = floor_to_step(lots * cap / margin, facts.volume_step)
-            if fitted >= facts.volume_min:
-                log.warning(
-                    "#%s: shrunk from %g to %g lots on %s to fit a guard's %.2f margin",
-                    cmd.master_ticket,
-                    lots,
-                    fitted,
-                    symbol,
-                    cap,
-                )
-                return fitted
-            return (
-                f"even {facts.volume_min:g} lots on {symbol} needs more than the "
-                f"{cap:.2f} margin a guard allows"
-            )
-        return (
-            f"{lots:g} lots on {symbol} need {margin:.2f} margin, over the {cap:.2f} a guard allows"
+        return self._session.margin_for(cmd.direction, symbol, lots, price) if price else None
+
+    def _fit_margin(
+        self, cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float
+    ) -> MarginFit | None:
+        """:func:`mt5copier.sizing.fit_margin`, with the margin asked of the terminal. None
+        without the cap."""
+        if cmd.max_margin is None:
+            return None
+        return fit_margin(
+            lots=lots,
+            margin=self._new_margin(cmd, symbol, lots),
+            cap=cmd.max_margin,
+            mode=cmd.margin_cap,
+            symbol=symbol,
+            facts=facts,
+            rule=cmd.margin_rule,
+            rule_id=cmd.margin_rule_id,
+        )
+
+    def _fit_total_margin(
+        self, cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float
+    ) -> MarginFit | None:
+        """:func:`mt5copier.sizing.fit_total_margin`, with the margin in use read now. None
+        without the cap."""
+        if cmd.max_total_margin is None:
+            return None
+        return fit_total_margin(
+            lots=lots,
+            margin=self._new_margin(cmd, symbol, lots),
+            total=cmd.max_total_margin,
+            in_use=self._session.margin_used(),
+            mode=cmd.total_margin_cap,
+            symbol=symbol,
+            facts=facts,
+            rule=cmd.total_margin_rule,
+            rule_id=cmd.total_margin_rule_id,
         )
 
     # --- the guard ------------------------------------------------------------------------

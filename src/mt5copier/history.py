@@ -24,7 +24,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .day_book import MasterEvent, Outcome, SlaveOutcome
+from .day_book import MasterEvent, Outcome, SlaveOutcome, describe_guard
 from .logging_setup import get_logger
 from .protocol import ActionKind
 from .reconcile import Action
@@ -55,9 +55,27 @@ CREATE TABLE IF NOT EXISTS steps (
 );
 CREATE INDEX IF NOT EXISTS steps_by_trade ON steps (terminal_id, master_ticket, ts);
 CREATE INDEX IF NOT EXISTS steps_by_time ON steps (ts);
+CREATE TABLE IF NOT EXISTS guard_actions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            REAL    NOT NULL,
+    account       TEXT    NOT NULL,
+    terminal_id   TEXT    NOT NULL,
+    rule_id       TEXT    NOT NULL,
+    rule          TEXT    NOT NULL,
+    action        TEXT    NOT NULL,
+    detail        TEXT    NOT NULL,
+    master_ticket INTEGER,
+    symbol        TEXT    NOT NULL DEFAULT '',
+    label         TEXT    NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS guard_actions_by_account ON guard_actions (account, ts);
 """
 
-_ADDED_COLUMNS = (("lots", "REAL"), ("action", "TEXT NOT NULL DEFAULT ''"))
+_ADDED_COLUMNS = (
+    ("lots", "REAL"),
+    ("action", "TEXT NOT NULL DEFAULT ''"),
+    ("guard", "TEXT NOT NULL DEFAULT ''"),
+)
 """Columns added after the table first shipped, added on open to a file that lacks them."""
 
 _ENTRIES = (ActionKind.OPEN.value, ActionKind.PLACE.value)
@@ -93,6 +111,26 @@ class Step:
     action: str = ""
     """What was done, in a word or few: ``opened``, ``stop/target change skipped``,
     ``breakeven``. Empty on a step written before it was kept apart, whose details say it."""
+    guard: str = ""
+    """What the slave's guards did to it -- ``Margin per trade shrunk it: from 3.5 to 1.2
+    lots ...`` -- or empty."""
+
+
+@dataclass(frozen=True, slots=True)
+class GuardAction:
+    """One thing a prop-firm guard did on an account: to a trade, or to the slave as a whole
+    (``master_ticket`` None), such as holding it back from new trades."""
+
+    ts: float
+    account: str
+    terminal_id: str
+    rule_id: str
+    rule: str
+    action: str
+    detail: str
+    master_ticket: int | None = None
+    symbol: str = ""
+    label: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +307,7 @@ def step_for(head: MasterEvent, outcome: SlaveOutcome, action: Action | None) ->
         slave=detail,
         lots=outcome.lots,
         action=did,
+        guard=describe_guard(outcome),
     )
 
 
@@ -343,8 +382,8 @@ class HistoryStore:
                     return
                 db.execute(
                     "INSERT INTO steps (ts, terminal_id, master_ticket, symbol, label, kind, "
-                    "outcome, problem, master, slave, lots, action) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "outcome, problem, master, slave, lots, action, guard) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         step.ts,
                         step.terminal_id,
@@ -358,6 +397,7 @@ class HistoryStore:
                         step.slave,
                         step.lots,
                         step.action,
+                        step.guard,
                     ),
                 )
                 db.commit()
@@ -382,9 +422,35 @@ class HistoryStore:
         step = Step(ts, terminal_id, master_ticket, symbol, label, NOTE, "", False, "", detail)
         self.record(replace(step, action=action), now=ts)
 
+    def record_guard(self, action: GuardAction) -> None:
+        """Write one thing a guard did."""
+        with self._lock:
+            try:
+                db = self._db
+                db.execute(
+                    "INSERT INTO guard_actions (ts, account, terminal_id, rule_id, rule, action, "
+                    "detail, master_ticket, symbol, label) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        action.ts,
+                        action.account,
+                        action.terminal_id,
+                        action.rule_id,
+                        action.rule,
+                        action.action,
+                        action.detail,
+                        action.master_ticket,
+                        action.symbol,
+                        action.label,
+                    ),
+                )
+                db.commit()
+            except sqlite3.Error:
+                log.exception("could not write a guard action to the history")
+
     def _prune(self, now: float) -> None:
         cutoff = now - self._keep_days * 86400.0
         gone = self._db.execute("DELETE FROM steps WHERE ts < ?", (cutoff,)).rowcount
+        self._db.execute("DELETE FROM guard_actions WHERE ts < ?", (cutoff,))
         self._db.commit()
         self._pruned = now
         if gone:
@@ -429,6 +495,37 @@ class HistoryStore:
                 return []
         return _group(rows, tickets)
 
+    def guard_actions(
+        self, account: str, *, since: float | None = None, limit: int = 200
+    ) -> list[GuardAction]:
+        """What the guards did on this account since ``since`` (default: everything kept),
+        newest first."""
+        with self._lock:
+            try:
+                rows = self._db.execute(
+                    "SELECT * FROM guard_actions WHERE account = ? AND ts >= ? "
+                    "ORDER BY ts DESC, id DESC LIMIT ?",
+                    (account, since or 0.0, limit),
+                ).fetchall()
+            except sqlite3.Error:
+                log.exception("could not read the guard actions")
+                return []
+        return [
+            GuardAction(
+                ts=r["ts"],
+                account=r["account"],
+                terminal_id=r["terminal_id"],
+                rule_id=r["rule_id"],
+                rule=r["rule"],
+                action=r["action"],
+                detail=r["detail"],
+                master_ticket=r["master_ticket"],
+                symbol=r["symbol"],
+                label=r["label"],
+            )
+            for r in rows
+        ]
+
 
 def _group(rows: Iterable[sqlite3.Row], order: list[int]) -> list[Trade]:
     steps: dict[int, list[Step]] = {}
@@ -447,6 +544,7 @@ def _group(rows: Iterable[sqlite3.Row], order: list[int]) -> list[Trade]:
                 slave=r["slave"],
                 lots=r["lots"],
                 action=r["action"],
+                guard=r["guard"],
             )
         )
     out: list[Trade] = []

@@ -41,6 +41,7 @@ def snap(
     since: float | None = NOW - 50 * 3600,
     positions: tuple[tuple[float, float], ...] = (),
     margin_free: float | None = 90_000.0,
+    margin: float | None = None,
 ) -> Snapshot:
     """``positions`` are ``(stop, floating P/L)`` pairs."""
     opened = tuple(
@@ -58,6 +59,7 @@ def snap(
         balance=balance,
         equity=balance if equity is None else equity,
         margin_free=margin_free,
+        margin=margin,
         currency="USD",
         open_positions=opened,
         live_positions=live,
@@ -250,6 +252,19 @@ def test_margin_per_trade_shows_the_limit_now(tmp_path: Path) -> None:
     book = book_with(GuardRule(type="margin_per_trade", params={"limit": 10}), tmp=tmp_path)
     status = only(book, snap(margin_free=50_000.0))
     assert status.limit == pytest.approx(5_000.0) and status.level is Level.OK
+
+
+def test_total_margin_counts_the_margin_in_use(tmp_path: Path) -> None:
+    rule = GuardRule(type="total_margin", params={"limit": 30, "percent_of": "balance"})
+    book = book_with(rule, tmp=tmp_path)
+    status = only(book, snap(balance=10_000.0, margin=2_000.0))
+    assert (status.used, status.limit) == (pytest.approx(2_000.0), pytest.approx(3_000.0))
+    assert "may add up to 1,000.00" in status.detail
+    assert status.basis == "30% of the balance"
+    verdict = book.verdict(KEY, snap(balance=10_000.0, margin=2_000.0), NOW)
+    assert verdict.max_total_margin is not None
+    assert verdict.max_total_margin.amount == pytest.approx(3_000.0)
+    assert verdict.max_margin is None
 
 
 def test_risk_per_trade_against_the_slaves_own_sizing(tmp_path: Path) -> None:

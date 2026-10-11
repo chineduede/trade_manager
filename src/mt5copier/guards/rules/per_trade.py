@@ -7,7 +7,7 @@ comes along, what they show is the limit they would hold it to right now.
 from __future__ import annotations
 
 from ..account import AccountView
-from ..base import Level, Measure, Memory, Rule, amount_words, money, register
+from ..base import Level, Measure, Memory, Rule, amount_words, basis_words, money, register
 from ..params import UNIT, Param, ParamKind, ParamValue, on_breach
 
 
@@ -15,6 +15,7 @@ from ..params import UNIT, Param, ParamKind, ParamValue, on_breach
 class MarginPerTrade(Rule):
     type = "margin_per_trade"
     title = "Margin per trade"
+    blurb = "caps the margin one new trade may use"
     cap = "margin"
     params = (
         Param("limit", "Limit", ParamKind.NUMBER, 20.0, minimum=0),
@@ -22,9 +23,14 @@ class MarginPerTrade(Rule):
         on_breach("decline", "warn", "decline", "shrink"),
     )
 
+    def basis(self, p: dict[str, ParamValue]) -> str:
+        return basis_words(p, "the free margin")
+
     def sentence(self, p: dict[str, ParamValue], currency: str) -> str:
         return (
-            f"A new trade may use at most {amount_words(p, 'the free margin', currency)} in margin."
+            f"Each new trade on its own may take at most "
+            f"{amount_words(p, 'the free margin', currency)} as margin. What is already open "
+            "counts only by leaving less free margin; Total margin in use caps them together."
         )
 
     def measure(
@@ -43,10 +49,82 @@ class MarginPerTrade(Rule):
         )
 
 
+_TOTAL_OF = {
+    "equity": "the equity",
+    "balance": "the balance",
+    "initial_balance": "the initial balance",
+}
+
+
+@register
+class TotalMargin(Rule):
+    """Every open trade's margin and a new trade's together, under one limit.
+
+    Checked by the worker as each trade is sent, against the margin in use at that moment, so
+    two trades copied together are each measured with the other already counted."""
+
+    type = "total_margin"
+    title = "Total margin in use"
+    blurb = "caps the margin of all open trades together"
+    cap = "total_margin"
+    params = (
+        Param("limit", "Limit", ParamKind.NUMBER, 30.0, minimum=0),
+        UNIT,
+        Param(
+            "percent_of",
+            "A percent of",
+            ParamKind.CHOICE,
+            "equity",
+            choices=tuple(_TOTAL_OF.items()),
+            only_if=("unit", "percent"),
+        ),
+        on_breach("decline", "warn", "decline", "shrink"),
+    )
+
+    def basis(self, p: dict[str, ParamValue]) -> str:
+        return basis_words(p, _TOTAL_OF[str(p["percent_of"])])
+
+    def sentence(self, p: dict[str, ParamValue], currency: str) -> str:
+        of = _TOTAL_OF[str(p["percent_of"])]
+        return (
+            f"All open trades together, a new one included, may take at most "
+            f"{amount_words(p, of, currency)} as margin."
+        )
+
+    def measure(
+        self, view: AccountView, p: dict[str, ParamValue], rule_id: str, memory: Memory
+    ) -> Measure:
+        if p["unit"] == "money":
+            limit = float(p["limit"])
+        else:
+            of = str(p["percent_of"])
+            base = {
+                "equity": view.equity,
+                "balance": view.balance,
+                "initial_balance": view.initial_balance,
+            }[of]
+            if base is None:
+                return Measure(
+                    unknown="set the account's initial balance"
+                    if of == "initial_balance"
+                    else f"{_TOTAL_OF[of]} has not been read yet"
+                )
+            limit = base * float(p["limit"]) / 100
+        if view.margin is None:
+            return Measure(unknown="the margin in use has not been read yet")
+        left = max(0.0, limit - view.margin)
+        return Measure(
+            used=view.margin,
+            limit=limit,
+            detail=f"a new trade may add up to {money(left)} in margin now",
+        )
+
+
 @register
 class RiskPerTrade(Rule):
     type = "risk_per_trade"
     title = "Risk per trade"
+    blurb = "caps what one trade risks to its stop"
     cap = "risk"
     params = (
         Param("limit", "Limit", ParamKind.NUMBER, 1.0, minimum=0),
@@ -61,6 +139,11 @@ class RiskPerTrade(Rule):
         ),
         on_breach("decline", "warn", "decline", "shrink"),
     )
+
+    def basis(self, p: dict[str, ParamValue]) -> str:
+        return basis_words(
+            p, "the initial balance" if p["percent_of"] == "initial_balance" else "the balance"
+        )
 
     def sentence(self, p: dict[str, ParamValue], currency: str) -> str:
         of = "the initial balance" if p["percent_of"] == "initial_balance" else "the balance"
@@ -98,6 +181,7 @@ class RiskPerTrade(Rule):
 class StopRequired(Rule):
     type = "stop_required"
     title = "Stop loss required"
+    blurb = "refuses a new trade with no stop loss"
     needs_stop = True
     params = (on_breach("decline", "warn", "decline"),)
 

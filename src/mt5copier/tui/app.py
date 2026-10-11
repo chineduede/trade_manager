@@ -43,7 +43,14 @@ from .. import role_actions
 from .. import setups as setups_mod
 from ..config import AppConfig, Role, TerminalConfig, account_key
 from ..ctrader import auth as ctrader_auth
-from ..day_book import MasterEvent, Outcome, SlaveOutcome, describe_master, describe_outcome
+from ..day_book import (
+    MasterEvent,
+    Outcome,
+    SlaveOutcome,
+    describe_guard,
+    describe_master,
+    describe_outcome,
+)
 from ..discovery import discover_terminals
 from ..engine import Engine, TerminalView
 from ..guards import AccountGuards, GuardRule, GuardsDoc
@@ -1577,7 +1584,7 @@ class CopierApp(App[None]):
                 break
             ordered = sorted(event.outcomes, key=lambda o: numbers.get(o.terminal_id, 99))
             shown.append((event, [(slave_name(o.terminal_id), o) for o in ordered]))
-            lines += 1 + len(ordered)
+            lines += 1 + len(ordered) + sum(1 for o in ordered if describe_guard(o))
         # Wide enough for the longest slave name shown, so the outcomes line up.
         width = max((len(name) for _, outs in shown for name, _ in outs), default=0)
 
@@ -1590,6 +1597,11 @@ class CopierApp(App[None]):
             for name, out in outs:
                 line = Text(f"{name:<{width}}  ", style=FG)
                 line.append(describe_outcome(event.kind, out), style=_tone(out))
+                guard = describe_guard(out)
+                if guard:
+                    line.append(f"\n{'':<{width}}  ")
+                    line.append("GUARD ", style=f"bold {YELLOW}")
+                    line.append(guard, style=YELLOW)
                 table.add_row("", line)
         panel.update(table)
 

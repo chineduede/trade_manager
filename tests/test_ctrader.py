@@ -587,6 +587,16 @@ class FakeOpenApi:
             return self._execution(om.ORDER_CANCELLED, self._shell(order), 0, order=order)
         if isinstance(msg, oa.ProtoOANewOrderReq):
             return self._new_order(msg)
+        if isinstance(msg, oa.ProtoOAExpectedMarginReq):
+            # 1,000.00 a lot either way: a lot is 10,000,000 in cTrader's volume.
+            return oa.ProtoOAExpectedMarginRes(
+                ctidTraderAccountId=ACCOUNT,
+                margin=[
+                    om.ProtoOAExpectedMargin(volume=v, buyMargin=v // 100, sellMargin=v // 100)
+                    for v in msg.volume
+                ],
+                moneyDigits=2,
+            )
         if isinstance(msg, oa.ProtoOAClosePositionReq):
             return self._close(msg)
         if isinstance(msg, oa.ProtoOAAmendPositionSLTPReq):
@@ -1000,6 +1010,45 @@ async def test_a_lot_multiple_open_needs_no_stop() -> None:
     assert order.volume == 3_000_000
     assert not order.HasField("relativeStopLoss")
     assert not _sent(api, oa.ProtoOAAmendPositionSLTPReq)
+
+
+async def test_the_total_margin_cap_counts_what_the_account_has_open() -> None:
+    # 2 lots need 2,000.00; of the 1,500.00 total, position 77 uses 25.00 already.
+    api = FakeOpenApi()
+    cmd = _command(
+        ActionKind.OPEN,
+        sizing_basis=SizingBasis.MASTER_LOT_MULTIPLE,
+        master_volume=2.0,
+        lot_multiple=1.0,
+        max_total_margin=1_500.0,
+        total_margin_cap="shrink",
+        total_margin_rule="Total margin in use",
+    )
+    results = await _results(api, cmd)
+    assert results[0].ok, results[0].error
+    (order,) = _sent(api, oa.ProtoOANewOrderReq)
+    assert order.volume == 14_700_000
+    [note] = results[0].guard
+    assert note.text() == (
+        "Total margin in use shrunk it: from 2 to 1.47 lots: 2,000.00 margin needed, "
+        "1,475.00 left of the 1,500.00 total (25.00 in use)"
+    )
+
+
+async def test_the_margin_per_trade_cap_on_ctrader() -> None:
+    api = FakeOpenApi()
+    cmd = _command(
+        ActionKind.OPEN,
+        sizing_basis=SizingBasis.MASTER_LOT_MULTIPLE,
+        master_volume=2.0,
+        lot_multiple=1.0,
+        max_margin=500.0,
+        margin_cap="decline",
+    )
+    results = await _results(api, cmd)
+    assert not results[0].ok
+    assert not _sent(api, oa.ProtoOANewOrderReq)
+    assert [n.action for n in results[0].guard] == ["declined"]
 
 
 async def test_a_fill_charged_nothing_reports_no_commission() -> None:

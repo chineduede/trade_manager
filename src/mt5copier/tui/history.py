@@ -80,6 +80,11 @@ def card_body(trade: Trade, now: float | None = None) -> Text:
         out.append(step.slave, style=color if step.problem or step.kind == NOTE else FG)
         if step.master:
             out.append(f" · {step.master}", style=MUTED)
+        if step.guard:
+            # Under its step, so a trade a guard resized never reads as sized that way.
+            out.append(f"\n{'':>12}  ")
+            out.append("GUARD", style=f"bold {YELLOW}")
+            out.append(f"  {step.guard}", style=YELLOW)
     return out
 
 

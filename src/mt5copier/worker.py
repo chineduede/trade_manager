@@ -337,6 +337,16 @@ class _Session:
         except (TypeError, ValueError):
             return None
 
+    def margin_used(self) -> float | None:
+        """``account_info().margin``: what the open positions use now. None if unreadable."""
+        try:
+            account = self._mt5.account_info()
+            margin = getattr(account, "margin", None) if account is not None else None
+            return None if margin is None else float(margin)
+        except Exception as exc:
+            log.debug("account_info() raised while reading the margin in use: %r", exc)
+            return None
+
     def position(self, ticket: int) -> LivePosition | None | ReadFailure:
         """``(symbol, direction, volume)`` for one open position, read live.
 

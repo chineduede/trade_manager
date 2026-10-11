@@ -30,16 +30,25 @@ Where cTrader differs:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from ..execution import Outcome
 from ..logging_setup import get_logger
-from ..protocol import ActionKind, OrderCommand, OrderResult, PositionType, SizingBasis
+from ..protocol import (
+    ActionKind,
+    GuardNote,
+    OrderCommand,
+    OrderResult,
+    PositionType,
+    SizingBasis,
+)
 from ..sizing import (
+    MarginFit,
     SizingResult,
     SymbolFacts,
-    floor_to_step,
+    fit_margin,
+    fit_total_margin,
     lots_for_master_multiple,
     lots_for_risk,
     quantize_volume,
@@ -153,10 +162,10 @@ class CTraderExecutor:
 
     async def _prepare(
         self, cmd: OrderCommand
-    ) -> tuple[str, cv.SymbolInfo, float, float | None] | OrderResult:
-        """What every new order starts with: the slave's symbol, the lots to send and, for a
-        cross, the rate converting its quote currency into the account's -- or the failure
-        that stops it."""
+    ) -> tuple[str, cv.SymbolInfo, float, float | None, tuple[GuardNote, ...]] | OrderResult:
+        """What every new order starts with: the slave's symbol, the lots to send, for a
+        cross the rate converting its quote currency into the account's, and what a guard's
+        margin cap did to it -- or the failure that stops it."""
         account = self._account
         resolved = self._symbols.resolve(
             self._terminal_id,
@@ -197,19 +206,36 @@ class CTraderExecutor:
             return self._fail(cmd, slave_symbol=name, error=sizing.describe())
         log.info("#%s on %s: %s", cmd.master_ticket, name, sizing.describe())
         lots = sizing.lots
-        if cmd.max_margin is not None:
-            fitted = await self._fit_margin(cmd, symbol, facts, lots, cmd.max_margin)
-            if isinstance(fitted, str):
-                return self._fail(cmd, slave_symbol=name, error=fitted)
-            lots = fitted
-        return name, symbol, lots, conversion
+        notes: tuple[GuardNote, ...] = ()
+        for fit_to in (self._fit_margin, self._fit_total_margin):
+            fit = await fit_to(cmd, symbol, facts, lots)
+            if fit is None:
+                continue
+            if fit.note is not None:
+                notes += (fit.note,)
+                log.warning("#%s on %s: %s", cmd.master_ticket, name, fit.note.text())
+            if fit.lots is None:
+                return self._fail(cmd, slave_symbol=name, error=fit.error, guard=notes)
+            lots = fit.lots
+        return name, symbol, lots, conversion, notes
 
     async def _open(self, cmd: OrderCommand) -> OrderResult:
-        account = self._account
         prepared = await self._prepare(cmd)
         if isinstance(prepared, OrderResult):
             return prepared
-        name, symbol, lots, conversion = prepared
+        name, symbol, lots, conversion, notes = prepared
+        result = await self._send_open(cmd, name, symbol, lots, conversion)
+        return replace(result, guard=notes) if notes else result
+
+    async def _send_open(
+        self,
+        cmd: OrderCommand,
+        name: str,
+        symbol: cv.SymbolInfo,
+        lots: float,
+        conversion: float | None,
+    ) -> OrderResult:
+        account = self._account
         request = oa.ProtoOANewOrderReq(
             ctidTraderAccountId=account.account_id,
             symbolId=symbol.symbol_id,
@@ -310,7 +336,19 @@ class CTraderExecutor:
         prepared = await self._prepare(cmd)
         if isinstance(prepared, OrderResult):
             return prepared
-        name, symbol, lots, conversion = prepared
+        name, symbol, lots, conversion, notes = prepared
+        result = await self._send_place(cmd, kind, name, symbol, lots, conversion)
+        return replace(result, guard=notes) if notes else result
+
+    async def _send_place(
+        self,
+        cmd: OrderCommand,
+        kind: om.ProtoOAOrderType,
+        name: str,
+        symbol: cv.SymbolInfo,
+        lots: float,
+        conversion: float | None,
+    ) -> OrderResult:
         digits = symbol.digits
         request = oa.ProtoOANewOrderReq(
             ctidTraderAccountId=self._account.account_id,
@@ -488,47 +526,41 @@ class CTraderExecutor:
         )
 
     async def _fit_margin(
-        self, cmd: OrderCommand, symbol: cv.SymbolInfo, facts: SymbolFacts, lots: float, cap: float
-    ) -> float | str:
-        """:meth:`mt5copier.executor.Executor._fit_margin`, with the margin asked of cTrader."""
+        self, cmd: OrderCommand, symbol: cv.SymbolInfo, facts: SymbolFacts, lots: float
+    ) -> MarginFit | None:
+        """:func:`mt5copier.sizing.fit_margin`, with the margin asked of cTrader. None without
+        the cap."""
+        if cmd.max_margin is None:
+            return None
         margin = await self._margin(cmd.direction, symbol, lots)
-        warn_only = cmd.margin_cap == "warn"
-        name = symbol.name
-        if margin is None:
-            if warn_only:
-                log.warning("#%s: could not price its margin on %s", cmd.master_ticket, name)
-                return lots
-            return f"could not price the margin of {lots:g} lots on {name}, which a guard limits"
-        if margin <= cap:
-            return lots
-        if warn_only:
-            log.warning(
-                "#%s: %g lots on %s use %.2f margin, over the %.2f a guard allows",
-                cmd.master_ticket,
-                lots,
-                name,
-                margin,
-                cap,
-            )
-            return lots
-        if cmd.margin_cap == "shrink":
-            fitted = floor_to_step(lots * cap / margin, facts.volume_step)
-            if fitted >= facts.volume_min:
-                log.warning(
-                    "#%s: shrunk from %g to %g lots on %s to fit a guard's %.2f margin",
-                    cmd.master_ticket,
-                    lots,
-                    fitted,
-                    name,
-                    cap,
-                )
-                return fitted
-            return (
-                f"even {facts.volume_min:g} lots on {name} needs more than the "
-                f"{cap:.2f} margin a guard allows"
-            )
-        return (
-            f"{lots:g} lots on {name} need {margin:.2f} margin, over the {cap:.2f} a guard allows"
+        return fit_margin(
+            lots=lots,
+            margin=margin,
+            cap=cmd.max_margin,
+            mode=cmd.margin_cap,
+            symbol=symbol.name,
+            facts=facts,
+            rule=cmd.margin_rule,
+            rule_id=cmd.margin_rule_id,
+        )
+
+    async def _fit_total_margin(
+        self, cmd: OrderCommand, symbol: cv.SymbolInfo, facts: SymbolFacts, lots: float
+    ) -> MarginFit | None:
+        """:func:`mt5copier.sizing.fit_total_margin`, with the margin in use asked of cTrader
+        now. None without the cap."""
+        if cmd.max_total_margin is None:
+            return None
+        return fit_total_margin(
+            lots=lots,
+            margin=await self._margin(cmd.direction, symbol, lots),
+            total=cmd.max_total_margin,
+            in_use=await self._account.used_margin(),
+            mode=cmd.total_margin_cap,
+            symbol=symbol.name,
+            facts=facts,
+            rule=cmd.total_margin_rule,
+            rule_id=cmd.total_margin_rule_id,
         )
 
     async def _margin(
