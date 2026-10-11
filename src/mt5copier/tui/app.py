@@ -221,7 +221,8 @@ class CopierApp(App[None]):
         yield TopBar("", id="topbar")
         with ContentSwitcher(initial="page-map", id="pages"):
             with VerticalScroll(id="page-map"):
-                yield Card("", classes="master")
+                with Horizontal(id="master-row"):
+                    yield Card("", classes="master")
                 yield Vertical(id="slaves")
                 with Horizontal(id="lower"):
                     with Vertical(id="daybook-col"):
@@ -1248,14 +1249,17 @@ class CopierApp(App[None]):
                 beside = Trunk(more=more)
                 self._trunks.append(beside)
                 cells.append(beside)
+            chunk_cards = []
             for v in chunk:
                 card = Card(v.cfg.terminal_id, classes="slave")
                 self._cards[card.terminal_id] = card
-                cells.append(card)
-            # Empty slots keep a lone card a quarter wide rather than stretching it.
-            cells += [Static(classes="slot") for _ in range(self._per_row - len(chunk))]
+                chunk_cards.append(card)
+            # The cards keep a full row's width (see _size_cards) and sit in the middle of
+            # theirs, so a row of one or two is centred under the master, not stretched.
+            cells.append(Horizontal(*chunk_cards, classes="slave-cards"))
             row = Horizontal(*cells, classes="slave-row")
             rail = Rail(row, first=n == 0, trunk=trunk, more=more)
+            rail.master = master_card
             self._rails.append(rail)
             widgets += [rail, row]
         if not rows:
@@ -1269,6 +1273,21 @@ class CopierApp(App[None]):
         """Slaves in the order their cards are drawn and numbered -- which the 1-9 keys and the
         day book must follow too. Not ``cfg.slaves``, which is in the order they were added."""
         return [v.cfg.terminal_id for v in self._groups()[1]]
+
+    def _size_cards(self) -> None:
+        """Every card on the Map, the master's too, one width: the share of a full row one
+        card gets, after the trunk and the gaps between cards (see ``.slave-cards`` in
+        app.tcss)."""
+        room = self.query_one("#master-row").content_size.width
+        if room <= 0:
+            return
+        per_row = self._per_row or self._cards_per_row()
+        trunk = 2 if len(self._rails) > 1 else 0
+        width = min(max((room - trunk - 2 * (per_row - 1)) // per_row, 30), room)
+        for card in self.query(Card):
+            now = card.styles.width
+            if now is None or now.value != width:
+                card.styles.width = width
 
     def _cards_per_row(self) -> int:
         """Four slave cards to a row, as the design has them; two on a narrow terminal."""
@@ -1363,6 +1382,8 @@ class CopierApp(App[None]):
                 )
             )
             card.set_classes(f"card slave -{state.kind}" + (" -selected" if selected else ""))
+
+        self._size_cards()
 
         # The master is live while it is up and at least one slave is taking its trades: its
         # border then matches the lines running from it.

@@ -11,7 +11,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from rich.console import Group, RenderableType
-from rich.table import Table
 from rich.text import Text
 
 from ..config import SizingMode, TerminalConfig
@@ -21,7 +20,9 @@ from ..presentation import RowInfo, slave_badge
 from ..protocol import Snapshot
 from ..terminal_detail import bar, format_ping, margin_gauge
 from .style import (
+    BG,
     BLUE,
+    FG,
     GREEN,
     MUTED,
     RED,
@@ -204,43 +205,41 @@ def slave_card(
     return Group(*lines)
 
 
+def master_title() -> Text:
+    """The master's name tag, filled in cream, where a slave's card has plain ``1 · SLAVE``: with
+    its double border, what tells the master's card apart at a glance."""
+    # A span, not the Text's own style, which would fill the whole cell it sits in.
+    return Text.assemble((" A · MASTER ", f"bold {BG} on {FG}"))
+
+
 def master_card(
     view: TerminalView, info: RowInfo, *, slaves: int, width: int = 0
 ) -> RenderableType:
+    """The same lines as a slave's card, in the same places, so the two read alike."""
     snap = view.snapshot
-    grid = Table.grid(expand=True, padding=(0, 3))
-    grid.add_column(no_wrap=True, vertical="middle")
-    grid.add_column(no_wrap=True, vertical="middle")
-    grid.add_column(no_wrap=True, ratio=1, vertical="middle")
-    grid.add_column(justify="right", no_wrap=True, vertical="middle")
-
     if snap is not None and info.tier == "good":
-        link = Text("connected", style=BLUE)
-        ping = format_ping(snap.ping_last_us)
-        if ping != "—":
-            link.append(f" · {ping}", style=BLUE)
+        link = Text("connected", style=f"bold {BLUE}")
     else:
         link = Text(info.status_text, style=f"bold {RED if info.tier != 'muted' else MUTED}")
-
-    margin = margin_line(snap)
+    ping = format_ping(snap.ping_last_us) if snap is not None else "—"
 
     trades = info.open_trades
-    trade_word = "—" if trades is None else f"{trades} trade{'s' if trades != 1 else ''} open"
+    trade_word = "—" if trades is None else f"{trades} open"
     feeds = f"feeds {slaves} slave{'s' if slaves != 1 else ''}"
-
-    # The big balance only when the rest still fits beside it: about 70 columns of text.
-    grid.add_row(
-        Group(Text("A · MASTER", style="bold"), Text(info.label, no_wrap=True)),
-        big_amount(info.balance, max(0, width - 75)),
-        Group(floating(info.floating_pl), margin),
-        Group(link, Text(f"{trade_word} · {feeds}", style=MUTED)),
+    return Group(
+        left_right(master_title(), link),
+        Text(info.label, no_wrap=True, overflow="ellipsis"),
+        big_amount(info.balance, width),
+        floating(info.floating_pl),
+        Text(f"{trade_word} · {feeds}", style=MUTED),
+        left_right(margin_line(snap), Text("" if ping == "—" else ping, style=MUTED)),
     )
-    return grid
 
 
 def no_master_card() -> RenderableType:
     return Group(
-        Text("A · MASTER", style="bold"),
+        master_title(),
+        Text(""),
         Text("none yet: select a terminal under NOT YET OPENED and press m", style=MUTED),
     )
 

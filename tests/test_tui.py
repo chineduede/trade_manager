@@ -272,6 +272,32 @@ async def test_live_cards_have_the_lines_green_border(app: CopierApp, cfg: AppCo
         assert not master.has_class("-live") and not slave.has_class("-copying")
 
 
+@pytest.mark.parametrize("width", [160, 100])
+async def test_the_master_card_is_a_slaves_size_and_centred(
+    app: CopierApp, cfg: AppConfig, width: int
+) -> None:
+    cfg.set_role(TID_MASTER, Role.MASTER)
+    cfg.set_role(TID_SLAVE, Role.SLAVE)
+    async with app.run_test(size=(width, 50)) as pilot:
+        app._refresh()
+        await pilot.pause()
+        master = app.query_one(".card.master", Card)
+        slave = next(c for c in app.query(Card) if c.terminal_id == TID_SLAVE)
+        assert master.region.width == slave.region.width
+
+        def centred(card: Card, row_id: str) -> bool:
+            row = app.query_one(row_id).region
+            return abs((card.region.x - row.x) - (row.right - card.region.right)) <= 1
+
+        assert centred(master, "#master-row")
+        # A row of one slave is not stretched, and sits in the middle too.
+        assert centred(slave, ".slave-cards")
+        # The stem comes down from the master's middle.
+        rail = app.query_one(Rail)
+        stem = plain(rail.render()).splitlines()[0]
+        assert abs(stem.index("│") + rail.region.x - master.region.center[0]) <= 1
+
+
 async def test_tab_switches_to_the_log_and_back(app: CopierApp) -> None:
     async with app.run_test(size=(160, 50)) as pilot:
         await pilot.press("tab")

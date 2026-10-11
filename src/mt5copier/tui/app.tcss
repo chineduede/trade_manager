@@ -47,8 +47,9 @@ Screen {
 }
 
 /* Slave cards in rows of four (two when narrow), as the design has them: one slave is a
-   quarter-width card, not a banner. Rows are a fixed height so the trunk beside them can be
-   drawn the full height of the row. */
+   quarter-width card, not a banner, and a row that is not full sits in the middle. Each card's
+   width is set from a full row's (see CopierApp._size_cards). Rows are a fixed height so the
+   trunk beside them can be drawn the full height of the row. */
 #slaves {
     height: auto;
 }
@@ -57,15 +58,18 @@ Screen {
     height: 12;
 }
 
-.slave-row > .card,
-.slave-row > .slot {
+.slave-cards {
     width: 1fr;
+    height: 100%;
+    align-horizontal: center;
+}
+
+.slave-cards > .card {
     height: 100%;
     margin-right: 2;
 }
 
-.slave-row > .card:last-child,
-.slave-row > .slot:last-child {
+.slave-cards > .card:last-child {
     margin-right: 0;
 }
 
@@ -86,11 +90,26 @@ Screen {
     border: dashed $panel;
 }
 
+/* The master: a slave card's size, centred over the slaves, in a double border that marks it
+   out from them. Its width is set from the slaves' (see CopierApp._size_cards). */
+#master-row {
+    height: 12;
+    align-horizontal: center;
+}
+
+.card.master {
+    height: 100%;
+    border: double $foreground;
+}
+
 /* Live: the master while it is being copied and each slave taking its trades, in the green of
    the lines between them (see GREEN in style.py). */
-.card.master.-live,
 .card.-copying {
     border: solid #7fbf6e;
+}
+
+.card.master.-live {
+    border: double #7fbf6e;
 }
 
 /* The selected card: a wash of cream that the card shows through, not a solid fill. */

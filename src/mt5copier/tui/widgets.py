@@ -63,7 +63,7 @@ class Picked(Message):
 
 
 class Card(Static):
-    """One terminal on the Map: the master's wide card, or one slave's.
+    """One terminal on the Map: the master's card, or one slave's, both the same size.
 
     It draws whatever the app hands it. Which border it has (solid, dashed for paused, red and
     dashed for held back) and whether it is the selected one are CSS classes, so the look of a
@@ -209,19 +209,22 @@ def rail_lines(
     trunk: bool,
     more: bool,
     below: Iterable[str] = (),
+    middle: int | None = None,
 ) -> list[Text]:
     """One row's connector, top to bottom.
 
     ``drops`` are (column, kind) for each card in the row. ``first`` adds the stem down from
     the master's middle. ``trunk`` means the tree has more than one row, so column 0 carries
     the trunk; ``more`` that it continues below this row, and ``below`` the kinds of the slaves
-    in the rows further down, which the trunk leads on to.
+    in the rows further down, which the trunk leads on to. ``middle`` is the column under the
+    master's middle, the rail's own middle when not given.
     """
     drops = sorted((x, k) for x, k in drops if 0 <= x < width)
     if not drops or width < 4:
         return []
     below = list(below) if trunk and more else []
-    middle = width // 2
+    if middle is None or not 0 <= middle < width:
+        middle = width // 2
     xs = [x for x, _ in drops]
     origin = middle if first else 0
     """Where the line enters this rail: down the stem, or off the trunk."""
@@ -300,6 +303,8 @@ class Rail(Widget):
         self.kinds: dict[str, str] = {}
         self.below: list[str] = []
         """The kinds of the slaves in the rows further down."""
+        self.master: Widget | None = None
+        """The master's card, whose middle the first row's stem comes down from."""
 
     def terminal_ids(self) -> list[str]:
         return [c.terminal_id for c in self.row.query(Card)]
@@ -321,8 +326,15 @@ class Rail(Widget):
                 trunk=self.trunk,
                 more=self.more,
                 below=self.below,
+                middle=self._master_middle(),
             )
         )
+
+    def _master_middle(self) -> int | None:
+        master = self.master
+        if master is None or master.region.width <= 0:
+            return None
+        return master.region.x + master.region.width // 2 - self.region.x
 
 
 class Trunk(Widget):
