@@ -858,6 +858,29 @@ GoLiveDialog.-short #dialog {
     margin-top: 1;
 }
 
+.form-screen #st-buttons {
+    width: auto;
+    height: auto;
+}
+
+/* Four buttons leave the words beside them a sliver on a narrow screen: the words go above. */
+.-narrow .form-screen #st-foot.stacks,
+.form-screen.-narrow #st-foot.stacks {
+    layout: vertical;
+}
+
+.-narrow .form-screen #st-foot.stacks #st-stake,
+.form-screen.-narrow #st-foot.stacks #st-stake {
+    height: auto;
+    margin-top: 0;
+}
+
+.-narrow .form-screen #st-foot.stacks #st-buttons,
+.form-screen.-narrow #st-foot.stacks #st-buttons {
+    width: 1fr;
+    align-horizontal: right;
+}
+
 .form-screen Button {
     height: 3;
     min-width: 16;

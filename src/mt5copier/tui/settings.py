@@ -72,6 +72,8 @@ _DIRECTION = (
     ("the same way as the master", "same"),
     ("the opposite way: buy becomes sell", "opposite"),
 )
+_BROKERS_OWN = ("symbol_prefix", "symbol_suffix", "symbol_map")
+"""Names that fit one broker's symbols, so copying another slave's settings leaves them be."""
 _LISTS = ("symbol_map", "symbol_whitelist", "symbol_blacklist")
 """One-line lists, where enter starts the next entry instead of saving the form."""
 
@@ -288,6 +290,7 @@ class SettingsForm(ModalScreen[bool]):
         Binding("escape", "cancel", "Cancel"),
         Binding("ctrl+s", "save", "Save"),
         Binding("ctrl+z", "revert", "Revert"),
+        Binding("ctrl+o", "copy_from", "Copy from"),
         # A modal hides the app's own keys, and the panic key must not be one of them: copying
         # can be live while this form is open.
         Binding("f9", "panic", "PANIC halt"),
@@ -433,7 +436,7 @@ class SettingsForm(ModalScreen[bool]):
                 " · copies are only simulated, so no order is sent, before or after a change.",
                 style=MUTED,
             )
-        renames = ", ".join(f"{k}={t}" for k, t in sorted(cfg.symbol_map.items()))
+        renames = str(self._written(cfg)["symbol_map"])
 
         with VerticalScroll(id="dialog", classes="settings", can_focus=False):
             yield self._header(cfg)
@@ -584,11 +587,13 @@ class SettingsForm(ModalScreen[bool]):
             )
             yield Static("", id="help")
             yield Static("", id="general-error")
-            with Horizontal(id="st-foot"):
+            with Horizontal(id="st-foot", classes="stacks"):
                 yield Static(self._at_stake(cfg), id="st-stake")
-                yield Button("Save  ctrl+s", id="save", classes="keep")
-                yield Button("Revert  ctrl+z", id="revert", classes="plain")
-                yield Button("Cancel  esc", id="cancel", classes="plain")
+                with Horizontal(id="st-buttons"):
+                    yield Button("Save  ctrl+s", id="save", classes="keep")
+                    yield Button("Copy from  ctrl+o", id="copy-from", classes="plain")
+                    yield Button("Revert  ctrl+z", id="revert", classes="plain")
+                    yield Button("Cancel  esc", id="cancel", classes="plain")
 
     def _at_stake(self, cfg: TerminalConfig) -> Text:
         held = self.copier._engine.open_copies(cfg.terminal_id)
@@ -608,7 +613,6 @@ class SettingsForm(ModalScreen[bool]):
         )
 
     def on_mount(self) -> None:
-        self._saved = self._values()
         self._show_parts()
         self.query_one(
             f"#{_F}risk_percent"
@@ -631,17 +635,27 @@ class SettingsForm(ModalScreen[bool]):
         raw["invert"] = raw["invert"] == "opposite"
         return raw
 
-    def _values(self) -> dict[str, str | bool]:
-        """What every field holds, by widget id, as written in the form."""
-        held: dict[str, str | bool] = {}
-        for widget in self.query("*"):
-            if not (widget.id or "").startswith(_F):
-                continue
-            if isinstance(widget, Input | Choice):
-                held[widget.id or ""] = widget.value
+    @staticmethod
+    def _written(cfg: TerminalConfig) -> dict[str, str | bool]:
+        """Every field's value as the form writes it for these settings, by field name."""
+        values = initial_values(cfg)
+        values["invert"] = "opposite" if cfg.invert else "same"
+        values["symbol_map"] = ", ".join(f"{k}={t}" for k, t in sorted(cfg.symbol_map.items()))
+        return values
+
+    def _fill(self, values: dict[str, str | bool]) -> None:
+        """Write values into the fields they name, then redo what hangs off them."""
+        for name, value in values.items():
+            widget = self.query_one(f"#{_F}{name}")
+            if isinstance(widget, Input):
+                widget.value = str(value)
             elif isinstance(widget, Checkbox):
-                held[widget.id or ""] = bool(widget.value)
-        return held
+                widget.value = bool(value)
+            elif isinstance(widget, Choice):
+                widget.value = str(value)
+        self._show_errors({})
+        self._show_parts()
+        self._rework()
 
     def _show_errors(self, errors: dict[str, str]) -> None:
         for spec in EDITABLE:
@@ -753,16 +767,41 @@ class SettingsForm(ModalScreen[bool]):
 
     def action_revert(self) -> None:
         """Put every field back to what is saved, and stay in the form."""
-        for wid, value in self._saved.items():
-            widget = self.query_one(f"#{wid}")
-            if isinstance(widget, Input):
-                widget.value = str(value)
-            elif isinstance(widget, Choice | Checkbox):
-                widget.value = value
-        self._show_errors({})
-        self._show_parts()
-        self._rework()
+        self._fill(self._written(self._current()))
         self.notify("Put back as saved.", timeout=2)
+
+    def _others(self) -> list[TerminalConfig]:
+        """The other slaves, whose settings this one can start from."""
+        tid = self._current().terminal_id
+        return [c for c in self.copier._cfg.slaves if c.terminal_id != tid]
+
+    def action_copy_from(self) -> None:
+        """Fill the form from another slave's settings, for review: nothing is saved until
+        the usual save, so the question about open copies is asked as for any edit."""
+        from .guards import GuardPick  # guards builds its forms from this module
+
+        others = self._others()
+        if not others:
+            self.notify("There is no other slave to copy settings from.", timeout=3)
+            return
+        names = self.copier._cfg.display_name
+        options = [(c.terminal_id, names(c.terminal_id)) for c in others]
+
+        def picked(tid: str | None) -> None:
+            source = next((c for c in others if c.terminal_id == tid), None)
+            if source is None:
+                return
+            values = self._written(source)
+            for name in _BROKERS_OWN:
+                values.pop(name)
+            self._fill(values)
+            self.notify(
+                f"Filled from {names(source.terminal_id)}; its symbol prefix, suffix and "
+                "renames are its broker's, so this slave keeps its own. Nothing is saved yet.",
+                timeout=5,
+            )
+
+        self.app.push_screen(GuardPick("Copy settings from", options), picked)
 
     def action_panic(self) -> None:
         """Halt copying, then leave the form so the app's real state is what is on screen.
@@ -794,6 +833,10 @@ class SettingsForm(ModalScreen[bool]):
     @on(Button.Pressed, "#save")
     def _on_save(self) -> None:
         self.action_save()
+
+    @on(Button.Pressed, "#copy-from")
+    def _on_copy_from(self) -> None:
+        self.action_copy_from()
 
     @on(Button.Pressed, "#revert")
     def _on_revert(self) -> None:

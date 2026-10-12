@@ -1524,11 +1524,14 @@ are the design, not a limitation waiting to be lifted.
   any of that meant to stay private), what happens to the copy loop if the Telegram API call is
   slow or fails (never blocks or delays a copy), and where the bot token lives (not plaintext in
   `config.json` if avoidable).
-- **Copy settings from another terminal — asked for 2026-10-04.** In a slave's settings form,
+- **Copy settings from another terminal — asked for 2026-10-04, built 2026-10-12.** In a slave's settings form,
   fill every field from another slave's settings, to save setting up similar accounts by hand.
   Still to settle: whether symbol renames come along (they are broker-specific, so probably
   not, or only on request), and whether it fills the form for review (nothing saved until the
   usual save, so the orphan-on-settings-edit rule still applies) — the expected answer.
+  **Built 2026-10-12**, with the expected answers: `ctrl+o` (or the Copy from button) in a
+  slave's settings form picks another slave and fills every field from it except the symbol
+  prefix, suffix and renames, which stay this slave's own. Nothing is saved until the usual save.
 - **Revert unsaved changes in the settings form — asked for 2026-10-04, built 2026-10-12.**
   One key that puts every field back to its saved value without leaving the form. As built:
   `ctrl+z` (or the Revert button) in a slave's settings form; nothing is saved by it.

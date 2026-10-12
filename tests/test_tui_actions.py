@@ -494,6 +494,40 @@ async def test_revert_puts_every_field_back_and_stays_in_the_form(
         assert app._saved_to.read_bytes() == on_disk  # type: ignore[attr-defined]
 
 
+async def test_copy_from_fills_another_slaves_settings_but_not_its_symbol_names(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        on_disk = app._saved_to.read_bytes()  # type: ignore[attr-defined]
+        other = app._cfg.terminals[TID_BROKEN]  # type: ignore[attr-defined]
+        app._cfg.terminals[TID_BROKEN] = other.model_copy(  # type: ignore[attr-defined]
+            update={
+                "role": Role.SLAVE,
+                "risk_percent": 0.5,
+                "copy_pending": True,
+                "invert": True,
+                "symbol_suffix": ".raw",
+                "symbol_map": {"US30": "DJ30"},
+                "symbol_blacklist": ["XAUUSD"],
+            }
+        )
+        screen.query_one("#f-symbol_suffix", Input).value = "m"
+        await pilot.press("ctrl+o")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert app.screen is screen
+        assert screen.query_one("#f-risk_percent", Input).value == "0.5"
+        assert screen.query_one("#f-copy_pending", Checkbox).value is True
+        assert screen.query_one("#f-invert", Choice).value == "opposite"
+        assert screen.query_one("#f-symbol_blacklist", Input).value == "XAUUSD"
+        assert screen.query_one("#f-symbol_suffix", Input).value == "m", "the broker's own"
+        assert screen.query_one("#f-symbol_map", Input).value == ""
+        assert app._saved_to.read_bytes() == on_disk  # type: ignore[attr-defined]
+        assert cfg.terminals[TID_SLAVE].risk_percent == 1.0
+
+
 async def test_saving_without_changing_anything_writes_nothing(
     app: CopierApp, cfg: AppConfig
 ) -> None:
