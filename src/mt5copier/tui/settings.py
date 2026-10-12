@@ -287,6 +287,7 @@ class SettingsForm(ModalScreen[bool]):
     BINDINGS = [
         Binding("escape", "cancel", "Cancel"),
         Binding("ctrl+s", "save", "Save"),
+        Binding("ctrl+z", "revert", "Revert"),
         # A modal hides the app's own keys, and the panic key must not be one of them: copying
         # can be live while this form is open.
         Binding("f9", "panic", "PANIC halt"),
@@ -586,6 +587,7 @@ class SettingsForm(ModalScreen[bool]):
             with Horizontal(id="st-foot"):
                 yield Static(self._at_stake(cfg), id="st-stake")
                 yield Button("Save  ctrl+s", id="save", classes="keep")
+                yield Button("Revert  ctrl+z", id="revert", classes="plain")
                 yield Button("Cancel  esc", id="cancel", classes="plain")
 
     def _at_stake(self, cfg: TerminalConfig) -> Text:
@@ -606,6 +608,7 @@ class SettingsForm(ModalScreen[bool]):
         )
 
     def on_mount(self) -> None:
+        self._saved = self._values()
         self._show_parts()
         self.query_one(
             f"#{_F}risk_percent"
@@ -627,6 +630,18 @@ class SettingsForm(ModalScreen[bool]):
             raw[(choice.id or "").removeprefix(_F)] = choice.value
         raw["invert"] = raw["invert"] == "opposite"
         return raw
+
+    def _values(self) -> dict[str, str | bool]:
+        """What every field holds, by widget id, as written in the form."""
+        held: dict[str, str | bool] = {}
+        for widget in self.query("*"):
+            if not (widget.id or "").startswith(_F):
+                continue
+            if isinstance(widget, Input | Choice):
+                held[widget.id or ""] = widget.value
+            elif isinstance(widget, Checkbox):
+                held[widget.id or ""] = bool(widget.value)
+        return held
 
     def _show_errors(self, errors: dict[str, str]) -> None:
         for spec in EDITABLE:
@@ -736,6 +751,19 @@ class SettingsForm(ModalScreen[bool]):
     def action_cancel(self) -> None:
         self.dismiss(False)
 
+    def action_revert(self) -> None:
+        """Put every field back to what is saved, and stay in the form."""
+        for wid, value in self._saved.items():
+            widget = self.query_one(f"#{wid}")
+            if isinstance(widget, Input):
+                widget.value = str(value)
+            elif isinstance(widget, Choice | Checkbox):
+                widget.value = value
+        self._show_errors({})
+        self._show_parts()
+        self._rework()
+        self.notify("Put back as saved.", timeout=2)
+
     def action_panic(self) -> None:
         """Halt copying, then leave the form so the app's real state is what is on screen.
 
@@ -766,6 +794,10 @@ class SettingsForm(ModalScreen[bool]):
     @on(Button.Pressed, "#save")
     def _on_save(self) -> None:
         self.action_save()
+
+    @on(Button.Pressed, "#revert")
+    def _on_revert(self) -> None:
+        self.action_revert()
 
     @on(Button.Pressed, "#cancel")
     def _on_cancel(self) -> None:

@@ -131,6 +131,8 @@ class Verdict:
     """The rule refusing new trades with no stop, when one is set to refuse."""
     stop_warning: str | None = None
     """The rule set only to warn about a new trade with no stop."""
+    stop_warned_by: str = ""
+    """The rule behind ``stop_warning``."""
     news: frozenset[str] = frozenset()
     """The currencies whose new trades a news rule declines now; ``"*"`` for every new trade."""
     news_why: str = ""
@@ -336,7 +338,7 @@ class GuardBook:
         held: list[str] = []
         held_by: list[str] = []
         news_by: list[str] = []
-        stop_by = ""
+        stop_by = stop_warned_by = ""
         warnings: list[str] = []
         warned_by: list[str] = []
         stop_required = stop_warning = None
@@ -350,6 +352,7 @@ class GuardBook:
             if rule.needs_stop:
                 if status.action == "warn":
                     stop_warning = status.title
+                    stop_warned_by = status.rule_id
                 else:
                     stop_required = status.title
                     stop_by = status.rule_id
@@ -397,6 +400,7 @@ class GuardBook:
             warned_by=tuple(warned_by),
             stop_required=stop_required,
             stop_warning=stop_warning,
+            stop_warned_by=stop_warned_by,
             news=frozenset(news),
             news_why="; ".join(news_why),
             news_by=tuple(news_by),

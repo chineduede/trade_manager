@@ -527,6 +527,50 @@ def test_a_guard_holds_a_slave_back_and_caps_its_risk(cfg: AppConfig, tmp_path: 
     assert note is not None and note.action == "shrunk" and note.rule == "Risk per trade"
 
 
+def test_a_stop_rule_set_to_warn_says_so_on_a_bare_trade(cfg: AppConfig, tmp_path: Path) -> None:
+    from mt5copier.guards import AccountGuards, GuardRule, GuardsDoc
+    from mt5copier.protocol import PositionType
+    from mt5copier.reconcile import Action
+
+    rule = GuardRule(id="st", type="stop_required", params={"on_breach": "warn"})
+    doc = GuardsDoc(accounts={"7@Prop": AccountGuards(initial_balance=10_000.0, rules=(rule,))})
+    eng = Engine(cfg, guards=doc, guard_state_path=tmp_path / "state.json")
+    snap = Snapshot(
+        terminal_id=TID_B,
+        state=WorkerState.CONNECTED,
+        login=7,
+        server="Prop",
+        balance=10_000.0,
+        equity=10_000.0,
+        open_positions=(),
+        pending_orders=(),
+    )
+    eng._judge(snap)
+    verdict = eng._verdicts[TID_B]
+    gate = eng._gate(TID_B, snap)
+    assert gate is not None and not gate.needs_stop, "a warning never declines the trade"
+
+    bare = Action(
+        kind=ActionKind.OPEN,
+        terminal_id=TID_B,
+        master_ticket=1,
+        master_symbol="EURUSD",
+        slave_symbol="EURUSD",
+        type=PositionType.BUY,
+        master_volume=1.0,
+        entry=1.1,
+        sl=0.0,
+    )
+    note = eng._stop_note(bare, cfg.terminals[TID_B], verdict)
+    assert note is not None
+    assert (note.rule, note.action, note.rule_id) == ("Stop loss required", "warned", "st")
+    assert "no stop loss" in note.text()
+
+    assert eng._stop_note(replace(bare, sl=1.09), cfg.terminals[TID_B], verdict) is None
+    closing = replace(bare, kind=ActionKind.CLOSE)
+    assert eng._stop_note(closing, cfg.terminals[TID_B], verdict) is None
+
+
 def test_a_moving_loss_is_announced_once(
     cfg: AppConfig, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:

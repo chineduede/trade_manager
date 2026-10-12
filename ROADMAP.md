@@ -1529,8 +1529,9 @@ are the design, not a limitation waiting to be lifted.
   Still to settle: whether symbol renames come along (they are broker-specific, so probably
   not, or only on request), and whether it fills the form for review (nothing saved until the
   usual save, so the orphan-on-settings-edit rule still applies) — the expected answer.
-- **Revert unsaved changes in the settings form — asked for 2026-10-04.** One key that puts
-  every field back to its saved value without leaving the form.
+- **Revert unsaved changes in the settings form — asked for 2026-10-04, built 2026-10-12.**
+  One key that puts every field back to its saved value without leaving the form. As built:
+  `ctrl+z` (or the Revert button) in a slave's settings form; nothing is saved by it.
 - **A trade's history, per slave — asked for 2026-10-04, built 2026-10-04 on `guards-enforce`,
   awaiting its demo check.** The user's words: each trade copied to a slave as one timeline —
   copied with x lots, a volume reduced, a stop moved, a trade blocked and why — kept for x days.

@@ -1037,6 +1037,7 @@ class Engine:
             return
         verdict = self._verdicts.get(cfg.terminal_id, NO_VERDICT)
         risk, risk_note = self._capped_risk(action, cfg, risk, verdict)
+        notes = tuple(n for n in (risk_note, self._stop_note(action, cfg, verdict)) if n)
         margin = verdict.max_margin
         total = verdict.max_total_margin
         opening = action.kind in (ActionKind.OPEN, ActionKind.PLACE)
@@ -1088,7 +1089,7 @@ class Engine:
             action,
             command_id,
             sent_at=time.monotonic(),
-            guard=(risk_note,) if risk_note is not None else (),
+            guard=notes,
         )
         worker = self._workers.get(cfg.terminal_id)
         if worker is None:
@@ -1150,6 +1151,25 @@ class Engine:
         )
         log.warning("guards: #%s on %s: %s", action.master_ticket, name, note.text())
         return risk, note
+
+    def _stop_note(self, action: Action, cfg: TerminalConfig, verdict: Verdict) -> GuardNote | None:
+        """What a stop rule set only to warn says about a new trade going out with no stop.
+
+        Set to decline, the gate refused the trade already; set to warn, it goes, and is said.
+        """
+        if verdict.stop_warning is None or action.sl != 0.0:
+            return None
+        if action.kind not in (ActionKind.OPEN, ActionKind.PLACE):
+            return None
+        note = GuardNote(
+            verdict.stop_warning,
+            "warned",
+            "it has no stop loss; sent anyway",
+            verdict.stop_warned_by,
+        )
+        name = self._cfg.display_name(cfg.terminal_id)
+        log.warning("guards: #%s on %s: %s", action.master_ticket, name, note.text())
+        return note
 
     def _gate_notes(self, action: Action) -> tuple[GuardNote, ...]:
         """Which guard declined a trade the gate refused, read off the slave's verdict."""

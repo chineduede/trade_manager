@@ -474,6 +474,26 @@ async def test_escape_discards_the_form(app: CopierApp, cfg: AppConfig) -> None:
         assert app._saved_to.read_bytes() == on_disk  # type: ignore[attr-defined]
 
 
+async def test_revert_puts_every_field_back_and_stays_in_the_form(
+    app: CopierApp, cfg: AppConfig
+) -> None:
+    async with app.run_test() as pilot:
+        screen = await _open_editor(app, pilot)
+        on_disk = app._saved_to.read_bytes()  # type: ignore[attr-defined]
+        screen.query_one("#f-risk_percent", Input).value = "9"
+        screen.query_one("#f-sizing_mode", Choice).value = "fixed_cash_risk"
+        screen.query_one("#f-copy_pending", Checkbox).value = True
+        await pilot.pause()
+        await pilot.press("ctrl+z")
+        await pilot.pause()
+        assert app.screen is screen
+        assert screen.query_one("#f-risk_percent", Input).value == "1"
+        assert screen.query_one("#f-sizing_mode", Choice).value == "percent_of_balance"
+        assert screen.query_one("#f-copy_pending", Checkbox).value is False
+        assert screen.query_one("#f-risk_percent", Input).display, "its sizing mode shows again"
+        assert app._saved_to.read_bytes() == on_disk  # type: ignore[attr-defined]
+
+
 async def test_saving_without_changing_anything_writes_nothing(
     app: CopierApp, cfg: AppConfig
 ) -> None:
