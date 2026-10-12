@@ -631,52 +631,46 @@ GoLiveDialog.-short #dialog {
     min-width: 16;
     margin-left: 3;
     text-style: bold;
-}
-
-.dialog Button.keep {
-    background: $foreground;
-    color: $background;
     border: none;
     content-align: center middle;
 }
 
-.dialog Button.danger {
-    background: $background;
-    color: $error;
-    border: solid $error;
-}
-
-/* Not yet: the name is not typed in full. Still pressable, to be told why not. */
-.dialog Button.danger.-waiting {
-    color: $text-muted;
-    border: dashed $panel;
-}
-
-/* The button that enter would press is filled in full; the other is dimmed. Not underlined:
-   text style covers a button's blank rows too, which would draw lines above and below. */
+/* Both answers are solid blocks of one size (ButtonRow evens their widths), so neither looks
+   bigger than the other: an outline is drawn through the middle of its edge rows and looks a row
+   shorter than a filled block beside it. The one enter would press is filled in full; the other
+   is dimmed. Not underlined: text style covers a button's blank rows too, which would draw lines
+   above and below. */
 .dialog Button.keep {
     background: $foreground 55%;
-}
-
-.dialog Button.keep:focus {
-    background: $foreground;
-}
-
-.dialog Button.danger:focus {
-    background: $error 25%;
-}
-
-.dialog Button:focus,
-.dialog Button:hover {
-    text-style: bold;
+    color: $background;
 }
 
 .dialog Button.keep:hover {
     background: $foreground 80%;
 }
 
+.dialog Button.keep:focus {
+    background: $foreground;
+}
+
+.dialog Button.danger {
+    background: $error 20%;
+    color: $error;
+}
+
 .dialog Button.danger:hover {
-    background: $error 15%;
+    background: $error 35%;
+}
+
+.dialog Button.danger:focus {
+    background: $error;
+    color: $background;
+}
+
+/* Not yet: the name is not typed in full. Still pressable, to be told why not. */
+.dialog Button.danger.-waiting {
+    background: $panel 60%;
+    color: $text-muted;
 }
 
 /* --- the settings forms --------------------------------------------------------------------- */

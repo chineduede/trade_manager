@@ -250,6 +250,12 @@ class CopierApp(App[None]):
         self._rebuild_rows()
         self.set_interval(0.5, self._on_timer)
         self._refresh()
+        # The cards' width needs the page laid out: size them once it is, not on the next tick,
+        # or the master's card shows full width for a moment.
+        self.call_after_refresh(self._size_cards)
+
+    def on_resize(self) -> None:
+        self.call_after_refresh(self._size_cards)
 
     def on_unmount(self) -> None:
         self._engine.stop()

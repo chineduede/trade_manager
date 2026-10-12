@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-from textual.widgets import DataTable, Input, Static
+from textual.widgets import Button, DataTable, Input, Static
 from tui_support import TID_MASTER, TID_SLAVE, copy_of, make_app, make_cfg, plain
 
 from mt5copier.config import AppConfig, Role
@@ -237,6 +237,14 @@ async def test_the_card_carries_the_badge(app: CopierApp, on_breach: str, badge:
         await pilot.pause()
         card = app._cards[TID_SLAVE]
         assert badge in plain(card.content, width=40)
+
+
+async def test_a_dialogs_answers_are_one_size(app: CopierApp) -> None:
+    async with app.run_test(size=(140, 50)) as pilot:
+        app.push_screen(GuardConfirm("Load it?", "It loads.", "Load it"))
+        await pilot.pause()
+        keep, go = (app.screen.query_one(f"#{name}", Button) for name in ("cancel", "go"))
+        assert keep.region.size == go.region.size
 
 
 async def test_the_arrows_move_along_a_dialogs_buttons(app: CopierApp) -> None:

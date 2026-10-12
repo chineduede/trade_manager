@@ -47,6 +47,14 @@ class ButtonRow(Horizontal):
         Binding("right", "along(1)", "Next button", show=False),
     ]
 
+    def on_mount(self) -> None:
+        """Every button as wide as the widest, so the answers read as a matched pair."""
+        buttons = list(self.query(Button))
+        if len(buttons) > 1:
+            widest = max(len(str(b.label)) for b in buttons) + 4
+            for button in buttons:
+                button.styles.min_width = widest
+
     def action_along(self, step: int) -> None:
         buttons = [b for b in self.query(Button) if b.focusable]
         focused = self.screen.focused
