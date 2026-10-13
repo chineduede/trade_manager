@@ -469,6 +469,76 @@ class FakeOpenApi:
         """``(bid, ask)`` by symbol, in cTrader's 1/100000, sent on subscribing."""
         self.commission = 3.5
         """What each deal is charged, in dollars."""
+        now = int(time.time() * 1000)
+        hour = 3_600_000
+        self.history: list[Any] = [
+            om.ProtoOADeal(
+                dealId=601,
+                orderId=600,
+                positionId=60,
+                volume=100_000,
+                filledVolume=100_000,
+                symbolId=1,
+                createTimestamp=now - 3 * hour,
+                executionTimestamp=now - 3 * hour,
+                tradeSide=om.BUY,
+                dealStatus=om.FILLED,
+                commission=-35_000,
+                moneyDigits=4,
+            ),
+            om.ProtoOADeal(
+                dealId=603,
+                orderId=602,
+                positionId=60,
+                volume=100_000,
+                filledVolume=100_000,
+                symbolId=1,
+                createTimestamp=now - 2 * hour,
+                executionTimestamp=now - 2 * hour,
+                tradeSide=om.SELL,
+                dealStatus=om.FILLED,
+                commission=-350,
+                moneyDigits=2,
+                closePositionDetail=om.ProtoOAClosePositionDetail(
+                    entryPrice=1.1,
+                    grossProfit=5_000,
+                    swap=-100,
+                    commission=-350,
+                    balance=1_000_000,
+                    moneyDigits=2,
+                ),
+            ),
+            # Refused: it moved no money.
+            om.ProtoOADeal(
+                dealId=605,
+                orderId=604,
+                positionId=61,
+                volume=100_000,
+                filledVolume=0,
+                symbolId=1,
+                createTimestamp=now - hour,
+                executionTimestamp=now - hour,
+                tradeSide=om.BUY,
+                dealStatus=om.REJECTED,
+                commission=-35_000,
+                moneyDigits=4,
+            ),
+        ]
+        """The deal list: opened 3 hours ago, closed 2 hours ago for $45.50 net, and a refusal."""
+        self.cash: list[Any] = [
+            om.ProtoOADepositWithdraw(
+                operationType=om.BALANCE_DEPOSIT,
+                balanceHistoryId=1,
+                balance=995_800,
+                delta=995_800,
+                changeBalanceTimestamp=now - 40 * hour,
+                moneyDigits=2,
+            )
+        ]
+        """The cash flows: a $9,958 deposit, which with the trade above leaves $10,000."""
+        self.rows = 1000
+        """How many deals one answer holds before it says there are more."""
+        self.refuse_history = False
         self.server: asyncio.Server | None = None
         self.port = 0
 
@@ -606,6 +676,28 @@ class FakeOpenApi:
             pos.stopLoss = msg.stopLoss
             pos.takeProfit = msg.takeProfit
             return self._execution(om.ORDER_ACCEPTED, pos, 900)
+        if isinstance(msg, oa.ProtoOADealListReq):
+            if self.refuse_history:
+                return oa.ProtoOAErrorRes(errorCode="REQUEST_FREQUENCY_EXCEEDED", description="")
+            found = [
+                d
+                for d in self.history
+                if msg.fromTimestamp <= d.executionTimestamp < msg.toTimestamp
+            ]
+            return oa.ProtoOADealListRes(
+                ctidTraderAccountId=ACCOUNT,
+                deal=found[: self.rows],
+                hasMore=len(found) > self.rows,
+            )
+        if isinstance(msg, oa.ProtoOACashFlowHistoryListReq):
+            return oa.ProtoOACashFlowHistoryListRes(
+                ctidTraderAccountId=ACCOUNT,
+                depositWithdraw=[
+                    c
+                    for c in self.cash
+                    if msg.fromTimestamp <= c.changeBalanceTimestamp < msg.toTimestamp
+                ],
+            )
         if isinstance(msg, oa.ProtoOAGetPositionUnrealizedPnLReq):
             return oa.ProtoOAGetPositionUnrealizedPnLRes(
                 ctidTraderAccountId=ACCOUNT,
@@ -805,7 +897,8 @@ async def test_the_worker_reports_the_account_like_an_mt5_terminal() -> None:
     assert snap.leverage == 100
     assert snap.trade_mode == ACCOUNT_TRADE_MODE_DEMO
     assert snap.server_offset_s == 0
-    assert snap.deals is None
+    assert snap.deals is not None and [d.ticket for d in snap.deals] == [1, 601, 603]
+    assert snap.deals_since is not None
     assert snap.open_positions is not None and len(snap.open_positions) == 1
     pos = snap.open_positions[0]
     assert (pos.ticket, pos.symbol, pos.volume, pos.magic) == (77, "EURUSD", 0.5, COPIER_MAGIC)
@@ -1259,7 +1352,7 @@ async def test_an_error_answer_raises() -> None:
     await client.connect()
     try:
         with pytest.raises(OpenApiError, match="UNEXPECTED"):
-            await client.request(oa.ProtoOADealListReq(ctidTraderAccountId=1, fromTimestamp=0))
+            await client.request(oa.ProtoOAVersionReq())
     finally:
         await client.close()
         await api.stop()
@@ -1400,3 +1493,92 @@ async def test_t_while_a_login_waits_gives_it_up_and_asks_again(
                 break
         assert given_up == [True]
         assert app._ctrader_cancel is None
+
+
+# --- the deal history, for the guards ------------------------------------------------------------
+
+
+def test_each_kind_of_entry_adds_what_it_moved_the_balance_by() -> None:
+    api = FakeOpenApi()
+    opened, closed, refused = api.history
+    (deposit,) = api.cash
+
+    entry = cv.booked_deal(opened, "EURUSD", 2)
+    assert entry is not None and entry.balance_after is None
+    assert (entry.deal.entry, entry.deal.net) == (0, pytest.approx(-3.5))
+
+    entry = cv.booked_deal(closed, "EURUSD", 2)
+    assert entry is not None and entry.balance_after == pytest.approx(10_000.0)
+    deal = entry.deal
+    assert (deal.ticket, deal.type, deal.entry, deal.symbol) == (603, 1, 1, "EURUSD")
+    assert (deal.profit, deal.swap, deal.commission) == (50.0, -1.0, -3.5)
+    assert deal.net == pytest.approx(45.5)
+    assert deal.time == pytest.approx(closed.executionTimestamp / 1000)
+
+    assert cv.booked_deal(refused, "EURUSD", 2) is None
+
+    cash = cv.booked_cash(deposit, 2)
+    assert (cash.deal.type, cash.deal.net, cash.balance_after) == (2, 9_958.0, 9_958.0)
+    out = om.ProtoOADepositWithdraw()
+    out.CopyFrom(deposit)
+    out.operationType = om.BALANCE_WITHDRAW
+    out.delta = 20_000
+    assert cv.booked_cash(out, 2).deal.net == pytest.approx(-200.0)
+
+
+def test_the_history_is_checked_against_the_balance_ctrader_says_it_left() -> None:
+    api = FakeOpenApi()
+    history = [b for b in (cv.booked_deal(d, "EURUSD", 2) for d in api.history) if b]
+    history.append(cv.booked_cash(api.cash[0], 2))
+    assert cv.balance_mismatch(history, 10_000.0) is None
+    said = cv.balance_mismatch(history, 10_010.0)
+    assert said is not None and "10,000.00 after #603" in said and "10,010.00" in said
+    assert cv.balance_mismatch([], 10_000.0) is None
+
+
+def _connected(got: list[object]) -> Snapshot:
+    live = [s for s in got if isinstance(s, Snapshot) and s.state is WorkerState.CONNECTED]
+    assert live, [getattr(s, "error", None) for s in got]
+    return live[-1]
+
+
+async def test_a_guard_rebuilds_the_days_start_from_a_ctrader_history() -> None:
+    from mt5copier.guards.account import AccountView
+
+    api = FakeOpenApi()
+    await api.start()
+    try:
+        snap = _connected(await _run_worker(api, []))
+    finally:
+        await api.stop()
+    assert "ProtoOACashFlowHistoryListReq" in api.seen
+    view = AccountView.of(snap, now=time.time(), initial_balance=None)
+    # Before the close, and after the opening commission.
+    assert view.balance_at(time.time() - 2.5 * 3600) == pytest.approx(9_954.5)
+    assert view.balance_at(time.time() - 4 * 3600) == pytest.approx(9_958.0)
+    assert view.balance_at(time.time() - 60 * 3600) is None, "before the window: unknown"
+
+
+async def test_a_long_deal_list_is_asked_for_again_in_halves() -> None:
+    api = FakeOpenApi()
+    api.rows = 1
+    await api.start()
+    try:
+        snap = _connected(await _run_worker(api, []))
+    finally:
+        await api.stop()
+    assert snap.deals is not None and [d.ticket for d in snap.deals] == [1, 601, 603]
+    asked = [m for m in api.requests if isinstance(m, oa.ProtoOADealListReq)]
+    assert len(asked) > 2
+
+
+async def test_a_history_that_cannot_be_read_whole_is_unknown_not_short() -> None:
+    api = FakeOpenApi()
+    api.refuse_history = True
+    await api.start()
+    try:
+        snap = _connected(await _run_worker(api, []))
+    finally:
+        await api.stop()
+    assert snap.deals is None and snap.deals_since is None
+    assert snap.balance == pytest.approx(10_000.0), "the rest of the account is still read"

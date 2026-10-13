@@ -28,7 +28,7 @@ from textual.widgets.option_list import Option
 from ..config import Role, account_key
 from ..guards import REGISTRY, AccountGuards, GuardReport, GuardRule, Level, RuleStatus
 from ..guards.base import money
-from ..guards.params import Param, ParamKind, ParamValue
+from ..guards.params import ZONE_HINT, Param, ParamKind, ParamValue
 from ..history import GuardAction
 from ..terminal_detail import bar
 from .settings import Choice, Tick, lead, rows, section, words
@@ -873,6 +873,8 @@ class RuleForm(ModalScreen[GuardRule | None]):
                     classes=f"p-{param.name}",
                 )
             )
+            if param.kind is ParamKind.ZONE:
+                lines.append(Static(Text(ZONE_HINT, style=MUTED), classes="note"))
             lines.append(Static("", id=f"{_E}{param.name}", classes="err"))
         with VerticalScroll(id="dialog", classes="settings", can_focus=False):
             yield Horizontal(

@@ -8,7 +8,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import StrEnum
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from functools import cache
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError, available_timezones
 
 ParamValue = float | str
 
@@ -19,7 +20,58 @@ class ParamKind(StrEnum):
     TIME = "time"
     """A time of day, ``HH:MM`` on the 24-hour clock."""
     ZONE = "zone"
-    """An IANA time zone name, such as ``Europe/Prague`` or ``America/New_York``."""
+    """An IANA time zone name, such as ``Europe/Prague`` or ``America/New_York``, or a fixed
+    offset from UTC in whole hours, such as ``UTC+2``."""
+
+
+ZONE_HINT = (
+    "A place, which follows its clocks' summer time: Europe/London, Europe/Prague, "
+    "Europe/Athens (most brokers' server time), America/New_York. Or a fixed offset: UTC+2."
+)
+"""What the form says under a time zone field."""
+
+_OFFSET = re.compile(r"(?:UTC|GMT)\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?", re.IGNORECASE)
+
+
+@cache
+def _names() -> dict[str, str]:
+    """Every zone name the system knows, by its lower case, so ``europe/london`` is found."""
+    return {name.lower(): name for name in available_timezones()}
+
+
+def normal_zone(text: str) -> tuple[str | None, str | None]:
+    """``(name, None)`` for a zone the copier can use, as it is written back -- ``UTC+2`` for an
+    offset, the zone's own spelling for a name -- or ``(None, why)``."""
+    text = text.strip()
+    if text.upper() in ("UTC", "GMT", "Z", "UTC+0", "GMT+0", "UTC-0", "GMT-0"):
+        return "UTC", None
+    offset = _OFFSET.fullmatch(text)
+    if offset is not None:
+        sign, hours, minutes = offset[1], int(offset[2]), offset[3]
+        if minutes not in (None, "00"):
+            return None, (
+                f"{text!r}: an offset must be whole hours; for a half-hour zone name the place, "
+                "such as Asia/Kolkata"
+            )
+        if hours == 0:
+            return "UTC", None
+        if hours > (14 if sign == "+" else 12):
+            return None, f"{text!r}: no place is that far from UTC"
+        return f"UTC{sign}{hours}", None
+    name = _names().get(text.lower())
+    if name is None:
+        return None, f"no time zone called {text!r} (try Europe/London, or UTC+2)"
+    return name, None
+
+
+def zone_info(text: str) -> ZoneInfo:
+    """The zone a stored name stands for. ``UTC+2`` is ``Etc/GMT-2``: those names count west
+    of Greenwich as positive, the reverse of how an offset is written everywhere else."""
+    offset = _OFFSET.fullmatch(text.strip())
+    if offset is not None:
+        flipped = "-" if offset[1] == "+" else "+"
+        return ZoneInfo(f"Etc/GMT{flipped}{int(offset[2])}")
+    return ZoneInfo(text)
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,11 +116,14 @@ class Param:
             if match is None or int(match[1]) > 23 or int(match[2]) > 59:
                 return None, f"{self.label} must be a time like 00:00 or 17:00"
             return f"{int(match[1]):02d}:{match[2]}", None
+        name, why = normal_zone(text)
+        if name is None:
+            return None, f"{self.label}: {why}"
         try:
-            ZoneInfo(text)
+            zone_info(name)
         except (ZoneInfoNotFoundError, ValueError):
-            return None, f"{self.label}: no time zone called {text!r} (try Europe/London)"
-        return text, None
+            return None, f"{self.label}: no time zone called {text!r} (try Europe/London, or UTC+2)"
+        return name, None
 
     def words(self, value: ParamValue) -> str:
         """How a CHOICE's value reads; anything else as written."""

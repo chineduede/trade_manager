@@ -11,9 +11,11 @@ and connection, between ticks.
 
 A position's current price comes from a spot subscription, taken out for each symbol the account
 holds a position in and kept until the connection ends. So do the prices that convert a cross's
-money into the account's currency (:meth:`_Account.conversion`). What a snapshot leaves unknown is
-``deals``: deposits and withdrawals come from a different request than trades, and a guard
-rebuilding a balance from half the history would be wrong rather than blank.
+money into the account's currency (:meth:`_Account.conversion`).
+
+The deal history the guards rebuild a past balance from is read from two lists -- cTrader keeps
+trades apart from deposits, withdrawals and fees -- and is unknown unless both were read whole
+(:meth:`_Account._refresh_history`).
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from ..protocol import (
     ACCOUNT_TRADE_MODE_DEMO,
     Command,
     CommandKind,
+    Deal,
     OrderCommand,
     OrderResult,
     PendingOrder,
@@ -59,6 +62,16 @@ _MIN_INTERVAL_S = 0.5
 
 _TRADER_EVERY_S = 2.0
 """How often the balance is re-read when nothing has happened. An execution re-reads it at once."""
+
+_HISTORY_EVERY_S = 5.0
+_HISTORY_WINDOW_S = 50 * 3600.0
+"""As on MT5: the history is re-read every few seconds, and at once when the balance moves, over
+the last 50 hours -- enough to reach back to any daily reset."""
+
+_DEAL_ROWS = 1000
+_SPLIT_DEPTH = 8
+"""A deal list cTrader says has more is asked for again in halves, down to a window this many
+halvings narrower; past that the history counts as unknown rather than short."""
 
 SPOT_WAIT_S = 2.0
 """How long the first trade needing a currency conversion waits for its symbols' first prices.
@@ -101,6 +114,12 @@ class _Account:
         """Each symbol's ``(base, quote)`` asset ids, from the symbol list."""
         self.symbols: dict[int, cv.SymbolInfo] = {}
         self._trader_read_at = 0.0
+        self.deals: tuple[Deal, ...] | None = None
+        self.deals_since: float | None = None
+        self._history_read_at = 0.0
+        self._history_balance: int | None = None
+        self._mismatch: str | None = None
+        self._said: str | None = None
         self.error: str | None = None
         self.spots: dict[int, tuple[float | None, float | None]] = {}
         """``(bid, ask)`` by symbol id, from the spot subscriptions."""
@@ -174,6 +193,89 @@ class _Account:
         answer = await self.client.request(oa.ProtoOATraderReq(ctidTraderAccountId=self.account_id))
         self.trader = answer.trader
         self._trader_read_at = time.monotonic()
+
+    async def _refresh_history(self) -> None:
+        """Re-read the deal history when it may have changed: every few seconds, and at once
+        when the balance moves, so a guard never works from a history missing the deal it just
+        saw land in the balance. A read that fails leaves it unknown, never short."""
+        balance = int(self.trader.balance) if self.trader is not None else None
+        now = time.time()
+        if now - self._history_read_at < _HISTORY_EVERY_S and balance == self._history_balance:
+            return
+        self._history_read_at = now
+        since = now - _HISTORY_WINDOW_S
+        try:
+            history = await self._read_history(since, now)
+        except OpenApiError as exc:
+            log.warning("could not read the deal history: %s", exc)
+            history = None
+        if history is None:
+            self.deals = self.deals_since = None
+            self._history_balance = None
+            return
+        self.deals = tuple(b.deal for b in history)
+        self.deals_since = since
+        self._history_balance = balance
+        if balance is None:
+            return
+        mismatch = cv.balance_mismatch(history, cv.money(balance, self.money_digits))
+        # Said once it is seen twice: a deal landing between the balance and the history being
+        # read looks like a gap for one read and no longer.
+        if mismatch is not None and mismatch == self._mismatch and mismatch != self._said:
+            log.warning("the deal history does not add up: %s", mismatch)
+            self._said = mismatch
+        self._mismatch = mismatch
+
+    async def _read_history(self, since: float, now: float) -> list[cv.Booked] | None:
+        """Every deal and every cash flow from ``since`` to now, oldest first, or None if any
+        of it could not be read."""
+        assert self.client is not None
+        start, end = int(since * 1000), int(now * 1000) + 60_000
+        raw = await self._deals_between(start, end, 0)
+        if raw is None:
+            return None
+        cash = await self.client.request(
+            oa.ProtoOACashFlowHistoryListReq(
+                ctidTraderAccountId=self.account_id, fromTimestamp=start, toTimestamp=end
+            )
+        )
+        out: list[cv.Booked] = []
+        try:
+            for deal in raw.values():
+                name = self.symbol_names.get(int(deal.symbolId), "")
+                booked = cv.booked_deal(deal, name, self.money_digits)
+                if booked is not None:
+                    out.append(booked)
+            out.extend(cv.booked_cash(c, self.money_digits) for c in cash.depositWithdraw)
+        except (AttributeError, TypeError, ValueError) as exc:
+            log.warning("unreadable entry in the deal history (%r); treating it as unknown", exc)
+            return None
+        out.sort(key=lambda b: b.deal.time)
+        return out
+
+    async def _deals_between(self, start: int, end: int, depth: int) -> dict[int, Any] | None:
+        """The deals between two times in milliseconds, by deal id. Asked for again in halves
+        while cTrader says there are more than it sent."""
+        assert self.client is not None
+        answer = await self.client.request(
+            oa.ProtoOADealListReq(
+                ctidTraderAccountId=self.account_id,
+                fromTimestamp=start,
+                toTimestamp=end,
+                maxRows=_DEAL_ROWS,
+            )
+        )
+        if not answer.hasMore:
+            return {int(d.dealId): d for d in answer.deal}
+        if depth >= _SPLIT_DEPTH:
+            log.warning("cTrader has more deals than can be read; the history is unknown")
+            return None
+        middle = (start + end) // 2
+        first = await self._deals_between(start, middle, depth + 1)
+        second = await self._deals_between(middle, end, depth + 1)
+        if first is None or second is None:
+            return None
+        return first | second
 
     @property
     def deposit_asset_id(self) -> int:
@@ -397,6 +499,7 @@ class _Account:
         executed = self._drain_events()
         if executed or time.monotonic() - self._trader_read_at >= _TRADER_EVERY_S:
             await self._read_trader()
+        await self._refresh_history()
         raw_positions, raw_orders = await self._reconcile()
         await self.symbols_for(
             {int(p.tradeData.symbolId) for p in raw_positions}
@@ -485,7 +588,8 @@ class _Account:
             live_positions=live,
             pending_orders=orders,
             server_offset_s=0,
-            deals=None,
+            deals=self.deals,
+            deals_since=self.deals_since,
             error=self.error,
             connect_attempts=attempts,
             trade_mode=ACCOUNT_TRADE_MODE_REAL if self.is_live else ACCOUNT_TRADE_MODE_DEMO,

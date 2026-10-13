@@ -74,8 +74,14 @@ class DailyLoss(Rule):
         elif basis == "equity":
             if equity is None:
                 return Measure(
-                    unknown="the equity at today's reset was not recorded: the copier was "
-                    "not running then. It will be from the next reset."
+                    unknown=(
+                        f"the equity at {p['reset']} {p['zone']} is not known: the copier was "
+                        "not running then, and no history keeps what open trades were worth "
+                        "at a past moment. It is recorded from the next reset. For today, set "
+                        "the day to start from the balance at the reset or the higher of the "
+                        "two: known from the history, but blind to what trades open at the "
+                        "reset were worth."
+                    )
                 )
             start = equity
         else:

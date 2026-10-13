@@ -104,6 +104,27 @@ def test_time_and_zone() -> None:
     assert z.check("Mars/Olympus")[1] is not None
 
 
+def test_a_zone_can_be_an_offset_or_a_name_in_any_case() -> None:
+    z = Param("zone", "Zone", ParamKind.ZONE, "UTC")
+    assert z.check("utc+2") == ("UTC+2", None)
+    assert z.check("GMT-5") == ("UTC-5", None)
+    assert z.check("UTC+03:00") == ("UTC+3", None)
+    assert z.check("gmt") == ("UTC", None)
+    assert z.check("europe/athens") == ("Europe/Athens", None)
+    half = z.check("UTC+5:30")[1]
+    assert half is not None and "whole hours" in half
+    assert z.check("UTC+15")[1] is not None
+
+
+def test_an_offset_reset_is_that_many_hours_ahead_of_utc() -> None:
+    # 00:00 at UTC+2 is 22:00 UTC the day before: the Etc names' reversed sign is handled.
+    now = at(2026, 1, 10, 12, tz=ZoneInfo("UTC"))
+    assert last_reset(now, "00:00", "UTC+2") == (
+        at(2026, 1, 9, 22, tz=ZoneInfo("UTC")),
+        "2026-01-10",
+    )
+
+
 def test_a_bad_value_is_reported_and_the_default_used() -> None:
     rule = GuardRule(type="max_drawdown", params={"limit": -3})
     params, problems = rule.resolved()
@@ -198,7 +219,11 @@ def test_daily_loss_needs_history(tmp_path: Path) -> None:
 
 def test_daily_loss_on_equity_waits_for_a_watched_reset(tmp_path: Path) -> None:
     book = book_with(daily(limit=5, basis="equity"), tmp=tmp_path)
-    assert only(book, snap()).level is Level.UNKNOWN
+    unknown = only(book, snap())
+    assert unknown.level is Level.UNKNOWN
+    # Says why it cannot be known, and what to choose for an estimate today.
+    assert "00:00 Europe/Prague" in unknown.detail and "not running then" in unknown.detail
+    assert "the balance at the reset" in unknown.detail
 
     before, after = at(2026, 10, 6, 0, 0) - 20, at(2026, 10, 6, 0, 0) + 1
     book.observe(KEY, snap(equity=101_000.0), before)

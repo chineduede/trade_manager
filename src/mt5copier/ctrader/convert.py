@@ -13,13 +13,24 @@ Where they differ in kind rather than in units:
   reconciler tells the copier's own trades apart exactly as it does on MT5.
 * **Time.** cTrader stamps everything in real UTC milliseconds, so the broker clock offset MT5
   needs is always zero here.
+* **History.** MT5 lists trades and deposits together; cTrader keeps trades in its deal list
+  and deposits, withdrawals and the like in its cash flow history. Both become MT5-style
+  :class:`Deal` entries, so a guard rebuilds a balance from either the same way.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..protocol import COPIER_MAGIC, OrderType, PendingOrder, Position, PositionLive, PositionType
+from ..protocol import (
+    COPIER_MAGIC,
+    Deal,
+    OrderType,
+    PendingOrder,
+    Position,
+    PositionLive,
+    PositionType,
+)
 from ..sizing import SymbolFacts
 from .proto import OpenApiModelMessages_pb2 as om
 
@@ -305,4 +316,98 @@ def pending_order(raw: object, symbol: SymbolInfo) -> PendingOrder | None:
         time_setup=int(data.openTimestamp) // 1000,
         magic=COPIER_MAGIC if data.label == COPIER_LABEL else 0,
         comment=str(data.comment),
+    )
+
+
+# --- history ------------------------------------------------------------------------------------
+
+_DEAL_BUY, _DEAL_SELL, _DEAL_BALANCE = 0, 1, 2
+"""MT5's ``DEAL_TYPE_*`` for a buy, a sell, and a balance operation."""
+_ENTRY_IN, _ENTRY_OUT = 0, 1
+"""MT5's ``DEAL_ENTRY_*`` for opening and closing."""
+_MOVED: frozenset[int] = frozenset({int(om.FILLED), int(om.PARTIALLY_FILLED)})
+"""A deal's statuses that moved money; a rejected or missed one moved none."""
+
+
+@dataclass(frozen=True, slots=True)
+class Booked:
+    """One entry in the history, and the balance cTrader says it left, when it says."""
+
+    deal: Deal
+    balance_after: float | None = None
+
+
+def _digits(raw: object, fallback: int) -> int:
+    return int(raw.moneyDigits) if raw.HasField("moneyDigits") else fallback  # type: ignore[attr-defined]
+
+
+def booked_deal(raw: object, symbol_name: str, money_digits: int) -> Booked | None:
+    """One ``ProtoOADeal``, as what it added to the balance; None for one that moved nothing.
+
+    cTrader charges commission in two parts: an opening deal carries its part, and a closing
+    deal carries the profit, swap, its own part of the commission and any conversion fee in its
+    ``closePositionDetail``, with the balance it left.
+    """
+    if int(raw.dealStatus) not in _MOVED:  # type: ignore[attr-defined]
+        return None
+    side = _DEAL_BUY if int(raw.tradeSide) == _BUY else _DEAL_SELL  # type: ignore[attr-defined]
+    common = {
+        "ticket": int(raw.dealId),  # type: ignore[attr-defined]
+        "time": int(raw.executionTimestamp) / 1000,  # type: ignore[attr-defined]
+        "type": side,
+        "symbol": symbol_name,
+    }
+    if not raw.HasField("closePositionDetail"):  # type: ignore[attr-defined]
+        digits = _digits(raw, money_digits)
+        commission = money(int(raw.commission), digits)  # type: ignore[attr-defined]
+        return Booked(Deal(entry=_ENTRY_IN, commission=commission, **common))  # type: ignore[arg-type]
+    detail = raw.closePositionDetail  # type: ignore[attr-defined]
+    digits = _digits(detail, _digits(raw, money_digits))
+    deal = Deal(
+        entry=_ENTRY_OUT,
+        profit=money(int(detail.grossProfit), digits),
+        commission=money(int(detail.commission), digits),
+        swap=money(int(detail.swap), digits),
+        fee=money(int(detail.pnlConversionFee), digits),
+        **common,  # type: ignore[arg-type]
+    )
+    return Booked(deal, money(int(detail.balance), digits))
+
+
+def booked_cash(raw: object, money_digits: int) -> Booked:
+    """One ``ProtoOADepositWithdraw``: a deposit, a withdrawal, a fee, a rebate. Its ``delta``
+    is the amount; which way it moved the balance is in the operation's name."""
+    digits = _digits(raw, money_digits)
+    kind = om.ProtoOAChangeBalanceType.Name(int(raw.operationType))  # type: ignore[attr-defined]
+    amount = abs(money(int(raw.delta), digits))  # type: ignore[attr-defined]
+    deal = Deal(
+        ticket=int(raw.balanceHistoryId),  # type: ignore[attr-defined]
+        time=int(raw.changeBalanceTimestamp) / 1000,  # type: ignore[attr-defined]
+        type=_DEAL_BALANCE,
+        entry=_ENTRY_IN,
+        profit=-amount if "WITHDRAW" in kind else amount,
+    )
+    return Booked(deal, money(int(raw.balance), digits))  # type: ignore[attr-defined]
+
+
+def balance_mismatch(history: list[Booked], balance: float) -> str | None:
+    """Whether the history adds up: the balance cTrader says its latest close or cash flow left,
+    against today's balance less everything booked after it. None when they agree, or when
+    nothing in the history says what balance it left.
+
+    A guard rebuilds the balance at the day's reset this way, so a gap here -- a charge cTrader
+    makes that the history above does not carry -- would put its day's start in the wrong place.
+    """
+    anchored = [b for b in history if b.balance_after is not None]
+    if not anchored:
+        return None
+    last = max(anchored, key=lambda b: b.deal.time)
+    later = sum(b.deal.net for b in history if b.deal.time > last.deal.time)
+    rebuilt = balance - later
+    assert last.balance_after is not None
+    if abs(rebuilt - last.balance_after) < 0.005:
+        return None
+    return (
+        f"cTrader says the balance was {last.balance_after:,.2f} after #{last.deal.ticket}, "
+        f"but today's balance less what came after it is {rebuilt:,.2f}"
     )

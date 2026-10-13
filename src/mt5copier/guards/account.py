@@ -9,10 +9,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 from ..news import Calendar
 from ..protocol import Deal, Position, PositionLive, Snapshot
+from .params import zone_info
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,7 +90,7 @@ def last_reset(now: float, at: str, zone: str) -> tuple[float, str]:
     Worked in the reset's own zone, so a daylight-saving change moves the reset with the
     clocks on the wall, as a firm's does.
     """
-    tz = ZoneInfo(zone)
+    tz = zone_info(zone)
     hours, minutes = (int(part) for part in at.split(":"))
     local = datetime.fromtimestamp(now, tz)
     day = local.date()

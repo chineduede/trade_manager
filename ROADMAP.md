@@ -1735,7 +1735,6 @@ are the design, not a limitation waiting to be lifted.
   - Spot prices (moved forward from phase 4): the worker subscribes to every symbol it holds a
     position in, so a position has a current price (bid for a buy, ask for a sell). Breakeven
     reads that, which is what lets it fire on a cTrader slave.
-  - Next: phase 4 cross-currency risk sizing from the spot prices, phase 5 deals.
   - *Demo check:* (1) Master places a buy limit with SL/TP: the slave rests one at the same
     levels, risk-sized; its ORDERS row's ticket is then the id the position will get. (2) Move
     the master's entry, SL and TP: the slave follows. (3) Remove the master's SL from the order:
@@ -1744,6 +1743,27 @@ are the design, not a limitation waiting to be lifted.
     the slave's position is then followed (move the master's SL, then close it) and no second copy
     opens. (6) A sell stop the same way. (7) Breakeven on the cTrader slave: its positions show a
     current price, the stop moves when the trigger is reached, and booking closes its share.
+- **cTrader slaves, phase 4 of 5 — built 2026-10-09 (`f16cd93`); demo check pending.**
+  Risk sizing for crosses (EURGBP on a USD account): `ProtoOASymbolsForConversionReq` gives the
+  chain of symbols from the quote currency to the account's, cached per currency; their spot
+  prices value the stop, at the side that makes the loss larger. The first trade in a new
+  currency waits up to 2 s for a price and is refused rather than sized on a guess.
+  - *Demo check:* EURGBP and GBPJPY with a stop: the loss at the stop is about the slave's risk.
+- **cTrader slaves, phase 5 of 5 — built 2026-10-13; demo check pending.** The deal history,
+  so a Daily loss rule can rebuild the balance at its reset on a cTrader account, as on MT5.
+  - Two lists, both over the last 50 hours: `ProtoOADealListReq` (trades) and
+    `ProtoOACashFlowHistoryListReq` (deposits, withdrawals, fees). Each entry becomes an MT5-style
+    `Deal`: an opening deal adds its commission; a closing deal its `closePositionDetail`'s gross
+    profit, swap, commission and conversion fee; a cash flow its delta, negative for a
+    withdrawal. Rejected deals move nothing and are left out.
+  - Re-read every 5 s and at once when the balance changes. A deal list cTrader says has more is
+    asked for again in halves; a failed or unreadable read makes the history unknown, not short.
+  - Self-check: cTrader states the balance each close and cash flow left. The latest one is
+    compared with today's balance less what came after it, and a gap seen on two reads in a row
+    is logged ("the deal history does not add up").
+  - *Demo check:* add a Daily loss rule to the cTrader demo; open and close a couple of trades;
+    the guards page's "day started at" stays at the balance the account had at the reset (the
+    trades closed after it do not move it), and the log has no "does not add up" line.
 - **Settings edits keep open copies — decided and built 2026-10-09.** Before, any edit to a
   slave holding copies (except breakeven alone) gave them up, after asking: one rule instead of
   knowing which settings were safe. Traced setting by setting, only `invert` broke an open copy
