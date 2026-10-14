@@ -67,6 +67,10 @@ class DailyLoss(Rule):
         equity = memory.day_start_equity(rule_id, day)
         basis = p["basis"]
         note = ""
+        if equity is None and balance is not None and view.open_at(reset_at) is False:
+            # Not recorded, but with nothing open the equity then was the balance then.
+            equity = balance
+            note = " (nothing was open at the reset, so its equity was its balance)"
         if basis == "balance":
             if balance is None:
                 return Measure(unknown="today's trade history has not been read yet")

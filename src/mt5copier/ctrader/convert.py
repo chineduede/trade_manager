@@ -356,6 +356,7 @@ def booked_deal(raw: object, symbol_name: str, money_digits: int) -> Booked | No
         "time": int(raw.executionTimestamp) / 1000,  # type: ignore[attr-defined]
         "type": side,
         "symbol": symbol_name,
+        "position": int(raw.positionId),  # type: ignore[attr-defined]
     }
     if not raw.HasField("closePositionDetail"):  # type: ignore[attr-defined]
         digits = _digits(raw, money_digits)

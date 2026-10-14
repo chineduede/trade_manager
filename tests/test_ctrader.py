@@ -1511,6 +1511,7 @@ def test_each_kind_of_entry_adds_what_it_moved_the_balance_by() -> None:
     assert entry is not None and entry.balance_after == pytest.approx(10_000.0)
     deal = entry.deal
     assert (deal.ticket, deal.type, deal.entry, deal.symbol) == (603, 1, 1, "EURUSD")
+    assert deal.position == 60
     assert (deal.profit, deal.swap, deal.commission) == (50.0, -1.0, -3.5)
     assert deal.net == pytest.approx(45.5)
     assert deal.time == pytest.approx(closed.executionTimestamp / 1000)

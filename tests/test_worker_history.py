@@ -36,6 +36,7 @@ class FakeDeal:
     fee: float = 0.0
     symbol: str = "EURUSD"
     time_msc: int = 0
+    position_id: int = 0
 
 
 class ClockMT5(FakeMT5):
@@ -129,7 +130,11 @@ def test_deals_are_read_in_the_broker_clock_and_reported_in_utc() -> None:
     session = _connected(mt5)
     now = 1_000_000.0
     _know_offset(session, mt5, now)
-    mt5.history = [FakeDeal(ticket=7, time=int(now - HOUR) + mt5.offset, profit=-50.0, fee=-1.0)]
+    mt5.history = [
+        FakeDeal(
+            ticket=7, time=int(now - HOUR) + mt5.offset, profit=-50.0, fee=-1.0, position_id=40
+        )
+    ]
 
     session._refresh_deals(mt5.offset, 1000.0, now=now)
 
@@ -137,6 +142,7 @@ def test_deals_are_read_in_the_broker_clock_and_reported_in_utc() -> None:
     deal = session._deals[0]
     assert deal.time == now - HOUR
     assert deal.net == -51.0
+    assert deal.position == 40
     since, until = mt5.deal_reads[-1]
     assert since == int(session._deals_since or 0) + mt5.offset
     assert until > now + mt5.offset

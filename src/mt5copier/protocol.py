@@ -118,6 +118,9 @@ class Deal:
     swap: float = 0.0
     fee: float = 0.0
     symbol: str = ""
+    position: int = 0
+    """The position the deal opened or closed -- the open position's ticket -- or 0 for a balance
+    operation. What tells a guard which trades were open at an earlier moment."""
 
     @property
     def net(self) -> float:

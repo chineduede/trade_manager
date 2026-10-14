@@ -14,6 +14,11 @@ from ..news import Calendar
 from ..protocol import Deal, Position, PositionLive, Snapshot
 from .params import zone_info
 
+_BALANCE = 2
+"""MT5's ``DEAL_TYPE_BALANCE``: a deposit or a withdrawal, which belongs to no trade."""
+_ENTRY_IN = 0
+"""MT5's ``DEAL_ENTRY_IN``: the deal that opened a position."""
+
 
 @dataclass(frozen=True, slots=True)
 class AccountView:
@@ -74,6 +79,25 @@ class AccountView:
         if when < self.deals_since:
             return None
         return self.balance - sum(d.net for d in self.deals if d.time >= when)
+
+    def open_at(self, when: float) -> bool | None:
+        """Whether any trade was open at ``when``; None when it cannot be told.
+
+        Told by the trades' ids, not their times, so no broker clock comes into it: a trade open
+        now, or closed since ``when``, was open then unless it was opened since. Its opening
+        deal is in the history if it was, and the history covers ``when`` onwards.
+        """
+        if self.deals is None or self.deals_since is None or self.positions is None:
+            return None
+        if when < self.deals_since:
+            return None
+        later = [d for d in self.deals if d.time >= when and d.type != _BALANCE]
+        if any(d.position == 0 for d in later):
+            return None
+        opened = {d.position for d in later if d.entry == _ENTRY_IN}
+        closed = {d.position for d in later if d.entry != _ENTRY_IN}
+        held = {p.ticket for p in self.positions} | closed
+        return bool(held - opened)
 
     def open_pnl(self, ticket: int) -> float | None:
         """A position's floating P/L with its swap, or None if the broker did not say."""

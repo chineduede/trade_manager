@@ -68,8 +68,12 @@ def snap(
     )
 
 
-def deal(when: float, net: float, ticket: int = 1) -> Deal:
-    return Deal(ticket=ticket, time=when, type=1, entry=1, profit=net)
+def deal(when: float, net: float, ticket: int = 1, position: int = 0, entry: int = 1) -> Deal:
+    return Deal(ticket=ticket, time=when, type=1, entry=entry, profit=net, position=position)
+
+
+HELD = ((0.0, 0.0),)
+"""One trade open now and opened before the reset: the equity then cannot be known."""
 
 
 def book_with(*rules: GuardRule, initial: float | None = 100_000.0, tmp: Path) -> GuardBook:
@@ -219,7 +223,7 @@ def test_daily_loss_needs_history(tmp_path: Path) -> None:
 
 def test_daily_loss_on_equity_waits_for_a_watched_reset(tmp_path: Path) -> None:
     book = book_with(daily(limit=5, basis="equity"), tmp=tmp_path)
-    unknown = only(book, snap())
+    unknown = only(book, snap(positions=HELD))
     assert unknown.level is Level.UNKNOWN
     # Says why it cannot be known, and what to choose for an estimate today.
     assert "00:00 Europe/Prague" in unknown.detail and "not running then" in unknown.detail
@@ -238,14 +242,47 @@ def test_daily_loss_on_equity_waits_for_a_watched_reset(tmp_path: Path) -> None:
 
 def test_a_reset_slept_through_is_not_recorded(tmp_path: Path) -> None:
     book = book_with(daily(limit=5, basis="equity"), tmp=tmp_path)
-    book.observe(KEY, snap(), at(2026, 10, 5, 23, 0))
-    book.observe(KEY, snap(), at(2026, 10, 6, 1, 0))
-    assert only(book, snap(), now=at(2026, 10, 6, 1, 1)).level is Level.UNKNOWN
+    book.observe(KEY, snap(positions=HELD), at(2026, 10, 5, 23, 0))
+    book.observe(KEY, snap(positions=HELD), at(2026, 10, 6, 1, 0))
+    status = only(book, snap(positions=HELD), now=at(2026, 10, 6, 1, 1))
+    assert status.level is Level.UNKNOWN
 
 
 def test_higher_basis_falls_back_to_balance_and_says_so(tmp_path: Path) -> None:
-    status = only(book_with(daily(limit=5, basis="higher"), tmp=tmp_path), snap(equity=99_000.0))
+    s = snap(equity=99_000.0, positions=HELD)
+    status = only(book_with(daily(limit=5, basis="higher"), tmp=tmp_path), s)
     assert status.used == pytest.approx(1_000.0) and "not recorded" in status.detail
+
+
+def test_with_nothing_open_at_the_reset_its_equity_was_its_balance(tmp_path: Path) -> None:
+    # Closed a trade opened and closed since the reset, and holds nothing: nothing was open
+    # at 00:00, so the day started at the balance then, unrecorded or not.
+    since = (
+        deal(at(2026, 10, 5, 8), 0.0, ticket=1, position=50, entry=0),
+        deal(at(2026, 10, 5, 9), -1_500.0, ticket=2, position=50),
+    )
+    for basis in ("equity", "higher"):
+        status = only(
+            book_with(daily(limit=5, basis=basis), tmp=tmp_path),
+            snap(balance=98_500.0, equity=98_000.0, deals=since),
+        )
+        assert status.level is not Level.UNKNOWN, basis
+        assert status.used == pytest.approx(2_000.0)
+        assert "100,000.00" in status.detail and "nothing was open" in status.detail
+
+
+def test_a_trade_opened_before_the_reset_leaves_its_equity_unknown(tmp_path: Path) -> None:
+    book = book_with(daily(limit=5, basis="equity"), tmp=tmp_path)
+    # Closed since the reset, but its opening is not in the history after it.
+    closed = (deal(at(2026, 10, 5, 9), -1_500.0, position=50),)
+    assert only(book, snap(deals=closed)).level is Level.UNKNOWN
+    # Open now, and opened since the reset: nothing was open then.
+    opened = (deal(at(2026, 10, 5, 9), 0.0, position=10, entry=0),)
+    assert only(book, snap(deals=opened, positions=HELD)).level is not Level.UNKNOWN
+    # A history that cannot say which trade a deal belongs to tells nothing.
+    assert only(book, snap(deals=(deal(at(2026, 10, 5, 9), -1.0),))).level is Level.UNKNOWN
+    # Nor does one not read.
+    assert only(book, snap(deals=None)).level is Level.UNKNOWN
 
 
 # --- the others --------------------------------------------------------------------------------

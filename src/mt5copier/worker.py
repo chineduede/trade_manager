@@ -538,6 +538,7 @@ class _Session:
                         swap=float(getattr(d, "swap", 0.0) or 0.0),
                         fee=float(getattr(d, "fee", 0.0) or 0.0),
                         symbol=str(getattr(d, "symbol", "") or ""),
+                        position=int(getattr(d, "position_id", 0) or 0),
                     )
                 )
             except (AttributeError, TypeError, ValueError) as exc:
