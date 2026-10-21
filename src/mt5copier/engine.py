@@ -30,6 +30,7 @@ from .breakeven import (
     breakeven_level,
     buffer_distance,
     check_breakeven_price,
+    guard_stop,
     master_breakeven_due,
 )
 from .config import (
@@ -45,6 +46,7 @@ from .copy_stats import StatsBook, TerminalStats
 from .ctrader.worker import run_ctrader_worker
 from .day_book import DayBook, MasterEvent, Outcome, SlaveOutcome
 from .guards import NO_VERDICT, GuardBook, GuardReport, GuardsDoc, Verdict
+from .guards.book import NewsAct
 from .history import ORPHANED, GuardAction, HistoryStore, Trade, step_for
 from .logging_setup import get_logger
 from .news import NewsCalendar
@@ -72,6 +74,8 @@ from .reconcile import (
     OpenCopy,
     SkipReason,
     SlaveLink,
+    news_hits,
+    protective_sl,
 )
 from .settings_edit import copies_word
 from .setups import Setup
@@ -281,6 +285,13 @@ class Engine:
         )
         """Each account's prop-firm rules and how they stand."""
         self._verdicts: dict[str, Verdict] = {}
+        self._news_done: dict[str, set[int]] = {}
+        """Per slave, the master tickets a news rule has acted on in the window now open: each
+        copy is acted on once per window, which ends when the slave's rules stop acting."""
+        self._guard_be: set[tuple[str, int]] = set()
+        """Copies a guard moved to breakeven: if the broker refuses that stop, they are closed."""
+        self._guard_pending: dict[tuple[str, int, ActionKind], GuardNote] = {}
+        """What a guard asked of a copy, waiting for the diff to derive the action it goes on."""
         """Per slave: what its guards said on its latest snapshot. Read when the master's tick
         derives new trades for it, and when a trade is sent."""
 
@@ -611,6 +622,7 @@ class Engine:
         dry = self._cfg.dry_run
         if not dry:
             self._arm_breakevens(links)
+        self._news_guard(links, positions, orders, snap, dry)
         try:
             actions = self._ledger.step(
                 positions,
@@ -650,6 +662,9 @@ class Engine:
             )
             invert = cfg is not None and cfg.invert
 
+            pending = self._guard_pending.pop(
+                (action.terminal_id, action.master_ticket, action.kind), None
+            )
             if not action.executable:
                 reason = action.skip_reason.value if action.skip_reason else None
                 guard = self._gate_notes(action)
@@ -660,7 +675,13 @@ class Engine:
                 self._day.add(action, Outcome.NOT_SENT, "this build cannot send it", invert=invert)
                 continue
             if dry:
-                self._day.add(action, Outcome.DRY_RUN, invert=invert)
+                self._day.add(
+                    action,
+                    Outcome.DRY_RUN,
+                    invert=invert,
+                    guard=(pending,) if pending else (),
+                    by=pending.rule if pending else "",
+                )
                 continue
             if cfg is None:
                 continue
@@ -670,8 +691,10 @@ class Engine:
                     action, Outcome.NOT_SENT, "the slave has not reported yet", invert=invert
                 )
                 continue
-            self._day.add(action, Outcome.SENDING, invert=invert)
-            self._dispatch(action, cfg, slave_snap)
+            self._day.add(
+                action, Outcome.SENDING, invert=invert, by=pending.rule if pending else ""
+            )
+            self._dispatch(action, cfg, slave_snap, pending)
         self._day.end_tick(links, self._hold_reason)
 
     def _arm_breakevens(self, links: list[SlaveLink]) -> None:
@@ -688,6 +711,19 @@ class Engine:
         """
         for tid, master_ticket in self._ledger.take_refused_breakevens():
             key = (tid, master_ticket)
+            if key in self._guard_be:
+                self._guard_be.discard(key)
+                self._guard_close(
+                    tid,
+                    master_ticket,
+                    ActionKind.CLOSE,
+                    GuardNote(
+                        "A guard",
+                        "closed",
+                        "the broker refused the breakeven stop it set before the news",
+                    ),
+                )
+                continue
             tried = self._be_room.pop(key, 0.0)
             self._be_min_room[key] = max(tried * _BE_RETRY_FACTOR, self._be_min_room.get(key, 0.0))
             cfg = self._cfg.terminals.get(tid)
@@ -768,6 +804,122 @@ class Engine:
                     price,
                     level,
                 )
+
+    # --- a guard acting on open copies ------------------------------------------------------
+
+    def _news_guard(
+        self,
+        links: list[SlaveLink],
+        positions: Sequence[Position],
+        orders: Sequence[PendingOrder],
+        master_snap: Snapshot,
+        dry: bool,
+    ) -> None:
+        """Move to breakeven or close the copies a news rule says to, before the release.
+
+        The one place a guard overrides the master: a copy it closes stays closed while the
+        master's trade runs on, and one it moves keeps that stop unless the master's is tighter
+        (the breakeven floor, as the slave's own breakeven sets it). Resting copies in the news
+        currency are cancelled. Each copy is acted on once in a window; one that cannot be
+        acted on yet -- its slave not connected -- is tried again on the next tick.
+
+        Matched on the master's symbol, as the gate does, since a broker's decorated name may
+        not read as currencies. Caller must hold the lock.
+        """
+        symbols = {p.ticket: p.symbol for p in positions} | {o.ticket: o.symbol for o in orders}
+        for link in links:
+            tid = link.cfg.terminal_id
+            acts = self._verdicts.get(tid, NO_VERDICT).news_acts
+            if not acts:
+                self._news_done.pop(tid, None)
+                continue
+            if not dry and not link.connected:
+                continue
+            done = self._news_done.setdefault(tid, set())
+            snap = master_snap if dry else self._snapshots.get(tid)
+            for copy in self._ledger.believed(tid):
+                ticket = copy.master_ticket
+                act = self._acting_on(acts, symbols.get(ticket, copy.slave_symbol))
+                if act is None or ticket in done or copy.guard_close:
+                    continue
+                done.add(ticket)
+                self._news_act(link.cfg, copy, act, snap, dry)
+            for order in self._ledger.believed_orders(tid):
+                ticket = order.master_ticket
+                act = self._acting_on(acts, symbols.get(ticket, order.slave_symbol))
+                if act is None or ticket in done or order.guard_close:
+                    continue
+                done.add(ticket)
+                note = GuardNote(act.title, "cancelled", f"before {act.why}", act.rule_id)
+                self._guard_close(tid, ticket, ActionKind.CANCEL, note)
+
+    @staticmethod
+    def _acting_on(acts: tuple[NewsAct, ...], symbol: str) -> NewsAct | None:
+        """The news rule acting on a copy of ``symbol`` now; a close wins over a breakeven."""
+        hits = [a for a in acts if news_hits(a.currencies, symbol)]
+        return next((a for a in hits if a.mode == "close"), hits[0] if hits else None)
+
+    def _news_act(
+        self,
+        cfg: TerminalConfig,
+        copy: CopiedPosition,
+        act: NewsAct,
+        snap: Snapshot | None,
+        dry: bool,
+    ) -> None:
+        """Breakeven or close one copy for a news rule. A breakeven that cannot be set -- the
+        copy is in loss, not yet clear of its costs, or its price or costs are unknown -- closes
+        it: the point is to be safe before the news, and closing is the side that is."""
+        tid, ticket = cfg.terminal_id, copy.master_ticket
+        if act.mode != "breakeven":
+            note = GuardNote(act.title, "closed", f"before {act.why}", act.rule_id)
+            self._guard_close(tid, ticket, ActionKind.CLOSE, note)
+            return
+        # Live, the copy's own fill and price; a dry run has no copy, so the master's trade
+        # stands in for it.
+        look = ticket if dry else copy.slave_ticket
+        fill = price = None
+        if snap is not None and look is not None:
+            fill = next((p.price_open for p in snap.open_positions or () if p.ticket == look), None)
+            price = next(
+                (p.price_current for p in snap.live_positions or () if p.ticket == look), None
+            )
+        stop = guard_stop(copy, fill, price, cfg) if fill is not None else None
+        if stop is None:
+            why = (
+                "it was in loss or not clear of its costs, so a breakeven stop was impossible"
+                if fill is not None and price is not None
+                else "its price could not be read, so a breakeven stop could not be set"
+            )
+            note = GuardNote(act.title, "closed", f"before {act.why}: {why}", act.rule_id)
+            self._guard_close(tid, ticket, ActionKind.CLOSE, note)
+            return
+        if protective_sl(copy.synced_sl, stop, copy.type) == copy.synced_sl:
+            return  # Its stop is already at least that safe: nothing to move.
+        self._ledger.set_breakeven(tid, ticket, stop)
+        self._guard_be.add((tid, ticket))
+        note = GuardNote(
+            act.title,
+            "moved",
+            f"its stop to breakeven, {stop:g}, before {act.why}; the master's stop is followed "
+            "only when tighter",
+            act.rule_id,
+        )
+        self._guard_pending[(tid, ticket, ActionKind.MODIFY_SLTP)] = note
+        self._note_guard_act(cfg, ticket, note)
+
+    def _guard_close(self, tid: str, ticket: int, kind: ActionKind, note: GuardNote) -> None:
+        """Close or cancel one copy for a guard; the next diff derives it."""
+        if not self._ledger.request_close(tid, ticket):
+            return
+        self._guard_pending[(tid, ticket, kind)] = note
+        cfg = self._cfg.terminals.get(tid)
+        if cfg is not None:
+            self._note_guard_act(cfg, ticket, note)
+
+    def _note_guard_act(self, cfg: TerminalConfig, ticket: int, note: GuardNote) -> None:
+        name = self._cfg.display_name(cfg.terminal_id)
+        log.warning("guards: #%s on %s: %s", ticket, name, note.text())
 
     # --- the master's own breakeven ---------------------------------------------------------
 
@@ -1016,7 +1168,13 @@ class Engine:
             kind,
         )
 
-    def _dispatch(self, action: Action, cfg: TerminalConfig, snap: Snapshot) -> None:
+    def _dispatch(
+        self,
+        action: Action,
+        cfg: TerminalConfig,
+        snap: Snapshot,
+        pending: GuardNote | None = None,
+    ) -> None:
         """Turn one action into an order command and put it on that slave's queue.
 
         The command is self-contained by design: the engine decides *what* and *how much
@@ -1037,7 +1195,7 @@ class Engine:
             return
         verdict = self._verdicts.get(cfg.terminal_id, NO_VERDICT)
         risk, risk_note = self._capped_risk(action, cfg, risk, verdict)
-        notes = tuple(n for n in (risk_note, self._stop_note(action, cfg, verdict)) if n)
+        notes = tuple(n for n in (risk_note, self._stop_note(action, cfg, verdict), pending) if n)
         margin = verdict.max_margin
         total = verdict.max_total_margin
         opening = action.kind in (ActionKind.OPEN, ActionKind.PLACE)

@@ -20,6 +20,7 @@ from ..protocol import Snapshot
 from .account import AccountView, last_reset
 from .base import REGISTRY, SEVERITY, Level, Measure
 from .model import GuardRule, GuardsDoc, write_json
+from .rules.news import acting
 
 log = get_logger(__name__)
 
@@ -115,6 +116,20 @@ class Cap:
 
 
 @dataclass(frozen=True, slots=True)
+class NewsAct:
+    """A news rule acting on the copies the slave holds now, before a release."""
+
+    rule_id: str
+    title: str
+    mode: str
+    """``"breakeven"`` or ``"close"``."""
+    currencies: frozenset[str]
+    """The news currencies; ``"*"`` for every copy."""
+    why: str
+    """Which news, and when."""
+
+
+@dataclass(frozen=True, slots=True)
 class Verdict:
     """What the guards tell the engine to do about one slave right now."""
 
@@ -145,6 +160,8 @@ class Verdict:
     max_margin: Cap | None = None
     max_total_margin: Cap | None = None
     """The most margin every open trade and a new one may use together."""
+    news_acts: tuple[NewsAct, ...] = ()
+    """News rules acting on open copies now, before a release."""
 
     @property
     def hold(self) -> str | None:
@@ -345,6 +362,7 @@ class GuardBook:
         news: set[str] = set()
         news_why: list[str] = []
         caps: dict[str, Cap] = {}
+        acts: list[NewsAct] = []
         for status in report.rules:
             rule = REGISTRY.get(status.type)
             if rule is None or not status.enabled:
@@ -362,7 +380,12 @@ class GuardBook:
                 if given is None or self.calendar is None:
                     continue
                 params, _ = given.resolved()
-                on_news, why = rule.held(params, self.calendar.current(), now)  # type: ignore[attr-defined]
+                calendar = self.calendar.current()
+                due, before = acting(params, calendar, now)
+                if due and status.action != "warn":
+                    mode = str(params["before_news"])
+                    acts.append(NewsAct(status.rule_id, status.title, mode, due, before))
+                on_news, why = rule.held(params, calendar, now)  # type: ignore[attr-defined]
                 if not on_news:
                     continue
                 if status.action == "warn":
@@ -408,6 +431,7 @@ class GuardBook:
             max_risk=caps.get("risk"),
             max_margin=caps.get("margin"),
             max_total_margin=caps.get("total_margin"),
+            news_acts=tuple(acts),
         )
 
 

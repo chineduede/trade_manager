@@ -1638,6 +1638,31 @@ are the design, not a limitation waiting to be lifted.
     in the slave's history as skipped) and one in another (copied); close a copy during the
     window (closed). Pull the network: after a day the rule says the calendar cannot be read and
     holds new trades.
+  - **Acting on open copies before the news — asked for and built 2026-10-14.** Two new
+    parameters: "Before the news" (leave open copies alone — the default; move them to
+    breakeven, closing those in loss; or close them) and "Do it N min before the news"
+    (default 5), independent of the no-new-trades window. The user's decisions:
+    - The guard overrides the master. A copy it closes is flagged (`guard_close`, kept in the
+      mapping db) so the diff sends a CLOSE and nothing else; once closed its master ticket is
+      excluded, so it is never reopened while the master's trade runs on. A breakeven is the
+      existing floor (`breakeven_sl`), so the master's stop is followed only when tighter.
+    - It acts from N min before a release until the release, never after (a late start does
+      nothing): after it a close no longer avoids the spike and many firms forbid one in the
+      window. An unread calendar never acts. Set to warn, it only warns.
+    - Resting copies in the news currency are cancelled too.
+    - Breakeven needs the copy past entry plus its commission and slippage buffer
+      (`breakeven.guard_stop`); in loss, not yet clear of costs, or with its price unknown it is
+      closed instead. A breakeven stop the broker refuses closes the copy.
+    - Each copy is acted on once per window. Every action is a GuardNote (closed / moved /
+      cancelled) on the day book, the trade's history and the guards page, and the day book's
+      headline names the guard ("High-impact news closed a slave's copy of ...; the master's is
+      unchanged").
+    - `request_close` and the pending-note path are what "close the worst copy" and "close
+      every copy" on the loss rules can use later; those still only hold new trades.
+    - *Demo check:* a news rule set to close, N = a few minutes before an upcoming release
+      (or a test event); a copy open in that currency is closed at the time, stays closed while
+      the master's trade runs on, and the guards page lists it. Set to breakeven: a copy in
+      profit gets its stop at entry plus costs, one in loss is closed.
 - **Booking profit at breakeven — asked for 2026-10-06, built the same day on
   `breakeven-partial` (off `integration`), awaiting its demo check.** When a copy's breakeven
   fires, its slave closes a set percent of it to book some profit. The user's decisions:

@@ -155,3 +155,22 @@ def breakeven_level(
     if gained + slack < threshold or (price_current - stop) * sign <= slack:
         return None
     return stop
+
+
+def guard_stop(
+    copy: CopiedPosition, price_open: float, price_current: float | None, cfg: TerminalConfig
+) -> float | None:
+    """Where a guard moving this copy to breakeven puts its stop, whatever its trigger: entry
+    plus the commission and slippage buffer. None when that cannot be done -- the price, the
+    buffer or the symbol's point is unknown, or the price is not past where the stop would go
+    (a copy in loss, or not yet clear of its costs) -- which a guard answers by closing it."""
+    if copy.point <= 0.0 or price_current is None or price_current <= 0.0:
+        return None
+    buffer = buffer_distance(copy, cfg)
+    if buffer is None:
+        return None
+    stop = breakeven_stop(copy, price_open, buffer)
+    sign = 1.0 if copy.type is PositionType.BUY else -1.0
+    if (price_current - stop) * sign <= copy.point / 2:
+        return None
+    return stop

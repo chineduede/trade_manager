@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS copies (
     book_fraction REAL    NOT NULL DEFAULT 0,
     book_tries    INTEGER NOT NULL DEFAULT 0,
     booked        INTEGER NOT NULL DEFAULT 0,
+    guard_close   INTEGER NOT NULL DEFAULT 0,
     opened_at     REAL    NOT NULL,
     updated_at    REAL    NOT NULL,
     PRIMARY KEY (terminal_id, master_ticket)
@@ -92,6 +93,7 @@ _ADDED_COLUMNS = (
     ("booked", "INTEGER NOT NULL DEFAULT 0"),
     ("commission_per_lot", "REAL NOT NULL DEFAULT 0"),
     ("master_managed", "INTEGER NOT NULL DEFAULT -1"),
+    ("guard_close", "INTEGER NOT NULL DEFAULT 0"),
 )
 """Columns added after the table first shipped, for breakeven and booking at it. ``CREATE TABLE
 IF NOT EXISTS`` leaves an older file's table as it was, so each is added on open when it is
@@ -153,6 +155,9 @@ class Copy:
     book_fraction: float = 0.0
     book_tries: int = 0
     booked: bool = False
+    guard_close: bool = False
+    """A guard closes (or cancels) this copy, whatever the master does: see
+    :attr:`mt5copier.reconcile.CopiedPosition.guard_close`."""
     opened_at: float = 0.0
     updated_at: float = 0.0
 
@@ -179,6 +184,7 @@ class Copy:
             book_fraction=self.book_fraction,
             book_tries=self.book_tries,
             booked=self.booked,
+            guard_close=self.guard_close,
         )
 
     def as_order(self) -> CopiedOrder:
@@ -198,6 +204,7 @@ class Copy:
             risk_distance=self.risk_distance,
             price_value=self.price_value,
             master_managed=self.master_managed is not False,
+            guard_close=self.guard_close,
         )
 
 
@@ -282,8 +289,8 @@ class MappingStore:
                     order_type, master_volume, slave_volume, entry, synced_sl, synced_tp,
                     point, digits, risk_distance, price_value, commission_per_lot,
                     master_managed, breakeven_sl, breakeven_exempt, breakeven_at,
-                    book_fraction, book_tries, booked, opened_at, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    book_fraction, book_tries, booked, guard_close, opened_at, updated_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     stamped.terminal_id,
@@ -310,6 +317,7 @@ class MappingStore:
                     stamped.book_fraction,
                     stamped.book_tries,
                     int(stamped.booked),
+                    int(stamped.guard_close),
                     stamped.opened_at,
                     stamped.updated_at,
                 ),
@@ -666,6 +674,7 @@ def _from_row(row: sqlite3.Row) -> Copy:
         book_fraction=float(row["book_fraction"]),
         book_tries=int(row["book_tries"]),
         booked=bool(row["booked"]),
+        guard_close=bool(row["guard_close"]),
         opened_at=float(row["opened_at"]),
         updated_at=float(row["updated_at"]),
     )

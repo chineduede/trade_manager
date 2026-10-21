@@ -60,7 +60,8 @@ ACTS = (
     "trades, or a new trade is declined or shrunk. What it already holds is still managed. "
 )
 CLOSING_LATER = (
-    "Closing copies comes later: until then, a rule set to close the worst copy or every copy "
+    "The news rule can also move copies to breakeven or close them before the news. Closing on "
+    "a loss limit comes later: until then, a rule set to close the worst copy or every copy "
     "keeps the slave from new trades instead. "
 )
 SAFETY_NET = (
@@ -175,6 +176,9 @@ ACTION_COLOR = {
     "declined": RED,
     "stopped new trades": RED,
     "let new trades through": BLUE,
+    "moved": YELLOW,
+    "closed": RED,
+    "cancelled": RED,
 }
 
 

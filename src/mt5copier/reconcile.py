@@ -255,6 +255,10 @@ class CopiedPosition:
     """The booking has gone out: sent and not yet answered, done, or given up. A breakeven
     that fires again (after a refused stop move) then books nothing more, and a restart while
     it is out does not send it again. Only a failure that is to be tried again clears it."""
+    guard_close: bool = False
+    """A guard closes this copy while the master's trade runs on: the diff sends a CLOSE and
+    nothing else for it, and once it is closed the master's trade is never copied again here.
+    Kept on disk, so a close not yet done is still owed after a restart."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +287,9 @@ class CopiedOrder:
     """Carried over to the position on a fill; see :class:`CopiedPosition`."""
     master_managed: bool = True
     """Carried over to the position on a fill. A resting order itself is always mirrored."""
+    guard_close: bool = False
+    """A guard cancels this order while the master's rests on; see
+    :attr:`CopiedPosition.guard_close`."""
 
 
 # --- pure helpers ---------------------------------------------------------------------------
@@ -400,7 +407,7 @@ class GuardGate:
     name is refused while any news is on."""
 
 
-def _news_hits(news: frozenset[str], symbol: str) -> bool:
+def news_hits(news: frozenset[str], symbol: str) -> bool:
     if not news:
         return False
     if "*" in news:
@@ -416,7 +423,7 @@ def _guard_reason(
         return None
     if gate.hold:
         return SkipReason.GUARD_HOLDS
-    if _news_hits(gate.news, symbol):
+    if news_hits(gate.news, symbol):
         return SkipReason.GUARD_NEWS
     if gate.needs_stop and slave_sl == 0.0:
         return SkipReason.GUARD_NEEDS_STOP
@@ -547,11 +554,11 @@ def reconcile_slave(
     copied_by_ticket = {c.master_ticket: c for c in copied}
     out: list[Action] = []
 
-    # --- gone from the master -> close ------------------------------------------------------
+    # --- gone from the master, or closed by a guard -> close ---------------------------------
     for ticket in sorted(copied_by_ticket):
-        if ticket in master_by_ticket:
-            continue
         stale = copied_by_ticket[ticket]
+        if ticket in master_by_ticket and not stale.guard_close:
+            continue
         out.append(
             Action(
                 kind=ActionKind.CLOSE,
@@ -609,6 +616,9 @@ def reconcile_slave(
                     master_managed=master_manages,
                 )
             )
+            continue
+        if c.guard_close:
+            # A guard is closing it: the master's partials and stop moves no longer reach it.
             continue
 
         # Partial close. Measured against the volume this copy was sized against, not against
@@ -754,10 +764,11 @@ def reconcile_slave_orders(
 
     # --- gone from the master's order list --------------------------------------------------
     for ticket in sorted(copied_by_ticket):
-        if ticket in resting:
-            continue
         stale = copied_by_ticket[ticket]
-        filled = ticket in position_tickets
+        if ticket in resting and not stale.guard_close:
+            continue
+        # A guard cancelling the copy cancels it, whether the master's rests on or filled.
+        filled = ticket in position_tickets and not stale.guard_close
         out.append(
             Action(
                 kind=ActionKind.ORDER_FILLED if filled else ActionKind.CANCEL,
@@ -819,6 +830,8 @@ def reconcile_slave_orders(
                     master_managed=master_manages,
                 )
             )
+            continue
+        if c.guard_close:
             continue
 
         # A resting order can be moved -- entry price included, which no position can be. Its
@@ -1299,6 +1312,21 @@ class CopyLedger:
         self._store.update(terminal_id, master_ticket, breakeven_sl=sl)
         self._last.pop((terminal_id, master_ticket, ActionKind.MODIFY_SLTP), None)
 
+    def request_close(self, terminal_id: str, master_ticket: int) -> bool:
+        """Close one copy -- cancel it, if it is resting -- whatever its master trade does.
+        Nothing is sent from here: the next diff derives the ``CLOSE`` or ``CANCEL`` from the
+        flag, which stays on disk until it is done. False if there is no such copy.
+
+        What a guard calls when it overrides the master; see
+        :attr:`CopiedPosition.guard_close`.
+        """
+        copy = self._store.update(terminal_id, master_ticket, guard_close=True)
+        if copy is None:
+            return False
+        for kind in (ActionKind.CLOSE, ActionKind.CANCEL):
+            self._last.pop((terminal_id, master_ticket, kind), None)
+        return True
+
     def set_booking(self, terminal_id: str, master_ticket: int, fraction: float) -> None:
         """Book a fraction of one copy at its breakeven. Nothing is sent from here, as with the
         floor: the next diff derives the ``BOOK``. Ignored on a copy whose booking is already
@@ -1726,6 +1754,11 @@ class CopyLedger:
         last = self._last.get(key)
         if result.op in (ActionKind.CLOSE, ActionKind.CANCEL):
             self._store.forget(result.terminal_id, result.master_ticket)
+            # Never copied again here: a guard's close leaves the master's trade running, and
+            # without this the next diff would open it afresh. After a close the master made,
+            # the ticket is gone from the master and pruned with the rest.
+            bucket = self._excluded if result.op is ActionKind.CLOSE else self._excluded_orders
+            bucket.setdefault(result.terminal_id, set()).add(result.master_ticket)
             return
         if last is None:
             # The action that produced this is gone from memory -- a restart between sending

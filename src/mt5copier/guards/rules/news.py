@@ -1,9 +1,14 @@
 """No new trades around high-impact news.
 
 Firms differ in the window, the impact that counts, and whether only the instruments the news
-moves are restricted or every trade -- so each is a parameter, never a firm's preset. Like the
-other rules about a new trade, it never touches what the slave already holds: a close, a
-partial or a stop move is copied through the news as at any other time.
+moves are restricted or every trade -- so each is a parameter, never a firm's preset.
+
+What the slave already holds is left alone unless the rule says otherwise: set to, it moves the
+copies in the news currency to breakeven (closing those in loss) or closes them, and cancels its
+resting copies there, a set number of minutes before the release. That is the one place a guard
+overrides the master: a copy it closes stays closed while the master's trade runs on, and one it
+moves keeps that stop unless the master's is tighter. It acts only before the release: after it,
+a close no longer avoids the spike, and many firms forbid one inside the window.
 
 Which symbols the news moves is read from their names (:func:`mt5copier.news.symbol_currencies`);
 a symbol whose name cannot be read is treated as moved by any news, since guessing "not
@@ -50,6 +55,26 @@ class NewsWindow(Rule):
             ),
         ),
         Param(
+            "before_news",
+            "Before the news",
+            ParamKind.CHOICE,
+            "nothing",
+            choices=(
+                ("nothing", "leave open copies alone"),
+                ("breakeven", "move copies to breakeven, close those in loss"),
+                ("close", "close the copies"),
+            ),
+        ),
+        Param(
+            "act_before",
+            "Do it",
+            ParamKind.NUMBER,
+            5.0,
+            minimum=0,
+            maximum=240,
+            after="min before the news",
+        ),
+        Param(
             "if_unknown",
             "If the calendar cannot be read",
             ParamKind.CHOICE,
@@ -65,10 +90,20 @@ class NewsWindow(Rule):
     def sentence(self, p: dict[str, ParamValue], currency: str) -> str:
         impact = "high-impact" if p["impact"] == "high" else "high- or medium-impact"
         which = "in its currency" if p["affects"] == "currency" else "at all"
-        return (
+        said = (
             f"No new trade {which} from {float(p['before']):g} min before {impact} news "
             f"until {float(p['after']):g} min after it."
         )
+        copies = "every copy" if p["affects"] == "all" else "the copies in its currency"
+        lead = f"{float(p['act_before']):g} min before it,"
+        if p["before_news"] == "breakeven":
+            said += (
+                f" {lead} {copies} are moved to breakeven, those in loss closed, and resting "
+                "copies cancelled."
+            )
+        elif p["before_news"] == "close":
+            said += f" {lead} {copies} are closed and resting copies cancelled."
+        return said
 
     def measure(
         self, view: AccountView, p: dict[str, ParamValue], rule_id: str, memory: Memory
@@ -109,6 +144,23 @@ class NewsWindow(Rule):
         currencies = frozenset(e.currency for e in now_on)
         listed = ", ".join(sorted(currencies))
         return currencies, f"{names}: no new {listed} trades until {clock(last)}"
+
+
+def acting(p: dict[str, ParamValue], calendar: Calendar, now: float) -> tuple[frozenset[str], str]:
+    """The currencies whose open copies the rule acts on now (``ALL`` for every one), and which
+    news: from ``act_before`` minutes before a release until the release itself, never after.
+    An unread calendar acts on nothing -- closing every trade because a feed failed would be
+    worse than the news."""
+    if p["before_news"] == "nothing" or calendar.events is None:
+        return frozenset(), ""
+    lead = float(p["act_before"]) * 60
+    due = [e for e in counted(p, calendar.events) if e.when - lead <= now < e.when]
+    if not due:
+        return frozenset(), ""
+    why = "; ".join(f"{e.currency} {e.title} at {clock(e.when)}" for e in due[:3])
+    if p["affects"] == "all" or any(e.currency == "ALL" for e in due):
+        return frozenset({ALL}), why
+    return frozenset(e.currency for e in due), why
 
 
 def counted(p: dict[str, ParamValue], events: tuple[NewsEvent, ...]) -> list[NewsEvent]:

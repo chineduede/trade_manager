@@ -131,6 +131,9 @@ class MasterEvent:
     sl: float = 0.0
     tp: float = 0.0
     outcomes: tuple[SlaveOutcome, ...] = ()
+    by: str = ""
+    """The guard that did it, when the master did not: a copy closed, cancelled or moved to
+    breakeven before the news while the master's trade runs on."""
 
     @property
     def problems(self) -> int:
@@ -232,11 +235,13 @@ class DayBook:
         *,
         invert: bool = False,
         guard: tuple[GuardNote, ...] = (),
+        by: str = "",
     ) -> None:
         """File one slave's action under this tick's event for its master trade.
 
         ``invert`` is whether that slave reverse-copies, needed only when the master's side
-        has to be pieced together from the action itself.
+        has to be pieced together from the action itself. ``by`` names the guard that asked
+        for it, when the master did not.
         """
         preexisting = action.skip_reason is SkipReason.PREEXISTING
         if action.kind is ActionKind.ORDER_FILLED:
@@ -247,6 +252,8 @@ class DayBook:
         event = self._tick.get(key)
         if event is None:
             event = self._open_event(action, preexisting, invert)
+            if by:
+                event.head = replace(event.head, by=by)
             self._tick[key] = event
         slot = _Slot(
             action.terminal_id,
@@ -514,6 +521,15 @@ def describe_master(event: MasterEvent) -> str:
         return f"already had {what} {vol} {state} when a slave started watching it"
     if kind is ActionKind.OPEN:
         return f"opened {what} {vol} at {_price(event.entry)}"
+    if event.by:
+        # Not something the master did: a guard acted on a slave's copy, the master's trade
+        # running on as it was.
+        done = {
+            ActionKind.CLOSE: "closed",
+            ActionKind.CANCEL: "cancelled",
+            ActionKind.MODIFY_SLTP: "moved the stop of",
+        }.get(kind, "acted on")
+        return f"{event.by} {done} a slave's copy of {what} {vol}; the master's is unchanged"
     if kind is ActionKind.CLOSE:
         return f"closed {what} {vol}"
     if kind is ActionKind.REDUCE:
