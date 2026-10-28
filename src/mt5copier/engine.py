@@ -46,7 +46,7 @@ from .copy_stats import StatsBook, TerminalStats
 from .ctrader.worker import run_ctrader_worker
 from .day_book import DayBook, MasterEvent, Outcome, SlaveOutcome
 from .guards import NO_VERDICT, GuardBook, GuardReport, GuardsDoc, Verdict
-from .guards.book import NewsAct
+from .guards.book import CloseAct, NewsAct
 from .history import ORPHANED, GuardAction, HistoryStore, Trade, step_for
 from .logging_setup import get_logger
 from .news import NewsCalendar
@@ -292,6 +292,10 @@ class Engine:
         """Copies a guard moved to breakeven: if the broker refuses that stop, they are closed."""
         self._guard_pending: dict[tuple[str, int, ActionKind], GuardNote] = {}
         """What a guard asked of a copy, waiting for the diff to derive the action it goes on."""
+        self._guard_closed: dict[str, set[int]] = {}
+        """Per slave, the slave tickets a close-the-worst rule has closed that its snapshot
+        still shows open. While one lingers, no further copy is picked: the rule is measured
+        again only on what is really left, so a laggy snapshot never closes one copy too many."""
         """Per slave: what its guards said on its latest snapshot. Read when the master's tick
         derives new trades for it, and when a trade is sent."""
 
@@ -623,6 +627,7 @@ class Engine:
         if not dry:
             self._arm_breakevens(links)
         self._news_guard(links, positions, orders, snap, dry)
+        self._close_guard(links, snap, dry)
         try:
             actions = self._ledger.step(
                 positions,
@@ -907,6 +912,73 @@ class Engine:
         )
         self._guard_pending[(tid, ticket, ActionKind.MODIFY_SLTP)] = note
         self._note_guard_act(cfg, ticket, note)
+
+    def _close_guard(self, links: list[SlaveLink], master_snap: Snapshot, dry: bool) -> None:
+        """Close the copies an account rule set to close says to, for as long as it says so.
+
+        ``flatten`` closes every copy and cancels every resting one at once. ``close_worst``
+        closes the copy deepest in loss and waits for that close to show in the slave's
+        snapshot; the rule is then measured afresh on what is left, so it keeps closing one
+        copy at a time until it lets go -- or nothing is left. The slave takes no new trades
+        the whole while (every close action also holds it back). Caller must hold the lock.
+        """
+        for link in links:
+            tid = link.cfg.terminal_id
+            acts = self._verdicts.get(tid, NO_VERDICT).close_acts
+            if not acts:
+                self._guard_closed.pop(tid, None)
+                continue
+            if not dry and not link.connected:
+                continue
+            act = next((a for a in acts if a.mode == "flatten"), acts[0])
+            if act.mode == "flatten":
+                for copy in self._ledger.believed(tid):
+                    if not copy.guard_close:
+                        note = GuardNote(act.title, "closed", act.why, act.rule_id)
+                        self._guard_close(tid, copy.master_ticket, ActionKind.CLOSE, note)
+                for order in self._ledger.believed_orders(tid):
+                    if not order.guard_close:
+                        note = GuardNote(act.title, "cancelled", act.why, act.rule_id)
+                        self._guard_close(tid, order.master_ticket, ActionKind.CANCEL, note)
+                continue
+            # Live, each copy's P/L is on the slave's snapshot by its slave ticket; a dry run
+            # has no copies on the broker, so the master's trades stand in for them.
+            self._close_worst(tid, act, master_snap if dry else self._snapshots.get(tid), dry)
+
+    def _close_worst(self, tid: str, act: CloseAct, snap: Snapshot | None, dry: bool) -> None:
+        """Close the one copy deepest in loss, unless an earlier close is still in flight."""
+        copies = self._ledger.believed(tid)
+        if any(c.guard_close for c in copies):
+            return  # a close is on its way; what is left is measured once it lands
+        closed = self._guard_closed.get(tid)
+        if closed:
+            closed &= {p.ticket for p in (snap.open_positions if snap else None) or ()}
+            if closed:
+                return  # the last close has not reached the snapshot yet
+        pnl: dict[int, float] = {}
+        for live in (snap.live_positions if snap else None) or ():
+            if live.profit is not None:
+                pnl[live.ticket] = live.profit + (live.swap or 0.0)
+        worst: CopiedPosition | None = None
+        worst_pnl = 0.0
+        for copy in copies:
+            look = copy.master_ticket if dry else copy.slave_ticket
+            value = pnl.get(look) if look is not None else None
+            if value is None:
+                continue
+            if worst is None or value < worst_pnl:
+                worst, worst_pnl = copy, value
+        if worst is None:
+            return  # no copy's P/L is known yet; tried again on the next tick
+        note = GuardNote(
+            act.title,
+            "closed",
+            f"the worst copy, {worst_pnl:,.2f} floating: {act.why}",
+            act.rule_id,
+        )
+        self._guard_close(tid, worst.master_ticket, ActionKind.CLOSE, note)
+        if not dry and worst.slave_ticket is not None:
+            self._guard_closed.setdefault(tid, set()).add(worst.slave_ticket)
 
     def _guard_close(self, tid: str, ticket: int, kind: ActionKind, note: GuardNote) -> None:
         """Close or cancel one copy for a guard; the next diff derives it."""

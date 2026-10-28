@@ -3,8 +3,7 @@ and what the rules together tell the engine to do about one slave -- its :class:
 
 A rule never acts itself. The verdict only says which of a few things the engine already knows
 how to do applies now: hold the slave back from new trades, refuse a trade with no stop, cap a
-new trade's risk or margin. Closing anything is not among them yet; a rule set to close copies
-holds the slave back from new trades until it can.
+new trade's risk or margin, close the worst copy or every copy.
 """
 
 from __future__ import annotations
@@ -29,9 +28,11 @@ _CONTINUITY_S = 60.0
 and the equity seen after it is not the equity at the reset."""
 
 _HOLDS_BACK = frozenset({"block_new", "close_worst", "flatten"})
-"""What a rule may be set to do on breach that stops new trades. Closing copies comes in a
-later stage; until then a rule set to close holds the slave back, the part of it already
-built, rather than doing nothing."""
+"""What a rule may be set to do on breach that stops new trades. A rule set to close copies
+holds the slave back too: it takes no new trades while old ones are being closed."""
+
+_CLOSES = frozenset({"close_worst", "flatten"})
+"""What a rule may be set to do on breach that closes open copies."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +131,18 @@ class NewsAct:
 
 
 @dataclass(frozen=True, slots=True)
+class CloseAct:
+    """An account rule closing open copies now: the worst one at a time, or every one."""
+
+    rule_id: str
+    title: str
+    mode: str
+    """``"close_worst"`` or ``"flatten"``."""
+    why: str
+    """How the rule stands: ``at 92% of its limit``."""
+
+
+@dataclass(frozen=True, slots=True)
 class Verdict:
     """What the guards tell the engine to do about one slave right now."""
 
@@ -162,6 +175,8 @@ class Verdict:
     """The most margin every open trade and a new one may use together."""
     news_acts: tuple[NewsAct, ...] = ()
     """News rules acting on open copies now, before a release."""
+    close_acts: tuple[CloseAct, ...] = ()
+    """Account rules set to close copies that are past the point they act at now."""
 
     @property
     def hold(self) -> str | None:
@@ -363,6 +378,7 @@ class GuardBook:
         news_why: list[str] = []
         caps: dict[str, Cap] = {}
         acts: list[NewsAct] = []
+        closes: list[CloseAct] = []
         for status in report.rules:
             rule = REGISTRY.get(status.type)
             if rule is None or not status.enabled:
@@ -410,6 +426,15 @@ class GuardBook:
                 if given is not None:
                     self._latch(key, given, status, now)
             line = _why(status)
+            if status.action in _CLOSES:
+                closes.append(
+                    CloseAct(
+                        status.rule_id,
+                        status.title,
+                        status.action,
+                        _standing(status) or "past its limit",
+                    )
+                )
             if status.action in _HOLDS_BACK:
                 held.append(line)
                 held_by.append(status.rule_id)
@@ -432,20 +457,27 @@ class GuardBook:
             max_margin=caps.get("margin"),
             max_total_margin=caps.get("total_margin"),
             news_acts=tuple(acts),
+            close_acts=tuple(closes),
         )
+
+
+def _standing(status: RuleStatus) -> str:
+    """``at 84% of its limit``, with how a breach is being held; empty when neither is known."""
+    fraction = status.fraction
+    parts: list[str] = []
+    if fraction is not None:
+        parts.append(f"at {fraction:.0%} of its limit")
+    if status.latched == "reset" and (fraction is None or fraction < (status.act_at or 1.0)):
+        parts.append("held until the reset")
+    elif status.latched == "hand":
+        parts.append("held until cleared")
+    return ", ".join(parts)
 
 
 def _why(status: RuleStatus) -> str:
     """``Daily loss at 84% of its limit``, or that a breach is being held."""
-    fraction = status.fraction
-    said = status.title
-    if fraction is not None:
-        said += f" at {fraction:.0%} of its limit"
-    if status.latched == "reset" and (fraction is None or fraction < (status.act_at or 1.0)):
-        said += ", held until the reset"
-    elif status.latched == "hand":
-        said += ", held until cleared"
-    return said
+    standing = _standing(status)
+    return f"{status.title} {standing}" if standing else status.title
 
 
 def _section(state: dict[str, object], name: str) -> dict[str, dict[str, dict[str, object]]]:

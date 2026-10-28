@@ -1658,7 +1658,26 @@ are the design, not a limitation waiting to be lifted.
       headline names the guard ("High-impact news closed a slave's copy of ...; the master's is
       unchanged").
     - `request_close` and the pending-note path are what "close the worst copy" and "close
-      every copy" on the loss rules can use later; those still only hold new trades.
+      every copy" on the loss rules use too (built 2026-10-28, see below).
+  - **Closing on the loss rules — built 2026-10-28, awaiting its demo check.** A rule set to
+    "close the worst copy" or "close every copy" (floating loss, daily loss, max drawdown) now
+    closes, from the point its buffer says to act (default 80% of the limit), not only at the
+    limit. The decisions:
+    - The verdict carries a `CloseAct` per acting rule; the engine acts, over the same
+      `guard_close` flag and GuardNote path the news rule closes with, so closed copies stay
+      closed while the master runs on and every close is listed on the day book, the trade's
+      history and the guards page.
+    - "Close every copy" closes every copy and cancels every resting one at once. "Close the
+      worst copy" closes the copy deepest in floating loss (by the slave snapshot's P/L plus
+      swap), then waits until that close shows in the slave's snapshot before measuring again:
+      one copy at a time, recursively, until the rule lets go -- never two closes decided on
+      the same stale numbers. A latched rule (daily loss, max drawdown) keeps acting until its
+      latch clears, so "close the worst" under a held breach drains every copy one by one.
+    - The slave takes no new trades the whole while: both close settings also hold it back, as
+      they always did.
+    - *Demo check:* floating loss set to close the worst, buffer 80%; open two copies and let
+      one run into loss past 80% of the limit: the deeper one is closed first, the other only
+      if the rule still acts on the next snapshots, and the guards page lists each close.
     - *Demo check:* a news rule set to close, N = a few minutes before an upcoming release
       (or a test event); a copy open in that currency is closed at the time, stays closed while
       the master's trade runs on, and the guards page lists it. Set to breakeven: a copy in
