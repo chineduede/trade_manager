@@ -11,7 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from textual.widgets import DataTable, Input, Static
+from textual.widgets import Button, DataTable, Input, Static
 from tui_support import TID_SLAVE, make_app, make_cfg, plain, toasted
 
 from mt5copier.config import VIRTUAL_MASTER_ID, AppConfig, AppMode, Role
@@ -555,3 +555,93 @@ async def test_a_fresh_ticket_seeds_its_lines_on_the_chart(app: CopierApp) -> No
         entry = float(screen.query_one("#dt-entry", Input).value)
         assert screen.chart_grab(scale.row(entry)) == "entry", "the entry line drags too"
         screen.chart_release()
+
+
+# --- rr and the buttons --------------------------------------------------------------------
+
+
+def wire_chart(app: CopierApp) -> None:
+    """A feed with a quote and bars, so the page draws and the rr math has its basis."""
+    engine = app._engine
+    engine.feed_tid = TID_SLAVE  # type: ignore[attr-defined]
+    engine.quotes["EURUSD"] = Quote("EURUSD", 1.0850, 1.0852)  # type: ignore[attr-defined]
+    engine.rates = RatesResult(  # type: ignore[attr-defined]
+        terminal_id=TID_SLAVE,
+        symbol="EURUSD",
+        timeframe=5,
+        candles=tuple(Candle(ts=i, open=1.08, high=1.09, low=1.07, close=1.085) for i in range(3)),
+    )
+
+
+async def test_rr_writes_the_target_and_the_target_writes_rr(app: CopierApp) -> None:
+    wire_chart(app)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_ticket(app, pilot)
+        screen.query_one("#dt-symbol", Input).value = "eurusd"
+        await pilot.pause()
+        screen.refresh_page()
+        screen.query_one("#dt-sl", Input).value = "1.0800"
+        await pilot.pause()
+        screen.query_one("#dt-rr", Input).value = "2"
+        await pilot.pause()
+        # A buy enters at the ask: risk 1.0852-1.08, the target twice that above the ask.
+        tp = float(screen.query_one("#dt-tp", Input).value)
+        assert abs(tp - 1.0956) < 1e-3, "rr 2 puts the target two risks past the entry"
+
+        screen.query_one("#dt-tp", Input).value = "1.0904"
+        await pilot.pause()
+        rr = float(screen.query_one("#dt-rr", Input).value)
+        assert abs(rr - 1.0) < 0.05, "a typed target writes its own rr back"
+
+
+async def test_moving_the_stop_keeps_the_rr_the_person_asked_for(app: CopierApp) -> None:
+    wire_chart(app)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_ticket(app, pilot)
+        screen.query_one("#dt-symbol", Input).value = "eurusd"
+        await pilot.pause()
+        screen.refresh_page()
+        screen.query_one("#dt-sl", Input).value = "1.0800"
+        await pilot.pause()
+        screen.query_one("#dt-rr", Input).value = "1"
+        await pilot.pause()
+        # rr was touched last, so a moved stop recomputes the target, not the rr.
+        screen.query_one("#dt-sl", Input).value = "1.0820"
+        await pilot.pause()
+        tp = float(screen.query_one("#dt-tp", Input).value)
+        assert abs(tp - 1.0884) < 1e-3, "the target follows the stop at the same rr"
+        assert screen.query_one("#dt-rr", Input).value == "1"
+
+
+async def test_the_place_button_wears_the_side(app: CopierApp) -> None:
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_ticket(app, pilot)
+        place = screen.query_one("#dt-place", Button)
+        assert "Buy" in str(place.label) and place.has_class("buy")
+        screen.query_one("#dt-side", Choice).value = "sell"
+        await pilot.pause()
+        assert "Sell" in str(place.label) and place.has_class("sell")
+        assert not place.has_class("buy")
+
+
+async def test_reset_returns_the_ticket_to_a_fresh_start(app: CopierApp) -> None:
+    wire_chart(app)
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_ticket(app, pilot)
+        screen.query_one("#dt-symbol", Input).value = "eurusd"
+        screen.query_one("#dt-lots", Input).value = "3"
+        screen.query_one("#dt-side", Choice).value = "sell"
+        screen.query_one("#dt-kind", Choice).value = "limit"
+        screen.query_one("#dt-sl", Input).value = "1.0900"
+        await pilot.pause()
+        screen.action_reset()
+        await pilot.pause()
+        assert screen.query_one("#dt-lots", Input).value == "1"
+        assert screen.query_one("#dt-side", Choice).value == "buy"
+        assert screen.query_one("#dt-kind", Choice).value == "market"
+        assert screen.query_one("#dt-symbol", Input).value == "eurusd", "the symbol is kept"
+        assert "ticket reset" in plain(screen.query_one("#dt-status", Static).content)
+        screen.refresh_page()
+        await pilot.pause()
+        sl = float(screen.query_one("#dt-sl", Input).value)
+        assert sl < 1.0850, "the lines reseed for a fresh buy"

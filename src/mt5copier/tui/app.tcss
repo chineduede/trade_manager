@@ -1000,8 +1000,44 @@ GoLiveDialog.-short #dialog {
     width: 9;
 }
 
-#dt-place {
+.dt-row .dt-rr {
+    width: 6;
+}
+
+/* The place button is the trade's side, said in its colour: blue is a buy (the copier's
+   working colour), red a sell -- the same coding as the book's rows. */
+.dt-actions {
+    margin-top: 1;
+}
+
+#dt-place.buy {
+    background: $accent 85%;
+    color: $background;
+    text-style: bold;
+}
+
+#dt-place.buy:hover, #dt-place.buy:focus {
+    background: $accent;
+}
+
+#dt-place.sell {
+    background: $error 85%;
+    color: $background;
+    text-style: bold;
+}
+
+#dt-place.sell:hover, #dt-place.sell:focus {
+    background: $error;
+}
+
+#dt-reset {
     margin-left: 2;
+    background: $foreground 12%;
+    color: $foreground;
+}
+
+#dt-reset:hover, #dt-reset:focus {
+    background: $foreground 30%;
 }
 
 #dt-quote, #dt-status {

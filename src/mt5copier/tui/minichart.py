@@ -253,13 +253,18 @@ def chart(
                 grid[r][column] = (drawn, color)
 
     # Tags last, over everything: a handle hidden behind a candle cannot be grabbed with
-    # any confidence.
+    # any confidence. Two levels on one row -- easy on a short chart -- put their tags
+    # side by side, so neither handle disappears under the other.
+    taken: dict[int, int] = {}
     for price, tag, color in levels:
         if not tag or not price or not scale.lo <= price <= scale.hi:
             continue
         r = scale.row(price)
-        for x, char in enumerate(tag[:columns]):
-            grid[r][x] = (char, f"{BG} on {color}")
+        start = taken.get(r, 0)
+        shown_tag = tag[: max(0, columns - start)]
+        for x, char in enumerate(shown_tag):
+            grid[r][start + x] = (char, f"{BG} on {color}")
+        taken[r] = start + len(shown_tag)
 
     out = Text()
     for r in range(height):

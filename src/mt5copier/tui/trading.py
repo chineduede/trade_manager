@@ -47,8 +47,9 @@ _ORDER_TYPES: dict[tuple[str, str], OrderType] = {
 
 _NUMERIC = r"[0-9., ]*"
 
-_CHART_HEIGHT = 14
-"""Rows the minichart draws in: one place, because the mouse maps rows back to prices."""
+_CHART_HEIGHT = 7
+"""Rows the minichart draws in: one place, because the mouse maps rows back to prices.
+Kept low so the ticket, not the picture, owns the page."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,6 +272,14 @@ class TradingScreen(Screen[None]):
         dragged (anything different) is recognised as theirs and never reseeded."""
         self._seeded_ctx: tuple[str, str, str] | None = None
         """The (symbol, side, kind) the levels were last seeded for."""
+        self._expect: dict[str, str] = {}
+        """What the rr/target sync last wrote into each field. Textual delivers Changed
+        after the write, so a flag cannot tell an echo from a keystroke -- the expected
+        text can, and an echo is swallowed instead of synced back, which is what stops
+        the two fields rewriting each other forever."""
+        self._rr_user = False
+        """Whether rr or the target was touched last: the one touched last is the
+        person's meaning, and the other follows when the stop or entry moves."""
 
     @property
     def copier(self) -> CopierApp:
@@ -292,15 +301,19 @@ class TradingScreen(Screen[None]):
                 )
                 yield Static(Text("  "), classes="dt-label")
                 yield Choice(_SIDES, "buy", id="dt-side")
-                yield Static(Text("  "), classes="dt-label")
-                yield Choice(_KINDS, "market", id="dt-kind")
             with Horizontal(classes="dt-row"):
-                yield Static(Text("entry ", style=MUTED), classes="dt-label", id="dt-entry-label")
-                yield Input(id="dt-entry", compact=True, classes="dt-num", restrict=_NUMERIC)
-                yield Static(Text("  stop ", style=MUTED), classes="dt-label")
+                yield Static(Text("stop ", style=MUTED), classes="dt-label")
                 yield Input(id="dt-sl", compact=True, classes="dt-num", restrict=_NUMERIC)
+                yield Static(Text("  rr ", style=MUTED), classes="dt-label")
+                yield Input(
+                    id="dt-rr", compact=True, classes="dt-rr", restrict=_NUMERIC, placeholder="1.5"
+                )
                 yield Static(Text("  target ", style=MUTED), classes="dt-label")
                 yield Input(id="dt-tp", compact=True, classes="dt-num", restrict=_NUMERIC)
+            with Horizontal(classes="dt-row"):
+                yield Choice(_KINDS, "market", id="dt-kind")
+                yield Static(Text("  entry ", style=MUTED), classes="dt-label", id="dt-entry-label")
+                yield Input(id="dt-entry", compact=True, classes="dt-num", restrict=_NUMERIC)
                 yield Static(
                     Text("  expires in ", style=MUTED), classes="dt-label", id="dt-expiry-label"
                 )
@@ -311,8 +324,9 @@ class TradingScreen(Screen[None]):
                     restrict=_NUMERIC,
                     placeholder="min",
                 )
-                yield Static(Text("  "), classes="dt-label")
-                yield Button("Place  enter", id="dt-place", classes="keep", compact=True)
+            with Horizontal(classes="dt-row dt-actions"):
+                yield Button("Buy  enter", id="dt-place", compact=True)
+                yield Button("Reset", id="dt-reset", compact=True)
             yield Static("", id="dt-quote")
             yield Static("", id="dt-status")
             yield Static("", id="dt-chart-head", classes="heading")
@@ -331,6 +345,7 @@ class TradingScreen(Screen[None]):
         self.query_one("#dt-ask").display = False
         self.set_interval(0.5, self._on_timer)
         self._show_kind()
+        self._show_side()
         self.refresh_page()
         self.query_one("#dt-symbol", Input).focus()
 
@@ -562,15 +577,123 @@ class TradingScreen(Screen[None]):
         for wid in ("#dt-entry-label", "#dt-entry", "#dt-expiry-label", "#dt-expiry"):
             self.query_one(wid).display = pending
 
+    def _show_side(self) -> None:
+        """The place button wears the side: a blue Buy or a red Sell, never a neutral Place."""
+        side = str(self.query_one("#dt-side", Choice).value)
+        place = self.query_one("#dt-place", Button)
+        place.label = f"{'Buy' if side == 'buy' else 'Sell'}  enter"
+        place.set_class(side == "buy", "buy")
+        place.set_class(side != "buy", "sell")
+
     @on(Choice.Changed)
     def _on_choice(self) -> None:
-        if self.is_mounted:
-            self._show_kind()
+        if not self.is_mounted:
+            return
+        self._show_kind()
+        self._show_side()
+        self._sync_levels()
 
     @on(Input.Changed, "#dt-symbol")
     def _on_symbol_typed(self) -> None:
         if self.is_mounted:
             self._watch_symbol()
+
+    # --- rr <-> target ----------------------------------------------------------------------
+
+    def _way(self) -> float:
+        return 1.0 if str(self.query_one("#dt-side", Choice).value) == "buy" else -1.0
+
+    def _basis_price(self) -> float:
+        """Where the trade would enter: a pending's entry, else the quote's entering side."""
+        if self._pending_kind():
+            return self._level("#dt-entry")
+        symbol = self.query_one("#dt-symbol", Input).value.strip().upper()
+        quote = self.copier._engine.direct_quote(symbol) if symbol else None
+        if quote is None:
+            return 0.0
+        return quote.ask if self._way() > 0 else quote.bid
+
+    def _risk(self) -> float:
+        """The entry-to-stop distance, positive only while the stop is on the losing side."""
+        basis, sl = self._basis_price(), self._level("#dt-sl")
+        if not basis or not sl:
+            return 0.0
+        return self._way() * (basis - sl)
+
+    def _fmt_price(self, price: float) -> str:
+        scale = self._chart_scale
+        if scale is not None:
+            return scale.fmt(price)
+        return f"{price:.5f}".rstrip("0").rstrip(".")
+
+    def _write_synced(self, name: str, text: str) -> None:
+        """A sync's own write: remembered, so its Changed echo is not synced back."""
+        box = self.query_one(f"#dt-{name}", Input)
+        if box.value == text:
+            return
+        self._expect[name] = text
+        box.value = text
+
+    def _tp_from_rr(self) -> None:
+        """The target the rr asks for, written into the ticket and onto the chart."""
+        rr, risk, basis = self._level("#dt-rr"), self._risk(), self._basis_price()
+        if rr <= 0 or risk <= 0 or not basis:
+            return
+        self._write_synced("tp", self._fmt_price(basis + self._way() * rr * risk))
+        self.refresh_page()
+
+    def _rr_from_tp(self) -> None:
+        """The rr box follows the target: reward over risk, blank while it means nothing."""
+        risk, basis = self._risk(), self._basis_price()
+        if risk <= 0 or not basis:
+            return
+        reward = self._way() * (self._level("#dt-tp") - basis)
+        said = f"{reward / risk:.2f}".rstrip("0").rstrip(".") if reward > 0 else ""
+        self._write_synced("rr", said)
+
+    def _sync_levels(self) -> None:
+        """The stop, entry or side moved: the field touched last keeps its meaning."""
+        if self._rr_user:
+            self._tp_from_rr()
+        else:
+            self._rr_from_tp()
+
+    @on(Input.Changed, "#dt-rr")
+    @on(Input.Changed, "#dt-tp")
+    @on(Input.Changed, "#dt-sl")
+    @on(Input.Changed, "#dt-entry")
+    def _on_level_typed(self, event: Input.Changed) -> None:
+        name = (event.input.id or "")[3:]
+        if self._expect.pop(name, None) == event.value or not self.is_mounted:
+            return
+        if name == "rr":
+            self._rr_user = True
+            self._tp_from_rr()
+        elif name == "tp":
+            self._rr_user = False
+            self._rr_from_tp()
+        else:
+            self._sync_levels()
+
+    def action_reset(self) -> None:
+        """A fresh ticket for the same symbol: everything but the symbol back to its start,
+        the lines reseeded onto the chart."""
+        self.query_one("#dt-lots", Input).value = "1"
+        # sl before rr before tp: each clearing syncs against already-cleared risk, and
+        # the last Changed processed leaves the target, not rr, as the touched field.
+        for name in ("sl", "rr", "tp", "entry", "expiry"):
+            self.query_one(f"#dt-{name}", Input).value = ""
+        self.query_one("#dt-side", Choice).value = "buy"
+        self.query_one("#dt-kind", Choice).value = "market"
+        self._rr_user = False
+        self._auto.clear()
+        self._seeded_ctx = None
+        self._status("ticket reset")
+        self.refresh_page()
+
+    @on(Button.Pressed, "#dt-reset")
+    def _on_reset(self) -> None:
+        self.action_reset()
 
     def _watch_symbol(self) -> None:
         symbol = self.query_one("#dt-symbol", Input).value.strip().upper()
