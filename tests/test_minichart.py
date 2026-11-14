@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from mt5copier.protocol import CHART_TIMEFRAMES, Candle
-from mt5copier.tui.minichart import chart, live_last, next_timeframe, timeframe_name
+from mt5copier.tui.minichart import (
+    BODY_GLYPHS,
+    WICK_GLYPHS,
+    chart,
+    live_last,
+    next_timeframe,
+    timeframe_name,
+)
 
 
 def candle(o: float, h: float, lo: float, c: float, ts: int = 0) -> Candle:
@@ -21,18 +28,20 @@ def test_every_line_is_exactly_the_asked_width() -> None:
 
 
 def test_a_candles_body_fills_its_column() -> None:
-    # One candle whose body is its whole range: every row of column 0 is body.
+    # One candle whose body is its whole range, right against the axis: every row of its
+    # column is heavy body stroke, and the columns around it stay clear.
     drawn = lines(chart([candle(1.0, 2.0, 1.0, 2.0)], width=30, height=5))
-    assert all(line[0] == "█" for line in drawn)
+    assert all(line[19] == "┃" for line in drawn), "the newest candle sits by the axis"
+    assert all(line[18] == " " for line in drawn), "with clear space beside it"
 
 
 def test_wicks_poke_out_of_the_body() -> None:
-    # A small body low in its range: wick above and below, body between.
+    # A small body low in its range: light wick strokes above, heavy body ones below.
     drawn = lines(chart([candle(1.05, 2.0, 1.0, 1.1)], width=30, height=7))
-    column = [line[0] for line in drawn]
-    assert column[0] == "│", "the high is wick"
-    assert column[-1] == "│", "so is the low, below the body"
-    assert "█" in column, "the body sits between them"
+    column = [line[19] for line in drawn]
+    assert column[0] in WICK_GLYPHS, "the high is wick"
+    assert "│" in column, "wick runs down the column"
+    assert column[-1] in BODY_GLYPHS, "the body sits at the bottom"
 
 
 def test_newest_candles_win_when_the_chart_is_narrow() -> None:
@@ -49,7 +58,7 @@ def test_the_bid_is_a_dotted_line_with_its_own_label() -> None:
     middle = drawn[2]
     assert "┈" in middle, "the bid is drawn across the empty columns"
     assert middle.rstrip().endswith("1.5000"), "and labelled on the axis"
-    assert middle[0] == "█", "the candles draw over it"
+    assert middle[19] == "┃", "the candles draw over it"
 
 
 def test_levels_inside_the_range_are_drawn_and_outside_are_not() -> None:

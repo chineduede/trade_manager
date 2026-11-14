@@ -1,9 +1,14 @@
-"""The minichart: the feed's candles, drawn in block characters under the order ticket.
+"""The minichart: the feed's candles, drawn in box characters under the order ticket.
 
 Pure, like :mod:`.cards`: everything here turns candles and levels into a
 :class:`rich.text.Text`, so the tests can pin the picture down without starting the app.
 The last candle is live -- the current bid moves its close (and its high or low when it
 goes past them), so the chart breathes with the quote line between bar refreshes.
+
+Each candle is one slim column -- a heavy line for the body, a light one for the wick --
+with a blank column between neighbours, so candles read as candles instead of fusing into
+a solid mass. The body/wick boundary lands on half a cell: ``╽`` is a wick becoming a body
+mid-cell, which doubles the vertical resolution the way the cards' half-block digits do.
 
 What is drawn besides the candles: the bid as a dotted blue line, and the ticket's stop and
 target as red and green ones, each labelled on the price axis -- so the person sees where
@@ -23,9 +28,29 @@ from .style import BLUE, GREEN, MUTED, RED
 _AXIS = 10
 """Columns kept for the price labels on the right."""
 
-_BODY = "█"
-_WICK = "│"
 _LEVEL = "┈"
+
+BODY_GLYPHS = frozenset("┃╹╻╿╽")
+"""Every character a candle's body can put in a cell (heavy strokes)."""
+WICK_GLYPHS = frozenset("│╵╷")
+"""Every character a wick alone can put in a cell (light strokes)."""
+
+
+def _glyph(body_upper: bool, body_lower: bool, wick_upper: bool, wick_lower: bool) -> str:
+    """One cell of one candle, from what covers its upper and lower half."""
+    if body_upper and body_lower:
+        return "┃"
+    if body_upper:
+        return "╿" if wick_lower else "╹"
+    if body_lower:
+        return "╽" if wick_upper else "╻"
+    if wick_upper and wick_lower:
+        return "│"
+    if wick_upper:
+        return "╵"
+    if wick_lower:
+        return "╷"
+    return ""
 
 
 def timeframe_name(timeframe: int) -> str:
@@ -76,16 +101,17 @@ def chart(
     sl: float = 0.0,
     tp: float = 0.0,
 ) -> Text:
-    """The picture: one column per candle, newest at the right, price labels on the axis.
+    """The picture: one slim candle every other column, newest against the axis, price
+    labels on the right.
 
     ``width`` and ``height`` are the whole drawing, axis included. Levels (the bid in blue,
-    the stop in red, the target in green) are dotted lines under the candles, drawn only
-    inside the bars' own price range.
+    the stop in red, the target in green) are dotted lines running behind the candles,
+    drawn only inside the bars' own price range.
     """
     columns = width - _AXIS
     if columns < 10 or height < 4:
         return Text("the chart needs more room", style=MUTED)
-    shown = live_last(candles, bid)[-columns:]
+    shown = live_last(candles, bid)[-max(1, (columns + 1) // 2) :]
     if not shown:
         return Text("")
 
@@ -95,8 +121,14 @@ def chart(
     lo -= pad
     hi += pad
 
+    halves = height * 2
+    """The vertical unit is half a cell: the glyphs can split one."""
+
+    def half(price: float) -> int:
+        return round((hi - price) / (hi - lo) * (halves - 1))
+
     def row(price: float) -> int:
-        return round((hi - price) / (hi - lo) * (height - 1))
+        return half(price) // 2
 
     grid = [[(" ", "")] * columns for _ in range(height)]
     labels: list[tuple[str, str]] = [("", MUTED)] * height
@@ -115,11 +147,20 @@ def chart(
         labels[r] = (f"{price:.{decimals}f}", color)
 
     for i, c in enumerate(shown):
+        column = columns - 1 - 2 * (len(shown) - 1 - i)
         color = GREEN if c.close >= c.open else RED
-        for r in range(row(c.high), row(c.low) + 1):
-            grid[r][i] = (_WICK, color)
-        for r in range(row(max(c.open, c.close)), row(min(c.open, c.close)) + 1):
-            grid[r][i] = (_BODY, color)
+        wick_top, body_top = half(c.high), half(max(c.open, c.close))
+        body_bottom, wick_bottom = half(min(c.open, c.close)), half(c.low)
+        for r in range(wick_top // 2, wick_bottom // 2 + 1):
+            upper, lower = 2 * r, 2 * r + 1
+            drawn = _glyph(
+                body_top <= upper <= body_bottom,
+                body_top <= lower <= body_bottom,
+                wick_top <= upper <= wick_bottom,
+                wick_top <= lower <= wick_bottom,
+            )
+            if drawn:
+                grid[r][column] = (drawn, color)
 
     out = Text()
     for r in range(height):

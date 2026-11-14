@@ -450,7 +450,7 @@ async def test_the_chart_draws_the_feeds_bars(app: CopierApp) -> None:
         screen.refresh_page()
         assert ("EURUSD", 5) in engine.rates_asked  # type: ignore[attr-defined]
         drawn = plain(screen.query_one("#dt-chart", Static).content)
-        assert "█" in drawn, "the bars are drawn"
+        assert any(glyph in drawn for glyph in "┃╹╻╿╽"), "the bars are drawn"
         head = plain(screen.query_one("#dt-chart-head", Static).content)
         assert "EURUSD" in head and "M5" in head
 
