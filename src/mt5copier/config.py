@@ -65,6 +65,30 @@ class Role(StrEnum):
     SLAVE = "slave"
 
 
+class AppMode(StrEnum):
+    """What this profile is for: copying a real master, or trading directly from the app.
+
+    Exclusive per profile, never both at once. In TRADING there is no master terminal at all;
+    the master's place is taken by a *virtual* book the person trades from the TUI, and every
+    enabled slave copies it exactly as it would copy a real master. Switching modes requires
+    no open copies, in the same spirit as the orphaning rule: the other mode's master has
+    different tickets, so copies carried across would read as closes.
+    """
+
+    COPY = "copy"
+    TRADING = "trading"
+
+
+VIRTUAL_MASTER_ID = "virtual-master"
+"""The virtual master's stand-in terminal id, in a TRADING profile.
+
+Deliberately not 32 hex characters, so it can never collide with a real MT5 instance hash --
+and deliberately **never stored in** ``AppConfig.terminals``: it is not a terminal, has no
+worker, claims nothing, and must not be offered roles, settings or logins. It exists only as
+the id :meth:`AppConfig.master` answers with in trading mode, so the diff engine has a master
+to key its snapshots on."""
+
+
 class SizingMode(StrEnum):
     """How a slave's volume is derived. Unused until Stage 2.
 
@@ -370,6 +394,30 @@ class TerminalConfig(BaseModel):
         return f"{self.risk_percent:g}%"
 
 
+_VIRTUAL_MASTER: TerminalConfig | None = None
+
+
+def virtual_master() -> TerminalConfig:
+    """The virtual master's stand-in config, shared and **read-only by convention**.
+
+    A single cached instance rather than a fresh one per call, because :meth:`AppConfig.master`
+    is read on every reconcile tick and per slave for :meth:`AppConfig.manages`. Everything the
+    engine reads off a master config is deliberately at its default here: no symbol decoration
+    (the book is kept in clean names), breakeven off (a direct trade's stop is the person's
+    own), management MASTER (the app propagates the person's stop moves and partials to every
+    copy -- that is the whole point of direct mode; a slave's ``master_manages`` opt-out is
+    still honoured as usual).
+    """
+    global _VIRTUAL_MASTER
+    if _VIRTUAL_MASTER is None:
+        _VIRTUAL_MASTER = TerminalConfig(
+            terminal_id=VIRTUAL_MASTER_ID,
+            label="Direct trading",
+            role=Role.MASTER,
+        )
+    return _VIRTUAL_MASTER
+
+
 def account_key(login: int | None, server: str | None) -> str | None:
     """Canonical key for naming an *account*, not a terminal -- ``None`` when no account is
     known yet (nothing to name).
@@ -397,6 +445,16 @@ class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     version: int = SCHEMA_VERSION
+
+    mode: AppMode = AppMode.COPY
+    """Whether this profile copies a real master terminal or trades directly from the app.
+    See :class:`AppMode`. Changed only through :meth:`mt5copier.engine.Engine.set_mode`, which
+    refuses while any copies are open."""
+
+    feed_terminal_id: str | None = None
+    """TRADING only: the terminal whose quotes feed the virtual master, pinned by hand. None
+    picks any connected MT5 slave automatically, failing over when it drops. A pin that is not
+    connected right now falls back to auto rather than leaving the book blind."""
 
     poll_interval_ms: int = Field(default=250, ge=50, le=10_000)
     """How often each worker refreshes its account snapshot."""
@@ -463,6 +521,12 @@ class AppConfig(BaseModel):
 
     @property
     def master(self) -> TerminalConfig | None:
+        """The master the slaves copy: a designated terminal, or in trading mode the virtual
+        one. Returning the virtual config here, rather than special-casing every caller, is
+        what lets the reconciler, ``manages()`` and the orphaned-slave repair all treat direct
+        mode as an ordinary master that happens not to be a terminal."""
+        if self.mode is AppMode.TRADING:
+            return virtual_master()
         return next((t for t in self.terminals.values() if t.role is Role.MASTER), None)
 
     @property
@@ -491,6 +555,10 @@ class AppConfig(BaseModel):
         everywhere a terminal's name already does without hunting down every one of those call
         sites, only the one place this actually reads the name from.
         """
+        if terminal_id == VIRTUAL_MASTER_ID:
+            # Not in ``terminals`` and never will be; named here so no caller that happens
+            # to hold the virtual id -- a log line, the day book -- can crash on it.
+            return virtual_master().label
         tcfg = self.terminals[terminal_id]
         key = account_key(tcfg.last_login, tcfg.last_server)
         if key is not None:
@@ -507,6 +575,11 @@ class AppConfig(BaseModel):
         """
         if terminal_id not in self.terminals:
             raise KeyError(terminal_id)
+        if role is Role.MASTER and self.mode is AppMode.TRADING:
+            raise ValueError(
+                "this profile trades directly, so it has no master terminal; "
+                "switch it to copy mode first"
+            )
         if role is Role.MASTER:
             for tcfg in self.terminals.values():
                 if tcfg.role is Role.MASTER and tcfg.terminal_id != terminal_id:
@@ -536,6 +609,21 @@ class AppConfig(BaseModel):
         if new.role is not old.role:
             raise ValueError("a settings edit cannot change a terminal's role; use set_role")
         self.terminals[new.terminal_id] = new
+
+
+def _demote_master_in_trading(cfg: AppConfig) -> list[str]:
+    """A trading profile has no master terminal, but a config hand-edited into holding both
+    the mode and a MASTER role can exist. Repaired on load like the orphaned slaves below,
+    and for the same reason: a validator would reset the whole config to defaults over a role
+    field. The virtual master takes the demoted terminal's place, so its slaves keep theirs.
+    """
+    if cfg.mode is not AppMode.TRADING:
+        return []
+    demoted = [t.terminal_id for t in cfg.terminals.values() if t.role is Role.MASTER]
+    for tid in demoted:
+        cfg.terminals[tid].role = Role.UNASSIGNED
+        cfg.terminals[tid].paused = False
+    return demoted
 
 
 def _demote_orphaned_slaves(cfg: AppConfig) -> list[str]:
@@ -701,15 +789,20 @@ def load(path: Path | None = None) -> AppConfig:
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
         cfg = AppConfig.model_validate(_migrate(raw))
+        demoted = _demote_master_in_trading(cfg)
+        if demoted:
+            log.warning(
+                "this profile trades directly, so its master terminal was unassigned: %s",
+                demoted,
+            )
         swept = _demote_orphaned_slaves(cfg)
         if swept:
             log.warning("slave(s) with no master found on load; unassigned: %s", swept)
+        if demoted or swept:
             try:
                 save(cfg, target)
             except OSError:
-                log.exception(
-                    "could not persist the orphaned-slave cleanup; will retry on next save"
-                )
+                log.exception("could not persist the role cleanup; will retry on next save")
         return cfg
     except Exception as exc:
         backup = target.with_suffix(f".bad-{os.getpid()}.json")

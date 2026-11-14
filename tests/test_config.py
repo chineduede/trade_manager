@@ -14,7 +14,9 @@ from pydantic import ValidationError
 
 from mt5copier.config import (
     SCHEMA_VERSION,
+    VIRTUAL_MASTER_ID,
     AppConfig,
+    AppMode,
     Management,
     NoStopPolicy,
     Role,
@@ -641,3 +643,66 @@ def test_the_master_manages_a_slaves_trades_only_with_both_gates_open(
 def test_with_no_master_nothing_is_managed_by_one() -> None:
     slave = TerminalConfig(terminal_id="S" * 32, role=Role.SLAVE)
     assert AppConfig(terminals={slave.terminal_id: slave}).manages(slave) is False
+
+
+# --- direct trading mode ---------------------------------------------------------------------
+
+
+def test_mode_defaults_to_copy_and_round_trips(tmp_path: Path) -> None:
+    cfg = AppConfig()
+    assert cfg.mode is AppMode.COPY
+    cfg.mode = AppMode.TRADING
+    cfg.feed_terminal_id = "F" * 32
+    path = tmp_path / "config.json"
+    save(cfg, path)
+    loaded = load(path)
+    assert loaded.mode is AppMode.TRADING
+    assert loaded.feed_terminal_id == "F" * 32
+
+
+def test_trading_mode_answers_with_the_virtual_master() -> None:
+    slave = TerminalConfig(terminal_id="S" * 32, role=Role.SLAVE)
+    cfg = AppConfig(mode=AppMode.TRADING, terminals={slave.terminal_id: slave})
+    master = cfg.master
+    assert master is not None and master.terminal_id == VIRTUAL_MASTER_ID
+    assert master.role is Role.MASTER
+    # The one-master rule and the orphaned-slave repair both key off this answer.
+    assert cfg.manages(slave) is True
+
+
+def test_a_trading_profile_keeps_its_slaves_on_load(tmp_path: Path) -> None:
+    """The orphaned-slave repair must read the virtual master as a master, or loading a
+    trading profile would silently unassign every slave."""
+    slave = TerminalConfig(terminal_id="S" * 32, role=Role.SLAVE)
+    cfg = AppConfig(mode=AppMode.TRADING, terminals={slave.terminal_id: slave})
+    path = tmp_path / "config.json"
+    save(cfg, path)
+    assert load(path).terminals["S" * 32].role is Role.SLAVE
+
+
+def test_a_master_role_in_a_trading_profile_is_repaired_on_load(tmp_path: Path) -> None:
+    cfg = AppConfig(
+        terminals={"M" * 32: TerminalConfig(terminal_id="M" * 32, role=Role.MASTER)}
+    )
+    path = tmp_path / "config.json"
+    save(cfg, path)
+    # Hand-edit the file into the contradictory shape: trading mode plus a master role.
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["mode"] = "trading"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    loaded = load(path)
+    assert loaded.terminals["M" * 32].role is Role.UNASSIGNED
+    assert loaded.master is not None and loaded.master.terminal_id == VIRTUAL_MASTER_ID
+
+
+def test_set_role_refuses_a_master_while_trading() -> None:
+    cfg = AppConfig(
+        mode=AppMode.TRADING,
+        terminals={"T" * 32: TerminalConfig(terminal_id="T" * 32)},
+    )
+    with pytest.raises(ValueError, match="trades directly"):
+        cfg.set_role("T" * 32, Role.MASTER)
+
+
+def test_display_name_knows_the_virtual_master() -> None:
+    assert AppConfig().display_name(VIRTUAL_MASTER_ID) == "Direct trading"

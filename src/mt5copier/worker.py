@@ -46,10 +46,13 @@ from .protocol import (
     Position,
     PositionLive,
     PositionType,
+    Quote,
     Snapshot,
+    WatchCommand,
     WorkerState,
 )
 from .sizing import SymbolFacts
+from .symbols import resolve as resolve_symbol
 
 if TYPE_CHECKING:
     from multiprocessing.queues import Queue
@@ -82,6 +85,15 @@ class _Session:
         self._deals_since: float | None = None
         self._deals_read_at = 0.0
         self._deals_balance: float | None = None
+        self.watch: WatchCommand | None = None
+        """The symbols to quote on every snapshot, as the supervisor last asked. Latest wins;
+        set from the command loop, read by :meth:`poll`."""
+        self._watch_resolved: WatchCommand | None = None
+        """Which watch command :attr:`_quote_names` was resolved for -- identity, not value,
+        so a re-sent identical command costs nothing and a new one re-resolves."""
+        self._quote_names: dict[str, str | None] = {}
+        """Clean name -> this broker's name, or None for one that cannot be resolved (said
+        once, at resolution, rather than every poll)."""
 
     def connect(self) -> tuple[bool, str | None]:
         """Call ``initialize(path=...)``. Returns (ok, error message).
@@ -104,6 +116,10 @@ class _Session:
         # The account may not be the one this session last read, so its history is not kept.
         self._deals = self._deals_since = self._deals_balance = None
         self._deals_read_at = 0.0
+        # The broker's symbol list may differ across a reconnect, so watched names are
+        # resolved against it afresh.
+        self._watch_resolved = None
+        self._quote_names = {}
         self._launched_pid = None if already_running else find_terminal_pid(self._exe_path)
         return True, None
 
@@ -422,6 +438,60 @@ class _Session:
             log.warning("order_send raised: %r", exc)
             return None
 
+    def _read_quotes(self, now: float) -> tuple[Quote, ...]:
+        """Current prices for the watched symbols, answered in their clean names.
+
+        A symbol that cannot be resolved or will not tick is simply absent -- the virtual
+        master treats a missing quote as unknown and does nothing on it, which is the safe
+        side of every guess available here.
+        """
+        watch = self.watch
+        if watch is None or not watch.symbols:
+            return ()
+        if self._watch_resolved is not watch:
+            self._resolve_watch(watch)
+        out: list[Quote] = []
+        for clean in watch.symbols:
+            name = self._quote_names.get(clean)
+            if name is None:
+                continue
+            quote = self.tick(name)
+            if quote is None:
+                continue
+            out.append(Quote(symbol=clean, bid=quote[0], ask=quote[1], ts=now))
+        return tuple(out)
+
+    def _resolve_watch(self, watch: WatchCommand) -> None:
+        """Turn each watched clean name into this broker's own, once per watch command.
+
+        The same resolution the executor applies to a trade's symbol, against the same list,
+        so the price feeding the book is quoted on exactly the instrument a copy would be
+        placed on. ``symbol_facts`` is read once per hit to select the symbol into Market
+        Watch -- an unselected symbol does not reliably tick.
+        """
+        available = self.symbol_names()
+        if not available:
+            return  # the list would not read; tried again next poll
+        resolved: dict[str, str | None] = {}
+        symbol_map = dict(watch.symbol_map)
+        for clean in watch.symbols:
+            answer = resolve_symbol(
+                clean,
+                available,
+                watch.symbol_prefix,
+                watch.symbol_suffix,
+                "the feed terminal",
+                symbol_map,
+            )
+            if answer.name is None:
+                log.warning("cannot quote %r for the virtual master: %s", clean, answer.how)
+                resolved[clean] = None
+                continue
+            self.symbol_facts(answer.name)
+            resolved[clean] = answer.name
+        self._quote_names = resolved
+        self._watch_resolved = watch
+
     def poll(self, terminal_id: str, seq: int, attempts: int) -> Snapshot:
         """Read account and terminal state into a snapshot.
 
@@ -490,6 +560,7 @@ class _Session:
             server_offset_s=offset,
             deals=self._deals,
             deals_since=self._deals_since,
+            quotes=self._read_quotes(time.time()),
             error=None if broker_up else "terminal not connected to broker",
             connect_attempts=attempts,
         )
@@ -882,6 +953,11 @@ def run_worker(
                     )
                     running = False
                     break
+                if isinstance(cmd, WatchCommand):
+                    # Latest wins, connected or not: resolution happens lazily in poll(),
+                    # once there is a symbol list to resolve against.
+                    session.watch = cmd
+                    continue
                 if isinstance(cmd, OrderCommand):
                     if not session.connected:
                         # Refuse rather than queue: by the time the link returns, the master's

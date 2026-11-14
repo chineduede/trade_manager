@@ -21,6 +21,7 @@ from mt5copier.protocol import (
     OrderType,
     PositionType,
     Snapshot,
+    WatchCommand,
     WorkerState,
 )
 from mt5copier.worker import _backoff_delay, _expiration_utc, _Session, run_worker
@@ -940,3 +941,115 @@ def test_the_worker_passes_close_any_through_from_its_stop_command(
         stop_command=Command(kind=CommandKind.STOP, close_terminal=True, close_any=True),
     )
     assert proc.terminated
+
+
+# --- quotes for the virtual master -----------------------------------------------------------
+
+
+@dataclass
+class FakeSymbol:
+    name: str
+    visible: bool = False
+
+
+@dataclass
+class FakeTick:
+    bid: float
+    ask: float
+    time: int = 0
+    time_msc: int = 0
+
+
+class QuotingMT5(FakeMT5):
+    """A broker that lists decorated names and ticks them."""
+
+    def __init__(self, *, names: tuple[str, ...], ticks: dict[str, FakeTick], **kw: object) -> None:
+        super().__init__(**kw)  # type: ignore[arg-type]
+        self._names = names
+        self._ticks = ticks
+
+    def symbols_get(self) -> tuple[FakeSymbol, ...]:
+        return tuple(FakeSymbol(name=n) for n in self._names)
+
+    def symbol_info_tick(self, name: str) -> FakeTick | None:
+        return self._ticks.get(name)
+
+
+def quoting_session() -> _Session:
+    mt5 = QuotingMT5(
+        names=("EURUSDm", "XAUUSDm", "US30"),
+        ticks={"EURUSDm": FakeTick(bid=1.08500, ask=1.08520)},
+        symbol_info_data={"EURUSDm": FakeSymbolInfo(name="EURUSDm")},
+    )
+    session = _Session(mt5, Path("x.exe"))
+    session.connect()
+    return session
+
+
+def test_watched_symbols_are_quoted_in_clean_names(tmp_path: Path) -> None:
+    session = quoting_session()
+    session.watch = WatchCommand(symbols=("EURUSD",), symbol_suffix="m")
+    snap = session.poll("TID", seq=1, attempts=0)
+    (q,) = snap.quotes
+    assert q.symbol == "EURUSD", "answered in the clean name, not the broker's"
+    assert q.bid == 1.08500 and q.ask == 1.08520
+
+
+def test_a_symbol_that_cannot_be_resolved_is_absent_not_zero(tmp_path: Path) -> None:
+    session = quoting_session()
+    session.watch = WatchCommand(symbols=("EURUSD", "GER40"), symbol_suffix="m")
+    snap = session.poll("TID", seq=1, attempts=0)
+    assert [q.symbol for q in snap.quotes] == ["EURUSD"]
+
+
+def test_a_resolved_symbol_that_will_not_tick_is_absent(tmp_path: Path) -> None:
+    session = quoting_session()
+    session.watch = WatchCommand(symbols=("XAUUSD",), symbol_suffix="m")  # resolves, no tick
+    snap = session.poll("TID", seq=1, attempts=0)
+    assert snap.quotes == ()
+
+
+def test_no_watch_means_no_quotes(tmp_path: Path) -> None:
+    session = quoting_session()
+    snap = session.poll("TID", seq=1, attempts=0)
+    assert snap.quotes == ()
+
+
+def test_a_new_watch_command_replaces_the_old_watch(tmp_path: Path) -> None:
+    session = quoting_session()
+    session.watch = WatchCommand(symbols=("EURUSD",), symbol_suffix="m")
+    session.poll("TID", seq=1, attempts=0)
+    session.watch = WatchCommand()  # the supervisor cleared it (feed handed over)
+    snap = session.poll("TID", seq=2, attempts=0)
+    assert snap.quotes == ()
+
+
+def test_the_worker_loop_applies_a_watch_command(tmp_path: Path) -> None:
+    mt5 = QuotingMT5(
+        names=("EURUSDm",),
+        ticks={"EURUSDm": FakeTick(bid=1.08500, ask=1.08520)},
+        symbol_info_data={"EURUSDm": FakeSymbolInfo(name="EURUSDm")},
+    )
+    out_q: queue.Queue = queue.Queue()
+    cmd_q: queue.Queue = queue.Queue()
+    cmd_q.put(WatchCommand(symbols=("EURUSD",), symbol_suffix="m"))
+
+    thread = threading.Thread(
+        target=run_worker,
+        args=("TID12345", "x.exe", out_q, cmd_q, str(tmp_path / "w.log"), 50, [0.01]),
+        kwargs={"_session_factory": lambda path: _Session(mt5, path)},
+        daemon=True,
+    )
+    thread.start()
+    wait = threading.Event()
+    collected: list[Snapshot] = []
+    for _ in range(100):
+        collected += drain(out_q)
+        if any(s.quotes for s in collected):
+            break
+        wait.wait(0.05)
+    cmd_q.put(_PLAIN_STOP)
+    thread.join(timeout=5.0)
+    assert not thread.is_alive(), "worker did not stop"
+    quoted = [s for s in collected if s.quotes]
+    assert quoted and quoted[0].quotes[0].symbol == "EURUSD"

@@ -35,7 +35,9 @@ from .breakeven import (
 )
 from .claims import ClaimBook, ClaimRefusedError, claim_keys
 from .config import (
+    VIRTUAL_MASTER_ID,
     AppConfig,
+    AppMode,
     BreakevenMode,
     Role,
     SizingMode,
@@ -51,7 +53,13 @@ from .guards.book import CloseAct, NewsAct
 from .history import ORPHANED, GuardAction, HistoryStore, Trade, step_for
 from .logging_setup import get_logger
 from .news import NewsCalendar
-from .paths import dryrun_store_path, history_db_path, log_dir, mapping_db_path
+from .paths import (
+    dryrun_store_path,
+    history_db_path,
+    log_dir,
+    mapping_db_path,
+    virtual_book_path,
+)
 from .protocol import (
     ACCOUNT_TRADE_MODE_DEMO,
     COPIER_MAGIC,
@@ -62,9 +70,14 @@ from .protocol import (
     GuardNote,
     OrderCommand,
     OrderResult,
+    OrderType,
     PendingOrder,
     Position,
+    PositionLive,
+    PositionType,
+    Quote,
     Snapshot,
+    WatchCommand,
     WorkerState,
 )
 from .reconcile import (
@@ -90,6 +103,7 @@ from .store import (
     find_orphans,
 )
 from .symbols import undecorate
+from .virtual import VirtualBook
 from .worker import run_worker
 
 log = get_logger(__name__)
@@ -225,6 +239,7 @@ class Engine:
         history_path: Path | None = None,
         calendar: NewsCalendar | None = None,
         claims: ClaimBook | None = None,
+        virtual_path: Path | None = None,
     ) -> None:
         # Windows only offers the spawn start method; request it explicitly so behaviour is
         # identical if this ever runs on Linux for testing.
@@ -322,6 +337,28 @@ class Engine:
         carrying simulated beliefs into a live session."""
         self._ledger = CopyLedger()
 
+        # --- direct trading (the virtual master) ---------------------------------------------
+        self._virtual_path = virtual_path
+        self._virtual: VirtualBook | None = None
+        """The synthetic master book, open only while the profile is in trading mode. Its tick
+        thread runs either way and no-ops while this is None, so a mode switch needs no thread
+        juggling."""
+        if cfg.mode is AppMode.TRADING:
+            self._virtual = VirtualBook(
+                virtual_path if virtual_path is not None else virtual_book_path()
+            )
+        self._virtual_seq = 0
+        self._virtual_thread: threading.Thread | None = None
+        self._stop_virtual = threading.Event()
+        self._feed_tid: str | None = None
+        """The terminal whose quotes feed the book, as last picked: the pinned one when it is
+        connected, else any connected MT5 slave. Remembered only to announce changes."""
+        self._watch_extra: str | None = None
+        """One symbol the order ticket is previewing beyond what the book holds, so its quote
+        is live before anything is placed."""
+        self._watch_sent: tuple[str, WatchCommand] | None = None
+        """The watch last sent and to whom, so an unchanged watch costs no queue traffic."""
+
     # --- lifecycle --------------------------------------------------------------------------
 
     def start(self) -> None:
@@ -332,6 +369,12 @@ class Engine:
                 target=self._drain_loop, name="engine-drain", daemon=True
             )
             self._drain_thread.start()
+        if self._virtual_thread is None:
+            self._stop_virtual.clear()
+            self._virtual_thread = threading.Thread(
+                target=self._virtual_loop, name="engine-virtual", daemon=True
+            )
+            self._virtual_thread.start()
         self._calendar.start()
         self.sync()
 
@@ -346,11 +389,16 @@ class Engine:
         for tid in terminal_ids:
             self._stop_worker(tid, close_terminal=True)
         self._stop_drain.set()
+        self._stop_virtual.set()
         self._calendar.stop()
         thread = self._drain_thread
         if thread is not None:
             thread.join(timeout=2.0)
             self._drain_thread = None
+        vthread = self._virtual_thread
+        if vthread is not None:
+            vthread.join(timeout=2.0)
+            self._virtual_thread = None
         self._history.close()
         if self._claims is not None:
             self._claims.release_all()
@@ -610,6 +658,338 @@ class Engine:
             return True
         worker = self._workers.get(snap.terminal_id)
         return worker is not None and getattr(worker.process, "pid", None) == snap.worker_pid
+
+    # --- direct trading: the virtual master ---------------------------------------------------
+
+    def _virtual_loop(self) -> None:
+        """Tick the virtual master on the worker cadence, while trading mode is on.
+
+        Runs whether or not it is -- it no-ops with the book closed -- so a mode switch never
+        has to start or stop a thread. A real master's reconcile is clocked by its snapshots
+        arriving; the virtual master has no worker, so this thread is its clock.
+        """
+        period = max(self._cfg.poll_interval_ms, 50) / 1000.0
+        while not self._stop_virtual.wait(period):
+            try:
+                self.virtual_tick()
+            except Exception:
+                # Same containment as the drain loop: a crash here must not silently stop
+                # the book ticking -- or worse, kill the thread and freeze direct mode.
+                log.exception("virtual master tick failed; skipping this tick")
+
+    def virtual_tick(self, now: float | None = None) -> None:
+        """One turn of the virtual master: prices act on the book, then the book is
+        reconciled onto the slaves exactly as a real master's snapshot would be."""
+        with self._lock:
+            book = self._virtual
+            if book is None:
+                return
+            when = time.time() if now is None else now
+            feed_tid, quotes = self._feed_quotes()
+            self._sync_watch(feed_tid)
+            book.tick(quotes, when)
+            self._virtual_seq += 1
+            positions = book.positions()
+            snap = Snapshot(
+                terminal_id=VIRTUAL_MASTER_ID,
+                state=WorkerState.CONNECTED,
+                seq=self._virtual_seq,
+                ts=when,
+                positions=len(positions),
+                open_positions=positions,
+                live_positions=self._virtual_live(positions, quotes),
+                pending_orders=book.orders(),
+            )
+            self._snapshots[VIRTUAL_MASTER_ID] = snap
+            self._received_at[VIRTUAL_MASTER_ID] = time.monotonic()
+            self._reconcile(snap)
+
+    @staticmethod
+    def _virtual_live(
+        positions: Sequence[Position], quotes: Mapping[str, tuple[float, float]]
+    ) -> tuple[PositionLive, ...]:
+        """The book's per-tick half, read off the feed: each position priced at the side its
+        close would execute on. None where the feed has no quote, like any failed read."""
+        out: list[PositionLive] = []
+        for p in positions:
+            quote = quotes.get(p.symbol)
+            price = None
+            if quote is not None:
+                price = quote[0] if p.type is PositionType.BUY else quote[1]
+            out.append(PositionLive(ticket=p.ticket, price_current=price))
+        return tuple(out)
+
+    def _feed_ok(self, terminal_id: str) -> bool:
+        """Whether this terminal can feed quotes right now: an enabled MT5 slave whose worker
+        is connected and fresh. cTrader accounts are not offered yet -- quotes come off MT5's
+        ``symbol_info_tick``, and the trendbar path is its own piece of work."""
+        cfg = self._cfg.terminals.get(terminal_id)
+        if cfg is None or cfg.is_ctrader or cfg.role is not Role.SLAVE or not cfg.enabled:
+            return False
+        snap = self._snapshots.get(terminal_id)
+        received = self._received_at.get(terminal_id)
+        fresh = (
+            received is not None and (time.monotonic() - received) <= self._cfg.heartbeat_timeout_s
+        )
+        return fresh and snap is not None and snap.state is WorkerState.CONNECTED
+
+    def _pick_feed(self) -> str | None:
+        """The terminal to quote from: the pinned one while it is usable, else any connected
+        MT5 slave, else none. Changes are announced once, not per tick -- a feed that fails
+        over silently would leave 'why did my pending fill late' unanswerable."""
+        pinned = self._cfg.feed_terminal_id
+        chosen = pinned if pinned is not None and self._feed_ok(pinned) else None
+        if chosen is None:
+            ordered = sorted(self._cfg.slaves, key=lambda c: (c.label.lower(), c.terminal_id))
+            chosen = next((t.terminal_id for t in ordered if self._feed_ok(t.terminal_id)), None)
+        if chosen != self._feed_tid:
+            if chosen is None:
+                log.warning(
+                    "direct trading has no price feed: no connected MT5 slave to quote from; "
+                    "nothing fills until one connects"
+                )
+            else:
+                log.info("direct trading quotes come from %s", self._cfg.display_name(chosen))
+            self._feed_tid = chosen
+        return chosen
+
+    def _feed_quotes(self) -> tuple[str | None, dict[str, tuple[float, float]]]:
+        """The feed's latest prices by clean symbol name. Caller must hold the lock."""
+        tid = self._pick_feed()
+        if tid is None:
+            return None, {}
+        snap = self._snapshots.get(tid)
+        quotes = {q.symbol: (q.bid, q.ask) for q in (snap.quotes if snap is not None else ())}
+        return tid, quotes
+
+    def _sync_watch(self, feed_tid: str | None) -> None:
+        """Keep the feed worker quoting what the book needs: every symbol it holds something
+        on, plus the one the ticket is previewing. Sent only when the watch or the feed
+        changes, and the old feed is told to stop when it is handed over."""
+        book = self._virtual
+        if book is None or feed_tid is None:
+            return
+        cfg = self._cfg.terminals.get(feed_tid)
+        if cfg is None:
+            return
+        needed = book.symbols()
+        if self._watch_extra:
+            needed = needed | {self._watch_extra}
+        cmd = WatchCommand(
+            symbols=tuple(sorted(needed)),
+            symbol_prefix=cfg.symbol_prefix,
+            symbol_suffix=cfg.symbol_suffix,
+            symbol_map=tuple(sorted(cfg.symbol_map.items())),
+        )
+        if self._watch_sent == (feed_tid, cmd):
+            return
+        if self._watch_sent is not None and self._watch_sent[0] != feed_tid:
+            old = self._workers.get(self._watch_sent[0])
+            if old is not None:
+                try:
+                    old.cmd_q.put_nowait(WatchCommand())
+                except Exception as exc:
+                    log.debug("could not clear the old feed's watch: %r", exc)
+        worker = self._workers.get(feed_tid)
+        if worker is None:
+            return
+        try:
+            worker.cmd_q.put_nowait(cmd)
+        except Exception as exc:
+            log.debug("could not send the watch to %s: %r", feed_tid[:8], exc)
+            return
+        self._watch_sent = (feed_tid, cmd)
+
+    # --- direct trading: the person's own orders ----------------------------------------------
+
+    _NOT_TRADING = "this profile copies a master; switch it to direct trading first"
+
+    def direct_mode(self) -> bool:
+        with self._lock:
+            return self._virtual is not None
+
+    def watch_direct(self, symbol: str | None) -> None:
+        """Tell the feed to quote one extra symbol: the one on the ticket, before anything is
+        placed on it, so the person sees a live price while they type."""
+        with self._lock:
+            self._watch_extra = symbol.strip().upper() if symbol else None
+
+    def direct_quote(self, symbol: str) -> Quote | None:
+        """The feed's current price for one clean symbol name, or None while unknown."""
+        with self._lock:
+            tid = self._feed_tid
+            snap = self._snapshots.get(tid) if tid is not None else None
+            if snap is None:
+                return None
+            wanted = symbol.strip().upper()
+            return next((q for q in snap.quotes if q.symbol == wanted), None)
+
+    def direct_feed(self) -> str | None:
+        """The terminal currently feeding quotes, or None while there is none."""
+        with self._lock:
+            return self._feed_tid
+
+    def direct_positions(self) -> tuple[Position, ...]:
+        with self._lock:
+            return self._virtual.positions() if self._virtual is not None else ()
+
+    def direct_orders(self) -> tuple[PendingOrder, ...]:
+        with self._lock:
+            return self._virtual.orders() if self._virtual is not None else ()
+
+    def place_direct_market(
+        self, symbol: str, direction: PositionType, lots: float, sl: float, tp: float = 0.0
+    ) -> str | None:
+        """Open a direct trade at the feed's price. None means done; otherwise why not.
+
+        The book validates -- the stop is required, on the losing side -- and the next tick
+        copies the position to every enabled slave through the ordinary diff, each slave's
+        guards gating it exactly as they gate a real master's trade.
+        """
+        with self._lock:
+            book = self._virtual
+            if book is None:
+                return self._NOT_TRADING
+            _, quotes = self._feed_quotes()
+            return book.open_market(
+                symbol,
+                direction,
+                lots,
+                sl,
+                tp,
+                quotes.get(symbol.strip().upper()),
+                now=time.time(),
+            )
+
+    def place_direct_pending(
+        self,
+        symbol: str,
+        order_type: OrderType,
+        lots: float,
+        entry: float,
+        sl: float,
+        tp: float = 0.0,
+        expiration_utc: int = 0,
+    ) -> str | None:
+        """Rest a direct limit or stop order. None means done; otherwise why not."""
+        with self._lock:
+            book = self._virtual
+            if book is None:
+                return self._NOT_TRADING
+            _, quotes = self._feed_quotes()
+            return book.place_pending(
+                symbol,
+                order_type,
+                lots,
+                entry,
+                sl,
+                tp,
+                quotes.get(symbol.strip().upper()),
+                expiration_utc=expiration_utc,
+                now=time.time(),
+            )
+
+    def modify_direct(self, ticket: int, sl: float, tp: float) -> str | None:
+        """Move a direct position's stop and target; every copy follows on the next tick."""
+        with self._lock:
+            book = self._virtual
+            if book is None:
+                return self._NOT_TRADING
+            return book.modify_position(ticket, sl, tp)
+
+    def modify_direct_order(
+        self, ticket: int, entry: float, sl: float, tp: float, expiration_utc: int = 0
+    ) -> str | None:
+        with self._lock:
+            book = self._virtual
+            if book is None:
+                return self._NOT_TRADING
+            return book.modify_order(ticket, entry, sl, tp, expiration_utc)
+
+    def close_direct(self, ticket: int) -> str | None:
+        with self._lock:
+            book = self._virtual
+            if book is None:
+                return self._NOT_TRADING
+            return book.close_position(ticket)
+
+    def partial_close_direct(self, ticket: int, percent: float) -> str | None:
+        with self._lock:
+            book = self._virtual
+            if book is None:
+                return self._NOT_TRADING
+            return book.partial_close(ticket, percent)
+
+    def cancel_direct(self, ticket: int) -> str | None:
+        with self._lock:
+            book = self._virtual
+            if book is None:
+                return self._NOT_TRADING
+            return book.cancel_order(ticket)
+
+    def flatten_direct(self) -> int:
+        """Close every direct position and cancel every resting order. Returns how many of
+        the two together were acted on."""
+        with self._lock:
+            book = self._virtual
+            if book is None:
+                return 0
+            done = 0
+            for p in book.positions():
+                if book.close_position(p.ticket) is None:
+                    done += 1
+            for o in book.orders():
+                if book.cancel_order(o.ticket) is None:
+                    done += 1
+            return done
+
+    def set_mode(self, mode: AppMode) -> str | None:
+        """Switch the profile between copying a master and trading directly. None means done.
+
+        Refused while any copy is open or believed, in the spirit of the orphaning rule: the
+        other mode's master has different tickets, so copies carried across would read as
+        closes on the first tick. The caller still has to save the config.
+        """
+        with self._lock:
+            if mode is self._cfg.mode:
+                return None
+            self._ensure_store()
+            held = len(self._ledger.believed()) + len(self._ledger.believed_orders())
+            if held:
+                return (
+                    f"{copies_word(held)} still open; close them, or give them up by "
+                    "unassigning their slaves, before switching modes"
+                )
+            if self._ledger.inflight_count:
+                return "commands are still in flight; try again in a moment"
+            if mode is AppMode.TRADING and self._cfg.master is not None:
+                # Demote the master alone -- not role_actions.unassign, which sweeps every
+                # slave along with it. Here the virtual master takes its place in the same
+                # breath, so the slaves keep their roles and copy it instead.
+                self._cfg.set_role(self._cfg.master.terminal_id, Role.UNASSIGNED)
+            self._cfg.mode = mode
+            if mode is AppMode.TRADING:
+                self._virtual = VirtualBook(
+                    self._virtual_path if self._virtual_path is not None else virtual_book_path()
+                )
+            else:
+                self._virtual = None
+                self._snapshots.pop(VIRTUAL_MASTER_ID, None)
+                self._received_at.pop(VIRTUAL_MASTER_ID, None)
+                self._feed_tid = None
+                self._watch_sent = None
+            # The master's identity changed, so every session conclusion reasoned against the
+            # old one -- exclusions, continuity, reconciliation -- is void.
+            self._ledger.reset_session_state()
+            for tid in list(self._cfg.terminals):
+                self._forget_reconciliation(tid)
+            log.warning(
+                "mode switched: this profile now %s",
+                "trades directly (virtual master)"
+                if mode is AppMode.TRADING
+                else "copies a master",
+            )
+        return None
 
     # --- Stage 2a: detection ----------------------------------------------------------------
 

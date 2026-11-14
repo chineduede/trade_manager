@@ -164,6 +164,14 @@ def dryrun_store_path() -> Path:
     return user_data_dir() / "dryrun.db"
 
 
+def virtual_book_path() -> Path:
+    """The virtual master's book, in a profile that trades directly: its open positions,
+    resting orders and ticket counter. Losing it loses the master side of every live copy --
+    the copies would read as orphans on the next start -- so it lives beside ``mapping.db``
+    rather than anywhere temporary."""
+    return user_data_dir() / "virtual_master.json"
+
+
 def mt5_terminal_root() -> Path:
     r"""``%APPDATA%\MetaQuotes\Terminal`` — where MT5 keeps one data folder per install."""
     appdata = os.environ.get("APPDATA")

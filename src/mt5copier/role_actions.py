@@ -28,16 +28,23 @@ each caller.
 
 from __future__ import annotations
 
-from .config import AppConfig, Role
+from .config import AppConfig, AppMode, Role
 
 
 def set_master(cfg: AppConfig, terminal_id: str) -> str | None:
     """Make this terminal the master. None means it went in (or it already was).
 
-    Refuses while a different terminal is the master: unassign that one first.
+    Refuses while a different terminal is the master: unassign that one first. In a profile
+    that trades directly there is no master terminal at all -- the virtual master holds the
+    role -- so this is refused outright rather than reading as "unassign Direct trading".
     """
     tcfg = cfg.terminals[terminal_id]
     label = cfg.display_name(terminal_id)
+    if cfg.mode is AppMode.TRADING:
+        return (
+            f"this profile trades directly, so {label} cannot be the master; "
+            "switch to copy mode first"
+        )
     current = cfg.master
     if current is not None and current.terminal_id == terminal_id:
         return None

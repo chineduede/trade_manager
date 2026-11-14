@@ -210,6 +210,42 @@ class PendingOrder:
         return self.sl != 0.0
 
 
+@dataclass(frozen=True, slots=True)
+class Quote:
+    """One watched symbol's current price, as the feed worker read it.
+
+    ``symbol`` is the *clean* canonical name the supervisor asked for, never the broker's
+    decorated one -- the worker resolves the decoration on its side and answers in the name
+    the virtual master's book is kept in, so nothing upstream needs to know what the feed
+    broker calls the instrument.
+    """
+
+    symbol: str
+    bid: float
+    ask: float
+    ts: float = 0.0
+    """When the worker read it, in its wall clock. Display only: staleness is judged from the
+    snapshot that carried it, as everything else on a snapshot is."""
+
+
+@dataclass(frozen=True, slots=True)
+class WatchCommand:
+    """Supervisor -> worker: quote these symbols in every snapshot from now on.
+
+    Latest wins -- each command replaces the whole watch list rather than editing it, so a
+    worker that missed one is wrong for a tick, not forever. Symbols are clean canonical
+    names; the slave's own decoration travels alongside so the worker can resolve them
+    against its broker's list exactly as the executor resolves a trade's symbol.
+    """
+
+    symbols: tuple[str, ...] = ()
+    symbol_prefix: str = ""
+    symbol_suffix: str = ""
+    symbol_map: tuple[tuple[str, str], ...] = ()
+    """Sorted ``(clean, broker)`` pairs, a tuple for the same reason as
+    :attr:`OrderCommand.symbol_map`."""
+
+
 class WorkerState(StrEnum):
     """Lifecycle of a single terminal connection."""
 
@@ -625,6 +661,12 @@ class Snapshot:
     deals_since: float | None = None
     """The UTC start of the window ``deals`` covers. A balance can only be rebuilt for a moment
     inside it."""
+
+    quotes: tuple[Quote, ...] = ()
+    """Current prices for the symbols a :class:`WatchCommand` asked this worker to watch,
+    keyed by their clean names. Empty when nothing is watched, when the terminal is not
+    connected, or when a watched symbol cannot be resolved or quoted -- a missing quote is
+    "unknown", and the virtual master refuses to fill against unknown rather than guessing."""
 
     error: str | None = None
     """Human-readable last error, kept for display even after a later success."""
