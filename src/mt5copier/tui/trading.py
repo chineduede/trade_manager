@@ -214,6 +214,10 @@ class ChartView(Static):
     means is the screen's (:meth:`TradingScreen.chart_grab` and friends), because only the
     screen holds the scale the picture was drawn with."""
 
+    ALLOW_SELECT = False
+    """Textual's own copy-text selection would highlight the chart on the very drag that
+    moves a line. The chart is a picture, not prose: nothing to copy, nothing to select."""
+
     def on_mouse_down(self, event: events.MouseDown) -> None:
         screen = self.screen
         if isinstance(screen, TradingScreen) and screen.chart_grab(int(event.y)) is not None:

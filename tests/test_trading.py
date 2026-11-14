@@ -490,6 +490,8 @@ async def test_the_stop_line_drags_into_the_ticket(app: CopierApp) -> None:
         screen.refresh_page()
         scale = screen._chart_scale
         assert scale is not None, "a drawn chart arms the mouse"
+        chart_widget = screen.query_one("#dt-chart")
+        assert chart_widget.ALLOW_SELECT is False, "dragging must not highlight the chart"
         assert screen.chart_grab(scale.row(1.075)) == "sl", "a press on the line takes hold"
         screen.chart_drag(0)
         moved = screen.query_one("#dt-sl", Input).value
