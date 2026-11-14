@@ -21,7 +21,7 @@ from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Input, Static
@@ -47,9 +47,9 @@ _ORDER_TYPES: dict[tuple[str, str], OrderType] = {
 
 _NUMERIC = r"[0-9., ]*"
 
-_CHART_HEIGHT = 7
+_CHART_HEIGHT = 14
 """Rows the minichart draws in: one place, because the mouse maps rows back to prices.
-Kept low so the ticket, not the picture, owns the page."""
+The chart has the page's right half to itself, so it can afford to be tall."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,46 +291,64 @@ class TradingScreen(Screen[None]):
         yield TopBar("", id="topbar")
         with VerticalScroll(id="dt-page"):
             yield Static("", id="dt-band")
-            yield Static("TICKET", classes="heading")
-            with Horizontal(classes="dt-row"):
-                yield Static(Text("symbol ", style=MUTED), classes="dt-label")
-                yield Input(id="dt-symbol", compact=True, classes="dt-symbol")
-                yield Static(Text("  lots ", style=MUTED), classes="dt-label")
-                yield Input(
-                    value="1", id="dt-lots", compact=True, classes="dt-num", restrict=_NUMERIC
-                )
-                yield Static(Text("  "), classes="dt-label")
-                yield Choice(_SIDES, "buy", id="dt-side")
-            with Horizontal(classes="dt-row"):
-                yield Static(Text("stop ", style=MUTED), classes="dt-label")
-                yield Input(id="dt-sl", compact=True, classes="dt-num", restrict=_NUMERIC)
-                yield Static(Text("  rr ", style=MUTED), classes="dt-label")
-                yield Input(
-                    id="dt-rr", compact=True, classes="dt-rr", restrict=_NUMERIC, placeholder="1.5"
-                )
-                yield Static(Text("  target ", style=MUTED), classes="dt-label")
-                yield Input(id="dt-tp", compact=True, classes="dt-num", restrict=_NUMERIC)
-            with Horizontal(classes="dt-row"):
-                yield Choice(_KINDS, "market", id="dt-kind")
-                yield Static(Text("  entry ", style=MUTED), classes="dt-label", id="dt-entry-label")
-                yield Input(id="dt-entry", compact=True, classes="dt-num", restrict=_NUMERIC)
-                yield Static(
-                    Text("  expires in ", style=MUTED), classes="dt-label", id="dt-expiry-label"
-                )
-                yield Input(
-                    id="dt-expiry",
-                    compact=True,
-                    classes="dt-num",
-                    restrict=_NUMERIC,
-                    placeholder="min",
-                )
-            with Horizontal(classes="dt-row dt-actions"):
-                yield Button("Buy  enter", id="dt-place", compact=True)
-                yield Button("Reset", id="dt-reset", compact=True)
-            yield Static("", id="dt-quote")
-            yield Static("", id="dt-status")
-            yield Static("", id="dt-chart-head", classes="heading")
-            yield ChartView("", id="dt-chart")
+            with Horizontal(id="dt-split"):
+                with Vertical(id="dt-form"):
+                    yield Static("TICKET", classes="heading")
+                    with Horizontal(classes="dt-row"):
+                        yield Static(Text("symbol", style=MUTED), classes="dt-label")
+                        yield Input(id="dt-symbol", compact=True, classes="dt-symbol")
+                    with Horizontal(classes="dt-row"):
+                        yield Static(Text("lots", style=MUTED), classes="dt-label")
+                        yield Input(
+                            value="1",
+                            id="dt-lots",
+                            compact=True,
+                            classes="dt-num",
+                            restrict=_NUMERIC,
+                        )
+                    with Horizontal(classes="dt-row"):
+                        yield Static(Text("side", style=MUTED), classes="dt-label")
+                        yield Choice(_SIDES, "buy", id="dt-side")
+                    with Horizontal(classes="dt-row dt-gap"):
+                        yield Static(Text("stop", style=MUTED), classes="dt-label")
+                        yield Input(id="dt-sl", compact=True, classes="dt-num", restrict=_NUMERIC)
+                    with Horizontal(classes="dt-row"):
+                        yield Static(Text("rr", style=MUTED), classes="dt-label")
+                        yield Input(
+                            id="dt-rr",
+                            compact=True,
+                            classes="dt-rr",
+                            restrict=_NUMERIC,
+                            placeholder="1.5",
+                        )
+                    with Horizontal(classes="dt-row"):
+                        yield Static(Text("target", style=MUTED), classes="dt-label")
+                        yield Input(id="dt-tp", compact=True, classes="dt-num", restrict=_NUMERIC)
+                    with Horizontal(classes="dt-row dt-gap"):
+                        yield Static(Text("type", style=MUTED), classes="dt-label")
+                        yield Choice(_KINDS, "market", id="dt-kind")
+                    with Horizontal(classes="dt-row", id="dt-entry-row"):
+                        yield Static(Text("entry", style=MUTED), classes="dt-label")
+                        yield Input(
+                            id="dt-entry", compact=True, classes="dt-num", restrict=_NUMERIC
+                        )
+                    with Horizontal(classes="dt-row", id="dt-expiry-row"):
+                        yield Static(Text("expires in", style=MUTED), classes="dt-label")
+                        yield Input(
+                            id="dt-expiry",
+                            compact=True,
+                            classes="dt-num",
+                            restrict=_NUMERIC,
+                            placeholder="min",
+                        )
+                    with Horizontal(classes="dt-row dt-actions"):
+                        yield Button("Buy  enter", id="dt-place", compact=True)
+                        yield Button("Reset", id="dt-reset", compact=True)
+                    yield Static("", id="dt-quote")
+                    yield Static("", id="dt-status")
+                with Vertical(id="dt-chart-side"):
+                    yield Static("", id="dt-chart-head", classes="heading")
+                    yield ChartView("", id="dt-chart")
             yield Static("", id="dt-book-head", classes="heading")
             yield DataTable(id="dt-book", cursor_type="row")
             with Horizontal(id="dt-ask"):
@@ -430,7 +448,7 @@ class TradingScreen(Screen[None]):
         self.query_one("#dt-chart-head", Static).update(
             left_right(
                 Text(f"CHART  {symbol or '—'} · {name}", style="bold"),
-                Text("t changes the timeframe · drag the stop or target line", style=MUTED),
+                Text("t timeframe · drag a line", style=MUTED),
             )
         )
         target = self.query_one("#dt-chart", Static)
@@ -574,7 +592,7 @@ class TradingScreen(Screen[None]):
 
     def _show_kind(self) -> None:
         pending = self.query_one("#dt-kind", Choice).value != "market"
-        for wid in ("#dt-entry-label", "#dt-entry", "#dt-expiry-label", "#dt-expiry"):
+        for wid in ("#dt-entry-row", "#dt-expiry-row"):
             self.query_one(wid).display = pending
 
     def _show_side(self) -> None:

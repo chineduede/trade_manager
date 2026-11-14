@@ -975,13 +975,33 @@ GoLiveDialog.-short #dialog {
     margin-top: 1;
 }
 
+/* The page splits in two: the ticket is a proper form on the left half, the chart has
+   the right half to itself. The book keeps the full width below. */
+#dt-split {
+    height: auto;
+}
+
+#dt-form {
+    width: 50%;
+    height: auto;
+}
+
+#dt-chart-side {
+    width: 1fr;
+    height: auto;
+}
+
 .dt-row {
     height: 1;
     margin: 0 2;
 }
 
 .dt-row .dt-label {
-    width: auto;
+    width: 12;
+}
+
+.dt-row.dt-gap {
+    margin: 1 2 0 2;
 }
 
 .dt-row Input {
@@ -993,21 +1013,21 @@ GoLiveDialog.-short #dialog {
 }
 
 .dt-row .dt-symbol {
-    width: 12;
+    width: 14;
 }
 
 .dt-row .dt-num {
-    width: 9;
+    width: 14;
 }
 
 .dt-row .dt-rr {
-    width: 6;
+    width: 7;
 }
 
 /* The place button is the trade's side, said in its colour: blue is a buy (the copier's
    working colour), red a sell -- the same coding as the book's rows. */
 .dt-actions {
-    margin-top: 1;
+    margin: 1 2 0 2;
 }
 
 #dt-place.buy {
