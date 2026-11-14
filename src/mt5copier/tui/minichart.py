@@ -142,12 +142,25 @@ class Scale:
         return abs(row - self.row(price)) <= 1
 
 
-def scale_of(shown: Sequence[Candle], height: int) -> Scale | None:
-    """The scale a chart of ``shown`` draws with: their range, padded 5% each side."""
+def scale_of(shown: Sequence[Candle], height: int, levels: Sequence[float] = ()) -> Scale | None:
+    """The scale a chart of ``shown`` draws with: their range, padded 5% each side.
+
+    ``levels`` are the ticket's lines, and the range stretches to keep each one on the
+    chart -- that is what lets a stop be dragged below everything the bars show: at the
+    bottom edge the next redraw has stretched further down, so there is always more room.
+    The stretch is capped at three times the bars' own range past them, enough to put a
+    stop well clear of the price action but not enough for one typo'd level to flatten
+    the candles into a line; past the cap a level is simply off the chart."""
     if not shown:
         return None
     lo = min(c.low for c in shown)
     hi = max(c.high for c in shown)
+    reach = 3 * ((hi - lo) or max(abs(hi) * 0.0001, 1e-9))
+    floor, ceiling = lo - reach, hi + reach
+    for price in levels:
+        if price:
+            lo = min(lo, max(price, floor))
+            hi = max(hi, min(price, ceiling))
     pad = (hi - lo) * 0.05 or max(abs(hi) * 0.0001, 1e-9)
     return Scale(hi=hi + pad, lo=lo - pad, height=height)
 
@@ -161,21 +174,28 @@ def chart(
     sl: float = 0.0,
     tp: float = 0.0,
     entry: float = 0.0,
+    lots: float = 0.0,
 ) -> Text:
     """The picture: one slim candle every other column, newest against the axis, price
     labels on the right.
 
     ``width`` and ``height`` are the whole drawing, axis included. Levels (the bid in blue,
     the stop in red, the target in green, a pending's entry in yellow) are dotted lines
-    running behind the candles, drawn only inside the bars' own price range. The draggable
-    ones wear a grip tag at their left end -- ``≡ SL`` -- so they read as handles, not
-    decoration; the bid is not draggable and goes without one.
+    running behind the candles, and the price scale stretches to keep them on the chart
+    (see :func:`scale_of`). The draggable ones wear a grip tag at their left end --
+    ``≡ SL`` -- so they read as handles, not decoration; the bid is not draggable and goes
+    without one.
+
+    The tags also say what the ticket means where it matters: the lots ride on the line
+    the trade would enter at (the pending's entry, else the bid), and the stop and target
+    tags carry their distance from that line, so dragging one reads as risk moving, not
+    just a price changing.
     """
     columns = width - _AXIS
     if columns < 10 or height < 4:
         return Text("the chart needs more room", style=MUTED)
     shown = window(candles, bid, width)
-    scale = scale_of(shown, height)
+    scale = scale_of(shown, height, (sl, tp, entry))
     if scale is None:
         return Text("")
 
@@ -186,13 +206,25 @@ def chart(
     labels[height - 1] = (scale.fmt(scale.lo), MUTED)
     labels[(height - 1) // 2] = (scale.fmt((scale.hi + scale.lo) / 2), MUTED)
 
+    basis = entry or bid or 0.0
+    """Where the trade would enter: what the stop's and target's distances measure from."""
+    lots_word = f"{lots:g} lot{'s' if lots != 1 else ''}" if lots else ""
+
+    def handle(name: str, price: float) -> str:
+        said = f" ≡ {name}"
+        if name == "ENTRY" and lots_word:
+            said += f" · {lots_word}"
+        elif basis and price:
+            said += f" {scale.fmt(abs(price - basis))}"
+        return said + " "
+
     # SL last, so where two lines share a row the stop's line and tag win: it is the one
     # that must never be misread.
-    levels: tuple[tuple[float | None, str | None, str], ...] = (
-        (bid, None, BLUE),
-        (tp, "TP", GREEN),
-        (entry, "ENTRY", YELLOW),
-        (sl, "SL", RED),
+    levels: tuple[tuple[float | None, str, str], ...] = (
+        (bid, f" {lots_word} " if lots_word and not entry else "", BLUE),
+        (tp, handle("TP", tp), GREEN),
+        (entry, handle("ENTRY", entry), YELLOW),
+        (sl, handle("SL", sl), RED),
     )
 
     # Level lines first, so the candles draw over them: the price action owns its pixels.
@@ -220,13 +252,13 @@ def chart(
             if drawn:
                 grid[r][column] = (drawn, color)
 
-    # Grip tags last, over everything: a handle hidden behind a candle cannot be grabbed
-    # with any confidence.
+    # Tags last, over everything: a handle hidden behind a candle cannot be grabbed with
+    # any confidence.
     for price, tag, color in levels:
-        if tag is None or not price or not scale.lo <= price <= scale.hi:
+        if not tag or not price or not scale.lo <= price <= scale.hi:
             continue
         r = scale.row(price)
-        for x, char in enumerate(f" ≡ {tag} "[:columns]):
+        for x, char in enumerate(tag[:columns]):
             grid[r][x] = (char, f"{BG} on {color}")
 
     out = Text()

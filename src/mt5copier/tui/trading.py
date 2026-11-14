@@ -435,18 +435,26 @@ class TradingScreen(Screen[None]):
             return
         width = max(30, target.content_size.width or self.size.width - 4)
         bid = quote.bid if quote is not None else None
-        self._chart_scale = scale_of(window(rates.candles, bid, width), _CHART_HEIGHT)
-        if self._chart_scale is not None and bid is not None:
-            self._seed_levels(symbol, self._chart_scale, bid)
+        shown = window(rates.candles, bid, width)
+        # Seeding measures off the bars alone; the drawing scale then stretches to the
+        # levels, or defaults would compound off their own stretch.
+        bars_scale = scale_of(shown, _CHART_HEIGHT)
+        if bars_scale is not None and bid is not None:
+            self._seed_levels(symbol, bars_scale, bid)
+        sl = self._level("#dt-sl")
+        tp = self._level("#dt-tp")
+        entry = self._level("#dt-entry") if self._pending_kind() else 0.0
+        self._chart_scale = scale_of(shown, _CHART_HEIGHT, (sl, tp, entry))
         target.update(
             chart(
                 rates.candles,
                 width=width,
                 height=_CHART_HEIGHT,
                 bid=bid,
-                sl=self._level("#dt-sl"),
-                tp=self._level("#dt-tp"),
-                entry=self._level("#dt-entry") if self._pending_kind() else 0.0,
+                sl=sl,
+                tp=tp,
+                entry=entry,
+                lots=self._level("#dt-lots"),
             )
         )
 

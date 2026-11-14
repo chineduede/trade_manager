@@ -63,12 +63,25 @@ def test_the_bid_is_a_dotted_line_with_its_own_label() -> None:
     assert middle[19] == "┃", "the candles draw over it"
 
 
-def test_levels_inside_the_range_are_drawn_and_outside_are_not() -> None:
+def test_the_chart_stretches_its_scale_to_keep_a_level_on_it() -> None:
     bars = [candle(1.0, 2.0, 1.0, 2.0)] * 2
-    with_sl = lines(chart(bars, width=30, height=9, sl=1.5))
+    with_sl = lines(chart(bars, width=36, height=9, sl=1.5))
     assert any("┈" in line and line.rstrip().endswith("1.5000") for line in with_sl)
-    without = lines(chart(bars, width=30, height=9, sl=5.0))
-    assert not any("┈" in line for line in without), "a level outside the bars is not drawn"
+    # A level past the bars pulls the scale out to it, instead of falling off the chart:
+    # that is what lets a stop be dragged below everything the bars show.
+    stretched = lines(chart(bars, width=36, height=9, sl=0.5))
+    assert any("≡ SL" in line and line.rstrip().endswith("0.5000") for line in stretched)
+    scale = scale_of(window(bars, None, 36), 9, (0.5,))
+    assert scale is not None and scale.lo < 0.5, "the bottom edge moves past the stop"
+
+
+def test_the_stretch_is_capped_so_a_typo_cannot_flatten_the_candles() -> None:
+    bars = [candle(100.0, 110.0, 100.0, 110.0)] * 2
+    scale = scale_of(window(bars, None, 36), 9, (1.0,))
+    assert scale is not None
+    assert scale.lo >= 60.0, "three times the bars' range is as far as a level can pull"
+    drawn = lines(chart(bars, width=36, height=9, sl=1.0))
+    assert not any("≡ SL" in line for line in drawn), "past the cap, the level is off the chart"
 
 
 def test_the_axis_reads_high_middle_and_low() -> None:
@@ -104,6 +117,20 @@ def test_the_draggable_lines_wear_grip_tags() -> None:
     # The bid is not draggable, so its line goes without a handle.
     drawn = lines(chart(bars, width=44, height=11, bid=1.5))
     assert not any("≡" in line for line in drawn)
+
+
+def test_the_tags_carry_the_lots_and_each_levels_distance() -> None:
+    bars = [candle(1.0, 2.0, 1.0, 2.0)] * 2
+    # A market ticket: the lots ride on the bid line, distances measured from it.
+    drawn = lines(chart(bars, width=50, height=11, bid=1.5, sl=1.3, tp=1.8, lots=0.5))
+    assert any("0.5 lots" in line for line in drawn)
+    assert any("≡ SL 0.2000" in line for line in drawn)
+    assert any("≡ TP 0.3000" in line for line in drawn)
+    # A pending: the lots move onto the entry's own tag, distances measure from the entry.
+    drawn = lines(chart(bars, width=50, height=11, bid=1.5, sl=1.3, tp=1.8, entry=1.4, lots=1.0))
+    assert any("≡ ENTRY · 1 lot " in line for line in drawn)
+    assert sum("lot" in line for line in drawn) == 1, "the bid line gives the lots tag up"
+    assert any("≡ SL 0.1000" in line for line in drawn)
 
 
 def test_the_scale_round_trips_rows_and_prices() -> None:
