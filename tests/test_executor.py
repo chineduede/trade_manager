@@ -1169,3 +1169,69 @@ def test_a_booking_that_would_leave_less_than_the_minimum_closes_nothing() -> No
     assert not result.ok and result.unsplittable
     assert "would leave 0.05" in (result.error or "")
     assert session.sent == []
+
+
+# --- keeping a direct ticket's reward:risk net of commission ----------------------------------
+#
+# The numbers throughout: entry 1.08500, stop 1.08000 (a 0.00500 move), target 1.09500 (a
+# 0.01000 move, so rr 2), $500 lost per lot over the stop distance -- $50,000 per 1.0 of
+# price. $5 round-turn commission pads the target by (2 + 1) x 5 / 50,000 = 0.00030.
+
+
+def test_a_direct_open_lands_its_target_past_the_rr_by_the_commissions() -> None:
+    session = FakeSession()
+    result = run(session, cmd(tp=1.09500, tp_net_rr=True, commission_per_lot=5.0))
+    assert result.ok
+    assert session.sent[0]["tp"] == pytest.approx(1.09530)
+
+
+def test_a_copied_target_is_never_padded() -> None:
+    """A real master's target is that trader's own level; only direct tickets carry the flag."""
+    session = FakeSession()
+    run(session, cmd(tp=1.09500, commission_per_lot=5.0))
+    assert session.sent[0]["tp"] == pytest.approx(1.09500)
+
+
+def test_a_commission_free_account_trades_the_ticket_as_written() -> None:
+    session = FakeSession()
+    run(session, cmd(tp=1.09500, tp_net_rr=True, commission_per_lot=0.0))
+    assert session.sent[0]["tp"] == pytest.approx(1.09500)
+
+
+def test_a_sell_pads_its_target_downward() -> None:
+    session = FakeSession()
+    run(
+        session,
+        cmd(
+            direction=PositionType.SELL,
+            entry=1.08500,
+            sl=1.09000,
+            tp=1.07500,
+            tp_net_rr=True,
+            commission_per_lot=5.0,
+        ),
+    )
+    assert session.sent[0]["tp"] == pytest.approx(1.07470)
+
+
+def test_a_direct_stop_move_restates_the_padded_target() -> None:
+    """Every later modify re-pads, or it would quietly rub the pad back off."""
+    session = closing_session()
+    run(session, modify(sl=1.08000, tp=1.09500, tp_net_rr=True, commission_per_lot=5.0))
+    assert session.sent[0]["tp"] == pytest.approx(1.09530)
+
+
+def test_an_unpriceable_move_leaves_the_target_at_the_tickets_level() -> None:
+    """Unpadded beats guessed: the trade still goes on at the ticket's own geometry."""
+    session = closing_session()
+    session.loss = None
+    result = run(session, modify(sl=1.08000, tp=1.09500, tp_net_rr=True, commission_per_lot=5.0))
+    assert result.ok
+    assert session.sent[0]["tp"] == pytest.approx(1.09500)
+
+
+def test_a_target_free_ticket_has_nothing_to_pad() -> None:
+    session = FakeSession()
+    result = run(session, cmd(tp_net_rr=True, commission_per_lot=5.0))
+    assert result.ok
+    assert "tp" not in session.sent[0]

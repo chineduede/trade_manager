@@ -224,6 +224,7 @@ class CTraderExecutor:
         if isinstance(prepared, OrderResult):
             return prepared
         name, symbol, lots, conversion, notes = prepared
+        cmd = self._net_rr_target(cmd, symbol, conversion)
         result = await self._send_open(cmd, name, symbol, lots, conversion)
         return replace(result, guard=notes) if notes else result
 
@@ -337,6 +338,7 @@ class CTraderExecutor:
         if isinstance(prepared, OrderResult):
             return prepared
         name, symbol, lots, conversion, notes = prepared
+        cmd = self._net_rr_target(cmd, symbol, conversion)
         result = await self._send_place(cmd, kind, name, symbol, lots, conversion)
 
         if (
@@ -458,6 +460,8 @@ class CTraderExecutor:
         await self._account.symbols_for({sid})
         symbol = self._account.symbols[sid]
         digits = symbol.digits
+        if cmd.tp_net_rr:
+            cmd = self._net_rr_target(cmd, symbol, await self._conversion_for(symbol))
         limit = int(raw.orderType) == om.LIMIT
         resting_at = float(raw.limitPrice) if limit else float(raw.stopPrice)
         wanted = f"entry {cmd.entry:g} sl {cmd.sl:g} tp {cmd.tp:g}"
@@ -596,6 +600,52 @@ class CTraderExecutor:
             facts=facts,
             max_lot=cmd.max_lot,
         )
+
+    async def _conversion_for(self, symbol: cv.SymbolInfo) -> float | None:
+        """The live rate turning this symbol's quote currency into the account's, for pricing
+        a move outside the sizing path. None for a non-cross, and None when the chain cannot
+        be priced -- the caller then leaves its level unpadded rather than guessing."""
+        if not cv.is_cross(symbol, self._account.deposit_asset_id):
+            return None
+        rate = await self._account.conversion(symbol.quote_asset_id)
+        return None if isinstance(rate, str) else rate
+
+    def _net_rr_target(
+        self, cmd: OrderCommand, symbol: cv.SymbolInfo, conversion: float | None
+    ) -> OrderCommand:
+        """:meth:`mt5copier.executor.Executor._net_rr_target`, rule for rule: a direct
+        ticket's target, landed (rr + 1) commissions further out so the realized reward:risk
+        survives commission. Valued the cTrader way, over the entry-to-stop move itself."""
+        if not cmd.tp_net_rr or not cmd.tp or not cmd.sl or cmd.commission_per_lot <= 0:
+            return cmd
+        dist = abs(cmd.entry - cmd.sl)
+        reward = abs(cmd.tp - cmd.entry)
+        if dist <= 0 or reward <= 0:
+            return cmd
+        loss = cv.loss_per_lot(symbol, self._account.deposit_asset_id, cmd.entry, cmd.sl, conversion)
+        if not loss:
+            log.warning(
+                "#%s on %s: a move cannot be priced, so the target stays at the ticket's %g",
+                cmd.master_ticket,
+                symbol.name,
+                cmd.tp,
+            )
+            return cmd
+        value = abs(loss) / dist
+        rr = reward / dist
+        pad = (rr + 1.0) * cmd.commission_per_lot / value
+        way = 1.0 if cmd.direction is PositionType.BUY else -1.0
+        tp = round(cmd.tp + way * pad, symbol.digits)
+        log.info(
+            "#%s on %s: target %g -> %g, (rr %.2f + 1) commissions of %.2f kept net",
+            cmd.master_ticket,
+            symbol.name,
+            cmd.tp,
+            tp,
+            rr,
+            cmd.commission_per_lot,
+        )
+        return replace(cmd, tp=tp)
 
     async def _fit_margin(
         self, cmd: OrderCommand, symbol: cv.SymbolInfo, facts: SymbolFacts, lots: float
@@ -794,6 +844,10 @@ class CTraderExecutor:
         await account.symbols_for({sid})
         symbol = account.symbols[sid]
         digits = symbol.digits
+        if cmd.tp_net_rr:
+            # Before the already-matched check: the copy holds the padded target, so the
+            # comparison must be against the padded ask or every tick would amend it.
+            cmd = self._net_rr_target(cmd, symbol, await self._conversion_for(symbol))
         if round(float(raw.stopLoss), digits) == round(cmd.sl, digits) and round(
             float(raw.takeProfit), digits
         ) == round(cmd.tp, digits):

@@ -191,6 +191,7 @@ class Executor:
         if facts is None:
             return self._fail(cmd, error=f"no symbol_info for {symbol!r}")
 
+        cmd = self._net_rr_target(cmd, symbol, facts)
         sizing = self._size(cmd, symbol, facts)
         if not sizing.ok or sizing.lots is None:
             return self._fail(cmd, slave_symbol=symbol, error=sizing.describe())
@@ -463,6 +464,10 @@ class Executor:
                 attempts=0,
             )
         symbol = live[0]
+        if cmd.tp_net_rr:
+            facts = self._session.symbol_facts(symbol)
+            if facts is not None:
+                cmd = self._net_rr_target(cmd, symbol, facts)
 
         request = {
             "action": int(TradeAction.SLTP),
@@ -499,6 +504,7 @@ class Executor:
             return self._fail(
                 cmd, slave_symbol=symbol, retryable=True, error=f"no symbol_info for {symbol!r}"
             )
+        cmd = self._net_rr_target(cmd, symbol, facts)
 
         commission = cmd.commission_per_lot
         try:
@@ -596,6 +602,10 @@ class Executor:
             label=self._terminal_id[:8],
             symbol_map=dict(cmd.symbol_map),
         )
+        if cmd.tp_net_rr and resolved.ok and resolved.name is not None:
+            facts = self._session.symbol_facts(resolved.name)
+            if facts is not None:
+                cmd = self._net_rr_target(cmd, resolved.name, facts)
         # No expiration_mask here: the order already rests, so no symbol facts were read. A
         # broker that refuses the timed order answers INVALID_EXPIRATION, which
         # :meth:`_send_modification` retries once without the expiry.
@@ -885,6 +895,46 @@ class Executor:
             log.exception("could not price a move on %s", symbol)
             return None
         return loss / step if loss else None
+
+    def _net_rr_target(self, cmd: OrderCommand, symbol: str, facts: SymbolFacts) -> OrderCommand:
+        """A direct ticket's target, landed past itself so its risk:reward survives commission.
+
+        The ticket's rr is price geometry, but commission is money paid win or lose: the win
+        collects the reward minus one commission, the loss costs the risk plus one. Moving the
+        target out by (rr + 1) x commission restores the ratio exactly -- the extra distance
+        earns (rr + 1) commissions, one pays the winning trade's own, and the other rr cover
+        rr times the losing side's. Volume cancels out of the arithmetic, so the pad is the
+        same at any size. Done on every command that writes a target, or a later modify would
+        quietly rub the pad back off."""
+        if not cmd.tp_net_rr or not cmd.tp or not cmd.sl or cmd.commission_per_lot <= 0:
+            return cmd
+        dist = abs(cmd.entry - cmd.sl)
+        reward = abs(cmd.tp - cmd.entry)
+        if dist <= 0 or reward <= 0:
+            return cmd
+        value = self._price_value(cmd.direction, symbol, cmd.entry, facts.point)
+        if not value or value <= 0:
+            log.warning(
+                "#%s on %s: a move cannot be priced, so the target stays at the ticket's %g",
+                cmd.master_ticket,
+                symbol,
+                cmd.tp,
+            )
+            return cmd
+        rr = reward / dist
+        pad = (rr + 1.0) * cmd.commission_per_lot / value
+        way = 1.0 if cmd.direction is PositionType.BUY else -1.0
+        tp = round(cmd.tp + way * pad, facts.digits)
+        log.info(
+            "#%s on %s: target %g -> %g, (rr %.2f + 1) commissions of %.2f kept net",
+            cmd.master_ticket,
+            symbol,
+            cmd.tp,
+            tp,
+            rr,
+            cmd.commission_per_lot,
+        )
+        return replace(cmd, tp=tp)
 
     def _send(
         self,

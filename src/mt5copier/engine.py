@@ -1798,6 +1798,12 @@ class Engine:
             total_margin_cap=total.mode if opening and total is not None else "",
             total_margin_rule=total.rule if opening and total is not None else "",
             total_margin_rule_id=total.rule_id if opening and total is not None else "",
+            # Direct trades only: the ticket's target is an rr intent, so each worker nudges
+            # its copy's target out by (rr + 1) x its own commission to keep the realized
+            # ratio. A real master's target is that trader's own level and goes untouched.
+            tp_net_rr=self._virtual is not None
+            and action.kind
+            in (ActionKind.OPEN, ActionKind.PLACE, ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER),
         )
 
         # Before sending, because an order that cannot be sent is answered on the spot.

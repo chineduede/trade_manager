@@ -519,6 +519,14 @@ class OrderCommand:
     position's own commission and ``slippage_points``, worked out by the worker. ``sl`` and
     ``tp`` are the master's levels now: a stop already past breakeven is left alone, never
     loosened, and the target is kept."""
+    tp_net_rr: bool = False
+    """Direct trading only, on anything that writes a target: the target encodes the ticket's
+    risk:reward, so the worker lands the copy's target past it by (rr + 1) x its own
+    commission. Commission is paid win or lose -- the win collects reward minus one, the loss
+    costs risk plus one -- and that distance is exactly what keeps the realized reward:risk at
+    the ticket's rr. Priced by the worker, like breakeven's buffer, because only the terminal
+    can say what a price move is worth in its account's money; unpriceable means the target
+    goes unpadded, never guessed."""
 
 
 @dataclass(frozen=True, slots=True)

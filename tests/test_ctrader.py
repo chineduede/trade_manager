@@ -1195,6 +1195,43 @@ async def test_stops_follow_the_master_and_a_zero_clears_one() -> None:
     assert not amend.HasField("takeProfit")
 
 
+async def test_a_direct_open_lands_its_target_past_the_rr_by_the_commissions() -> None:
+    """Entry 1.1000, stop 1.0990 ($100 a lot, $100,000 per 1.0), target 1.1030 is rr 3: a $5
+    round turn pads the exact amend's target by (3 + 1) x 5 / 100,000 = 0.0002."""
+    api = FakeOpenApi()
+    cmd = _command(
+        ActionKind.OPEN,
+        entry=1.1000,
+        sl=1.0990,
+        tp=1.1030,
+        risk_amount=100.0,
+        tp_net_rr=True,
+        commission_per_lot=5.0,
+    )
+    results = await _results(api, cmd)
+    assert results[0].ok, results[0].error
+    (amend,) = _sent(api, oa.ProtoOAAmendPositionSLTPReq)
+    assert amend.takeProfit == pytest.approx(1.1032)
+    assert amend.stopLoss == pytest.approx(1.0990), "only the target moves"
+
+
+async def test_a_direct_stop_move_restates_the_padded_target() -> None:
+    api = FakeOpenApi()
+    cmd = _command(
+        ActionKind.MODIFY_SLTP,
+        slave_ticket=77,
+        entry=1.1000,
+        sl=1.0990,
+        tp=1.1030,
+        tp_net_rr=True,
+        commission_per_lot=5.0,
+    )
+    results = await _results(api, cmd)
+    assert results[0].ok, results[0].error
+    (amend,) = _sent(api, oa.ProtoOAAmendPositionSLTPReq)
+    assert amend.takeProfit == pytest.approx(1.1032)
+
+
 async def test_moving_the_stops_of_a_gone_copy_says_so() -> None:
     api = FakeOpenApi()
     results = await _results(api, _command(ActionKind.MODIFY_SLTP, slave_ticket=999, sl=1.09))
