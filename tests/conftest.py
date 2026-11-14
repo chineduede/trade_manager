@@ -22,3 +22,6 @@ def _isolated_user_data(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("APPDATA", str(tmp_path_factory.mktemp("appdata")))
+    # And no inherited profile: a developer running the suite from a shell that launched a
+    # profile would otherwise aim every test at that profile's layout.
+    monkeypatch.delenv("MT5COPIER_PROFILE", raising=False)

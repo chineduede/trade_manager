@@ -13,6 +13,21 @@ from pathlib import Path
 
 APP_NAME = "MT5Copier"
 
+DEFAULT_PROFILE = "default"
+"""The profile the data layout started with: the root of :func:`base_data_dir` itself.
+
+Named rather than special-cased everywhere so the picker, the ``--profile`` flag and the lock
+files all call it one thing. Its data deliberately stays where it has always been -- a person
+who never touches profiles sees no migration and no new folder."""
+
+_PROFILE_ENV = "MT5COPIER_PROFILE"
+"""How the chosen profile travels: an environment variable, not a module global.
+
+Deliberate, because workers are *spawn*-started processes that re-import everything -- a
+global set in the parent would silently reset to the default in every child, and the child
+would write its logs and state into the wrong profile. The environment is inherited through
+``spawn``, so setting it once in the entry point covers every process after it."""
+
 
 def is_frozen() -> bool:
     """True when running from a PyInstaller bundle."""
@@ -26,8 +41,8 @@ def exe_dir() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def user_data_dir() -> Path:
-    r"""Writable per-user directory for config, logs and state.
+def base_data_dir() -> Path:
+    r"""The app's one writable root, shared by every profile.
 
     Uses ``%APPDATA%\MT5Copier``. A ``portable.txt`` marker next to the exe switches to an
     exe-adjacent ``data/`` folder instead, so the app can live on a USB stick.
@@ -37,6 +52,48 @@ def user_data_dir() -> Path:
     appdata = os.environ.get("APPDATA")
     base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
     return base / APP_NAME
+
+
+def active_profile() -> str:
+    """The profile this process belongs to. Never empty: no choice means the default."""
+    name = os.environ.get(_PROFILE_ENV, "").strip()
+    return name or DEFAULT_PROFILE
+
+
+def set_active_profile(name: str) -> None:
+    """Pick the profile for this process and every process it spawns.
+
+    Called exactly once, by the entry point, before anything derives a path. Everything else
+    treats the choice as read-only.
+    """
+    os.environ[_PROFILE_ENV] = name.strip() or DEFAULT_PROFILE
+
+
+def profiles_root() -> Path:
+    """Where the non-default profiles live, one directory per profile."""
+    return base_data_dir() / "profiles"
+
+
+def claims_dir() -> Path:
+    """Cross-profile claim locks on terminals and accounts -- see :mod:`mt5copier.claims`.
+
+    Under the *base* directory on purpose: the whole point is that every profile sees the
+    same locks, so two instances can never attach the same terminal or copy to the same
+    account."""
+    return base_data_dir() / "claims"
+
+
+def user_data_dir() -> Path:
+    r"""Writable directory for the active profile's config, logs and state.
+
+    The default profile is :func:`base_data_dir` itself -- the layout from before profiles
+    existed -- and every other profile is a directory of its own under ``profiles/``. Nothing
+    else in the package may care which profile is active; it all goes through here.
+    """
+    name = active_profile()
+    if name == DEFAULT_PROFILE:
+        return base_data_dir()
+    return profiles_root() / name
 
 
 def config_path() -> Path:

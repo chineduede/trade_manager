@@ -607,3 +607,53 @@ def test_a_moving_loss_is_announced_once(
     said = [r.getMessage() for r in caplog.records]
     assert sum("takes no new trades" in m for m in said) == 1
     assert sum(m.startswith("guards: Beta: ") for m in said) == 1
+
+
+# --- cross-profile claims -------------------------------------------------------------------
+
+
+def test_a_claim_held_elsewhere_refuses_the_spawn_and_says_who(
+    cfg: AppConfig, tmp_path: Path
+) -> None:
+    """The real ``_spawn_worker``: the refusal returns before any process is created."""
+    from mt5copier.claims import ClaimBook
+
+    other = ClaimBook(tmp_path / "claims", "funded")
+    other.acquire([f"terminal:{TID_A}"])
+    try:
+        eng = Engine(cfg, claims=ClaimBook(tmp_path / "claims", "scalp"))
+        eng._spawn_worker(cfg.terminals[TID_A])
+        assert TID_A not in eng._workers, "no worker may exist for a refused terminal"
+        view = next(v for v in eng.views() if v.cfg.terminal_id == TID_A)
+        assert view.claim_refused is not None
+        assert "funded" in view.claim_refused
+        assert view.status(1.0) == view.claim_refused, "the row's status is the refusal"
+    finally:
+        other.release_all()
+
+
+def test_reaping_a_worker_releases_its_claims(cfg: AppConfig, tmp_path: Path) -> None:
+    from mt5copier.claims import ClaimBook
+
+    mine = ClaimBook(tmp_path / "claims", "scalp")
+    eng = Engine(cfg, claims=mine)
+    mine.acquire([f"terminal:{TID_A}"])
+    eng._claimed[TID_A] = (f"terminal:{TID_A}",)
+    eng._workers[TID_A] = _FakeWorker(TID_A)  # type: ignore[assignment]
+
+    eng._reap(TID_A)
+
+    other = ClaimBook(tmp_path / "claims", "funded")
+    other.acquire([f"terminal:{TID_A}"])  # must not raise: the reap let go
+    other.release_all()
+
+
+def test_unassigning_a_refused_terminal_drops_the_stale_note(
+    cfg: AppConfig, engine: Engine
+) -> None:
+    """The fixture engine spawns nothing real, so only the note's lifecycle is on trial."""
+    engine._claim_refused[TID_A] = "the terminal is in use by profile 'funded'"
+    engine.config.terminals[TID_A].role = Role.UNASSIGNED
+    engine.sync()
+    view = next(v for v in engine.views() if v.cfg.terminal_id == TID_A)
+    assert view.claim_refused is None

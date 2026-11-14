@@ -41,6 +41,7 @@ from .. import account_switch as account_mod
 from .. import config as config_mod
 from .. import role_actions
 from .. import setups as setups_mod
+from ..claims import ClaimBook
 from ..config import AppConfig, Role, TerminalConfig, account_key
 from ..ctrader import auth as ctrader_auth
 from ..day_book import (
@@ -68,7 +69,15 @@ from ..log_entries import (
     terminal_names,
 )
 from ..logging_setup import get_logger
-from ..paths import config_path, guards_path, log_dir, setups_path
+from ..paths import (
+    DEFAULT_PROFILE,
+    active_profile,
+    claims_dir,
+    config_path,
+    guards_path,
+    log_dir,
+    setups_path,
+)
 from ..presentation import RowInfo, read_log_tail, row_info
 from ..protocol import WorkerState
 from ..reconcile import OpenCopy
@@ -177,6 +186,7 @@ class CopierApp(App[None]):
         cfg: AppConfig,
         guards: GuardsDoc | None = None,
         setups: setups_mod.SetupsDoc | None = None,
+        claims: ClaimBook | None = None,
     ) -> None:
         super().__init__()
         self._cfg = cfg
@@ -187,7 +197,7 @@ class CopierApp(App[None]):
         self._switching: set[str] = set()
         self._ctrader_cancel: threading.Event | None = None
         """Terminals being logged into another account: no role is given them until it ends."""
-        self._engine = Engine(cfg, guards=self._guards)
+        self._engine = Engine(cfg, guards=self._guards, claims=claims)
         self._page = "map"
         self._sel: str | None = None
         self._order: list[str] = []
@@ -1974,6 +1984,7 @@ def _tone(out: SlaveOutcome) -> str:
 
 def run() -> None:
     """Entry point: load config, fold in a discovery sweep, then hand over to the UI."""
+    profile = active_profile()
     cfg = config_mod.load()
     guards = guards_mod.load(guards_path())
     saved = setups_mod.load(setups_path())
@@ -1988,5 +1999,9 @@ def run() -> None:
         ctrader_auth.refresh_if_due()
     except Exception as exc:
         log.warning("could not refresh the cTrader login (%s); press t to log in again", exc)
-    log.info("config at %s", config_path())
-    CopierApp(cfg, guards, saved).run()
+    log.info("config at %s (profile %s)", config_path(), profile)
+    app = CopierApp(cfg, guards, saved, claims=ClaimBook(claims_dir(), profile))
+    if profile != DEFAULT_PROFILE:
+        # Three instances side by side need telling apart; one plain run reads as always.
+        app.title = f"{CopierApp.TITLE} — {profile}"
+    app.run()

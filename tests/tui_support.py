@@ -45,7 +45,11 @@ class StubEngine:
     """Engine stand-in: records calls, spawns nothing."""
 
     def __init__(
-        self, cfg: AppConfig, state_path: Path | None = None, guards: GuardsDoc | None = None
+        self,
+        cfg: AppConfig,
+        state_path: Path | None = None,
+        guards: GuardsDoc | None = None,
+        claims: object | None = None,
     ) -> None:
         self._cfg = cfg
         # The default state file, under the test's own %APPDATA% (see conftest): a latch the

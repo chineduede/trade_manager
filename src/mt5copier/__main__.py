@@ -16,7 +16,16 @@ import sys
 
 from . import __version__
 from .logging_setup import configure
-from .paths import config_path, ensure_dirs, is_frozen, lock_path, log_dir, user_data_dir
+from .paths import (
+    active_profile,
+    config_path,
+    ensure_dirs,
+    is_frozen,
+    lock_path,
+    log_dir,
+    set_active_profile,
+    user_data_dir,
+)
 from .single_instance import AlreadyRunningError, SingleInstanceLock
 
 
@@ -38,15 +47,25 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         action="store_true",
         help="verify the MetaTrader5 extension can be imported, then exit",
     )
+    parser.add_argument(
+        "--profile",
+        metavar="NAME",
+        default=None,
+        help="open this profile directly instead of showing the picker; "
+        "it must already exist (profiles are made in the picker)",
+    )
     return parser.parse_args(argv)
 
 
 def _cmd_paths() -> int:
     print(f"frozen:      {is_frozen()}")
+    print(f"profile:     {active_profile()}")
     print(f"user data:   {user_data_dir()}")
     print(f"config:      {config_path()}")
     print(f"logs:        {log_dir()}")
     return 0
+
+
 
 
 def _cmd_check() -> int:
@@ -85,21 +104,53 @@ def _cmd_list() -> int:
 def main(argv: list[str] | None = None) -> int:
     mp.freeze_support()
     args = _parse_args(argv)
+
+    from . import profiles
+
+    if args.paths or args.check or args.list:
+        # Diagnostics stay lockless and must not create anything: an existing profile named
+        # on the flag is reported on, a missing one is only *said* to be missing -- a typo
+        # here must not leave an empty profile directory behind.
+        if args.profile is not None:
+            name = args.profile.strip()
+            if profiles.exists(name):
+                set_active_profile(name)
+            else:
+                print(f"(no profile called {name!r}; showing the default)")
+        ensure_dirs()
+        configure(log_dir() / "copier.log")
+        if args.paths:
+            return _cmd_paths()
+        if args.check:
+            return _cmd_check()
+        return _cmd_list()
+
+    if args.profile is not None:
+        name = args.profile.strip()
+        if not profiles.exists(name):
+            known = ", ".join(p.name for p in profiles.list_profiles())
+            print(f"no profile called {name!r}. Profiles: {known}")
+            print("new profiles are made in the picker: run mt5copier with no --profile")
+            return 2
+    else:
+        # The picker runs before logging, the lock, and every path below: a person can sit
+        # on it while other profiles run, and quitting it starts nothing.
+        from .tui.picker import pick_profile
+
+        chosen = pick_profile()
+        if chosen is None:
+            return 0
+        name = chosen
+
+    set_active_profile(name)
     ensure_dirs()
     configure(log_dir() / "copier.log")
-
-    if args.paths:
-        return _cmd_paths()
-    if args.check:
-        return _cmd_check()
-    if args.list:
-        return _cmd_list()
 
     lock = SingleInstanceLock(lock_path())
     try:
         lock.acquire()
     except AlreadyRunningError as exc:
-        print(f"mt5copier is already running: {exc}")
+        print(f"profile {active_profile()!r} is already running: {exc}")
         return 1
 
     try:

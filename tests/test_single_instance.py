@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from mt5copier.single_instance import AlreadyRunningError, SingleInstanceLock
+from mt5copier.single_instance import AlreadyRunningError, SingleInstanceLock, holder_pid
 
 
 def test_a_second_lock_on_the_same_file_is_refused(tmp_path: Path) -> None:
@@ -65,5 +65,33 @@ def test_acquiring_creates_the_lock_file_and_its_parent_directory(tmp_path: Path
     lock.acquire()
     try:
         assert path.exists()
+    finally:
+        lock.release()
+
+
+def test_holder_pid_reads_the_pid_while_the_lock_is_held(tmp_path: Path) -> None:
+    """The picker's "running" column: readable *during* the hold, despite the byte lock."""
+    import os
+
+    path = tmp_path / "mt5copier.lock"
+    assert holder_pid(path) is None, "no file yet means nobody holds it"
+
+    lock = SingleInstanceLock(path)
+    lock.acquire()
+    try:
+        assert holder_pid(path) == os.getpid()
+    finally:
+        lock.release()
+    assert holder_pid(path) is None, "released means nobody, whatever the file still says"
+
+
+def test_probing_never_steals_or_breaks_the_lock(tmp_path: Path) -> None:
+    path = tmp_path / "mt5copier.lock"
+    lock = SingleInstanceLock(path)
+    lock.acquire()
+    try:
+        holder_pid(path)
+        with pytest.raises(AlreadyRunningError):
+            SingleInstanceLock(path).acquire()
     finally:
         lock.release()

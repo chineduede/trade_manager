@@ -33,6 +33,7 @@ from .breakeven import (
     guard_stop,
     master_breakeven_due,
 )
+from .claims import ClaimBook, ClaimRefusedError, claim_keys
 from .config import (
     AppConfig,
     BreakevenMode,
@@ -138,6 +139,10 @@ class TerminalView:
     process_alive: bool = False
     supervised: bool = False
     """Whether the engine currently has a worker for this terminal."""
+    claim_refused: str | None = None
+    """Why no worker was spawned: another running profile holds this terminal or its
+    account. The engine keeps retrying on every sync, so this clears by itself once the
+    other instance lets go."""
 
     def is_stale(self, timeout_s: float) -> bool:
         """True when a supervised worker has stopped reporting.
@@ -153,6 +158,8 @@ class TerminalView:
     def status(self, timeout_s: float) -> str:
         """Short status string for display."""
         if not self.supervised:
+            if self.claim_refused is not None:
+                return self.claim_refused
             return "not connected" if self.cfg.role is not Role.UNASSIGNED else "-"
         if not self.process_alive:
             return "worker dead"
@@ -217,6 +224,7 @@ class Engine:
         guard_state_path: Path | None = None,
         history_path: Path | None = None,
         calendar: NewsCalendar | None = None,
+        claims: ClaimBook | None = None,
     ) -> None:
         # Windows only offers the spawn start method; request it explicitly so behaviour is
         # identical if this ever runs on Linux for testing.
@@ -224,6 +232,13 @@ class Engine:
         self._cfg = cfg
         self._out_q: mp.Queue = self._ctx.Queue(maxsize=10_000)
         self._workers: dict[str, _Worker] = {}
+        self._claims = claims
+        """Cross-profile claims on terminals and accounts. ``None`` -- the tests' engines, and
+        anything else that is not a real app instance -- claims nothing and refuses nothing."""
+        self._claimed: dict[str, tuple[str, ...]] = {}
+        """Per terminal: the claim keys its worker holds, released when the worker is reaped."""
+        self._claim_refused: dict[str, str] = {}
+        """Per terminal: why its worker was not spawned, for the UI. Retried on every sync."""
         self._snapshots: dict[str, Snapshot] = {}
         self._received_at: dict[str, float] = {}
         self._lock = threading.RLock()
@@ -337,6 +352,8 @@ class Engine:
             thread.join(timeout=2.0)
             self._drain_thread = None
         self._history.close()
+        if self._claims is not None:
+            self._claims.release_all()
 
     def __enter__(self) -> Engine:
         self.start()
@@ -374,6 +391,12 @@ class Engine:
                     # this terminal is one we launched, we are done with it.
                     self._stop_worker(tid, close_terminal=True)
 
+            # A terminal no longer wanted keeps no refusal note: the person unassigned it,
+            # so "in use elsewhere" would be stale the moment it is shown.
+            for tid in list(self._claim_refused):
+                if tid not in wanted:
+                    del self._claim_refused[tid]
+
             for tid, tcfg in wanted.items():
                 existing = self._workers.get(tid)
                 if existing is not None and existing.process.is_alive():
@@ -408,6 +431,17 @@ class Engine:
                 log.debug("could not send reconnect to %s: %r", terminal_id[:8], exc)
 
     def _spawn_worker(self, tcfg: TerminalConfig) -> None:
+        if self._claims is not None:
+            keys = claim_keys(tcfg)
+            try:
+                self._claims.acquire(keys)
+            except ClaimRefusedError as exc:
+                if self._claim_refused.get(tcfg.terminal_id) != str(exc):
+                    log.warning("not connecting %s: %s", tcfg.label, exc)
+                self._claim_refused[tcfg.terminal_id] = str(exc)
+                return
+            self._claimed[tcfg.terminal_id] = tuple(keys)
+        self._claim_refused.pop(tcfg.terminal_id, None)
         cmd_q: mp.Queue = self._ctx.Queue(maxsize=64)
         if tcfg.ctrader_account_id is not None:
             log_file = log_dir() / f"worker-ctrader-{tcfg.ctrader_account_id}.log"
@@ -496,6 +530,10 @@ class Engine:
                 worker.cmd_q.close()
             except Exception:
                 pass
+        if self._claims is not None:
+            # Only once the process is gone: releasing while it still runs would let another
+            # profile attach a terminal this one is mid-shutdown on.
+            self._claims.release(list(self._claimed.pop(terminal_id, ())))
         self._snapshots.pop(terminal_id, None)
         self._received_at.pop(terminal_id, None)
         self._stats.on_worker_gone(terminal_id)
@@ -2387,6 +2425,7 @@ class Engine:
                         received_at=self._received_at.get(tcfg.terminal_id),
                         process_alive=bool(worker and worker.process.is_alive()),
                         supervised=worker is not None,
+                        claim_refused=self._claim_refused.get(tcfg.terminal_id),
                     )
                 )
         out.sort(key=lambda v: (v.cfg.label.lower(), v.cfg.terminal_id))
