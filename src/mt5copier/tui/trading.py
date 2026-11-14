@@ -265,7 +265,12 @@ class TradingScreen(Screen[None]):
         """The scale the chart was last drawn with, so the mouse can map rows to prices.
         None whenever no candles are drawn, which is also what disarms dragging."""
         self._dragging: str | None = None
-        """The line being dragged: ``"sl"``, ``"tp"``, or None."""
+        """The line being dragged: ``"sl"``, ``"tp"``, ``"entry"``, or None."""
+        self._auto: dict[str, str] = {}
+        """What each level field was last seeded with, so a value the person typed or
+        dragged (anything different) is recognised as theirs and never reseeded."""
+        self._seeded_ctx: tuple[str, str, str] | None = None
+        """The (symbol, side, kind) the levels were last seeded for."""
 
     @property
     def copier(self) -> CopierApp:
@@ -431,6 +436,8 @@ class TradingScreen(Screen[None]):
         width = max(30, target.content_size.width or self.size.width - 4)
         bid = quote.bid if quote is not None else None
         self._chart_scale = scale_of(window(rates.candles, bid, width), _CHART_HEIGHT)
+        if self._chart_scale is not None and bid is not None:
+            self._seed_levels(symbol, self._chart_scale, bid)
         target.update(
             chart(
                 rates.candles,
@@ -439,8 +446,45 @@ class TradingScreen(Screen[None]):
                 bid=bid,
                 sl=self._level("#dt-sl"),
                 tp=self._level("#dt-tp"),
+                entry=self._level("#dt-entry") if self._pending_kind() else 0.0,
             )
         )
+
+    def _pending_kind(self) -> bool:
+        return str(self.query_one("#dt-kind", Choice).value) != "market"
+
+    def _seed_levels(self, symbol: str, scale: Scale, bid: float) -> None:
+        """A fresh ticket starts with its lines on the chart, ready to drag.
+
+        Seeded once per (symbol, side, kind): the stop a quarter of the visible range on
+        the losing side, the target the same on the winning one, a pending's entry nearer
+        in on its own resting side. Only an empty field, or one still holding what was
+        seeded before, is touched -- a number the person typed or dragged is theirs, and
+        an emptied field stays empty until the ticket changes shape again."""
+        side = str(self.query_one("#dt-side", Choice).value)
+        kind = str(self.query_one("#dt-kind", Choice).value)
+        ctx = (symbol, side, kind)
+        if ctx == self._seeded_ctx:
+            return
+        self._seeded_ctx = ctx
+        span = scale.hi - scale.lo
+        way = 1.0 if side == "buy" else -1.0
+        self._seed("sl", bid - way * 0.25 * span, scale)
+        self._seed("tp", bid + way * 0.25 * span, scale)
+        if kind != "market":
+            # A limit rests on the pullback side of the market, a stop on the breakout
+            # side: below the bid for a buy limit, above it for a buy stop, mirrored short.
+            sign = -way if kind == "limit" else way
+            self._seed("entry", bid + sign * 0.15 * span, scale)
+
+    def _seed(self, name: str, price: float, scale: Scale) -> None:
+        box = self.query_one(f"#dt-{name}", Input)
+        current = box.value.strip()
+        if box.has_focus or (current and current != self._auto.get(name)):
+            return
+        text = scale.fmt(price)
+        box.value = text
+        self._auto[name] = text
 
     def _level(self, selector: str) -> float:
         """What the ticket says for one level, 0.0 while it will not read as a number."""
@@ -464,10 +508,11 @@ class TradingScreen(Screen[None]):
         scale = self._chart_scale
         if scale is None:
             return None
+        held = [("sl", self._level("#dt-sl")), ("tp", self._level("#dt-tp"))]
+        if self._pending_kind():
+            held.append(("entry", self._level("#dt-entry")))
         lines = [
-            (abs(row - scale.row(price)), what)
-            for what, price in (("sl", self._level("#dt-sl")), ("tp", self._level("#dt-tp")))
-            if scale.grabbed(row, price)
+            (abs(row - scale.row(price)), what) for what, price in held if scale.grabbed(row, price)
         ]
         if not lines:
             return None
@@ -485,7 +530,7 @@ class TradingScreen(Screen[None]):
     def chart_release(self) -> None:
         if self._dragging is None:
             return
-        name = "stop" if self._dragging == "sl" else "target"
+        name = {"sl": "stop", "tp": "target", "entry": "entry"}[self._dragging]
         value = self.query_one(f"#dt-{self._dragging}", Input).value
         self._dragging = None
         self._status(f"{name} dragged to {value}")

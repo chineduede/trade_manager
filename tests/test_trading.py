@@ -503,3 +503,55 @@ async def test_the_stop_line_drags_into_the_ticket(app: CopierApp) -> None:
         # With the stop now at the top and no target typed, a press low on the chart
         # takes hold of nothing.
         assert screen.chart_grab(13) is None
+
+
+async def test_a_fresh_ticket_seeds_its_lines_on_the_chart(app: CopierApp) -> None:
+    engine = app._engine
+    engine.feed_tid = TID_SLAVE  # type: ignore[attr-defined]
+    engine.quotes["EURUSD"] = Quote("EURUSD", 1.0850, 1.0852)  # type: ignore[attr-defined]
+    engine.rates = RatesResult(  # type: ignore[attr-defined]
+        terminal_id=TID_SLAVE,
+        symbol="EURUSD",
+        timeframe=5,
+        candles=tuple(Candle(ts=i, open=1.08, high=1.09, low=1.07, close=1.085) for i in range(3)),
+    )
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_ticket(app, pilot)
+        screen.query_one("#dt-symbol", Input).value = "eurusd"
+        await pilot.pause()
+        screen.refresh_page()
+        sl_box = screen.query_one("#dt-sl", Input)
+        tp_box = screen.query_one("#dt-tp", Input)
+        assert float(sl_box.value) < 1.0850 < float(tp_box.value), (
+            "a buy starts with the stop below the bid and the target above"
+        )
+        drawn = plain(screen.query_one("#dt-chart", Static).content)
+        assert "≡ SL" in drawn and "≡ TP" in drawn, "the lines wear their handles"
+
+        # Flipping the side flips lines the person has not touched.
+        screen.query_one("#dt-side", Choice).value = "sell"
+        await pilot.pause()
+        screen.refresh_page()
+        assert float(sl_box.value) > 1.0850 > float(tp_box.value)
+
+        # A typed stop is the person's own: side flips move only the untouched target.
+        sl_box.value = "1.0800"
+        screen.query_one("#dt-side", Choice).value = "buy"
+        await pilot.pause()
+        screen.refresh_page()
+        assert sl_box.value == "1.0800"
+        assert float(tp_box.value) > 1.0850
+
+        # A pending kind seeds the entry on its resting side, with its own handle.
+        screen.query_one("#dt-kind", Choice).value = "limit"
+        await pilot.pause()
+        screen.refresh_page()
+        assert float(screen.query_one("#dt-entry", Input).value) < 1.0850, (
+            "a buy limit rests below the market"
+        )
+        assert "≡ ENTRY" in plain(screen.query_one("#dt-chart", Static).content)
+        scale = screen._chart_scale
+        assert scale is not None
+        entry = float(screen.query_one("#dt-entry", Input).value)
+        assert screen.chart_grab(scale.row(entry)) == "entry", "the entry line drags too"
+        screen.chart_release()

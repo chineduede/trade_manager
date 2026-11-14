@@ -95,6 +95,17 @@ def test_the_live_bid_moves_the_last_candle() -> None:
     assert live_last([], 1.3) == []
 
 
+def test_the_draggable_lines_wear_grip_tags() -> None:
+    bars = [candle(1.0, 2.0, 1.0, 2.0)] * 2
+    drawn = lines(chart(bars, width=44, height=11, sl=1.3, tp=1.8, entry=1.55))
+    assert any("≡ SL" in line and line.rstrip().endswith("1.3000") for line in drawn)
+    assert any("≡ TP" in line for line in drawn)
+    assert any("≡ ENTRY" in line for line in drawn)
+    # The bid is not draggable, so its line goes without a handle.
+    drawn = lines(chart(bars, width=44, height=11, bid=1.5))
+    assert not any("≡" in line for line in drawn)
+
+
 def test_the_scale_round_trips_rows_and_prices() -> None:
     scale = scale_of([candle(1.0, 2.0, 1.0, 2.0)], 14)
     assert scale is not None

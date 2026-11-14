@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from rich.text import Text
 
 from ..protocol import CHART_TIMEFRAMES, Candle
-from .style import BLUE, GREEN, MUTED, RED
+from .style import BG, BLUE, GREEN, MUTED, RED, YELLOW
 
 _AXIS = 10
 """Columns kept for the price labels on the right."""
@@ -160,13 +160,16 @@ def chart(
     bid: float | None = None,
     sl: float = 0.0,
     tp: float = 0.0,
+    entry: float = 0.0,
 ) -> Text:
     """The picture: one slim candle every other column, newest against the axis, price
     labels on the right.
 
     ``width`` and ``height`` are the whole drawing, axis included. Levels (the bid in blue,
-    the stop in red, the target in green) are dotted lines running behind the candles,
-    drawn only inside the bars' own price range.
+    the stop in red, the target in green, a pending's entry in yellow) are dotted lines
+    running behind the candles, drawn only inside the bars' own price range. The draggable
+    ones wear a grip tag at their left end -- ``≡ SL`` -- so they read as handles, not
+    decoration; the bid is not draggable and goes without one.
     """
     columns = width - _AXIS
     if columns < 10 or height < 4:
@@ -183,8 +186,17 @@ def chart(
     labels[height - 1] = (scale.fmt(scale.lo), MUTED)
     labels[(height - 1) // 2] = (scale.fmt((scale.hi + scale.lo) / 2), MUTED)
 
-    # Levels first, so the candles draw over them: the price action owns its pixels.
-    for price, color in ((tp, GREEN), (sl, RED), (bid, BLUE)):
+    # SL last, so where two lines share a row the stop's line and tag win: it is the one
+    # that must never be misread.
+    levels: tuple[tuple[float | None, str | None, str], ...] = (
+        (bid, None, BLUE),
+        (tp, "TP", GREEN),
+        (entry, "ENTRY", YELLOW),
+        (sl, "SL", RED),
+    )
+
+    # Level lines first, so the candles draw over them: the price action owns its pixels.
+    for price, _, color in levels:
         if not price or not scale.lo <= price <= scale.hi:
             continue
         r = scale.row(price)
@@ -207,6 +219,15 @@ def chart(
             )
             if drawn:
                 grid[r][column] = (drawn, color)
+
+    # Grip tags last, over everything: a handle hidden behind a candle cannot be grabbed
+    # with any confidence.
+    for price, tag, color in levels:
+        if tag is None or not price or not scale.lo <= price <= scale.hi:
+            continue
+        r = scale.row(price)
+        for x, char in enumerate(f" ≡ {tag} "[:columns]):
+            grid[r][x] = (char, f"{BG} on {color}")
 
     out = Text()
     for r in range(height):
