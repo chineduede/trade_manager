@@ -66,8 +66,6 @@ def _cmd_paths() -> int:
     return 0
 
 
-
-
 def _cmd_check() -> int:
     """Import the MT5 extension without connecting.
 

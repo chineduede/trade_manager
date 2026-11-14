@@ -109,10 +109,15 @@ class PickerApp(App[str]):
                 status = Text(f"running (pid {info.pid})", style=YELLOW)
             else:
                 status = Text("-", style=MUTED)
+            if info.trading:
+                # A trading profile has no master terminal: the person is the master.
+                master_cell = Text("direct trading", style=YELLOW)
+            else:
+                master_cell = Text(info.master or "-", style=FG if info.master else MUTED)
             table.add_row(
                 name,
                 status,
-                Text(info.master or "-", style=FG if info.master else MUTED),
+                master_cell,
                 Text(str(info.slaves) if info.slaves else "-", style=FG if info.slaves else MUTED),
                 Text(_age(info.last_opened), style=MUTED),
                 key=info.name,

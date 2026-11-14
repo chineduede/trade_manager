@@ -956,3 +956,95 @@ GoLiveDialog.-short #dialog {
 #td-be-error {
     display: none;
 }
+
+/* --- direct trading ------------------------------------------------------------------------ */
+
+#dt-page {
+    padding-top: 1;
+    scrollbar-size-vertical: 1;
+}
+
+#dt-band {
+    background: $foreground;
+    color: $background;
+    padding: 1 2;
+    height: auto;
+}
+
+#dt-page .heading {
+    margin-top: 1;
+}
+
+.dt-row {
+    height: 1;
+    margin: 0 2;
+}
+
+.dt-row .dt-label {
+    width: auto;
+}
+
+.dt-row Input {
+    background: $foreground 12%;
+}
+
+.dt-row Input:focus {
+    background: $foreground 30%;
+}
+
+.dt-row .dt-symbol {
+    width: 12;
+}
+
+.dt-row .dt-num {
+    width: 9;
+}
+
+#dt-place {
+    margin-left: 2;
+}
+
+#dt-quote, #dt-status {
+    height: auto;
+    margin: 1 2 0 2;
+}
+
+#dt-book {
+    background: $background;
+    border: none;
+    height: auto;
+    margin: 0 2;
+}
+
+#dt-book:focus {
+    background-tint: $foreground 0%;
+}
+
+#dt-book > .datatable--header {
+    background: $background;
+}
+
+#dt-book > .datatable--cursor {
+    background: $foreground 18%;
+}
+
+#dt-book > .datatable--hover {
+    background: $foreground 10%;
+}
+
+#dt-ask {
+    height: 1;
+    margin: 1 2 0 2;
+}
+
+#dt-ask-what, #dt-ask .w {
+    width: auto;
+}
+
+#dt-ask-box {
+    width: 32;
+}
+
+#dt-ask-box:focus {
+    background: $foreground 30%;
+}

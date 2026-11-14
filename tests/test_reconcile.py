@@ -1004,8 +1004,7 @@ def test_a_placed_expiry_becomes_belief_and_then_settles(tmp_path: Path) -> None
     with MappingStore(path) as store:
         revived = CopyLedger(store)
         assert (
-            revived.step([], [pending_link()], master_orders=resting, now=clock.advance(1.0))
-            == []
+            revived.step([], [pending_link()], master_orders=resting, now=clock.advance(1.0)) == []
         )
         # The master pushing its expiry out is noticed from the revived belief too.
         moved = revived.step(
@@ -1220,7 +1219,10 @@ def test_a_market_fallback_copy_survives_a_restart_without_being_replaced(
         ledger = CopyLedger(store)
         watching(ledger, clock, [pending_link()])
         actions = ledger.step(
-            [], [pending_link()], master_orders=[order(ticket=50)], now=clock.advance(1.0),
+            [],
+            [pending_link()],
+            master_orders=[order(ticket=50)],
+            now=clock.advance(1.0),
             simulate=False,
         )
         ledger.apply_result(replace(result(actions[0]), filled_at_market=True))

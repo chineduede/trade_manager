@@ -31,7 +31,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import account_switch
 from .account_switch import Account
-from .config import AppConfig, Role, TerminalConfig
+from .config import AppConfig, AppMode, Role, TerminalConfig
 from .guards.model import write_json
 from .logging_setup import get_logger
 from .paths import setups_path
@@ -97,9 +97,10 @@ def logins_of(cfg: AppConfig) -> dict[str, int | None]:
 
 def capture(cfg: AppConfig, logins: Logins | None = None) -> Setup | None:
     """The roles as they are now, on the accounts they are on, or None while there is no
-    master: nothing to save."""
+    master: nothing to save. A profile that trades directly has none either -- its master is
+    virtual, not a terminal, and setups are a copy-mode thing."""
     master = cfg.master
-    if master is None:
+    if master is None or cfg.mode is AppMode.TRADING:
         return None
     logins = logins_of(cfg) if logins is None else logins
     slaves = tuple(t.terminal_id for t in cfg.slaves)
@@ -234,6 +235,8 @@ def problems(setup: Setup, cfg: AppConfig, logins: Logins | None = None) -> list
     """Why this setup cannot be loaded here, or nothing. A terminal it names may have been
     removed since, or have no executable to connect with -- the same refusal as pressing m or s
     on it -- or not have the account it has to be logged into."""
+    if cfg.mode is AppMode.TRADING:
+        return ["this profile trades directly; switch it to copying (g) before loading a setup"]
     found: list[str] = []
     for tid in setup.terminals:
         tcfg = cfg.terminals.get(tid)

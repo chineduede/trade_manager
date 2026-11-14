@@ -16,7 +16,7 @@ from rich.console import Console
 from textual.pilot import Pilot
 
 from mt5copier import setups as setups_mod
-from mt5copier.config import AppConfig, Role, TerminalConfig, account_key
+from mt5copier.config import AppConfig, AppMode, Role, TerminalConfig, account_key
 from mt5copier.copy_stats import TerminalStats
 from mt5copier.day_book import MasterEvent
 from mt5copier.engine import RecordedAction, RecordedResult, TerminalView
@@ -24,9 +24,12 @@ from mt5copier.guards import GuardBook, GuardReport, GuardsDoc
 from mt5copier.history import GuardAction, Trade
 from mt5copier.protocol import (
     COPIER_MAGIC,
+    OrderType,
+    PendingOrder,
     Position,
     PositionLive,
     PositionType,
+    Quote,
     Snapshot,
     WorkerState,
 )
@@ -78,6 +81,20 @@ class StubEngine:
         self.history: dict[str, list[Trade]] = {}
         self.guard_log: dict[str, list[GuardAction]] = {}
         """Each slave's trade history, the most recently active first."""
+        self.book_positions: list[Position] = []
+        """What the stub's virtual book holds open (direct trading)."""
+        self.book_orders: list[PendingOrder] = []
+        self.quotes: dict[str, Quote] = {}
+        """What the stub's feed quotes, by clean symbol name."""
+        self.feed_tid: str | None = None
+        self.watched: list[str | None] = []
+        """Every ``watch_direct`` call, in order."""
+        self.direct_calls: list[tuple] = []
+        """Every book-changing direct call, as ``(name, args...)``."""
+        self.direct_refusal: str | None = None
+        """What every book-changing direct call answers; None lets them through."""
+        self.mode_refusal: str | None = None
+        """What ``set_mode`` answers; None lets the switch through."""
 
     def trade_history(self, terminal_id: str, *, since: float | None = None) -> list[Trade]:
         return self.history.get(terminal_id, [])
@@ -308,6 +325,84 @@ class StubEngine:
             return refusal
         setups_mod.apply_roles(setup, self._cfg, leave_out)
         setups_mod.restore_settings(setup, self._cfg)
+        return None
+
+    # --- direct trading ---------------------------------------------------------------------
+
+    def direct_mode(self) -> bool:
+        return self._cfg.mode is AppMode.TRADING
+
+    def direct_feed(self) -> str | None:
+        return self.feed_tid
+
+    def direct_quote(self, symbol: str) -> Quote | None:
+        return self.quotes.get(symbol)
+
+    def direct_positions(self) -> tuple[Position, ...]:
+        return tuple(self.book_positions)
+
+    def direct_orders(self) -> tuple[PendingOrder, ...]:
+        return tuple(self.book_orders)
+
+    def watch_direct(self, symbol: str | None) -> None:
+        self.watched.append(symbol)
+
+    def place_direct_market(
+        self, symbol: str, direction: PositionType, lots: float, sl: float, tp: float = 0.0
+    ) -> str | None:
+        self.direct_calls.append(("market", symbol, direction, lots, sl, tp))
+        return self.direct_refusal
+
+    def place_direct_pending(
+        self,
+        symbol: str,
+        order_type: OrderType,
+        lots: float,
+        entry: float,
+        sl: float,
+        tp: float = 0.0,
+        expiration_utc: int = 0,
+    ) -> str | None:
+        self.direct_calls.append(
+            ("pending", symbol, order_type, lots, entry, sl, tp, expiration_utc)
+        )
+        return self.direct_refusal
+
+    def modify_direct(self, ticket: int, sl: float, tp: float) -> str | None:
+        self.direct_calls.append(("modify", ticket, sl, tp))
+        return self.direct_refusal
+
+    def modify_direct_order(
+        self, ticket: int, entry: float, sl: float, tp: float, expiration_utc: int = 0
+    ) -> str | None:
+        self.direct_calls.append(("modify_order", ticket, entry, sl, tp, expiration_utc))
+        return self.direct_refusal
+
+    def close_direct(self, ticket: int) -> str | None:
+        self.direct_calls.append(("close", ticket))
+        return self.direct_refusal
+
+    def partial_close_direct(self, ticket: int, percent: float) -> str | None:
+        self.direct_calls.append(("partial", ticket, percent))
+        return self.direct_refusal
+
+    def cancel_direct(self, ticket: int) -> str | None:
+        self.direct_calls.append(("cancel", ticket))
+        return self.direct_refusal
+
+    def flatten_direct(self) -> int:
+        count = len(self.book_positions) + len(self.book_orders)
+        self.direct_calls.append(("flatten",))
+        if self.direct_refusal is None:
+            self.book_positions.clear()
+            self.book_orders.clear()
+        return count
+
+    def set_mode(self, mode: AppMode) -> str | None:
+        if self.mode_refusal is not None:
+            return self.mode_refusal
+        self.direct_calls.append(("set_mode", mode))
+        self._cfg.mode = mode
         return None
 
 

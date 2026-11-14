@@ -681,9 +681,7 @@ def test_a_trading_profile_keeps_its_slaves_on_load(tmp_path: Path) -> None:
 
 
 def test_a_master_role_in_a_trading_profile_is_repaired_on_load(tmp_path: Path) -> None:
-    cfg = AppConfig(
-        terminals={"M" * 32: TerminalConfig(terminal_id="M" * 32, role=Role.MASTER)}
-    )
+    cfg = AppConfig(terminals={"M" * 32: TerminalConfig(terminal_id="M" * 32, role=Role.MASTER)})
     path = tmp_path / "config.json"
     save(cfg, path)
     # Hand-edit the file into the contradictory shape: trading mode plus a master role.

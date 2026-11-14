@@ -51,6 +51,8 @@ class ProfileInfo:
     """Assigned slave terminals, enabled or not."""
     last_opened: float | None
     """When this profile last ran (its lock file's mtime), else ``None`` -- never opened."""
+    trading: bool = False
+    """Whether this profile trades directly (a virtual master) rather than copying one."""
 
     @property
     def running(self) -> bool:
@@ -81,8 +83,10 @@ def exists(name: str) -> bool:
 def _inspect(name: str, path: Path) -> ProfileInfo:
     master = ""
     slaves = 0
+    trading = False
     try:
         raw = json.loads((path / "config.json").read_text(encoding="utf-8"))
+        trading = raw.get("mode") == "trading"
         for entry in raw.get("terminals", {}).values():
             role = entry.get("role")
             if role == "slave":
@@ -109,6 +113,7 @@ def _inspect(name: str, path: Path) -> ProfileInfo:
         pid=holder_pid(lock),
         master=master,
         slaves=slaves,
+        trading=trading,
         last_opened=last_opened,
     )
 

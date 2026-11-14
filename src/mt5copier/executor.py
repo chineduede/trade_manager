@@ -1034,9 +1034,7 @@ class Executor:
             else (0 if cmd.direction is PositionType.BUY else 1)
         )
         type_time, expiration = (
-            self._pending_expiry(cmd, expiration_mask)
-            if is_pending
-            else (int(OrderTime.GTC), 0)
+            self._pending_expiry(cmd, expiration_mask) if is_pending else (int(OrderTime.GTC), 0)
         )
         request: dict[str, Any] = {
             # TRADE_ACTION_PENDING is 5; TRADE_ACTION_DEAL is 1.

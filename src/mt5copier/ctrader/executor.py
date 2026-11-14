@@ -339,8 +339,10 @@ class CTraderExecutor:
         name, symbol, lots, conversion, notes = prepared
         result = await self._send_place(cmd, kind, name, symbol, lots, conversion)
 
-        if not result.ok and cmd.expiration_utc and "TRADING_BAD_EXPIRATION_DATE" in (
-            result.error or ""
+        if (
+            not result.ok
+            and cmd.expiration_utc
+            and "TRADING_BAD_EXPIRATION_DATE" in (result.error or "")
         ):
             # Only the mirrored expiry was refused -- most likely already in the past by
             # this server's reckoning. Resting GTC is what every copy was before expiry was
@@ -466,8 +468,8 @@ class CTraderExecutor:
         # as matched, so the ledger records them synced and the diff does not ask forever.
         resting_gtd = int(getattr(raw, "timeInForce", 0) or 0) == int(om.GOOD_TILL_DATE)
         resting_expiry = int(getattr(raw, "expirationTimestamp", 0) or 0) // 1000
-        expiry_moves = resting_gtd and bool(cmd.expiration_utc) and (
-            resting_expiry != cmd.expiration_utc
+        expiry_moves = (
+            resting_gtd and bool(cmd.expiration_utc) and (resting_expiry != cmd.expiration_utc)
         )
         if cmd.expiration_utc and not resting_gtd:
             log.warning(
@@ -661,10 +663,7 @@ class CTraderExecutor:
         account = self._account
         raw = (await account.open_positions()).get(cmd.slave_ticket)
         if raw is None:
-            if (
-                cmd.op is ActionKind.CLOSE
-                and cmd.slave_ticket in await account.resting_orders()
-            ):
+            if cmd.op is ActionKind.CLOSE and cmd.slave_ticket in await account.resting_orders():
                 # A flipped pending copy can still be resting when its master's order fills,
                 # after which belief calls it a position and mirrors the master's exit as a
                 # CLOSE. Being flat is what was asked for, so cancel the resting order rather

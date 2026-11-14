@@ -19,7 +19,7 @@ from textual.screen import ModalScreen
 from textual.widget import Widget
 from textual.widgets import Button, Input, Static
 
-from ..config import TerminalClosing
+from ..config import AppMode, TerminalClosing
 from ..general_edit import (
     APPLIES_ON_CONNECT,
     DRY_RUN,
@@ -53,6 +53,18 @@ _CLOSING = (
 _MODE = (
     ("simulates every copy: dry run", "dry"),
     ("sends real orders: live", "live"),
+)
+
+_PROFILE = "profile_mode"
+_PROFILE_MODE = (
+    ("copies a master terminal", AppMode.COPY.value),
+    ("trades directly from this app", AppMode.TRADING.value),
+)
+_PROFILE_HELP = (
+    "What this profile is",
+    "Copying mirrors a real master terminal. Direct trading has no master terminal: you "
+    "place trades on the order ticket (n) and every enabled slave copies them, with prices "
+    "fed by any connected MT5 slave. Switching needs every copy closed or given up first.",
 )
 
 
@@ -94,6 +106,14 @@ class GeneralForm(ModalScreen[bool]):
         with VerticalScroll(id="dialog", classes="settings", can_focus=False):
             yield head
             yield Static(self._mode_note(), id="st-mode")
+            yield section(
+                "profile",
+                rows(
+                    lead("This profile"),
+                    Choice(_PROFILE_MODE, cfg.mode.value, id=f"{_F}{_PROFILE}"),
+                ),
+                *self._errors(_PROFILE),
+            )
             yield section(
                 "mode",
                 rows(
@@ -208,9 +228,12 @@ class GeneralForm(ModalScreen[bool]):
     @on(events.DescendantFocus)
     def _on_descendant_focus(self, event: events.DescendantFocus) -> None:
         name = (event.widget.id or "").removeprefix(_F)
-        if name not in HELP:
+        if name == _PROFILE:
+            label, text = _PROFILE_HELP
+        elif name not in HELP:
             return
-        label, text = HELP[name]
+        else:
+            label, text = HELP[name]
         line = Text()
         line.append(label, style=f"bold {FG}")
         line.append(f" · {text}", style=MUTED)
@@ -224,6 +247,14 @@ class GeneralForm(ModalScreen[bool]):
     def action_panic(self) -> None:
         self.copier.action_panic()
         self.dismiss(False)
+
+    def _wanted_mode(self) -> AppMode:
+        return AppMode(str(self.query_one(f"#{_F}{_PROFILE}", Choice).value))
+
+    def _show_profile_error(self, message: str) -> None:
+        line = self.query_one(f"#{_E}{_PROFILE}", Static)
+        line.update(Text(message, style=RED) if message else "")
+        line.display = bool(message)
 
     def action_save(self) -> None:
         app = self.copier
@@ -250,11 +281,44 @@ class GeneralForm(ModalScreen[bool]):
             return
         self._commit(outcome)
 
+    def _switch_mode(self) -> bool | None:
+        """Switch the profile's mode if the form asks to. True: switched; False: no change
+        asked; None: refused, with the refusal shown -- nothing else may be saved then,
+        because a form half-applied is worse than one refused whole."""
+        app = self.copier
+        wanted = self._wanted_mode()
+        if wanted is app._cfg.mode:
+            self._show_profile_error("")
+            return False
+        refusal = app._engine.set_mode(wanted)
+        if refusal is not None:
+            self._show_profile_error(refusal)
+            return None
+        self._show_profile_error("")
+        return True
+
     def _commit(self, outcome: GeneralOutcome) -> None:
         app = self.copier
-        if not outcome.changes:
+        switched = self._switch_mode()
+        if switched is None:
+            return
+        if not outcome.changes and not switched:
             app.notify("the copier's settings: no changes")
             self.dismiss(False)
+            return
+        if switched:
+            trading = app._cfg.mode.value == "trading"
+            app.notify(
+                "This profile now trades directly: n opens the order ticket, and every "
+                "enabled slave copies it."
+                if trading
+                else "This profile now copies a master terminal: assign one with m.",
+                severity="warning",
+                timeout=10,
+            )
+        if not outcome.changes:
+            app._persist_and_sync()
+            self.dismiss(True)
             return
         commit_general(app._cfg, outcome)
         log.warning("copier settings changed: %s", describe_changes(outcome.changes))

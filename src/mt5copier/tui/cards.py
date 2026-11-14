@@ -236,6 +236,33 @@ def master_card(
     )
 
 
+def virtual_master_card(
+    *, feed: str | None, positions: int, orders: int, slaves: int
+) -> RenderableType:
+    """The master's card in a profile that trades directly: the virtual book where a real
+    master's account would be. Same shape as the master's card, so the Map reads the same."""
+    if feed is not None:
+        link = Text("feed " + feed, style=f"bold {BLUE}", no_wrap=True, overflow="ellipsis")
+    else:
+        link = Text("no feed", style=f"bold {RED}")
+    opened = f"{positions} open" if positions else "nothing open"
+    resting = f" · {orders} resting" if orders else ""
+    feeds = f"feeds {slaves} slave{'s' if slaves != 1 else ''}"
+    hint = _keyed("n", "order ticket")
+    hint.stylize(MUTED)
+    return Group(
+        left_right(master_title(), link),
+        Text("Direct trading", no_wrap=True, overflow="ellipsis"),
+        Text("you are the master", style=MUTED),
+        Text(f"{opened}{resting}", style="bold"),
+        Text(feeds, style=MUTED),
+        left_right(
+            hint,
+            Text("" if feed is not None else "connect an MT5 slave", style=MUTED),
+        ),
+    )
+
+
 def no_master_card() -> RenderableType:
     return Group(
         master_title(),

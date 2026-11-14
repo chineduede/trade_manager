@@ -42,7 +42,14 @@ from .. import config as config_mod
 from .. import role_actions
 from .. import setups as setups_mod
 from ..claims import ClaimBook
-from ..config import AppConfig, Role, TerminalConfig, account_key
+from ..config import (
+    VIRTUAL_MASTER_ID,
+    AppConfig,
+    AppMode,
+    Role,
+    TerminalConfig,
+    account_key,
+)
 from ..ctrader import auth as ctrader_auth
 from ..day_book import (
     MasterEvent,
@@ -96,7 +103,7 @@ from .general import GeneralForm
 from .guards import GuardConfirm, GuardPick, GuardsScreen
 from .history import HistoryScreen
 from .master import MasterForm
-from .menu import ActionMenu, terminal_actions
+from .menu import ActionMenu, MenuItem, terminal_actions
 from .settings import SettingsForm
 from .setups import SetupsScreen, describe
 from .style import (
@@ -116,6 +123,7 @@ from .style import (
     key_hint,
     spaced,
 )
+from .trading import TradingScreen
 from .widgets import Card, ChipItem, Chips, KeyBar, Picked, QuickInput, Rail, TopBar, Trunk
 
 log = get_logger(__name__)
@@ -164,6 +172,7 @@ class CopierApp(App[None]):
         Binding("k", "guards", "Guards (prop-firm rules)", show=False),
         Binding("h", "history", "Trade history", show=False),
         Binding("w", "setups", "Saved setups", show=False),
+        Binding("n", "trading", "Order ticket (direct trading)", show=False),
         Binding("i", "switch_account", "Log in to another account", show=False),
         Binding("t", "ctrader_login", "Log in to cTrader", show=False),
         Binding("tab", "next_page", "Map / Log", show=False, priority=True),
@@ -309,7 +318,13 @@ class CopierApp(App[None]):
     # --- the details page -------------------------------------------------------------------
 
     def action_open_terminal(self) -> None:
-        """Open the selected terminal's details page. Esc on that page comes back here."""
+        """Open the selected terminal's details page. Esc on that page comes back here.
+
+        The virtual master has no details page; enter on its card opens the order ticket,
+        which is its whole surface."""
+        if self._sel == VIRTUAL_MASTER_ID:
+            self.action_trading()
+            return
         tid = self._selected_id()
         if tid is None:
             return
@@ -360,8 +375,12 @@ class CopierApp(App[None]):
         if (self._page != "map" and detail is None) or not self._order:
             return
         at = self._order.index(self._sel) if self._sel in self._order else -delta
-        self._select(self._order[(at + delta) % len(self._order)])
-        if detail is not None and self._sel is not None:
+        wanted = self._order[(at + delta) % len(self._order)]
+        if detail is not None and wanted == VIRTUAL_MASTER_ID and len(self._order) > 1:
+            # The virtual master has no details page to step onto; skip past it.
+            wanted = self._order[(at + 2 * delta) % len(self._order)]
+        self._select(wanted)
+        if detail is not None and self._sel is not None and self._sel != VIRTUAL_MASTER_ID:
             detail.show(self._sel)
 
     def action_jump(self, number: int) -> None:
@@ -393,7 +412,13 @@ class CopierApp(App[None]):
 
     def action_pick(self, tid: str) -> None:
         """A click on a card or chip selects it; a click on the one already selected opens its
-        action menu."""
+        action menu -- or, on the virtual master, the order ticket."""
+        if tid == VIRTUAL_MASTER_ID:
+            if tid == self._sel:
+                self.action_trading()
+            else:
+                self._select(tid)
+            return
         if tid not in self._cfg.terminals:
             return
         if tid == self._sel:
@@ -408,6 +433,21 @@ class CopierApp(App[None]):
         tid = self._sel
         detail = self._detail()
         if (self._page != "map" and detail is None) or tid is None:
+            return
+        if tid == VIRTUAL_MASTER_ID:
+            anchor = self._anchor(tid)
+            if anchor is None:
+                return
+            items = [
+                MenuItem("n", "order ticket: trade from here", "trading"),
+                MenuItem("g", "switch this profile back to copying", "general_settings"),
+            ]
+
+            def picked(action: str | None) -> None:
+                if action is not None:
+                    getattr(self, f"action_{action}")()
+
+            self.push_screen(ActionMenu("Direct trading", items, anchor), picked)
             return
         if tid not in self._cfg.terminals:
             return
@@ -584,6 +624,20 @@ class CopierApp(App[None]):
             self.notify("History is kept per slave: what was done with each trade copied to it.")
             return
         self.push_screen(HistoryScreen(tid))
+
+    def action_trading(self) -> None:
+        """Open the order ticket -- the trading page of a profile that trades directly."""
+        if self._cfg.mode is not AppMode.TRADING:
+            self.notify(
+                "This profile copies a master. Direct trading is its own profile mode: "
+                "switch it in the copier settings (g), with nothing open.",
+                severity="warning",
+                timeout=8,
+            )
+            return
+        if isinstance(self.screen, TradingScreen):
+            return
+        self.push_screen(TradingScreen())
 
     def action_setups(self) -> None:
         """Open the saved setups: a master and its slaves, to save or load."""
@@ -1240,18 +1294,18 @@ class CopierApp(App[None]):
         group to another leaves it selected where it landed.
         """
         master, slaves, unassigned = self._groups()
-        self._shape = self._shape_of(master, slaves, unassigned)
+        trading = self._cfg.mode is AppMode.TRADING
+        self._shape = self._shape_of(master, slaves, unassigned, trading)
+        head = [VIRTUAL_MASTER_ID] if trading else ([master.cfg.terminal_id] if master else [])
         self._order = (
-            ([master.cfg.terminal_id] if master else [])
-            + [v.cfg.terminal_id for v in slaves]
-            + [v.cfg.terminal_id for v in unassigned]
+            head + [v.cfg.terminal_id for v in slaves] + [v.cfg.terminal_id for v in unassigned]
         )
 
         master_card = self.query_one(".card.master", Card)
-        master_card.terminal_id = master.cfg.terminal_id if master else ""
+        master_card.terminal_id = head[0] if head else ""
         area = self.query_one("#slaves", Vertical)
         area.remove_children()
-        self._cards = {master_card.terminal_id: master_card} if master else {}
+        self._cards = {master_card.terminal_id: master_card} if head else {}
         self._rails = []
         self._trunks = []
         self._per_row = self._cards_per_row()
@@ -1279,7 +1333,9 @@ class CopierApp(App[None]):
             self._rails.append(rail)
             widgets += [rail, row]
         if not rows:
-            widgets.append(Static(self._no_slaves_text(master is not None), classes="hint"))
+            widgets.append(
+                Static(self._no_slaves_text(master is not None or trading), classes="hint")
+            )
         area.mount(*widgets)
 
         keep = self._sel if self._sel in self._order else (self._order[0] if self._order else None)
@@ -1311,10 +1367,13 @@ class CopierApp(App[None]):
 
     @staticmethod
     def _shape_of(
-        master: TerminalView | None, slaves: list[TerminalView], unassigned: list[TerminalView]
+        master: TerminalView | None,
+        slaves: list[TerminalView],
+        unassigned: list[TerminalView],
+        trading: bool,
     ) -> tuple[object, ...]:
         return (
-            master.cfg.terminal_id if master else None,
+            VIRTUAL_MASTER_ID if trading else (master.cfg.terminal_id if master else None),
             tuple(v.cfg.terminal_id for v in slaves),
             tuple(v.cfg.terminal_id for v in unassigned),
         )
@@ -1346,7 +1405,8 @@ class CopierApp(App[None]):
 
     def _refresh(self) -> None:
         master, slaves, unassigned = self._groups()
-        if self._shape_of(master, slaves, unassigned) != self._shape:
+        trading = self._cfg.mode is AppMode.TRADING
+        if self._shape_of(master, slaves, unassigned, trading) != self._shape:
             self._rebuild_rows()
         holds = self._engine.holds()
         dry_run = self._cfg.dry_run
@@ -1354,7 +1414,18 @@ class CopierApp(App[None]):
 
         master_card = self.query_one(".card.master", Card)
         master_up = False
-        if master is None:
+        if trading:
+            feed_tid = self._engine.direct_feed()
+            master_up = feed_tid is not None
+            master_card.update(
+                cards.virtual_master_card(
+                    feed=self._cfg.display_name(feed_tid) if feed_tid is not None else None,
+                    positions=len(self._engine.direct_positions()),
+                    orders=len(self._engine.direct_orders()),
+                    slaves=len(slaves),
+                )
+            )
+        elif master is None:
             master_card.update(cards.no_master_card())
         else:
             master_info = self._info(master, holds)
@@ -1368,7 +1439,7 @@ class CopierApp(App[None]):
                 )
             )
         master_card.set_class(
-            master is not None and master.cfg.terminal_id == self._sel, "-selected"
+            bool(master_card.terminal_id) and master_card.terminal_id == self._sel, "-selected"
         )
 
         if self._cards_per_row() != self._per_row:
@@ -1520,6 +1591,8 @@ class CopierApp(App[None]):
                 count = min(len(self._cfg.slaves), 9)
                 go = key_hint("a 1" if count == 1 else f"a 1-{count}", "go to")
                 keys.append(Piece(go, drop=3))
+            if self._cfg.mode is AppMode.TRADING:
+                keys.append(Piece(key_hint("n", "order ticket"), short=key_hint("n", "ticket")))
             keys.append(Piece(key_hint("tab", "log"), drop=5))
             copying = self._cfg.copying_enabled
             keys.append(
