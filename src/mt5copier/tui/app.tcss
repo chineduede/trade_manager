@@ -975,33 +975,45 @@ GoLiveDialog.-short #dialog {
     margin-top: 1;
 }
 
-/* The page splits in two: the ticket is a proper form on the left half, the chart has
-   the right half to itself. The book keeps the full width below. */
+/* The page splits in two: the ticket is a contained panel on the left -- a faint tint
+   and a hairline border, one labelled field per row -- and the chart has the rest of
+   the width. The book keeps the full width below. */
 #dt-split {
     height: auto;
+    margin: 0 2;
 }
 
 #dt-form {
-    width: 50%;
+    width: 46;
     height: auto;
+    background: $foreground 4%;
+    border: solid $foreground 20%;
+    padding: 0 2 1 2;
+}
+
+#dt-split .heading {
+    margin-top: 0;
 }
 
 #dt-chart-side {
     width: 1fr;
     height: auto;
+    margin-left: 3;
 }
 
 .dt-row {
     height: 1;
-    margin: 0 2;
+    margin: 0;
 }
 
 .dt-row .dt-label {
-    width: 12;
+    width: 10;
+    margin-right: 1;
+    text-align: right;
 }
 
 .dt-row.dt-gap {
-    margin: 1 2 0 2;
+    margin: 1 0 0 0;
 }
 
 .dt-row Input {
@@ -1024,10 +1036,34 @@ GoLiveDialog.-short #dialog {
     width: 7;
 }
 
+/* The stop's and target's distance from the entry, beside their inputs. */
+.dt-away {
+    width: auto;
+    margin-left: 1;
+}
+
+/* One press writes a common rr into the box. */
+.dt-rrchip {
+    width: auto;
+    min-width: 3;
+    margin-left: 1;
+    background: $foreground 8%;
+    color: #a39a87;
+}
+
+.dt-rrchip:hover, .dt-rrchip:focus {
+    background: $foreground 25%;
+    color: $background;
+}
+
 /* The place button is the trade's side, said in its colour: blue is a buy (the copier's
    working colour), red a sell -- the same coding as the book's rows. */
 .dt-actions {
-    margin: 1 2 0 2;
+    margin: 1 0 0 11;
+}
+
+#dt-place {
+    width: 1fr;
 }
 
 #dt-place.buy {
@@ -1062,7 +1098,7 @@ GoLiveDialog.-short #dialog {
 
 #dt-quote, #dt-status {
     height: auto;
-    margin: 1 2 0 2;
+    margin: 1 0 0 0;
 }
 
 #dt-chart-head {
@@ -1071,7 +1107,6 @@ GoLiveDialog.-short #dialog {
 
 #dt-chart {
     height: auto;
-    margin: 0 2;
 }
 
 #dt-book {
@@ -1083,6 +1118,11 @@ GoLiveDialog.-short #dialog {
 
 #dt-book:focus {
     background-tint: $foreground 0%;
+}
+
+#dt-book-empty {
+    height: auto;
+    margin: 0 2;
 }
 
 #dt-book > .datatable--header {

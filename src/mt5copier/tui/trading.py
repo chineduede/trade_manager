@@ -293,7 +293,7 @@ class TradingScreen(Screen[None]):
             yield Static("", id="dt-band")
             with Horizontal(id="dt-split"):
                 with Vertical(id="dt-form"):
-                    yield Static("TICKET", classes="heading")
+                    yield Static("TICKET", classes="heading", id="dt-ticket-head")
                     with Horizontal(classes="dt-row"):
                         yield Static(Text("symbol", style=MUTED), classes="dt-label")
                         yield Input(id="dt-symbol", compact=True, classes="dt-symbol")
@@ -312,6 +312,7 @@ class TradingScreen(Screen[None]):
                     with Horizontal(classes="dt-row dt-gap"):
                         yield Static(Text("stop", style=MUTED), classes="dt-label")
                         yield Input(id="dt-sl", compact=True, classes="dt-num", restrict=_NUMERIC)
+                        yield Static("", id="dt-sl-away", classes="dt-away")
                     with Horizontal(classes="dt-row"):
                         yield Static(Text("rr", style=MUTED), classes="dt-label")
                         yield Input(
@@ -321,9 +322,12 @@ class TradingScreen(Screen[None]):
                             restrict=_NUMERIC,
                             placeholder="1.5",
                         )
+                        for quick in ("1", "1.5", "2", "3"):
+                            yield Button(quick, compact=True, classes="dt-rrchip")
                     with Horizontal(classes="dt-row"):
                         yield Static(Text("target", style=MUTED), classes="dt-label")
                         yield Input(id="dt-tp", compact=True, classes="dt-num", restrict=_NUMERIC)
+                        yield Static("", id="dt-tp-away", classes="dt-away")
                     with Horizontal(classes="dt-row dt-gap"):
                         yield Static(Text("type", style=MUTED), classes="dt-label")
                         yield Choice(_KINDS, "market", id="dt-kind")
@@ -351,6 +355,10 @@ class TradingScreen(Screen[None]):
                     yield ChartView("", id="dt-chart")
             yield Static("", id="dt-book-head", classes="heading")
             yield DataTable(id="dt-book", cursor_type="row")
+            yield Static(
+                Text("nothing yet — the ticket places straight into the book", style=MUTED),
+                id="dt-book-empty",
+            )
             with Horizontal(id="dt-ask"):
                 yield Static("", id="dt-ask-what")
                 yield QuickInput(id="dt-ask-box", compact=True)
@@ -359,6 +367,7 @@ class TradingScreen(Screen[None]):
 
     def on_mount(self) -> None:
         table = self.query_one("#dt-book", DataTable)
+        table.zebra_stripes = True
         table.add_columns("", "#", "SYMBOL", "SIDE", "LOTS", "ENTRY", "STOP", "TARGET", "NOW")
         self.query_one("#dt-ask").display = False
         self.set_interval(0.5, self._on_timer)
@@ -400,7 +409,23 @@ class TradingScreen(Screen[None]):
 
         symbol = self.query_one("#dt-symbol", Input).value.strip().upper()
         quote = engine.direct_quote(symbol) if symbol else None
-        self.query_one("#dt-quote", Static).update(quote_line(symbol, quote, feed))
+        # A live quote sits in the panel's own header; the wordy states (no feed, still
+        # waiting) get the line under the form, where there is room to say why.
+        head = self.query_one("#dt-ticket-head", Static)
+        if quote is not None:
+            head.update(
+                left_right(
+                    Text("TICKET", style="bold"),
+                    Text(f"bid {quote.bid:g} · ask {quote.ask:g}", style=MUTED),
+                )
+            )
+        else:
+            head.update(Text("TICKET", style="bold"))
+        quote_line_w = self.query_one("#dt-quote", Static)
+        quote_line_w.display = quote is None
+        if quote is None:
+            quote_line_w.update(quote_line(symbol, quote, feed))
+        self._update_away()
         self._draw_chart(symbol, quote, feed)
 
         positions = engine.direct_positions()
@@ -411,6 +436,7 @@ class TradingScreen(Screen[None]):
                 Text(f"{len(positions)} open · {len(orders)} resting", style=MUTED),
             )
         )
+        self.query_one("#dt-book-empty").display = not positions and not orders
         self._draw_book(positions, orders)
         self._refresh_keys()
 
@@ -596,12 +622,36 @@ class TradingScreen(Screen[None]):
             self.query_one(wid).display = pending
 
     def _show_side(self) -> None:
-        """The place button wears the side: a blue Buy or a red Sell, never a neutral Place."""
+        """The place button says the whole act -- Buy 0.5 lots -- in the side's colour:
+        a blue Buy or a red Sell, never a neutral Place."""
         side = str(self.query_one("#dt-side", Choice).value)
+        lots = self._level("#dt-lots")
+        word = f" {lots:g} lot{'s' if lots != 1 else ''}" if lots else ""
         place = self.query_one("#dt-place", Button)
-        place.label = f"{'Buy' if side == 'buy' else 'Sell'}  enter"
+        place.label = f"{'Buy' if side == 'buy' else 'Sell'}{word}"
         place.set_class(side == "buy", "buy")
         place.set_class(side != "buy", "sell")
+
+    def _update_away(self) -> None:
+        """The stop's and target's distance from the entry, said beside their inputs."""
+        basis = self._basis_price()
+        for name, color in (("sl", RED), ("tp", GREEN)):
+            level = self._level(f"#dt-{name}")
+            said = Text("")
+            if basis and level:
+                away = level - basis
+                said = Text(f"{'+' if away >= 0 else '-'}{abs(away):g}", style=color)
+            self.query_one(f"#dt-{name}-away", Static).update(said)
+
+    @on(Input.Changed, "#dt-lots")
+    def _on_lots_typed(self) -> None:
+        if self.is_mounted:
+            self._show_side()
+
+    @on(Button.Pressed, ".dt-rrchip")
+    def _on_rr_chip(self, event: Button.Pressed) -> None:
+        """A quick rr: the chip types into the rr box, and the sync does the rest."""
+        self.query_one("#dt-rr", Input).value = str(event.button.label)
 
     @on(Choice.Changed)
     def _on_choice(self) -> None:
@@ -692,6 +742,7 @@ class TradingScreen(Screen[None]):
             self._rr_from_tp()
         else:
             self._sync_levels()
+        self._update_away()
 
     def action_reset(self) -> None:
         """A fresh ticket for the same symbol: everything but the symbol back to its start,
