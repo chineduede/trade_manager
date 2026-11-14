@@ -993,6 +993,19 @@ GoLiveDialog.-short #dialog {
 
 #dt-split .heading {
     margin-top: 0;
+    margin-bottom: 1;
+}
+
+/* The hairlines between the form's groups, as the design draws them. */
+#dt-form .dt-divider {
+    height: 1;
+    margin: 0;
+    color: $foreground 15%;
+}
+
+#dt-pending-hint {
+    height: 1;
+    margin-left: 11;
 }
 
 #dt-chart-side {
@@ -1012,12 +1025,21 @@ GoLiveDialog.-short #dialog {
     text-align: right;
 }
 
-.dt-row.dt-gap {
-    margin: 1 0 0 0;
-}
-
 .dt-row Input {
     background: $foreground 12%;
+}
+
+/* The accent the design gives each price box: the line's own colour on its left edge. */
+#dt-symbol {
+    border-left: thick $accent;
+}
+
+#dt-sl {
+    border-left: thick $error;
+}
+
+#dt-tp {
+    border-left: thick #7fbf6e;
 }
 
 .dt-row Input:focus {

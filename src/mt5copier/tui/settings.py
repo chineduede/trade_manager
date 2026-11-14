@@ -130,9 +130,19 @@ class Choice(Widget, can_focus=True):
         def control(self) -> Choice:
             return self.choice
 
-    def __init__(self, options: tuple[tuple[str, str], ...], value: str, *, id: str) -> None:
+    def __init__(
+        self,
+        options: tuple[tuple[str, str], ...],
+        value: str,
+        *,
+        id: str,
+        colors: dict[str, str] | None = None,
+    ) -> None:
         super().__init__(id=id)
         self._options = options
+        self._colors = colors or {}
+        """A fill per value for the chosen chip, where the choice has a colour of its own
+        (a buy is blue, a sell red); every other value keeps the cream fill."""
         self.set_reactive(Choice.value, value)
 
     def _spans(self) -> list[tuple[str, str]]:
@@ -142,7 +152,7 @@ class Choice(Widget, can_focus=True):
             if self.disabled:
                 style = f"bold {MUTED} on {CHIP_BG}" if value == self.value else MUTED
             elif value == self.value:
-                style = f"bold {BG} on {FG}"
+                style = f"bold {BG} on {self._colors.get(value, FG)}"
             elif self.has_focus:
                 style = f"{FG} on {CHIP_BG}"
             else:

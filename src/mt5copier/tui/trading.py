@@ -24,12 +24,12 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import Screen
-from textual.widgets import Button, DataTable, Input, Static
+from textual.widgets import Button, DataTable, Input, Rule, Static
 
 from ..protocol import CHART_TIMEFRAMES, OrderType, PendingOrder, Position, PositionType, Quote
 from .minichart import Scale, chart, next_timeframe, scale_of, timeframe_name, window
 from .settings import Choice
-from .style import BLUE, FG, GREEN, MUTED, RED, YELLOW, key_hint, left_right, spaced
+from .style import BLUE, FAINT, FG, GREEN, MUTED, RED, YELLOW, key_hint, left_right, spaced
 from .widgets import KeyBar, QuickInput, TopBar
 
 if TYPE_CHECKING:
@@ -308,29 +308,29 @@ class TradingScreen(Screen[None]):
                         )
                     with Horizontal(classes="dt-row"):
                         yield Static(Text("side", style=MUTED), classes="dt-label")
-                        yield Choice(_SIDES, "buy", id="dt-side")
-                    with Horizontal(classes="dt-row dt-gap"):
+                        yield Choice(_SIDES, "buy", id="dt-side", colors={"buy": BLUE, "sell": RED})
+                    yield Rule(classes="dt-divider")
+                    with Horizontal(classes="dt-row"):
                         yield Static(Text("stop", style=MUTED), classes="dt-label")
                         yield Input(id="dt-sl", compact=True, classes="dt-num", restrict=_NUMERIC)
                         yield Static("", id="dt-sl-away", classes="dt-away")
                     with Horizontal(classes="dt-row"):
                         yield Static(Text("rr", style=MUTED), classes="dt-label")
-                        yield Input(
-                            id="dt-rr",
-                            compact=True,
-                            classes="dt-rr",
-                            restrict=_NUMERIC,
-                            placeholder="1.5",
-                        )
+                        yield Input(id="dt-rr", compact=True, classes="dt-rr", restrict=_NUMERIC)
                         for quick in ("1", "1.5", "2", "3"):
                             yield Button(quick, compact=True, classes="dt-rrchip")
                     with Horizontal(classes="dt-row"):
                         yield Static(Text("target", style=MUTED), classes="dt-label")
                         yield Input(id="dt-tp", compact=True, classes="dt-num", restrict=_NUMERIC)
                         yield Static("", id="dt-tp-away", classes="dt-away")
-                    with Horizontal(classes="dt-row dt-gap"):
+                    yield Rule(classes="dt-divider")
+                    with Horizontal(classes="dt-row"):
                         yield Static(Text("type", style=MUTED), classes="dt-label")
                         yield Choice(_KINDS, "market", id="dt-kind")
+                    yield Static(
+                        Text("entry & expiry for pendings", style=FAINT),
+                        id="dt-pending-hint",
+                    )
                     with Horizontal(classes="dt-row", id="dt-entry-row"):
                         yield Static(Text("entry", style=MUTED), classes="dt-label")
                         yield Input(
@@ -620,6 +620,7 @@ class TradingScreen(Screen[None]):
         pending = self.query_one("#dt-kind", Choice).value != "market"
         for wid in ("#dt-entry-row", "#dt-expiry-row"):
             self.query_one(wid).display = pending
+        self.query_one("#dt-pending-hint").display = not pending
 
     def _show_side(self) -> None:
         """The place button says the whole act -- Buy 0.5 lots -- in the side's colour:
