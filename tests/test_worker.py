@@ -23,7 +23,7 @@ from mt5copier.protocol import (
     Snapshot,
     WorkerState,
 )
-from mt5copier.worker import _backoff_delay, _Session, run_worker
+from mt5copier.worker import _backoff_delay, _expiration_utc, _Session, run_worker
 
 
 @dataclass
@@ -83,6 +83,8 @@ class FakeOrder:
     time_setup: int = 1_700_000_000
     magic: int = 0
     comment: str = ""
+    type_time: int = 0  # ORDER_TIME_GTC
+    time_expiration: int = 0
 
 
 def fake_positions(count: int = 3) -> tuple[FakePosition, ...]:
@@ -418,6 +420,26 @@ def test_poll_converts_resting_orders() -> None:
     assert o.ticket == 200
     assert o.type is OrderType.SELL_STOP
     assert o.volume == 0.4, "volume_current, i.e. what is still unfilled"
+
+
+def test_an_orders_expiry_is_put_on_the_utc_line_with_the_brokers_offset() -> None:
+    """MT5 stamps the expiry in the broker's own clock; two hours ahead means two hours
+    subtracted to reach real UTC."""
+    timed = FakeOrder(type_time=2, time_expiration=1_780_007_200)  # ORDER_TIME_SPECIFIED
+    assert _expiration_utc(timed, 7_200) == 1_780_000_000
+
+
+def test_an_expiry_without_a_known_offset_reads_as_none() -> None:
+    """Guessing could be hours off; the tick that finds the offset reports it properly."""
+    timed = FakeOrder(type_time=2, time_expiration=1_780_007_200)
+    assert _expiration_utc(timed, None) == 0
+
+
+def test_only_a_specified_expiry_is_copyable() -> None:
+    """GTC has no timestamp and a DAY order's day is the broker's, not a moment in time."""
+    assert _expiration_utc(FakeOrder(), 7_200) == 0
+    day = FakeOrder(type_time=1, time_expiration=1_780_007_200)  # ORDER_TIME_DAY
+    assert _expiration_utc(day, 7_200) == 0
 
 
 def test_no_resting_orders_is_an_empty_tuple_not_none() -> None:

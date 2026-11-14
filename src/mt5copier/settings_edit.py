@@ -196,6 +196,16 @@ SECTIONS: tuple[Section, ...] = (
                 Kind.FLAG,
                 "Mirror the master's resting orders as well as its open positions.",
             ),
+            EditableField(
+                "pending_fallback",
+                "Rescue refused pendings",
+                Kind.FLAG,
+                "When this broker refuses a pending copy's price, retry it once as the other "
+                "resting type at the same price (a limit as a stop, a stop as a limit), then "
+                "once at market. A copy that went to market is an open position: it is closed "
+                "if the master cancels the order, and managed normally once the order fills. "
+                "Off, a refused pending is simply not copied.",
+            ),
         ),
     ),
     Section(

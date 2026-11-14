@@ -338,6 +338,44 @@ class CTraderExecutor:
             return prepared
         name, symbol, lots, conversion, notes = prepared
         result = await self._send_place(cmd, kind, name, symbol, lots, conversion)
+
+        if not result.ok and cmd.expiration_utc and "TRADING_BAD_EXPIRATION_DATE" in (
+            result.error or ""
+        ):
+            # Only the mirrored expiry was refused -- most likely already in the past by
+            # this server's reckoning. Resting GTC is what every copy was before expiry was
+            # mirrored at all, and the master's own expiry still cancels it.
+            log.warning(
+                "#%s: cTrader refused the order's expiry; placing it GTC instead",
+                cmd.master_ticket,
+            )
+            result = await self._send_place(
+                replace(cmd, expiration_utc=0), kind, name, symbol, lots, conversion
+            )
+
+        # The price fallback, as on MT5: a pending refused over its price is retried once as
+        # the other resting type at the same price, then once at market. Only for
+        # TRADING_BAD_PRICES -- any other refusal would fail the same way again.
+        if cmd.pending_fallback and _bad_price(result):
+            flipped = om.STOP if kind == om.LIMIT else om.LIMIT
+            flipped_type = cmd.order_type.flipped if cmd.order_type is not None else None
+            log.warning(
+                "#%s: %s at %g refused over its price, retrying as a %s",
+                cmd.master_ticket,
+                om.ProtoOAOrderType.Name(kind),
+                cmd.entry,
+                om.ProtoOAOrderType.Name(flipped),
+            )
+            retry = await self._send_place(cmd, flipped, name, symbol, lots, conversion)
+            result = replace(retry, placed_type=flipped_type) if retry.ok else retry
+            if _bad_price(result):
+                log.warning(
+                    "#%s: no resting order at %g was accepted, executing at market",
+                    cmd.master_ticket,
+                    cmd.entry,
+                )
+                market = await self._send_open(cmd, name, symbol, lots, conversion)
+                result = replace(market, filled_at_market=True) if market.ok else market
         return replace(result, guard=notes) if notes else result
 
     async def _send_place(
@@ -367,6 +405,11 @@ class CTraderExecutor:
             request.stopLoss = round(cmd.sl, digits)
         if cmd.tp:
             request.takeProfit = round(cmd.tp, digits)
+        if cmd.expiration_utc:
+            # The command's expiry is real UTC seconds and cTrader takes real UTC
+            # milliseconds -- no broker clock in between, unlike MT5.
+            request.timeInForce = om.GOOD_TILL_DATE
+            request.expirationTimestamp = cmd.expiration_utc * 1000
 
         answer = await self._follow(request, wait_for_fill=False)
         event = answer.event
@@ -416,7 +459,30 @@ class CTraderExecutor:
         limit = int(raw.orderType) == om.LIMIT
         resting_at = float(raw.limitPrice) if limit else float(raw.stopPrice)
         wanted = f"entry {cmd.entry:g} sl {cmd.sl:g} tp {cmd.tp:g}"
-        if all(
+
+        # Expiry can only be *amended*, never granted or revoked: ProtoOAAmendOrderReq moves
+        # a GTD order's timestamp but carries no time-in-force, so a copy resting GTC stays
+        # GTC and one resting GTD stays GTD. The unfixable cases are said and then treated
+        # as matched, so the ledger records them synced and the diff does not ask forever.
+        resting_gtd = int(getattr(raw, "timeInForce", 0) or 0) == int(om.GOOD_TILL_DATE)
+        resting_expiry = int(getattr(raw, "expirationTimestamp", 0) or 0) // 1000
+        expiry_moves = resting_gtd and bool(cmd.expiration_utc) and (
+            resting_expiry != cmd.expiration_utc
+        )
+        if cmd.expiration_utc and not resting_gtd:
+            log.warning(
+                "#%s: cTrader cannot add an expiry to a resting order; the copy stays GTC "
+                "and the master's own expiry still cancels it",
+                cmd.master_ticket,
+            )
+        elif not cmd.expiration_utc and resting_gtd:
+            log.warning(
+                "#%s: cTrader cannot make a GTD order good-till-cancelled; the copy keeps "
+                "its expiry",
+                cmd.master_ticket,
+            )
+
+        if not expiry_moves and all(
             round(a, digits) == round(b, digits)
             for a, b in (
                 (resting_at, cmd.entry),
@@ -441,6 +507,10 @@ class CTraderExecutor:
             request.stopLoss = round(cmd.sl, digits)
         if cmd.tp:
             request.takeProfit = round(cmd.tp, digits)
+        if resting_gtd:
+            # Restated even when unchanged, in case the server reads an absent field on a
+            # GTD order as anything but "keep it".
+            request.expirationTimestamp = (cmd.expiration_utc or resting_expiry) * 1000
         answer = await self._follow(request, wait_for_fill=False)
         if answer.code in _ORDER_GONE:
             log.warning("#%s: %s, so %s was not applied", cmd.master_ticket, answer.refusal, wanted)
@@ -591,6 +661,21 @@ class CTraderExecutor:
         account = self._account
         raw = (await account.open_positions()).get(cmd.slave_ticket)
         if raw is None:
+            if (
+                cmd.op is ActionKind.CLOSE
+                and cmd.slave_ticket in await account.resting_orders()
+            ):
+                # A flipped pending copy can still be resting when its master's order fills,
+                # after which belief calls it a position and mirrors the master's exit as a
+                # CLOSE. Being flat is what was asked for, so cancel the resting order rather
+                # than declare it gone and orphan it.
+                log.info(
+                    "#%s: slave ticket %s is still a resting order; cancelling it instead "
+                    "of closing",
+                    cmd.master_ticket,
+                    cmd.slave_ticket,
+                )
+                return await self._cancel(cmd)
             log.info("#%s: slave position %s already gone", cmd.master_ticket, cmd.slave_ticket)
             return self._ok(
                 cmd, slave_ticket=cmd.slave_ticket, filled_volume=0.0, outcome="already closed"
@@ -865,6 +950,14 @@ def _commission(event: Any, money_digits: int) -> float | None:
     digits = int(deal.moneyDigits) if deal.HasField("moneyDigits") else money_digits
     charged = cv.money(int(deal.commission), digits)
     return -charged if charged < 0 else None
+
+
+def _bad_price(result: OrderResult) -> bool:
+    """Whether a refused request was refused over its *price*. cTrader says
+    ``TRADING_BAD_PRICES`` for it, whether as an error code or on a rejected execution event,
+    and both end up verbatim in the failure's error text, which is the one place a
+    :class:`OrderResult` carries the code."""
+    return not result.ok and "TRADING_BAD_PRICES" in (result.error or "")
 
 
 def _refusal(answer: _Answer) -> str | None:

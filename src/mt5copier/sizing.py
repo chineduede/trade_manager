@@ -45,6 +45,10 @@ class SymbolFacts:
     filling_mask: int = 0
     """``symbol_info.filling_mode`` -- a bitmask of permitted modes, not a mode. See
     :mod:`mt5copier.execution`."""
+    expiration_mask: int = 0
+    """``symbol_info.expiration_mode`` -- which pending-order lifetimes the broker permits on
+    this symbol, as a bitmask (:class:`mt5copier.execution.SymbolExpiration`). Not sizing, but
+    read from the same ``symbol_info`` call everything else here comes from."""
 
 
 class SizingFailure(StrEnum):

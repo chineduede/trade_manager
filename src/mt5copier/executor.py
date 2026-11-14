@@ -33,13 +33,16 @@ from typing import Any, Protocol
 from .breakeven import stop_past_entry
 from .execution import (
     OrderFilling,
+    OrderTime,
     Outcome,
     Retcode,
+    SymbolExpiration,
     TradeAction,
     alternative_filling,
     choose_filling,
     classify,
     is_transient,
+    price_refused,
 )
 from .execution import describe_retcode as _describe
 from .logging_setup import get_logger
@@ -105,6 +108,7 @@ class Session(Protocol):
     """What the executor needs from a terminal. Implemented by the worker's ``_Session``."""
 
     def account_trade_mode(self) -> int | None: ...
+    def server_offset_s(self) -> int | None: ...
     def symbol_names(self) -> list[str]: ...
     def symbol_facts(self, name: str) -> SymbolFacts | None: ...
     def tick(self, name: str) -> tuple[float, float] | None: ...
@@ -306,6 +310,18 @@ class Executor:
                 error=f"could not read slave position {cmd.slave_ticket} to close it",
             )
         if live is None:
+            if cmd.op is ActionKind.CLOSE and self._session.order_exists(cmd.slave_ticket):
+                # A flipped pending copy can still be resting when its master's order fills,
+                # after which belief calls it a position and mirrors the master's exit as a
+                # CLOSE. "Close" means "be flat", and for a ticket still resting that is a
+                # cancellation -- declaring it gone instead would orphan a live order.
+                log.info(
+                    "#%s: slave ticket %s is still a resting order; cancelling it instead "
+                    "of closing",
+                    cmd.master_ticket,
+                    cmd.slave_ticket,
+                )
+                return self._cancel(cmd)
             log.info("#%s: slave position %s already gone", cmd.master_ticket, cmd.slave_ticket)
             return self._ok(
                 cmd,
@@ -546,10 +562,11 @@ class Executor:
         parameter. Volume is deliberately absent, because MT5 cannot modify a pending order's
         volume at all.
 
-        ``type_time`` is sent rather than left out. Omitting it would not preserve the order's
-        existing expiry -- the zero-filled struct resets it to ``ORDER_TIME_GTC`` -- which
-        happens to be what :meth:`_build_request` placed the order with, so the two agree only
-        by coincidence. Stating it makes that agreement deliberate.
+        ``type_time`` is always sent rather than left out, because omitting it would not
+        preserve the order's existing expiry -- the zero-filled struct resets it to
+        ``ORDER_TIME_GTC``. So the master's expiry is restated on every move, and a master
+        clearing its expiry is mirrored by the GTC the zero pair means. The expiry change is
+        itself what some of these commands are for: the diff compares it like the levels.
         """
         if cmd.slave_ticket is None:
             return self._fail(cmd, error="no slave ticket recorded for this copy")
@@ -579,15 +596,18 @@ class Executor:
             label=self._terminal_id[:8],
             symbol_map=dict(cmd.symbol_map),
         )
+        # No expiration_mask here: the order already rests, so no symbol facts were read. A
+        # broker that refuses the timed order answers INVALID_EXPIRATION, which
+        # :meth:`_send_modification` retries once without the expiry.
+        type_time, expiration = self._pending_expiry(cmd, None)
         request = {
             "action": int(TradeAction.MODIFY),
             "order": cmd.slave_ticket,
             "price": float(cmd.entry),
             "sl": float(cmd.sl),
             "tp": float(cmd.tp),
-            # ORDER_TIME_GTC, and no expiration to go with it.
-            "type_time": 0,
-            "expiration": 0,
+            "type_time": type_time,
+            "expiration": expiration,
         }
         return self._send_modification(
             cmd,
@@ -656,6 +676,17 @@ class Executor:
                     outcome=Outcome.GONE.value,
                     target_gone=True,
                 )
+            if retcode == Retcode.INVALID_EXPIRATION and request.get("expiration"):
+                # Only the mirrored expiry was refused -- the copy likely rests GTC from
+                # before this broker's refusal was known, or the master's expiry is already
+                # in this broker's past. The levels still matter more than the lifetime, so
+                # they go again without it; the master's own expiry still cancels the copy.
+                log.warning(
+                    "#%s: the broker refused the order's expiry; moving it without one",
+                    cmd.master_ticket,
+                )
+                request = {**request, "type_time": int(OrderTime.GTC), "expiration": 0}
+                continue
             if outcome is Outcome.BACKOFF:
                 time.sleep(BACKOFF_S)
                 continue
@@ -717,6 +748,7 @@ class Executor:
             price,
             choose_filling(facts.filling_mask, is_pending=is_pending),
             is_pending,
+            expiration_mask=facts.expiration_mask,
         )
         result = self._send(
             cmd,
@@ -726,15 +758,99 @@ class Executor:
             facts.filling_mask,
             reprice_direction=None if is_pending else cmd.direction,
         )
+        if is_pending and not result.ok and cmd.pending_fallback and price_refused(result.retcode):
+            result = self._pending_fallback(cmd, symbol, facts, lots, result)
         if not result.ok:
             return result
-        fill = (result.price or price) if not is_pending else cmd.entry
+        resting = is_pending and not result.filled_at_market
+        fill = cmd.entry if resting else (result.price or price)
         return replace(
             result,
             point=facts.point,
             digits=facts.digits,
             price_value=self._price_value(cmd.direction, symbol, fill, facts.point),
         )
+
+    def _pending_fallback(
+        self, cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float, refused: OrderResult
+    ) -> OrderResult:
+        """Two more tries for a pending order whose *price* the broker refused.
+
+        The first flips the resting type at the same price. A limit and a stop at one price
+        differ only in which side of the quote they may rest on, so when the refusal is the
+        quote having already crossed the master's price -- the routine way a copied pending
+        dies, since the slave's feed lags and differs from the master's -- the flipped type is
+        the one the broker will take, and it still fills at the master's own level.
+
+        The second gives up on resting and takes the market: the master wanted in at this
+        price and the slave's broker will not hold an order there, so the nearest honest copy
+        is a fill where that slave's market is now. The result says so (``filled_at_market``),
+        because the ledger must remember a position, not an order.
+
+        Only for refusals about the price (:func:`~mt5copier.execution.price_refused`):
+        anything else -- no money, bad volume, trading disabled -- would fail the same way
+        again, so it is returned as the failure it is.
+        """
+        flipped = cmd.order_type.flipped if cmd.order_type is not None else None
+        if flipped is not None:
+            log.warning(
+                "#%s: %s at %g refused (%s), retrying as a %s",
+                cmd.master_ticket,
+                cmd.order_type.name if cmd.order_type is not None else "?",
+                cmd.entry,
+                _describe(refused.retcode),
+                flipped.name,
+            )
+            request = {
+                **self._build_request(
+                    cmd,
+                    symbol,
+                    lots,
+                    cmd.entry,
+                    choose_filling(facts.filling_mask, is_pending=True),
+                    True,
+                    expiration_mask=facts.expiration_mask,
+                ),
+                "type": int(flipped),
+            }
+            result = self._send(
+                cmd, request, symbol, lots, facts.filling_mask, reprice_direction=None
+            )
+            if result.ok:
+                return replace(result, placed_type=flipped)
+            if not price_refused(result.retcode):
+                return result
+            refused = result
+
+        log.warning(
+            "#%s: no resting order at %g was accepted (%s), executing at market",
+            cmd.master_ticket,
+            cmd.entry,
+            _describe(refused.retcode),
+        )
+        price = self._first_tick(symbol, cmd.direction)
+        if price is None:
+            return self._fail(
+                cmd,
+                slave_symbol=symbol,
+                retcode=refused.retcode,
+                error=(
+                    f"{_describe(refused.retcode)}, and no tick for {symbol!r} to execute "
+                    "at market instead"
+                ),
+            )
+        request = self._build_request(
+            cmd,
+            symbol,
+            lots,
+            price,
+            choose_filling(facts.filling_mask, is_pending=False),
+            False,
+        )
+        result = self._send(
+            cmd, request, symbol, lots, facts.filling_mask, reprice_direction=cmd.direction
+        )
+        return replace(result, filled_at_market=True) if result.ok else result
 
     def _commission(self, deal: int | None) -> float | None:
         """What the opening deal was charged, as a positive cost; None when there is no deal to
@@ -818,9 +934,16 @@ class Executor:
                     filled_volume=filled,
                     price=_float_or_none(getattr(last, "price", None)) or price,
                     attempts=attempts,
+                    # A PLACE is included only when its request became a market deal -- the
+                    # fallback's last resort -- whose fill has an opening deal like any
+                    # OPEN's. A genuinely resting PLACE has been charged nothing yet.
                     commission=(
                         self._commission(_int_or_none(getattr(last, "deal", None)))
                         if cmd.op is ActionKind.OPEN
+                        or (
+                            cmd.op is ActionKind.PLACE
+                            and int(request.get("action", 0)) == int(TradeAction.DEAL)
+                        )
                         else None
                     ),
                 )
@@ -864,6 +987,18 @@ class Executor:
                 filling = nxt
                 request = {**request, "type_filling": int(nxt)}
                 continue
+            if retcode == Retcode.INVALID_EXPIRATION and request.get("expiration"):
+                # The mirrored expiry, not the order, is what was refused -- a broker rule
+                # the expiration mask did not disclose, or an expiry already in this broker's
+                # past. Without it the request is exactly what every copy was before expiry
+                # was mirrored at all, and losing the trade over the lifetime would be
+                # backwards; the master's own expiry still cancels the copy.
+                log.warning(
+                    "#%s: the broker refused the order's expiry; placing it GTC instead",
+                    cmd.master_ticket,
+                )
+                request = {**request, "type_time": int(OrderTime.GTC), "expiration": 0}
+                continue
             if outcome is Outcome.BACKOFF:
                 time.sleep(BACKOFF_S)
                 continue
@@ -890,12 +1025,18 @@ class Executor:
         price: float,
         filling: OrderFilling,
         is_pending: bool,
+        expiration_mask: int = 0,
     ) -> dict[str, Any]:
         """The MqlTradeRequest, as a plain dict -- what the Python API expects."""
         order_type = (
             int(cmd.order_type)
             if (is_pending and cmd.order_type is not None)
             else (0 if cmd.direction is PositionType.BUY else 1)
+        )
+        type_time, expiration = (
+            self._pending_expiry(cmd, expiration_mask)
+            if is_pending
+            else (int(OrderTime.GTC), 0)
         )
         request: dict[str, Any] = {
             # TRADE_ACTION_PENDING is 5; TRADE_ACTION_DEAL is 1.
@@ -908,14 +1049,50 @@ class Executor:
             "magic": cmd.magic,
             "comment": cmd.comment[:31],
             "type_filling": int(filling),
-            # ORDER_TIME_GTC
-            "type_time": 0,
+            "type_time": type_time,
         }
+        if expiration:
+            request["expiration"] = expiration
         if cmd.sl:
             request["sl"] = cmd.sl
         if cmd.tp:
             request["tp"] = cmd.tp
         return request
+
+    def _pending_expiry(self, cmd: OrderCommand, expiration_mask: int | None) -> tuple[int, int]:
+        """The ``(type_time, expiration)`` a pending request carries, mirroring the master's.
+
+        The command's expiry is real UTC; MT5 takes expirations in the *slave broker's* own
+        clock, so the slave's offset puts it back on that clock -- each side converts through
+        UTC precisely because the two brokers' clocks need not agree.
+
+        Three cases fall back to GTC, each still covered by the mirror: when the master's
+        order expires, it leaves the master's book and the diff cancels the copy. No expiry
+        to mirror is the ordinary one. A symbol whose reported ``expiration_mode`` does not
+        permit a timed order cannot carry one (a mask of zero is "the terminal said nothing"
+        and is allowed through, like a zero filling mask -- a wrong guess is recoverable, see
+        :meth:`_send`). And while the slave's clock offset is unknown the timestamp could
+        land hours off, so resting GTC for the moment is the honest copy.
+        """
+        if not cmd.expiration_utc:
+            return int(OrderTime.GTC), 0
+        if expiration_mask and not expiration_mask & SymbolExpiration.SPECIFIED:
+            log.warning(
+                "#%s: this broker does not allow a timed pending on the symbol "
+                "(expiration mask %s); resting GTC, the master's expiry still cancels it",
+                cmd.master_ticket,
+                expiration_mask,
+            )
+            return int(OrderTime.GTC), 0
+        offset = self._session.server_offset_s()
+        if offset is None:
+            log.warning(
+                "#%s: the broker's clock offset is not known yet, so the master's expiry "
+                "cannot be placed on it; resting GTC for now",
+                cmd.master_ticket,
+            )
+            return int(OrderTime.GTC), 0
+        return int(OrderTime.SPECIFIED), cmd.expiration_utc + offset
 
     def _market_price(self, symbol: str, direction: PositionType) -> float | None:
         """Buy at the ask, sell at the bid. Re-read on every reprice, never cached."""

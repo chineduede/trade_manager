@@ -51,6 +51,7 @@ CREATE TABLE IF NOT EXISTS copies (
     entry         REAL    NOT NULL DEFAULT 0,
     synced_sl     REAL    NOT NULL DEFAULT 0,
     synced_tp     REAL    NOT NULL DEFAULT 0,
+    synced_expiration INTEGER NOT NULL DEFAULT 0,
     point         REAL    NOT NULL DEFAULT 0,
     digits        INTEGER NOT NULL DEFAULT 0,
     risk_distance REAL    NOT NULL DEFAULT 0,
@@ -94,6 +95,7 @@ _ADDED_COLUMNS = (
     ("commission_per_lot", "REAL NOT NULL DEFAULT 0"),
     ("master_managed", "INTEGER NOT NULL DEFAULT -1"),
     ("guard_close", "INTEGER NOT NULL DEFAULT 0"),
+    ("synced_expiration", "INTEGER NOT NULL DEFAULT 0"),
 )
 """Columns added after the table first shipped, for breakeven and booking at it. ``CREATE TABLE
 IF NOT EXISTS`` leaves an older file's table as it was, so each is added on open when it is
@@ -141,6 +143,8 @@ class Copy:
     entry: float = 0.0
     synced_sl: float = 0.0
     synced_tp: float = 0.0
+    synced_expiration: int = 0
+    """An order row only: the broker-side expiry the copy carries, in real UTC seconds."""
     point: float = 0.0
     digits: int = 0
     risk_distance: float = 0.0
@@ -197,6 +201,7 @@ class Copy:
             entry=self.entry,
             synced_sl=self.synced_sl,
             synced_tp=self.synced_tp,
+            synced_expiration=self.synced_expiration,
             slave_ticket=self.slave_ticket,
             volume=self.slave_volume,
             point=self.point,
@@ -287,10 +292,11 @@ class MappingStore:
                 INSERT OR REPLACE INTO copies (
                     terminal_id, master_ticket, kind, slave_ticket, slave_symbol, direction,
                     order_type, master_volume, slave_volume, entry, synced_sl, synced_tp,
+                    synced_expiration,
                     point, digits, risk_distance, price_value, commission_per_lot,
                     master_managed, breakeven_sl, breakeven_exempt, breakeven_at,
                     book_fraction, book_tries, booked, guard_close, opened_at, updated_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     stamped.terminal_id,
@@ -305,6 +311,7 @@ class MappingStore:
                     stamped.entry,
                     stamped.synced_sl,
                     stamped.synced_tp,
+                    stamped.synced_expiration,
                     stamped.point,
                     stamped.digits,
                     stamped.risk_distance,
@@ -382,6 +389,7 @@ class MappingStore:
         slave_volume: float | None = None,
         synced_sl: float = 0.0,
         synced_tp: float = 0.0,
+        synced_expiration: int = 0,
         point: float = 0.0,
         digits: int = 0,
         risk_distance: float = 0.0,
@@ -403,6 +411,7 @@ class MappingStore:
                 slave_volume=slave_volume,
                 synced_sl=synced_sl,
                 synced_tp=synced_tp,
+                synced_expiration=synced_expiration,
                 point=point,
                 digits=digits,
                 risk_distance=risk_distance,
@@ -662,6 +671,7 @@ def _from_row(row: sqlite3.Row) -> Copy:
         entry=float(row["entry"]),
         synced_sl=float(row["synced_sl"]),
         synced_tp=float(row["synced_tp"]),
+        synced_expiration=int(row["synced_expiration"]),
         point=float(row["point"]),
         digits=int(row["digits"]),
         risk_distance=float(row["risk_distance"]),

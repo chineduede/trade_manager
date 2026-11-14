@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 import psutil
 
 from .discovery import find_terminal_pid
+from .execution import OrderTime
 from .executor import UNREADABLE, Executor, LivePosition, ReadFailure
 from .logging_setup import configure, get_logger
 from .protocol import (
@@ -185,6 +186,13 @@ class _Session:
     # Thin, forgiving wrappers: each returns None rather than raising, because a missing or
     # misbehaving read must become a refusal to trade, not an exception that kills the worker.
 
+    def server_offset_s(self) -> int | None:
+        """How far this broker's clock runs ahead of UTC, or None while still unknown.
+
+        The executor turns a command's UTC expiry into this broker's own clock with it --
+        the same offset the polling loop stamps on every snapshot."""
+        return self._clock.offset
+
     def account_trade_mode(self) -> int | None:
         """``account_info().trade_mode``. None when it cannot be read, which the executor
         treats as "not a demo"."""
@@ -247,6 +255,7 @@ class _Session:
                 point=float(getattr(info, "point", 0.0) or 0.0),
                 digits=int(getattr(info, "digits", 5) or 5),
                 filling_mask=int(getattr(info, "filling_mode", 0) or 0),
+                expiration_mask=int(getattr(info, "expiration_mode", 0) or 0),
             )
         except (AttributeError, TypeError, ValueError) as exc:
             log.warning("unusable symbol_info for %r: %s", name, exc)
@@ -443,8 +452,10 @@ class _Session:
             )
 
         open_positions, live_positions = self._read_positions()
-        pending_orders = self._read_orders()
+        # The clock first: an order's expiry is reported in the broker's own time, so reading
+        # the orders without the offset would leave every expiry uncopyable this tick.
         offset = self._clock.update(self._mt5, open_positions, now=time.time())
+        pending_orders = self._read_orders(offset)
         balance = getattr(account, "balance", None)
         self._refresh_deals(offset, balance, now=time.time())
 
@@ -549,12 +560,17 @@ class _Session:
         out.sort(key=lambda deal: deal.time)
         return tuple(out)
 
-    def _read_orders(self) -> tuple[PendingOrder, ...] | None:
+    def _read_orders(self, offset: int | None = None) -> tuple[PendingOrder, ...] | None:
         """Read the resting orders, or None if they could not be read.
 
         Same discipline as :meth:`_read_positions`, and for a sharper reason: an order missing
         from this list is read as a cancellation, so a failed read misreported as an empty list
         would propose cancelling every copied order at once.
+
+        ``offset`` is the broker's clock offset, for turning an order's expiry into real UTC.
+        While it is still unknown the expiry is reported as none -- the copy rests GTC for a
+        moment -- and the tick that finds the offset reports the real expiry, which the diff
+        then applies as an ordinary order modification.
         """
         try:
             raw = self._mt5.orders_get()
@@ -580,6 +596,7 @@ class _Session:
                         time_setup=int(getattr(o, "time_setup", 0) or 0),
                         magic=int(getattr(o, "magic", 0) or 0),
                         comment=str(getattr(o, "comment", "") or ""),
+                        expiration_utc=_expiration_utc(o, offset),
                     )
                 )
             except (AttributeError, TypeError, ValueError) as exc:
@@ -710,6 +727,26 @@ class _ServerClock:
                 log.debug("symbols_get() raised: %r", exc)
                 self._watch = []
         return self._watch
+
+
+def _expiration_utc(order: Any, offset: int | None) -> int:
+    """An order's broker-side expiry in real UTC seconds, or 0 when there is none to copy.
+
+    Only ``ORDER_TIME_SPECIFIED`` carries a timestamp worth mirroring: GTC has none, and a
+    DAY order's "day" is the *broker's* trading day, which another broker's clock ends at a
+    different moment -- copying it as a timestamp would be inventing one. The timestamp is in
+    the broker's own clock, so without the clock offset it cannot be placed on the UTC line
+    yet and reads as none; the tick that finds the offset reports it properly.
+    """
+    if offset is None:
+        return 0
+    try:
+        if int(getattr(order, "type_time", 0) or 0) != int(OrderTime.SPECIFIED):
+            return 0
+        expiration = int(getattr(order, "time_expiration", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return expiration - offset if expiration > 0 else 0
 
 
 def _tick_time(mt5: Any, name: str) -> float | None:

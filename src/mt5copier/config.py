@@ -251,6 +251,17 @@ class TerminalConfig(BaseModel):
     copy_pending: bool = False
     """Mirror pending orders (limit/stop) as well as open positions. Stage 4; unused so far."""
 
+    pending_fallback: bool = True
+    """Rescue a pending copy whose price the broker refuses, instead of dropping the trade.
+
+    Two retries, in order: once as the other resting type at the master's price (a limit as a
+    stop, a stop as a limit -- the two differ only in which side of the quote they may rest
+    on, and a feed that has already crossed the master's price is the routine refusal), then
+    once at market. A copy that went to market is an open position from the start; it is
+    closed if the master cancels the order, and managed normally once the master's order
+    fills. On by default, because the alternative is the trade silently not copying; turn it
+    off on a slave that must only ever rest exactly what the master rests."""
+
     # --- breakeven ---------------------------------------------------------------------------
     breakeven_mode: BreakevenMode = BreakevenMode.OFF
     breakeven_trigger_r: float = Field(default=1.0, gt=0)

@@ -299,6 +299,29 @@ def test_outcome_wording() -> None:
     assert describe_outcome(ActionKind.OPEN, SlaveOutcome(TID_S1, Outcome.SENDING)) == "sending..."
 
 
+def test_a_rescued_pending_says_how_it_was_rescued() -> None:
+    """A copy that is not resting the way the master's is must never look like one that is."""
+    flipped = SlaveOutcome(
+        TID_S1,
+        Outcome.DONE,
+        lots=0.5,
+        latency_ms=12,
+        fallback="as a buy stop: the broker refused the master's type",
+    )
+    assert describe_outcome(ActionKind.PLACE, flipped) == (
+        "placed 0.5 lots as a buy stop: the broker refused the master's type in 12 ms"
+    )
+    market = SlaveOutcome(
+        TID_S1,
+        Outcome.DONE,
+        lots=0.5,
+        fallback="at market: the broker refused it resting",
+    )
+    assert describe_outcome(ActionKind.PLACE, market) == (
+        "placed 0.5 lots at market: the broker refused it resting"
+    )
+
+
 # --- through the engine ---------------------------------------------------------------------
 
 

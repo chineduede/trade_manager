@@ -100,6 +100,34 @@ def alternative_filling(tried: OrderFilling, mask: int) -> OrderFilling | None:
     return None
 
 
+class OrderTime(IntEnum):
+    """``ORDER_TIME_*`` -- a request's ``type_time`` field: how long a pending order rests.
+
+    The copier only ever sends GTC and SPECIFIED. DAY and SPECIFIED_DAY expire at a *trading
+    day's* end, and whose day that is depends on the broker's server clock -- the master's day
+    and the slave's can end hours apart -- so neither is mirrored; the master's own expiry
+    still reaches the slave as a CANCEL when the order leaves the master's book.
+    """
+
+    GTC = 0
+    DAY = 1
+    SPECIFIED = 2
+    SPECIFIED_DAY = 3
+
+
+class SymbolExpiration(IntEnum):
+    """``SYMBOL_EXPIRATION_*`` -- the bitmask ``symbol_info.expiration_mode`` returns.
+
+    Like :class:`SymbolFilling`, a *mask of what is permitted*, and its bits are not the
+    :class:`OrderTime` values: SPECIFIED is order-time 2 but permission bit 4.
+    """
+
+    GTC = 1
+    DAY = 2
+    SPECIFIED = 4
+    SPECIFIED_DAY = 8
+
+
 # --- retcodes -------------------------------------------------------------------------------
 
 
@@ -201,6 +229,22 @@ _OUTCOMES: dict[int, Outcome] = {
     # It is what makes a modification safe to retry.
     Retcode.NO_CHANGES: Outcome.SUCCEEDED,
 }
+
+
+PRICE_REFUSALS = frozenset(
+    {Retcode.INVALID_PRICE, Retcode.PRICE_OFF, Retcode.REQUOTE, Retcode.PRICE_CHANGED}
+)
+"""Refusals about the request's *price* rather than its size, its stops or the account.
+
+What the pending-order fallback keys on: a price the broker will not take as this resting
+type may still be taken as the other one, or filled at market. ``INVALID_STOPS`` is
+deliberately absent -- it is about the SL/TP distances, which neither flipping the type nor
+going to market changes."""
+
+
+def price_refused(retcode: int | None) -> bool:
+    """Whether a refusal was about the request's price. See :data:`PRICE_REFUSALS`."""
+    return retcode in PRICE_REFUSALS
 
 
 def classify(retcode: int | None) -> Outcome:

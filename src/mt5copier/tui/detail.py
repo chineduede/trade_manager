@@ -316,6 +316,14 @@ def rule_rows(
             ),
         ),
         ("Pending orders", _v("copied" if cfg.copy_pending else "not copied")),
+        (
+            "Refused pending price",
+            _v(
+                "retried as the other type, then at market"
+                if cfg.pending_fallback
+                else "not copied"
+            ),
+        ),
         ("Breakeven", _v(breakeven)),
     ]
     rows += symbol_rows(cfg, example)

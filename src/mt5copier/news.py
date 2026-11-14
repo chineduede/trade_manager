@@ -40,7 +40,12 @@ FRESH_S = 24 * 3600.0
 _TIMEOUT_S = 20.0
 
 HIGH, MEDIUM = "High", "Medium"
-_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+# The feed resets connections whose User-Agent it does not recognise as a browser, and since
+# 2026-11 the bare "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" prefix is no longer enough.
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
 
 
 @dataclass(frozen=True, slots=True)

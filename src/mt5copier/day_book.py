@@ -106,6 +106,10 @@ class SlaveOutcome:
     """What the broker filled at, when it says."""
     guard: tuple[GuardNote, ...] = ()
     """What the slave's guards did to it: sized it down, shrunk it, declined it, warned."""
+    fallback: str | None = None
+    """On a PLACE the broker refused as sent: how the copy was rescued -- flipped to the
+    other resting type, or executed at market. Said with the outcome, so a copy that is not
+    resting the way the master's is never looks like one that is."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,6 +166,7 @@ class _Slot:
     """The event it belongs to, for :attr:`DayBook.listener`."""
     action: Action | None = None
     guard: tuple[GuardNote, ...] = ()
+    fallback: str | None = None
 
     def frozen(self) -> SlaveOutcome:
         return SlaveOutcome(
@@ -176,6 +181,7 @@ class _Slot:
             self.ts,
             self.price,
             self.guard,
+            self.fallback,
         )
 
 
@@ -336,6 +342,11 @@ class DayBook:
             slot.lots = result.filled_volume
             slot.price = result.price or None
             slot.target_gone = result.target_gone
+            if result.filled_at_market:
+                slot.fallback = "at market: the broker refused it resting"
+            elif result.placed_type is not None:
+                words = result.placed_type.name.replace("_", " ").lower()
+                slot.fallback = f"as a {words}: the broker refused the master's type"
             if result.op is ActionKind.OPEN and result.price and result.point:
                 slot.slippage_points = slippage_in_points(
                     slot.direction, slot.entry, result.price, result.point
@@ -577,6 +588,8 @@ def describe_outcome(kind: ActionKind, outcome: SlaveOutcome) -> str:
             text = _DONE_VERB.get(kind, "done")
             if kind in _LOTS_KINDS and outcome.lots is not None:
                 text += f" {_num(outcome.lots)} lots"
+            if outcome.fallback:
+                text += f" {outcome.fallback}"
         if outcome.latency_ms is not None:
             text += f" in {outcome.latency_ms:,.0f} ms"
         if outcome.attempts > 1:

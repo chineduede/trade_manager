@@ -155,10 +155,28 @@ class OrderType(IntEnum):
         """The position this order becomes if it fills."""
         return PositionType.BUY if self in _BUY_ORDERS else PositionType.SELL
 
+    @property
+    def flipped(self) -> OrderType | None:
+        """The other resting type on the same side: a limit as a stop and back.
+
+        The side of the quote a pending must rest on is the one thing that separates the
+        two -- a buy limit below the ask, a buy stop above it -- so a price the broker
+        refuses for one of them is, whenever the refusal is about which side the quote is
+        on, exactly where the other may rest. None for anything that is not a plain limit
+        or stop, a stop-limit included: its trigger and entry pair has no mirror."""
+        return _FLIPPED.get(self)
+
 
 _BUY_ORDERS = frozenset(
     {OrderType.BUY, OrderType.BUY_LIMIT, OrderType.BUY_STOP, OrderType.BUY_STOP_LIMIT}
 )
+
+_FLIPPED = {
+    OrderType.BUY_LIMIT: OrderType.BUY_STOP,
+    OrderType.BUY_STOP: OrderType.BUY_LIMIT,
+    OrderType.SELL_LIMIT: OrderType.SELL_STOP,
+    OrderType.SELL_STOP: OrderType.SELL_LIMIT,
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +199,11 @@ class PendingOrder:
     time_setup: int = 0
     magic: int = 0
     comment: str = ""
+    expiration_utc: int = 0
+    """When the broker will delete this order if it has not filled, in **real UTC seconds** --
+    the worker converts it from the broker's server clock before it gets here. 0 for an order
+    with no copyable expiry: good-till-cancelled, a day order (whose "day" is the broker's,
+    not a timestamp), or an expiry read before the broker's clock offset was known."""
 
     @property
     def has_stop(self) -> bool:
@@ -334,6 +357,11 @@ class OrderCommand:
     tp: float = 0.0
     """Slave-facing levels: already swapped if this slave reverse-copies."""
 
+    expiration_utc: int = 0
+    """PLACE / MODIFY_ORDER only: the master order's expiry in real UTC seconds, 0 for none.
+    The worker converts it back into *its own* broker's server clock when it sends, because
+    each side's terminal speaks its own server time."""
+
     master_volume: float = 0.0
     sizing_basis: SizingBasis = SizingBasis.RISK_FROM_STOP
     lot_multiple: float | None = None
@@ -346,6 +374,11 @@ class OrderCommand:
     slippage_points: int = 0
     max_lot: float | None = None
     deviation_points: int = 20
+
+    pending_fallback: bool = True
+    """PLACE only: when the broker refuses the pending's price, retry it once as the other
+    resting type (a limit as a stop, a stop as a limit) at the same price, and if that is
+    refused over its price too, execute at market. The slave's ``pending_fallback`` setting."""
 
     close_fraction: float | None = None
     """REDUCE and BOOK only."""
@@ -452,6 +485,17 @@ class OrderResult:
     """On a filled OPEN: the commission charged on the opening deal, as a positive cost in the
     account currency. None when it could not be read or none was charged; the copy then falls
     back to the slave's ``commission_per_lot_round_turn``."""
+
+    placed_type: OrderType | None = None
+    """On a filled PLACE: the resting type actually placed, when the fallback flipped it away
+    from the master's -- a limit placed as a stop or the reverse. None when the copy rests as
+    the master's own type. Belief records this type, because it is what the slave carries."""
+
+    filled_at_market: bool = False
+    """A PLACE that could not rest at all and fell back to market execution. The copy is an
+    open position from the start, never a resting order, and the ledger must remember it as
+    one: its master is still a resting order, so it waits on that order's fate -- closed if
+    the order is cancelled, managed normally once the order fills."""
 
     unsplittable: bool = False
     """A ``BOOK`` that was not sent because the slice, or what it would leave open, is under

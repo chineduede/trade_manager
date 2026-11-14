@@ -42,6 +42,7 @@ import math
 import time
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Protocol
 
@@ -133,6 +134,11 @@ class Action:
     """Pending-order actions only: the resting order kind, already inverted if this slave
     reverse-copies. ``type`` stays the direction the order would become if it filled."""
 
+    expiration_utc: int = 0
+    """PLACE and MODIFY_ORDER: when the master's order expires, in real UTC seconds; 0 for
+    none. Mirrored so the copy dies on the slave's own broker even if the copier is down at
+    that moment, rather than only by the CANCEL the diff derives when the master's goes."""
+
     sizing_basis: SizingBasis = SizingBasis.RISK_FROM_STOP
     """OPEN and PLACE: which calculation Stage 2b must use."""
 
@@ -165,6 +171,9 @@ class Action:
             bits.append(f"sl {self.sl:g}" if self.sl else "sl none")
             if self.tp:
                 bits.append(f"tp {self.tp:g}")
+            if self.expiration_utc:
+                when = datetime.fromtimestamp(self.expiration_utc, tz=UTC)
+                bits.append(f"expires {when:%Y-%m-%d %H:%M} UTC")
             if self.kind is not ActionKind.MODIFY_ORDER:
                 if self.sizing_basis is SizingBasis.MASTER_LOT_MULTIPLE:
                     target = self.master_volume * (self.lot_multiple or 1.0)
@@ -278,6 +287,10 @@ class CopiedOrder:
     entry: float = 0.0
     synced_sl: float = 0.0
     synced_tp: float = 0.0
+    synced_expiration: int = 0
+    """The expiry the copy was placed or last modified with, in real UTC seconds; 0 for
+    none. Compared like the levels: the master changing its order's expiry is as much an
+    order modification as moving its price."""
     slave_ticket: int | None = None
     volume: float | None = None
     point: float = 0.0
@@ -531,6 +544,7 @@ def reconcile_slave(
     excluded: Collection[int] = (),
     gate: GuardGate | None = None,
     master_manages: bool = True,
+    master_order_tickets: Collection[int] = (),
 ) -> list[Action]:
     """Derive the intended actions for one slave. Pure and order-deterministic.
 
@@ -558,6 +572,14 @@ def reconcile_slave(
     for ticket in sorted(copied_by_ticket):
         stale = copied_by_ticket[ticket]
         if ticket in master_by_ticket and not stale.guard_close:
+            continue
+        if ticket in master_order_tickets and not stale.guard_close:
+            # A pending copy that fell back to market execution: the copy is already a
+            # position while its master still *rests*. Nothing is wrong and nothing is
+            # stale -- the master's order either fills, whereupon its position arrives
+            # under this same ticket and the ordinary management above takes over, or is
+            # cancelled, whereupon the ticket leaves this set too and the copy is closed
+            # here on the next tick.
             continue
         out.append(
             Action(
@@ -791,8 +813,11 @@ def reconcile_slave_orders(
         o = resting[ticket]
         slave_symbol = map_symbol(o.symbol, cfg)
         c = copied_by_ticket.get(ticket)
-        # As for a position: a resting copy keeps the reversal it was placed with.
-        inverted = cfg.invert if c is None else c.order_type is not o.type
+        # As for a position: a resting copy keeps the reversal it was placed with. Read off
+        # the *direction* rather than the exact type, because the price fallback may have
+        # placed the copy as the other resting type on the same side -- a buy limit resting
+        # as a buy stop is not a reversal, a sell stop in its place is.
+        inverted = cfg.invert if c is None else c.order_type.direction is not o.type.direction
         slave_sl, slave_tp = swap_levels(o.sl, o.tp, inverted)
         otype = invert_order_type(o.type) if inverted else o.type
 
@@ -823,6 +848,7 @@ def reconcile_slave_orders(
                     entry=o.price_open,
                     sl=slave_sl,
                     tp=slave_tp,
+                    expiration_utc=o.expiration_utc,
                     sizing_basis=sizing.basis,
                     lot_multiple=sizing.lot_multiple,
                     skip_reason=reason,
@@ -837,10 +863,13 @@ def reconcile_slave_orders(
         # A resting order can be moved -- entry price included, which no position can be. Its
         # volume cannot be modified in MT5 at all, so a volume change means a partial fill or a
         # delete-and-replace, neither of which is a modify; it is deliberately not compared.
+        # Expiry is compared like the levels: the master changing when its order dies is an
+        # order modification too.
         moved = not (
             _same(o.price_open, c.entry, _PRICE_EPS)
             and _same(slave_sl, c.synced_sl, _PRICE_EPS)
             and _same(slave_tp, c.synced_tp, _PRICE_EPS)
+            and o.expiration_utc == c.synced_expiration
         )
         if moved:
             out.append(
@@ -856,6 +885,7 @@ def reconcile_slave_orders(
                     entry=o.price_open,
                     sl=slave_sl,
                     tp=slave_tp,
+                    expiration_utc=o.expiration_utc,
                     slave_ticket=c.slave_ticket,
                     skip_reason=None if cfg.copy_pending else SkipReason.PENDING_DISABLED,
                 )
@@ -943,6 +973,7 @@ class BeliefStore(Protocol):
         slave_volume: float | None = None,
         synced_sl: float = 0.0,
         synced_tp: float = 0.0,
+        synced_expiration: int = 0,
         point: float = 0.0,
         digits: int = 0,
         risk_distance: float = 0.0,
@@ -1037,6 +1068,7 @@ class _MemoryBeliefs:
         slave_volume: float | None = None,
         synced_sl: float = 0.0,
         synced_tp: float = 0.0,
+        synced_expiration: int = 0,
         point: float = 0.0,
         digits: int = 0,
         risk_distance: float = 0.0,
@@ -1052,6 +1084,7 @@ class _MemoryBeliefs:
             entry=entry,
             synced_sl=synced_sl,
             synced_tp=synced_tp,
+            synced_expiration=synced_expiration,
             slave_ticket=slave_ticket,
             volume=slave_volume,
             point=point,
@@ -1506,6 +1539,9 @@ class CopyLedger:
                     excluded=excluded,
                     gate=link.gate,
                     master_manages=link.master_manages,
+                    # So a market-fallback copy -- a believed position whose master still
+                    # rests -- is not read as "gone from the master" and closed.
+                    master_order_tickets={o.ticket for o in master_orders if o.type.is_pending},
                 ),
                 fresh,
                 simulate=simulate,
@@ -1687,7 +1723,12 @@ class CopyLedger:
         notices += [
             _preexisting_order_notice(o, cfg)
             for o in sorted(master_orders, key=lambda o: o.ticket)
-            if o.ticket in keep_orders and o.ticket not in already_orders
+            # An order ticket believed as a *position* is a market-fallback copy, not a
+            # preexisting order: it stays excluded from placing (it is copied already) but
+            # must not be announced as never-copied.
+            if o.ticket in keep_orders
+            and o.ticket not in already_orders
+            and o.ticket not in believed_tickets
         ]
         return notices
 
@@ -1800,19 +1841,48 @@ class CopyLedger:
                 commission_per_lot=round_turn_per_lot(result.commission, result.filled_volume),
                 master_managed=last.master_managed,
             )
+        elif result.op is ActionKind.PLACE and result.filled_at_market:
+            # The pending could not rest and was executed at market instead, so what exists
+            # on the slave is a position, and belief follows what the broker did. Keyed by
+            # the master's *order* ticket, which is also the ticket of the position that
+            # order opens if it fills -- the same MT5 behaviour the fill handover relies on
+            # -- so the position diff takes over seamlessly then. Until then the diff holds
+            # the copy open on the master's resting ticket (see ``reconcile_slave``), and
+            # the order ticket is excluded so the order diff does not copy it a second time.
+            self._store.remember_position(
+                terminal_id=last.terminal_id,
+                master_ticket=last.master_ticket,
+                slave_symbol=result.slave_symbol or last.slave_symbol,
+                direction=last.type,
+                master_volume=last.master_volume,
+                slave_ticket=result.slave_ticket,
+                slave_volume=result.filled_volume,
+                synced_sl=last.sl,
+                synced_tp=last.tp,
+                point=result.point or 0.0,
+                digits=result.digits or 0,
+                risk_distance=_risk_distance(result.price, last.sl),
+                price_value=result.price_value or 0.0,
+                commission_per_lot=round_turn_per_lot(result.commission, result.filled_volume),
+                master_managed=last.master_managed,
+            )
+            self._excluded_orders.setdefault(result.terminal_id, set()).add(result.master_ticket)
         elif result.op is ActionKind.PLACE:
             self._store.remember_order(
                 terminal_id=last.terminal_id,
                 master_ticket=last.master_ticket,
                 slave_symbol=result.slave_symbol or last.slave_symbol,
                 direction=last.type,
-                order_type=last.order_type or OrderType.BUY_LIMIT,
+                # The type actually resting: the fallback may have flipped the master's into
+                # the other resting type on the same side, and belief records the slave's own.
+                order_type=result.placed_type or last.order_type or OrderType.BUY_LIMIT,
                 master_volume=last.master_volume,
                 entry=last.entry,
                 slave_ticket=result.slave_ticket,
                 slave_volume=result.filled_volume,
                 synced_sl=last.sl,
                 synced_tp=last.tp,
+                synced_expiration=last.expiration_utc,
                 point=result.point or 0.0,
                 digits=result.digits or 0,
                 # A resting order fills at its own price, give or take a stop order's slippage.
@@ -1848,6 +1918,7 @@ class CopyLedger:
                 return
             changes: dict[str, Any] = {"synced_sl": last.sl, "synced_tp": last.tp}
             if result.op is ActionKind.MODIFY_ORDER:
+                changes["synced_expiration"] = last.expiration_utc
                 if not self._is_order(last.terminal_id, last.master_ticket):
                     # It filled while the modify was in flight, and ``_on_fill`` has already
                     # converted the row, keeping the levels the slave's order really rested

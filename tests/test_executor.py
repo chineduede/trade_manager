@@ -12,7 +12,14 @@ from typing import Any
 
 import pytest
 
-from mt5copier.execution import OrderFilling, Retcode, SymbolFilling
+from mt5copier.execution import (
+    OrderFilling,
+    OrderTime,
+    Retcode,
+    SymbolExpiration,
+    SymbolFilling,
+    TradeAction,
+)
 from mt5copier.executor import UNREADABLE, Executor, ReadFailure
 from mt5copier.protocol import ActionKind, OrderCommand, OrderType, PositionType, SizingBasis
 from mt5copier.sizing import SymbolFacts
@@ -48,12 +55,17 @@ class FakeSession:
     resting_orders: set[int] = field(default_factory=set)
     position_unreadable: bool = False
     """The terminal refusing the read, which is not the same as the position being gone."""
+    server_offset: int | None = 0
+    """The broker's clock offset; None while the worker has not worked it out yet."""
     commissions: dict[int, float] = field(default_factory=dict)
     """Each deal's ``commission`` as MT5 records it, negative for a charge."""
     deals_read: list[int] = field(default_factory=list)
 
     def account_trade_mode(self) -> int | None:
         return self.trade_mode
+
+    def server_offset_s(self) -> int | None:
+        return self.server_offset
 
     def symbol_names(self) -> list[str]:
         return list(self.symbols)
@@ -589,6 +601,181 @@ def test_a_pending_order_is_placed_at_its_own_price_not_the_market() -> None:
     assert request["type_filling"] == int(OrderFilling.RETURN)
 
 
+def test_an_open_never_carries_an_expiry_even_if_the_command_has_one() -> None:
+    """A market order has no lifetime to mirror; the field would be noise at best."""
+    session = FakeSession(server_offset=7_200)
+    run(session, cmd(expiration_utc=1_780_000_000))
+    request = session.sent[0]
+    assert request["type_time"] == int(OrderTime.GTC)
+    assert "expiration" not in request
+
+
+# --- mirroring an order's expiry --------------------------------------------------------------
+
+
+EXPIRY_UTC = 1_780_000_000
+"""An arbitrary expiry on the UTC line, as the engine sends it."""
+
+
+def timed_session(**kw: Any) -> FakeSession:
+    """A broker two hours ahead of UTC that permits timed pendings on the symbol."""
+    base: dict[str, Any] = {
+        "server_offset": 7_200,
+        "facts": SymbolFacts(
+            name="EURUSD",
+            volume_min=0.01,
+            volume_max=100.0,
+            volume_step=0.01,
+            point=0.00001,
+            filling_mask=int(SymbolFilling.FOK | SymbolFilling.IOC),
+            expiration_mask=int(SymbolExpiration.GTC | SymbolExpiration.SPECIFIED),
+        ),
+    }
+    base.update(kw)
+    return FakeSession(**base)
+
+
+def test_a_pending_carries_the_masters_expiry_in_the_slaves_server_clock() -> None:
+    """The command's expiry is real UTC; the broker takes its own clock, two hours ahead."""
+    session = timed_session()
+    result = run(
+        session,
+        cmd(
+            op=ActionKind.PLACE,
+            order_type=OrderType.BUY_LIMIT,
+            entry=1.07,
+            expiration_utc=EXPIRY_UTC,
+        ),
+    )
+    assert result.ok
+    request = session.sent[0]
+    assert request["type_time"] == int(OrderTime.SPECIFIED)
+    assert request["expiration"] == EXPIRY_UTC + 7_200
+
+
+def test_a_pending_with_no_expiry_rests_gtc() -> None:
+    session = timed_session()
+    run(session, cmd(op=ActionKind.PLACE, order_type=OrderType.BUY_LIMIT, entry=1.07))
+    request = session.sent[0]
+    assert request["type_time"] == int(OrderTime.GTC)
+    assert "expiration" not in request
+
+
+def test_a_symbol_that_forbids_timed_orders_falls_back_to_gtc() -> None:
+    """The mask said no; the master's own expiry still cancels the copy via the diff."""
+    session = timed_session()
+    session.facts = SymbolFacts(
+        name="EURUSD",
+        volume_min=0.01,
+        volume_max=100.0,
+        volume_step=0.01,
+        point=0.00001,
+        filling_mask=int(SymbolFilling.FOK | SymbolFilling.IOC),
+        expiration_mask=int(SymbolExpiration.GTC | SymbolExpiration.DAY),
+    )
+    result = run(
+        session,
+        cmd(
+            op=ActionKind.PLACE,
+            order_type=OrderType.BUY_LIMIT,
+            entry=1.07,
+            expiration_utc=EXPIRY_UTC,
+        ),
+    )
+    assert result.ok
+    assert session.sent[0]["type_time"] == int(OrderTime.GTC)
+    assert "expiration" not in session.sent[0]
+
+
+def test_a_mask_of_zero_is_unknown_and_the_expiry_is_still_attempted() -> None:
+    """Like a zero filling mask: the terminal said nothing, and a wrong guess is recoverable
+    because INVALID_EXPIRATION is retried without the expiry."""
+    session = FakeSession(server_offset=7_200)  # default facts report expiration_mask 0
+    run(
+        session,
+        cmd(
+            op=ActionKind.PLACE,
+            order_type=OrderType.BUY_LIMIT,
+            entry=1.07,
+            expiration_utc=EXPIRY_UTC,
+        ),
+    )
+    assert session.sent[0]["type_time"] == int(OrderTime.SPECIFIED)
+
+
+def test_an_unknown_clock_offset_rests_gtc_rather_than_guessing() -> None:
+    """Hours wrong is worse than none: the tick that finds the offset modifies it on."""
+    session = timed_session(server_offset=None)
+    result = run(
+        session,
+        cmd(
+            op=ActionKind.PLACE,
+            order_type=OrderType.BUY_LIMIT,
+            entry=1.07,
+            expiration_utc=EXPIRY_UTC,
+        ),
+    )
+    assert result.ok
+    assert session.sent[0]["type_time"] == int(OrderTime.GTC)
+    assert "expiration" not in session.sent[0]
+
+
+def test_an_expiry_the_broker_refuses_is_retried_without_one() -> None:
+    """INVALID_EXPIRATION must not cost the trade: GTC is what every copy was before."""
+    session = timed_session()
+    session.results = [FakeResult(retcode=int(Retcode.INVALID_EXPIRATION)), FakeResult()]
+    result = run(
+        session,
+        cmd(
+            op=ActionKind.PLACE,
+            order_type=OrderType.BUY_LIMIT,
+            entry=1.07,
+            expiration_utc=EXPIRY_UTC,
+        ),
+    )
+    assert result.ok
+    assert session.sent[0]["expiration"] == EXPIRY_UTC + 7_200
+    assert session.sent[1]["type_time"] == int(OrderTime.GTC)
+    assert session.sent[1]["expiration"] == 0
+
+
+def test_moving_an_order_restates_the_masters_expiry() -> None:
+    session = timed_session(resting_orders={88})
+    result = run(
+        session,
+        cmd(
+            op=ActionKind.MODIFY_ORDER,
+            order_type=OrderType.BUY_LIMIT,
+            slave_ticket=88,
+            entry=1.07,
+            expiration_utc=EXPIRY_UTC,
+        ),
+    )
+    assert result.ok
+    request = session.sent[0]
+    assert request["type_time"] == int(OrderTime.SPECIFIED)
+    assert request["expiration"] == EXPIRY_UTC + 7_200
+
+
+def test_a_move_whose_expiry_is_refused_still_moves_the_order() -> None:
+    session = timed_session(resting_orders={88})
+    session.results = [FakeResult(retcode=int(Retcode.INVALID_EXPIRATION)), FakeResult()]
+    result = run(
+        session,
+        cmd(
+            op=ActionKind.MODIFY_ORDER,
+            order_type=OrderType.BUY_LIMIT,
+            slave_ticket=88,
+            entry=1.07,
+            expiration_utc=EXPIRY_UTC,
+        ),
+    )
+    assert result.ok
+    assert session.sent[1]["type_time"] == int(OrderTime.GTC)
+    assert session.sent[1]["expiration"] == 0
+    assert session.sent[1]["price"] == pytest.approx(1.07)
+
+
 def test_an_open_reports_its_opening_deals_commission_as_a_cost() -> None:
     session = FakeSession(commissions={777_001: -3.5})
     result = run(session)
@@ -619,6 +806,104 @@ def test_a_resting_order_reads_no_commission_it_has_not_been_charged() -> None:
     assert result.ok
     assert result.commission is None
     assert session.deals_read == []
+
+
+# --- the pending price fallback ---------------------------------------------------------------
+
+
+def place_cmd(**kw: object) -> OrderCommand:
+    base: dict[str, Any] = {
+        "op": ActionKind.PLACE,
+        "order_type": OrderType.BUY_LIMIT,
+        "entry": 1.07000,
+        "sl": 1.06500,
+    }
+    base.update(kw)
+    return cmd(**base)
+
+
+def test_a_limit_refused_over_its_price_is_retried_as_a_stop_at_the_same_price() -> None:
+    session = FakeSession()
+    session.results = [FakeResult(retcode=int(Retcode.INVALID_PRICE)), FakeResult()]
+    result = run(session, place_cmd())
+    assert result.ok
+    assert [r["type"] for r in session.sent] == [int(OrderType.BUY_LIMIT), int(OrderType.BUY_STOP)]
+    assert session.sent[1]["action"] == 5, "still resting, not a market order"
+    assert session.sent[1]["price"] == pytest.approx(1.07000), "the master's own price"
+    assert result.placed_type is OrderType.BUY_STOP, "belief must record what actually rests"
+    assert not result.filled_at_market
+
+
+def test_a_sell_stop_refused_over_its_price_is_retried_as_a_sell_limit() -> None:
+    session = FakeSession()
+    session.results = [FakeResult(retcode=int(Retcode.PRICE_OFF)), FakeResult()]
+    result = run(
+        session,
+        place_cmd(
+            direction=PositionType.SELL, order_type=OrderType.SELL_STOP, entry=1.07, sl=1.075
+        ),
+    )
+    assert result.ok
+    assert session.sent[1]["type"] == int(OrderType.SELL_LIMIT)
+    assert result.placed_type is OrderType.SELL_LIMIT
+
+
+def test_when_neither_resting_type_is_taken_the_copy_executes_at_market() -> None:
+    session = FakeSession(commissions={777_001: -3.5})
+    session.results = [
+        FakeResult(retcode=int(Retcode.INVALID_PRICE)),
+        FakeResult(retcode=int(Retcode.INVALID_PRICE)),
+        FakeResult(),
+    ]
+    result = run(session, place_cmd())
+    assert result.ok
+    assert result.filled_at_market
+    market = session.sent[2]
+    assert market["action"] == int(TradeAction.DEAL)
+    assert market["type"] == 0, "a plain market buy"
+    assert market["price"] == pytest.approx(1.08510), "the ask, not the pending's price"
+    assert result.commission == pytest.approx(3.5), "a market fill pays its deal like an OPEN"
+    assert result.price == pytest.approx(1.08510)
+
+
+def test_the_fallback_is_off_when_the_setting_is() -> None:
+    session = FakeSession()
+    session.results = [FakeResult(retcode=int(Retcode.INVALID_PRICE))]
+    result = run(session, place_cmd(pending_fallback=False))
+    assert not result.ok
+    assert len(session.sent) == 1
+    assert "INVALID_PRICE" in (result.error or "")
+
+
+def test_a_refusal_that_is_not_about_the_price_is_not_rescued() -> None:
+    """NO_MONEY, bad volume and the rest would refuse the flip and the market order the same
+    way; retrying them is hammering the server with a request that cannot work."""
+    session = FakeSession()
+    session.results = [FakeResult(retcode=int(Retcode.NO_MONEY))]
+    result = run(session, place_cmd())
+    assert not result.ok
+    assert len(session.sent) == 1
+
+
+def test_a_flip_refused_for_another_reason_goes_no_further() -> None:
+    session = FakeSession()
+    session.results = [
+        FakeResult(retcode=int(Retcode.INVALID_PRICE)),
+        FakeResult(retcode=int(Retcode.NO_MONEY)),
+    ]
+    result = run(session, place_cmd())
+    assert not result.ok
+    assert len(session.sent) == 2, "no market order for an account that cannot pay"
+
+
+def test_a_close_whose_ticket_still_rests_cancels_the_order_instead() -> None:
+    """A flipped pending copy can still be resting when its master's order fills; the master's
+    exit then arrives as a CLOSE naming a ticket that is an order. Being flat is what was
+    asked for, so the order is cancelled rather than declared already closed and orphaned."""
+    session = FakeSession(resting_orders={88})
+    result = run(session, cmd(op=ActionKind.CLOSE, slave_ticket=88))
+    assert result.ok
+    assert session.sent == [{"action": int(TradeAction.REMOVE), "order": 88}]
 
 
 def test_a_market_order_uses_a_filling_mode_the_symbol_permits() -> None:

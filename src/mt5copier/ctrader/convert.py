@@ -316,6 +316,12 @@ def pending_order(raw: object, symbol: SymbolInfo) -> PendingOrder | None:
         time_setup=int(data.openTimestamp) // 1000,
         magic=COPIER_MAGIC if data.label == COPIER_LABEL else 0,
         comment=str(data.comment),
+        # Already real UTC -- cTrader's one advantage here: no broker clock to subtract.
+        expiration_utc=(
+            int(getattr(raw, "expirationTimestamp", 0) or 0) // 1000
+            if int(getattr(raw, "timeInForce", 0) or 0) == int(om.GOOD_TILL_DATE)
+            else 0
+        ),
     )
 
 

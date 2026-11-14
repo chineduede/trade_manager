@@ -1265,6 +1265,92 @@ async def test_a_sell_stop_rests_at_its_stop_price() -> None:
     assert order.stopPrice == 1.09 and not order.HasField("limitPrice")
 
 
+async def test_a_place_mirrors_the_masters_expiry_as_good_till_date() -> None:
+    api = FakeOpenApi()
+    place = _command(
+        ActionKind.PLACE,
+        order_type=OrderType.BUY_LIMIT,
+        entry=1.0900,
+        sl=1.0880,
+        risk_amount=100.0,
+        expiration_utc=1_780_000_000,
+    )
+    (result,) = await _results(api, place)
+    assert result.ok, result.error
+    (order,) = _sent(api, oa.ProtoOANewOrderReq)
+    assert order.timeInForce == om.GOOD_TILL_DATE
+    assert order.expirationTimestamp == 1_780_000_000_000, "cTrader takes UTC milliseconds"
+
+
+async def test_a_place_with_no_expiry_stays_good_till_cancelled() -> None:
+    api = FakeOpenApi()
+    place = _command(
+        ActionKind.PLACE,
+        order_type=OrderType.BUY_LIMIT,
+        entry=1.0900,
+        sl=1.0880,
+        risk_amount=100.0,
+    )
+    (result,) = await _results(api, place)
+    assert result.ok, result.error
+    (order,) = _sent(api, oa.ProtoOANewOrderReq)
+    assert not order.HasField("expirationTimestamp")
+
+
+def _resting_gtd_order(api: FakeOpenApi) -> None:
+    """The same resting copy, carrying an expiry."""
+    _resting_order(api)
+    api.orders[99].timeInForce = om.GOOD_TILL_DATE
+    api.orders[99].expirationTimestamp = 1_780_000_000_000
+
+
+async def test_a_masters_expiry_change_alone_moves_the_resting_copy() -> None:
+    api = FakeOpenApi()
+    _resting_gtd_order(api)
+    move = _command(
+        ActionKind.MODIFY_ORDER,
+        order_type=OrderType.BUY_LIMIT,
+        slave_ticket=99,
+        entry=1.09,
+        sl=1.085,
+        tp=1.1,
+        expiration_utc=1_790_000_000,
+    )
+    (result,) = await _results(api, move)
+    assert result.ok, result.error
+    (amend,) = _sent(api, oa.ProtoOAAmendOrderReq)
+    assert amend.expirationTimestamp == 1_790_000_000_000
+
+
+async def test_an_expiry_ctrader_cannot_grant_still_counts_as_matched() -> None:
+    """The amend message carries no time-in-force, so a GTC copy cannot become GTD; saying
+    so and settling beats asking the server for the impossible on every tick."""
+    api = FakeOpenApi()
+    _resting_order(api)  # rests GTC
+    move = _command(
+        ActionKind.MODIFY_ORDER,
+        order_type=OrderType.BUY_LIMIT,
+        slave_ticket=99,
+        entry=1.09,
+        sl=1.085,
+        tp=1.1,
+        expiration_utc=1_790_000_000,
+    )
+    (result,) = await _results(api, move)
+    assert result.ok, result.error
+    assert not _sent(api, oa.ProtoOAAmendOrderReq)
+
+
+def test_a_resting_gtd_order_reports_its_expiry_in_utc_seconds() -> None:
+    api = FakeOpenApi()
+    _resting_gtd_order(api)
+    order = cv.pending_order(api.orders[99], EURUSD)
+    assert order is not None and order.expiration_utc == 1_780_000_000
+    api.orders[99].timeInForce = om.GOOD_TILL_CANCEL
+    gtc = cv.pending_order(api.orders[99], EURUSD)
+    assert gtc is not None and gtc.expiration_utc == 0
+
+
 async def test_a_resting_copy_is_moved_by_its_order_id() -> None:
     api = FakeOpenApi()
     _resting_order(api)

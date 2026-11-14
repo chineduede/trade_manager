@@ -492,6 +492,7 @@ def order(
     price_open: float = 1.08000,
     sl: float = 1.07500,
     tp: float = 0.0,
+    expiration_utc: int = 0,
 ) -> PendingOrder:
     return PendingOrder(
         ticket=ticket,
@@ -502,6 +503,7 @@ def order(
         sl=sl,
         tp=tp,
         time_setup=1_700_000_000,
+        expiration_utc=expiration_utc,
     )
 
 
@@ -512,6 +514,7 @@ def copied_order(
     entry: float = 1.08000,
     sl: float = 1.07500,
     tp: float = 0.0,
+    expiration: int = 0,
 ) -> CopiedOrder:
     return CopiedOrder(
         terminal_id=TID_SLAVE,
@@ -522,6 +525,7 @@ def copied_order(
         entry=entry,
         synced_sl=sl,
         synced_tp=tp,
+        synced_expiration=expiration,
     )
 
 
@@ -562,6 +566,46 @@ def test_moving_a_resting_orders_entry_is_a_modify() -> None:
 
 def test_an_unchanged_resting_order_produces_nothing() -> None:
     assert reconcile_slave_orders([order()], [], [copied_order()], slave(copy_pending=True)) == []
+
+
+def test_a_masters_expiry_is_carried_on_the_place() -> None:
+    action = reconcile_slave_orders(
+        [order(expiration_utc=1_780_000_000)], [], [], slave(copy_pending=True)
+    )[0]
+    assert action.kind is ActionKind.PLACE
+    assert action.expiration_utc == 1_780_000_000
+
+
+def test_changing_only_the_expiry_is_an_order_modify() -> None:
+    """The master changing when its order dies is as much a modification as moving it."""
+    actions = reconcile_slave_orders(
+        [order(expiration_utc=1_780_000_000)],
+        [],
+        [copied_order()],
+        slave(copy_pending=True),
+    )
+    assert [a.kind for a in actions] == [ActionKind.MODIFY_ORDER]
+    assert actions[0].expiration_utc == 1_780_000_000
+
+
+def test_a_cleared_expiry_is_mirrored_back_to_gtc() -> None:
+    actions = reconcile_slave_orders(
+        [order()], [], [copied_order(expiration=1_780_000_000)], slave(copy_pending=True)
+    )
+    assert [a.kind for a in actions] == [ActionKind.MODIFY_ORDER]
+    assert actions[0].expiration_utc == 0
+
+
+def test_an_unchanged_expiry_produces_nothing() -> None:
+    assert (
+        reconcile_slave_orders(
+            [order(expiration_utc=1_780_000_000)],
+            [],
+            [copied_order(expiration=1_780_000_000)],
+            slave(copy_pending=True),
+        )
+        == []
+    )
 
 
 def test_an_orders_volume_change_is_not_a_modify() -> None:
@@ -941,6 +985,39 @@ def test_moving_an_order_then_leaving_it_alone_settles() -> None:
     )
 
 
+def test_a_placed_expiry_becomes_belief_and_then_settles(tmp_path: Path) -> None:
+    """The copy's expiry is remembered through the SQLite store like its levels, so neither
+    the next tick nor a restart re-derives the same modification."""
+    clock = Clock()
+    path = tmp_path / "beliefs.db"
+    resting = [order(ticket=50, expiration_utc=1_780_000_000)]
+    with MappingStore(path) as store:
+        ledger = CopyLedger(store)
+        watching(ledger, clock, [pending_link()])
+        placed = ledger.step([], [pending_link()], master_orders=resting, now=clock.advance(1.0))
+        assert [a.kind for a in placed] == [ActionKind.PLACE]
+        assert ledger.believed_orders()[0].synced_expiration == 1_780_000_000
+        assert (
+            ledger.step([], [pending_link()], master_orders=resting, now=clock.advance(1.0)) == []
+        )
+
+    with MappingStore(path) as store:
+        revived = CopyLedger(store)
+        assert (
+            revived.step([], [pending_link()], master_orders=resting, now=clock.advance(1.0))
+            == []
+        )
+        # The master pushing its expiry out is noticed from the revived belief too.
+        moved = revived.step(
+            [],
+            [pending_link()],
+            master_orders=[order(ticket=50, expiration_utc=1_790_000_000)],
+            now=clock.advance(1.0),
+        )
+        assert [a.kind for a in moved] == [ActionKind.MODIFY_ORDER]
+        assert revived.believed_orders()[0].synced_expiration == 1_790_000_000
+
+
 def test_order_state_survives_a_restart(tmp_path: Path) -> None:
     clock = Clock()
     path = tmp_path / "beliefs.db"
@@ -1052,6 +1129,111 @@ def test_a_failed_open_is_final_and_not_retried() -> None:
     assert ledger.step([pos(ticket=5)], [link()], now=clock.advance(1.0), simulate=False) == []
     later = ledger.step([pos(ticket=5, sl=1.09)], [link()], now=clock.advance(1.0), simulate=False)
     assert later == [], "not even when the master moves its stop"
+
+
+# --- the pending price fallback, through the ledger -------------------------------------------
+
+
+def test_a_place_that_fell_back_to_market_is_believed_as_a_position() -> None:
+    """The broker holds a position, so belief does too -- and the copy then waits on the
+    master's resting order: held open while it rests, closed when it is cancelled, and never
+    placed a second time by the order diff."""
+    clock = Clock()
+    ledger = CopyLedger()
+    watching(ledger, clock, [pending_link()])
+    resting = [order(ticket=50)]
+    actions = ledger.step(
+        [], [pending_link()], master_orders=resting, now=clock.advance(1.0), simulate=False
+    )
+    assert [a.kind for a in actions] == [ActionKind.PLACE]
+
+    ledger.apply_result(replace(result(actions[0]), filled_at_market=True, price=1.0845))
+    assert ledger.believed_orders() == []
+    assert [c.master_ticket for c in ledger.believed()] == [50]
+
+    # While the master's order rests: not gone, not placed again, nothing to do.
+    assert ledger.step([], [pending_link()], master_orders=resting, now=clock.advance(1.0)) == []
+
+    # The master cancels: the copy is a position, so it is closed, not cancelled.
+    gone = ledger.step([], [pending_link()], master_orders=[], now=clock.advance(1.0))
+    assert [a.kind for a in gone] == [ActionKind.CLOSE]
+
+
+def test_a_market_fallback_copy_is_managed_once_the_masters_order_fills() -> None:
+    """The master's order fills under its own ticket -- the same handover the order diff
+    relies on -- so the position diff finds the copy already tracked and simply manages it."""
+    clock = Clock()
+    ledger = CopyLedger()
+    watching(ledger, clock, [pending_link()])
+    actions = ledger.step(
+        [],
+        [pending_link()],
+        master_orders=[order(ticket=50, sl=1.07500)],
+        now=clock.advance(1.0),
+        simulate=False,
+    )
+    ledger.apply_result(replace(result(actions[0]), filled_at_market=True))
+
+    landed = pos(ticket=50, sl=1.08000)
+    filled = ledger.step([landed], [pending_link()], master_orders=[], now=clock.advance(1.0))
+    assert ActionKind.OPEN not in [a.kind for a in filled], "never copied twice"
+    assert ActionKind.CLOSE not in [a.kind for a in filled]
+    sync = [a for a in filled if a.kind is ActionKind.MODIFY_SLTP]
+    assert len(sync) == 1, "the master's levels reach the copy"
+    assert sync[0].sl == pytest.approx(1.08000)
+
+
+def test_a_flipped_copy_keeps_its_own_resting_type_without_reading_as_reversed() -> None:
+    """Belief records the type the slave actually rests on. The order diff reads reversal off
+    the *direction*, so a buy limit resting as a buy stop stays a plain copy: the master
+    moving its order derives a MODIFY_ORDER with unswapped levels."""
+    clock = Clock()
+    ledger = CopyLedger()
+    watching(ledger, clock, [pending_link()])
+    actions = ledger.step(
+        [],
+        [pending_link()],
+        master_orders=[order(ticket=50, price_open=1.08, sl=1.075, tp=1.09)],
+        now=clock.advance(1.0),
+        simulate=False,
+    )
+    ledger.apply_result(replace(result(actions[0]), placed_type=OrderType.BUY_STOP))
+    assert ledger.believed_orders()[0].order_type is OrderType.BUY_STOP
+
+    moved = ledger.step(
+        [],
+        [pending_link()],
+        master_orders=[order(ticket=50, price_open=1.079, sl=1.075, tp=1.09)],
+        now=clock.advance(1.0),
+    )
+    assert [a.kind for a in moved] == [ActionKind.MODIFY_ORDER]
+    assert moved[0].sl == pytest.approx(1.075), "same direction is not a reversal: not swapped"
+    assert moved[0].tp == pytest.approx(1.09)
+
+
+def test_a_market_fallback_copy_survives_a_restart_without_being_replaced(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    path = tmp_path / "beliefs.db"
+    with MappingStore(path) as store:
+        ledger = CopyLedger(store)
+        watching(ledger, clock, [pending_link()])
+        actions = ledger.step(
+            [], [pending_link()], master_orders=[order(ticket=50)], now=clock.advance(1.0),
+            simulate=False,
+        )
+        ledger.apply_result(replace(result(actions[0]), filled_at_market=True))
+
+    with MappingStore(path) as store:
+        revived = CopyLedger(store)
+        # The lapse re-baselines: the master's order must come back excluded from placing --
+        # it is copied already, as a position -- and not announced as preexisting either.
+        actions = revived.step(
+            [], [pending_link()], master_orders=[order(ticket=50)], now=clock.advance(100.0)
+        )
+        assert actions == []
+        assert [c.master_ticket for c in revived.believed()] == [50]
 
 
 def test_a_close_is_believed_gone_only_once_confirmed() -> None:

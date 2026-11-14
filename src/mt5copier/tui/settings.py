@@ -511,7 +511,16 @@ class SettingsForm(ModalScreen[bool]):
                         compact=True,
                     ),
                 ),
-                *self._errors("master_manages", "copy_pending"),
+                rows(
+                    lead("If a pending's price is refused,"),
+                    Tick(
+                        "retry as the other resting type, then at market",
+                        value=bool(v["pending_fallback"]),
+                        id=f"{_F}pending_fallback",
+                        compact=True,
+                    ),
+                ),
+                *self._errors("master_manages", "copy_pending", "pending_fallback"),
             )
             yield section(
                 "direction",
