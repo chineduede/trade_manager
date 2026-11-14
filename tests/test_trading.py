@@ -470,3 +470,34 @@ async def test_the_chart_says_why_there_are_no_bars(app: CopierApp) -> None:
         screen.refresh_page()
         said = plain(screen.query_one("#dt-chart", Static).content)
         assert "no feed" in said, "no feed terminal: the chart says so, not a blank"
+
+
+async def test_the_stop_line_drags_into_the_ticket(app: CopierApp) -> None:
+    engine = app._engine
+    engine.feed_tid = TID_SLAVE  # type: ignore[attr-defined]
+    engine.quotes["EURUSD"] = Quote("EURUSD", 1.0850, 1.0852)  # type: ignore[attr-defined]
+    engine.rates = RatesResult(  # type: ignore[attr-defined]
+        terminal_id=TID_SLAVE,
+        symbol="EURUSD",
+        timeframe=5,
+        candles=tuple(Candle(ts=i, open=1.08, high=1.09, low=1.07, close=1.085) for i in range(3)),
+    )
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_ticket(app, pilot)
+        screen.query_one("#dt-symbol", Input).value = "eurusd"
+        screen.query_one("#dt-sl", Input).value = "1.075"
+        await pilot.pause()
+        screen.refresh_page()
+        scale = screen._chart_scale
+        assert scale is not None, "a drawn chart arms the mouse"
+        assert screen.chart_grab(scale.row(1.075)) == "sl", "a press on the line takes hold"
+        screen.chart_drag(0)
+        moved = screen.query_one("#dt-sl", Input).value
+        assert moved == scale.fmt(scale.price(0)), "the ticket's field follows the drag"
+        screen.chart_release()
+        assert not screen.chart_dragging
+        said = plain(screen.query_one("#dt-status", Static).content)
+        assert f"stop dragged to {moved}" in said
+        # With the stop now at the top and no target typed, a press low on the chart
+        # takes hold of nothing.
+        assert screen.chart_grab(13) is None

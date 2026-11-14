@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from rich.text import Text
-from textual import on
+from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
@@ -27,7 +27,7 @@ from textual.screen import Screen
 from textual.widgets import Button, DataTable, Input, Static
 
 from ..protocol import CHART_TIMEFRAMES, OrderType, PendingOrder, Position, PositionType, Quote
-from .minichart import chart, next_timeframe, timeframe_name
+from .minichart import Scale, chart, next_timeframe, scale_of, timeframe_name, window
 from .settings import Choice
 from .style import BLUE, FG, GREEN, MUTED, RED, YELLOW, key_hint, left_right, spaced
 from .widgets import KeyBar, QuickInput, TopBar
@@ -46,6 +46,9 @@ _ORDER_TYPES: dict[tuple[str, str], OrderType] = {
 }
 
 _NUMERIC = r"[0-9., ]*"
+
+_CHART_HEIGHT = 14
+"""Rows the minichart draws in: one place, because the mouse maps rows back to prices."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +207,33 @@ def row_for_order(o: PendingOrder, now: float) -> tuple[Text, ...]:
     )
 
 
+class ChartView(Static):
+    """The chart, with the ticket's lines draggable by mouse.
+
+    Only the mouse work lives here -- press, drag, let go, translated to rows. What a row
+    means is the screen's (:meth:`TradingScreen.chart_grab` and friends), because only the
+    screen holds the scale the picture was drawn with."""
+
+    def on_mouse_down(self, event: events.MouseDown) -> None:
+        screen = self.screen
+        if isinstance(screen, TradingScreen) and screen.chart_grab(int(event.y)) is not None:
+            self.capture_mouse()
+            event.stop()
+
+    def on_mouse_move(self, event: events.MouseMove) -> None:
+        screen = self.screen
+        if isinstance(screen, TradingScreen) and screen.chart_dragging:
+            screen.chart_drag(int(event.y))
+            event.stop()
+
+    def on_mouse_up(self, event: events.MouseUp) -> None:
+        screen = self.screen
+        if isinstance(screen, TradingScreen) and screen.chart_dragging:
+            self.release_mouse()
+            screen.chart_release()
+            event.stop()
+
+
 class TradingScreen(Screen[None]):
     """The order ticket and the virtual master's book. Esc goes back to the Map."""
 
@@ -227,6 +257,11 @@ class TradingScreen(Screen[None]):
         self._watched = ""
         self._timeframe = CHART_TIMEFRAMES[1][1]
         """The minichart's timeframe, M5 to begin with; t cycles it."""
+        self._chart_scale: Scale | None = None
+        """The scale the chart was last drawn with, so the mouse can map rows to prices.
+        None whenever no candles are drawn, which is also what disarms dragging."""
+        self._dragging: str | None = None
+        """The line being dragged: ``"sl"``, ``"tp"``, or None."""
 
     @property
     def copier(self) -> CopierApp:
@@ -272,7 +307,7 @@ class TradingScreen(Screen[None]):
             yield Static("", id="dt-quote")
             yield Static("", id="dt-status")
             yield Static("", id="dt-chart-head", classes="heading")
-            yield Static("", id="dt-chart")
+            yield ChartView("", id="dt-chart")
             yield Static("", id="dt-book-head", classes="heading")
             yield DataTable(id="dt-book", cursor_type="row")
             with Horizontal(id="dt-ask"):
@@ -371,10 +406,11 @@ class TradingScreen(Screen[None]):
         self.query_one("#dt-chart-head", Static).update(
             left_right(
                 Text(f"CHART  {symbol or '—'} · {name}", style="bold"),
-                Text("t changes the timeframe", style=MUTED),
+                Text("t changes the timeframe · drag the stop or target line", style=MUTED),
             )
         )
         target = self.query_one("#dt-chart", Static)
+        self._chart_scale = None
         if not symbol:
             target.update(Text("type a symbol to chart it", style=MUTED))
             return
@@ -388,13 +424,15 @@ class TradingScreen(Screen[None]):
                 said, tone = f"waiting for {feed} to send bars…", YELLOW
             target.update(Text(said, style=tone))
             return
-        width = target.content_size.width or self.size.width - 4
+        width = max(30, target.content_size.width or self.size.width - 4)
+        bid = quote.bid if quote is not None else None
+        self._chart_scale = scale_of(window(rates.candles, bid, width), _CHART_HEIGHT)
         target.update(
             chart(
                 rates.candles,
-                width=max(30, width),
-                height=14,
-                bid=quote.bid if quote is not None else None,
+                width=width,
+                height=_CHART_HEIGHT,
+                bid=bid,
                 sl=self._level("#dt-sl"),
                 tp=self._level("#dt-tp"),
             )
@@ -410,6 +448,43 @@ class TradingScreen(Screen[None]):
     def action_timeframe(self) -> None:
         self._timeframe = next_timeframe(self._timeframe)
         self.refresh_page()
+
+    # --- dragging the chart's lines -----------------------------------------------------------
+
+    @property
+    def chart_dragging(self) -> bool:
+        return self._dragging is not None
+
+    def chart_grab(self, row: int) -> str | None:
+        """Take hold of the line nearest a mouse press, if one is within reach."""
+        scale = self._chart_scale
+        if scale is None:
+            return None
+        lines = [
+            (abs(row - scale.row(price)), what)
+            for what, price in (("sl", self._level("#dt-sl")), ("tp", self._level("#dt-tp")))
+            if scale.grabbed(row, price)
+        ]
+        if not lines:
+            return None
+        self._dragging = min(lines)[1]
+        return self._dragging
+
+    def chart_drag(self, row: int) -> None:
+        """The held line follows the mouse: the ticket's field is what actually moves."""
+        scale = self._chart_scale
+        if self._dragging is None or scale is None:
+            return
+        self.query_one(f"#dt-{self._dragging}", Input).value = scale.fmt(scale.price(row))
+        self.refresh_page()
+
+    def chart_release(self) -> None:
+        if self._dragging is None:
+            return
+        name = "stop" if self._dragging == "sl" else "target"
+        value = self.query_one(f"#dt-{self._dragging}", Input).value
+        self._dragging = None
+        self._status(f"{name} dragged to {value}")
 
     def _refresh_keys(self) -> None:
         keys = [key_hint("esc", "back"), key_hint("enter", "place"), key_hint("t", "timeframe")]

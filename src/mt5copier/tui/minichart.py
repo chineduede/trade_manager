@@ -19,6 +19,7 @@ drawn (the range belongs to the price action); its number is still on the ticket
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 from rich.text import Text
 
@@ -92,6 +93,65 @@ def _decimals(span: float, hi: float) -> int:
     return 5 if span < 0.2 else 4
 
 
+def window(candles: Sequence[Candle], bid: float | None, width: int) -> list[Candle]:
+    """The candles a chart of ``width`` shows: the newest that fit, the last one live."""
+    columns = width - _AXIS
+    if columns < 10:
+        return []
+    return live_last(candles, bid)[-max(1, (columns + 1) // 2) :]
+
+
+@dataclass(frozen=True, slots=True)
+class Scale:
+    """How a drawn chart maps prices to rows and back.
+
+    What makes a line draggable: the mouse hands the page a row, and only the scale the
+    chart was *drawn with* can say which price line sits there and what price a row the
+    line is dragged to means. Built by :func:`scale_of` from the same window the picture
+    was built from, so the two can never disagree.
+    """
+
+    hi: float
+    """The price at the top edge, padding included."""
+    lo: float
+    """The price at the bottom edge, padding included."""
+    height: int
+
+    def half(self, price: float) -> int:
+        """The half-cell a price lands in: the drawing's own vertical unit."""
+        return round((self.hi - price) / (self.hi - self.lo) * (self.height * 2 - 1))
+
+    def row(self, price: float) -> int:
+        return self.half(price) // 2
+
+    def price(self, row: int) -> float:
+        """The price at a row's centre, clamped to the drawing: what a drag there means."""
+        row = max(0, min(self.height - 1, row))
+        return self.hi - (row + 0.5) / self.height * (self.hi - self.lo)
+
+    def fmt(self, price: float) -> str:
+        """A price written as the axis writes it."""
+        return f"{price:.{_decimals(self.hi - self.lo, self.hi)}f}"
+
+    def grabbed(self, row: int, price: float) -> bool:
+        """Whether a press on ``row`` takes hold of the line at ``price``: the line is
+        drawn (inside the range) and the press is within one row of it -- a one-cell line
+        is a thin thing to hit exactly."""
+        if not price or not self.lo <= price <= self.hi:
+            return False
+        return abs(row - self.row(price)) <= 1
+
+
+def scale_of(shown: Sequence[Candle], height: int) -> Scale | None:
+    """The scale a chart of ``shown`` draws with: their range, padded 5% each side."""
+    if not shown:
+        return None
+    lo = min(c.low for c in shown)
+    hi = max(c.high for c in shown)
+    pad = (hi - lo) * 0.05 or max(abs(hi) * 0.0001, 1e-9)
+    return Scale(hi=hi + pad, lo=lo - pad, height=height)
+
+
 def chart(
     candles: Sequence[Candle],
     *,
@@ -111,41 +171,27 @@ def chart(
     columns = width - _AXIS
     if columns < 10 or height < 4:
         return Text("the chart needs more room", style=MUTED)
-    shown = live_last(candles, bid)[-max(1, (columns + 1) // 2) :]
-    if not shown:
+    shown = window(candles, bid, width)
+    scale = scale_of(shown, height)
+    if scale is None:
         return Text("")
-
-    lo = min(c.low for c in shown)
-    hi = max(c.high for c in shown)
-    pad = (hi - lo) * 0.05 or max(abs(hi) * 0.0001, 1e-9)
-    lo -= pad
-    hi += pad
-
-    halves = height * 2
-    """The vertical unit is half a cell: the glyphs can split one."""
-
-    def half(price: float) -> int:
-        return round((hi - price) / (hi - lo) * (halves - 1))
-
-    def row(price: float) -> int:
-        return half(price) // 2
 
     grid = [[(" ", "")] * columns for _ in range(height)]
     labels: list[tuple[str, str]] = [("", MUTED)] * height
 
-    decimals = _decimals(hi - lo, hi)
-    labels[0] = (f"{hi:.{decimals}f}", MUTED)
-    labels[height - 1] = (f"{lo:.{decimals}f}", MUTED)
-    labels[(height - 1) // 2] = (f"{(hi + lo) / 2:.{decimals}f}", MUTED)
+    labels[0] = (scale.fmt(scale.hi), MUTED)
+    labels[height - 1] = (scale.fmt(scale.lo), MUTED)
+    labels[(height - 1) // 2] = (scale.fmt((scale.hi + scale.lo) / 2), MUTED)
 
     # Levels first, so the candles draw over them: the price action owns its pixels.
     for price, color in ((tp, GREEN), (sl, RED), (bid, BLUE)):
-        if not price or not lo <= price <= hi:
+        if not price or not scale.lo <= price <= scale.hi:
             continue
-        r = row(price)
+        r = scale.row(price)
         grid[r] = [(_LEVEL, color)] * columns
-        labels[r] = (f"{price:.{decimals}f}", color)
+        labels[r] = (scale.fmt(price), color)
 
+    half = scale.half
     for i, c in enumerate(shown):
         column = columns - 1 - 2 * (len(shown) - 1 - i)
         color = GREEN if c.close >= c.open else RED

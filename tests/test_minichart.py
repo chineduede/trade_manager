@@ -9,7 +9,9 @@ from mt5copier.tui.minichart import (
     chart,
     live_last,
     next_timeframe,
+    scale_of,
     timeframe_name,
+    window,
 )
 
 
@@ -91,6 +93,35 @@ def test_the_live_bid_moves_the_last_candle() -> None:
     assert (moved[-1].close, moved[-1].high) == (1.3, 1.3), "a new high stretches it"
     assert live_last(bars, None) == bars
     assert live_last([], 1.3) == []
+
+
+def test_the_scale_round_trips_rows_and_prices() -> None:
+    scale = scale_of([candle(1.0, 2.0, 1.0, 2.0)], 14)
+    assert scale is not None
+    for row in range(14):
+        assert scale.row(scale.price(row)) == row, "a drag lands on the row it points at"
+    assert scale.price(-5) == scale.price(0), "rows off the drawing clamp to its edges"
+    assert scale.price(99) == scale.price(13)
+    assert scale_of([], 14) is None
+
+
+def test_a_press_near_a_line_takes_hold_of_it() -> None:
+    scale = scale_of([candle(1.0, 2.0, 1.0, 2.0)], 14)
+    assert scale is not None
+    row = scale.row(1.5)
+    assert scale.grabbed(row, 1.5)
+    assert scale.grabbed(row - 1, 1.5) and scale.grabbed(row + 1, 1.5), "one row of slack"
+    assert not scale.grabbed(row + 2, 1.5)
+    assert not scale.grabbed(row, 0.0), "no line, nothing to take hold of"
+    assert not scale.grabbed(scale.row(2.05), 9.0), "a line outside the bars is not drawn"
+
+
+def test_the_scale_is_the_one_the_chart_drew_with() -> None:
+    bars = [candle(1.0, 2.0, 1.0, 2.0)] * 2
+    scale = scale_of(window(bars, None, 30), 9)
+    assert scale is not None
+    drawn = lines(chart(bars, width=30, height=9, sl=1.5))
+    assert "1.5000" in drawn[scale.row(1.5)], "the mouse's row is the drawn row"
 
 
 def test_the_timeframes_cycle_and_name_themselves() -> None:
