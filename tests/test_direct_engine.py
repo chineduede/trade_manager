@@ -308,6 +308,35 @@ def test_no_connected_slave_means_no_feed(engine: Engine) -> None:
     assert why is not None and "no price" in why
 
 
+def test_the_first_connected_slave_keeps_the_feed(
+    engine: Engine, cfg: AppConfig, exe: Path
+) -> None:
+    """Unpinned, the feed is first-come-keeps-it: a slave connecting later never takes the
+    job over mid-session, even one that sorts ahead -- only losing the feed re-picks."""
+    cfg.terminals[OTHER] = TerminalConfig(
+        terminal_id=OTHER, label="Alpha", exe_path=exe, role=Role.SLAVE
+    )
+    engine.sync()
+    feed(engine, EURUSD_QUOTE)  # Beta connects first and starts feeding
+    engine.virtual_tick()
+    assert engine.direct_feed() == SLAVE
+    # Alpha connects later; it sorts before Beta, but Beta is already feeding.
+    engine._snapshots[OTHER] = Snapshot(
+        terminal_id=OTHER, state=WorkerState.CONNECTED, seq=1, open_positions=(), pending_orders=()
+    )
+    engine._received_at[OTHER] = time.monotonic()
+    engine.virtual_tick()
+    assert engine.direct_feed() == SLAVE, "the feed does not change hands while it works"
+    # Beta drops: now Alpha takes over -- and keeps it when Beta returns.
+    del engine._snapshots[SLAVE]
+    del engine._received_at[SLAVE]
+    engine.virtual_tick()
+    assert engine.direct_feed() == OTHER
+    feed(engine, EURUSD_QUOTE, seq=2)
+    engine.virtual_tick()
+    assert engine.direct_feed() == OTHER, "a returning slave does not grab the feed back"
+
+
 def test_a_pinned_feed_wins_and_fails_over(engine: Engine, cfg: AppConfig, exe: Path) -> None:
     cfg.terminals[OTHER] = TerminalConfig(
         terminal_id=OTHER, label="Alpha", exe_path=exe, role=Role.SLAVE

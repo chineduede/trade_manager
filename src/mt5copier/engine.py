@@ -745,11 +745,16 @@ class Engine:
         return fresh and snap is not None and snap.state is WorkerState.CONNECTED
 
     def _pick_feed(self) -> str | None:
-        """The terminal to quote from: the pinned one while it is usable, else any connected
-        MT5 slave, else none. Changes are announced once, not per tick -- a feed that fails
-        over silently would leave 'why did my pending fill late' unanswerable."""
+        """The terminal to quote from: the pinned one while it is usable, else whoever is
+        feeding now while *it* is usable, else the first connected MT5 slave by label, else
+        none. Sticky on purpose -- the first slave to connect keeps the job, and a slave
+        connecting later never takes it over mid-session; only the pin outranks a working
+        feed. Changes are announced once, not per tick -- a feed that fails over silently
+        would leave 'why did my pending fill late' unanswerable."""
         pinned = self._cfg.feed_terminal_id
         chosen = pinned if pinned is not None and self._feed_ok(pinned) else None
+        if chosen is None and self._feed_tid is not None and self._feed_ok(self._feed_tid):
+            chosen = self._feed_tid
         if chosen is None:
             ordered = sorted(self._cfg.slaves, key=lambda c: (c.label.lower(), c.terminal_id))
             chosen = next((t.terminal_id for t in ordered if self._feed_ok(t.terminal_id)), None)
