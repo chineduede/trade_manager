@@ -36,6 +36,7 @@ from .execution import OrderTime
 from .executor import UNREADABLE, Executor, LivePosition, ReadFailure
 from .logging_setup import configure, get_logger
 from .protocol import (
+    Candle,
     Command,
     CommandKind,
     Deal,
@@ -47,6 +48,8 @@ from .protocol import (
     PositionLive,
     PositionType,
     Quote,
+    RatesRequest,
+    RatesResult,
     Snapshot,
     WatchCommand,
     WorkerState,
@@ -491,6 +494,41 @@ class _Session:
             resolved[clean] = answer.name
         self._quote_names = resolved
         self._watch_resolved = watch
+
+    def read_rates(self, req: RatesRequest) -> tuple[Candle, ...] | str:
+        """The last ``req.count`` bars of one clean symbol, oldest first, or why they will
+        not read. Resolution is the watch's own (:meth:`_resolve_watch`), so the chart shows
+        exactly the instrument the quotes feeding the book are read from."""
+        available = self.symbol_names()
+        if not available:
+            return "the broker's symbol list would not read"
+        answer = resolve_symbol(
+            req.symbol,
+            available,
+            req.symbol_prefix,
+            req.symbol_suffix,
+            "the feed terminal",
+            dict(req.symbol_map),
+        )
+        if answer.name is None:
+            return answer.how
+        self.symbol_facts(answer.name)
+        try:
+            rows = self._mt5.copy_rates_from_pos(answer.name, req.timeframe, 0, req.count)
+        except Exception as exc:
+            return f"the bars would not read: {exc!r}"
+        if rows is None:
+            return "the terminal answered no bars"
+        return tuple(
+            Candle(
+                ts=int(row["time"]),
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+            )
+            for row in rows
+        )
 
     def poll(self, terminal_id: str, seq: int, attempts: int) -> Snapshot:
         """Read account and terminal state into a snapshot.
@@ -957,6 +995,25 @@ def run_worker(
                     # Latest wins, connected or not: resolution happens lazily in poll(),
                     # once there is a symbol list to resolve against.
                     session.watch = cmd
+                    continue
+                if isinstance(cmd, RatesRequest):
+                    if session.connected:
+                        got = session.read_rates(cmd)
+                    else:
+                        got = "the feed terminal is not connected"
+                    answer = RatesResult(
+                        terminal_id=terminal_id,
+                        symbol=cmd.symbol,
+                        timeframe=cmd.timeframe,
+                        candles=got if not isinstance(got, str) else (),
+                        error=got if isinstance(got, str) else None,
+                        ts=time.time(),
+                    )
+                    try:
+                        # Droppable, like a snapshot: the supervisor asks again soon.
+                        out_q.put_nowait(answer)
+                    except Exception as exc:
+                        wlog.debug("could not publish bars: %r", exc)
                     continue
                 if isinstance(cmd, OrderCommand):
                     if not session.connected:

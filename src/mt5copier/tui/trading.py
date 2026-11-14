@@ -26,7 +26,8 @@ from textual.css.query import NoMatches
 from textual.screen import Screen
 from textual.widgets import Button, DataTable, Input, Static
 
-from ..protocol import OrderType, PendingOrder, Position, PositionType, Quote
+from ..protocol import CHART_TIMEFRAMES, OrderType, PendingOrder, Position, PositionType, Quote
+from .minichart import chart, next_timeframe, timeframe_name
 from .settings import Choice
 from .style import BLUE, FG, GREEN, MUTED, RED, YELLOW, key_hint, left_right, spaced
 from .widgets import KeyBar, QuickInput, TopBar
@@ -213,6 +214,7 @@ class TradingScreen(Screen[None]):
         Binding("x", "partial_row", "Partial close", show=False),
         Binding("m", "modify_row", "Modify", show=False),
         Binding("F", "flatten", "Close everything", show=False),
+        Binding("t", "timeframe", "Timeframe", show=False),
     ]
 
     def __init__(self) -> None:
@@ -223,6 +225,8 @@ class TradingScreen(Screen[None]):
         self._ask_resting = False
         self._drawn: tuple | None = None
         self._watched = ""
+        self._timeframe = CHART_TIMEFRAMES[1][1]
+        """The minichart's timeframe, M5 to begin with; t cycles it."""
 
     @property
     def copier(self) -> CopierApp:
@@ -267,6 +271,8 @@ class TradingScreen(Screen[None]):
                 yield Button("Place  enter", id="dt-place", classes="keep", compact=True)
             yield Static("", id="dt-quote")
             yield Static("", id="dt-status")
+            yield Static("", id="dt-chart-head", classes="heading")
+            yield Static("", id="dt-chart")
             yield Static("", id="dt-book-head", classes="heading")
             yield DataTable(id="dt-book", cursor_type="row")
             with Horizontal(id="dt-ask"):
@@ -318,6 +324,7 @@ class TradingScreen(Screen[None]):
         symbol = self.query_one("#dt-symbol", Input).value.strip().upper()
         quote = engine.direct_quote(symbol) if symbol else None
         self.query_one("#dt-quote", Static).update(quote_line(symbol, quote, feed))
+        self._draw_chart(symbol, quote, feed)
 
         positions = engine.direct_positions()
         orders = engine.direct_orders()
@@ -358,8 +365,54 @@ class TradingScreen(Screen[None]):
             except Exception:
                 pass
 
+    def _draw_chart(self, symbol: str, quote: Quote | None, feed: str | None) -> None:
+        """The minichart under the ticket: the feed's bars with the ticket's own levels."""
+        name = timeframe_name(self._timeframe)
+        self.query_one("#dt-chart-head", Static).update(
+            left_right(
+                Text(f"CHART  {symbol or '—'} · {name}", style="bold"),
+                Text("t changes the timeframe", style=MUTED),
+            )
+        )
+        target = self.query_one("#dt-chart", Static)
+        if not symbol:
+            target.update(Text("type a symbol to chart it", style=MUTED))
+            return
+        rates = self.copier._engine.direct_rates(symbol, self._timeframe)
+        if rates is None or rates.error is not None:
+            if rates is not None and rates.error is not None:
+                said, tone = rates.error, YELLOW
+            elif feed is None:
+                said, tone = "no feed: connect an MT5 slave to chart prices", f"bold {RED}"
+            else:
+                said, tone = f"waiting for {feed} to send bars…", YELLOW
+            target.update(Text(said, style=tone))
+            return
+        width = target.content_size.width or self.size.width - 4
+        target.update(
+            chart(
+                rates.candles,
+                width=max(30, width),
+                height=14,
+                bid=quote.bid if quote is not None else None,
+                sl=self._level("#dt-sl"),
+                tp=self._level("#dt-tp"),
+            )
+        )
+
+    def _level(self, selector: str) -> float:
+        """What the ticket says for one level, 0.0 while it will not read as a number."""
+        try:
+            return float(self.query_one(selector, Input).value.strip() or 0.0)
+        except ValueError:
+            return 0.0
+
+    def action_timeframe(self) -> None:
+        self._timeframe = next_timeframe(self._timeframe)
+        self.refresh_page()
+
     def _refresh_keys(self) -> None:
-        keys = [key_hint("esc", "back"), key_hint("enter", "place")]
+        keys = [key_hint("esc", "back"), key_hint("enter", "place"), key_hint("t", "timeframe")]
         if self._selected_row() is not None:
             resting = self._ask_resting if self._asking else self._selected_row()[1]
             keys.append(key_hint("c", "cancel it" if resting else "close it"))

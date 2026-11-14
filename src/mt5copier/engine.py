@@ -76,6 +76,8 @@ from .protocol import (
     PositionLive,
     PositionType,
     Quote,
+    RatesRequest,
+    RatesResult,
     Snapshot,
     WatchCommand,
     WorkerState,
@@ -358,6 +360,11 @@ class Engine:
         is live before anything is placed."""
         self._watch_sent: tuple[str, WatchCommand] | None = None
         """The watch last sent and to whom, so an unchanged watch costs no queue traffic."""
+        self._rates: RatesResult | None = None
+        """The minichart's bars, as the feed last answered them. Latest wins."""
+        self._rates_asked: tuple[str, int, str] | None = None
+        """What was last asked for and of whom: (symbol, timeframe, feed terminal)."""
+        self._rates_asked_at = 0.0
 
     # --- lifecycle --------------------------------------------------------------------------
 
@@ -621,6 +628,10 @@ class Engine:
                 with self._lock:
                     self._on_result(snap)
                 continue
+            if isinstance(snap, RatesResult):
+                with self._lock:
+                    self._rates = snap
+                continue
             if not isinstance(snap, Snapshot):
                 continue
             with self._lock:
@@ -829,6 +840,54 @@ class Engine:
         with self._lock:
             return self._feed_tid
 
+    _RATES_REFRESH_S = 5.0
+    """How often the minichart's bars are re-read. Between refreshes the last candle moves
+    live off the quotes, so this only paces when a *closed* bar can appear."""
+
+    def direct_rates(self, symbol: str, timeframe: int, count: int = 120) -> RatesResult | None:
+        """The feed's bars for the minichart: what is cached when it matches, None until the
+        first answer lands. Asking is part of reading -- a read for another symbol or
+        timeframe, or an old one, sends the feed worker a fresh :class:`RatesRequest`, so the
+        chart's timer is the only clock this needs."""
+        with self._lock:
+            if self._virtual is None:
+                return None
+            symbol = symbol.strip().upper()
+            tid = self._pick_feed()
+            if tid is None:
+                return None
+            key = (symbol, timeframe, tid)
+            now = time.monotonic()
+            if key != self._rates_asked or now - self._rates_asked_at >= self._RATES_REFRESH_S:
+                self._ask_rates(key, count)
+            have = self._rates
+            if have is not None and (have.symbol, have.timeframe) == (symbol, timeframe):
+                return have
+            return None
+
+    def _ask_rates(self, key: tuple[str, int, str], count: int) -> None:
+        """Send one rates request to the feed worker. Caller must hold the lock."""
+        symbol, timeframe, tid = key
+        cfg = self._cfg.terminals.get(tid)
+        worker = self._workers.get(tid)
+        if cfg is None or worker is None:
+            return
+        req = RatesRequest(
+            symbol=symbol,
+            timeframe=timeframe,
+            count=count,
+            symbol_prefix=cfg.symbol_prefix,
+            symbol_suffix=cfg.symbol_suffix,
+            symbol_map=tuple(sorted(cfg.symbol_map.items())),
+        )
+        try:
+            worker.cmd_q.put_nowait(req)
+        except Exception as exc:
+            log.debug("could not ask %s for bars: %r", tid[:8], exc)
+            return
+        self._rates_asked = key
+        self._rates_asked_at = time.monotonic()
+
     def direct_positions(self) -> tuple[Position, ...]:
         with self._lock:
             return self._virtual.positions() if self._virtual is not None else ()
@@ -978,6 +1037,8 @@ class Engine:
                 self._received_at.pop(VIRTUAL_MASTER_ID, None)
                 self._feed_tid = None
                 self._watch_sent = None
+                self._rates = None
+                self._rates_asked = None
             # The master's identity changed, so every session conclusion reasoned against the
             # old one -- exclusions, continuity, reconciliation -- is void.
             self._ledger.reset_session_state()

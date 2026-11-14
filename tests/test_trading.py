@@ -15,7 +15,15 @@ from textual.widgets import DataTable, Input, Static
 from tui_support import TID_SLAVE, make_app, make_cfg, plain, toasted
 
 from mt5copier.config import VIRTUAL_MASTER_ID, AppConfig, AppMode, Role
-from mt5copier.protocol import OrderType, PendingOrder, Position, PositionType, Quote
+from mt5copier.protocol import (
+    Candle,
+    OrderType,
+    PendingOrder,
+    Position,
+    PositionType,
+    Quote,
+    RatesResult,
+)
 from mt5copier.tui import CopierApp
 from mt5copier.tui.cards import virtual_master_card
 from mt5copier.tui.settings import Choice
@@ -418,3 +426,47 @@ async def test_a_refused_switch_keeps_the_form_open_and_saves_nothing(
         assert "2 copies are still open" in plain(form.query_one("#e-profile_mode", Static).content)
         assert copy_cfg.mode is AppMode.COPY
         assert copy_cfg.poll_interval_ms == 250, "nothing else is saved on a refusal"
+
+
+# --- the minichart on the page -------------------------------------------------------------
+
+
+async def test_the_chart_draws_the_feeds_bars(app: CopierApp) -> None:
+    engine = app._engine
+    engine.feed_tid = TID_SLAVE  # type: ignore[attr-defined]
+    engine.quotes["EURUSD"] = Quote("EURUSD", 1.0850, 1.0852)  # type: ignore[attr-defined]
+    engine.rates = RatesResult(  # type: ignore[attr-defined]
+        terminal_id=TID_SLAVE,
+        symbol="EURUSD",
+        timeframe=5,
+        candles=tuple(Candle(ts=i, open=1.08, high=1.09, low=1.07, close=1.085) for i in range(3)),
+    )
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_ticket(app, pilot)
+        said = plain(screen.query_one("#dt-chart", Static).content)
+        assert "type a symbol to chart it" in said
+        screen.query_one("#dt-symbol", Input).value = "eurusd"
+        await pilot.pause()
+        screen.refresh_page()
+        assert ("EURUSD", 5) in engine.rates_asked  # type: ignore[attr-defined]
+        drawn = plain(screen.query_one("#dt-chart", Static).content)
+        assert "█" in drawn, "the bars are drawn"
+        head = plain(screen.query_one("#dt-chart-head", Static).content)
+        assert "EURUSD" in head and "M5" in head
+
+        screen.action_timeframe()
+        head = plain(screen.query_one("#dt-chart-head", Static).content)
+        assert "M15" in head, "t steps to the next timeframe"
+        said = plain(screen.query_one("#dt-chart", Static).content)
+        assert "waiting for Beta Broker" in said, "the M15 bars have not landed yet"
+        assert ("EURUSD", 15) in engine.rates_asked  # type: ignore[attr-defined]
+
+
+async def test_the_chart_says_why_there_are_no_bars(app: CopierApp) -> None:
+    async with app.run_test(size=(160, 50)) as pilot:
+        screen = await open_ticket(app, pilot)
+        screen.query_one("#dt-symbol", Input).value = "eurusd"
+        await pilot.pause()
+        screen.refresh_page()
+        said = plain(screen.query_one("#dt-chart", Static).content)
+        assert "no feed" in said, "no feed terminal: the chart says so, not a blank"

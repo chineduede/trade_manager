@@ -246,6 +246,63 @@ class WatchCommand:
     :attr:`OrderCommand.symbol_map`."""
 
 
+CHART_TIMEFRAMES: tuple[tuple[str, int], ...] = (
+    ("M1", 1),
+    ("M5", 5),
+    ("M15", 15),
+    ("M30", 30),
+    ("H1", 16385),
+)
+"""The minichart's timeframes, each with MT5's own ``TIMEFRAME_*`` value (H1 is ``0x4001``),
+restated rather than imported for the same reason as :class:`PositionType`."""
+
+
+@dataclass(frozen=True, slots=True)
+class Candle:
+    """One closed (or still-forming last) bar, as the feed terminal read it."""
+
+    ts: int
+    """The bar's open time in the broker server's epoch seconds. Display only, like
+    :attr:`Quote.ts` -- nothing is scheduled off it."""
+    open: float
+    high: float
+    low: float
+    close: float
+
+
+@dataclass(frozen=True, slots=True)
+class RatesRequest:
+    """Supervisor -> feed worker: read the last ``count`` bars of one symbol, once.
+
+    Not a subscription: the supervisor asks again when it wants fresher bars, so a request
+    lost with a worker costs one refresh, not the chart. ``symbol`` is clean, with the
+    slave's decoration alongside, exactly as on :class:`WatchCommand`."""
+
+    symbol: str
+    timeframe: int
+    """One of :data:`CHART_TIMEFRAMES`'s values."""
+    count: int = 120
+    symbol_prefix: str = ""
+    symbol_suffix: str = ""
+    symbol_map: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class RatesResult:
+    """Feed worker -> supervisor: the bars asked for, oldest first -- or why not.
+
+    Droppable like a snapshot, not precious like an :class:`OrderResult`: the next refresh
+    supersedes it."""
+
+    terminal_id: str
+    symbol: str
+    timeframe: int
+    candles: tuple[Candle, ...] = ()
+    error: str | None = None
+    ts: float = 0.0
+    """When the worker read them, in its wall clock. Display only."""
+
+
 class WorkerState(StrEnum):
     """Lifecycle of a single terminal connection."""
 

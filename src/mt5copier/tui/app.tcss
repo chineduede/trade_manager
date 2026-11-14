@@ -1009,6 +1009,15 @@ GoLiveDialog.-short #dialog {
     margin: 1 2 0 2;
 }
 
+#dt-chart-head {
+    margin-top: 1;
+}
+
+#dt-chart {
+    height: auto;
+    margin: 0 2;
+}
+
 #dt-book {
     background: $background;
     border: none;

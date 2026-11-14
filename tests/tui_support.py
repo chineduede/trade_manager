@@ -30,6 +30,7 @@ from mt5copier.protocol import (
     PositionLive,
     PositionType,
     Quote,
+    RatesResult,
     Snapshot,
     WorkerState,
 )
@@ -89,6 +90,9 @@ class StubEngine:
         self.feed_tid: str | None = None
         self.watched: list[str | None] = []
         """Every ``watch_direct`` call, in order."""
+        self.rates: RatesResult | None = None
+        """What ``direct_rates`` answers when symbol and timeframe match."""
+        self.rates_asked: list[tuple[str, int]] = []
         self.direct_calls: list[tuple] = []
         """Every book-changing direct call, as ``(name, args...)``."""
         self.direct_refusal: str | None = None
@@ -346,6 +350,13 @@ class StubEngine:
 
     def watch_direct(self, symbol: str | None) -> None:
         self.watched.append(symbol)
+
+    def direct_rates(self, symbol: str, timeframe: int, count: int = 120) -> RatesResult | None:
+        self.rates_asked.append((symbol, timeframe))
+        have = self.rates
+        if have is not None and (have.symbol, have.timeframe) == (symbol, timeframe):
+            return have
+        return None
 
     def place_direct_market(
         self, symbol: str, direction: PositionType, lots: float, sl: float, tp: float = 0.0

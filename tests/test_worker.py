@@ -20,6 +20,8 @@ from mt5copier.protocol import (
     CommandKind,
     OrderType,
     PositionType,
+    RatesRequest,
+    RatesResult,
     Snapshot,
     WatchCommand,
     WorkerState,
@@ -1022,6 +1024,129 @@ def test_a_new_watch_command_replaces_the_old_watch(tmp_path: Path) -> None:
     session.watch = WatchCommand()  # the supervisor cleared it (feed handed over)
     snap = session.poll("TID", seq=2, attempts=0)
     assert snap.quotes == ()
+
+
+class RatesMT5(QuotingMT5):
+    """A broker that also answers bars for the minichart."""
+
+    def __init__(self, *, rates: list[dict[str, float]] | None, **kw: object) -> None:
+        super().__init__(**kw)  # type: ignore[arg-type]
+        self._rates = rates
+        self.rates_calls: list[tuple[str, int, int, int]] = []
+
+    def copy_rates_from_pos(
+        self, name: str, timeframe: int, start: int, count: int
+    ) -> list[dict[str, float]] | None:
+        self.rates_calls.append((name, timeframe, start, count))
+        return self._rates
+
+
+def rates_session(rates: list[dict[str, float]] | None) -> tuple[_Session, RatesMT5]:
+    mt5 = RatesMT5(
+        rates=rates,
+        names=("EURUSDm",),
+        ticks={"EURUSDm": FakeTick(bid=1.08500, ask=1.08520)},
+        symbol_info_data={"EURUSDm": FakeSymbolInfo(name="EURUSDm")},
+    )
+    session = _Session(mt5, Path("x.exe"))
+    session.connect()
+    return session, mt5
+
+
+BAR = {"time": 1_700_000_000, "open": 1.08, "high": 1.09, "low": 1.07, "close": 1.085}
+
+
+def test_rates_are_read_on_the_resolved_symbol(tmp_path: Path) -> None:
+    session, mt5 = rates_session([BAR, {**BAR, "time": 1_700_000_060}])
+    got = session.read_rates(RatesRequest(symbol="EURUSD", timeframe=5, count=2, symbol_suffix="m"))
+    assert not isinstance(got, str)
+    assert mt5.rates_calls == [("EURUSDm", 5, 0, 2)], "read on the broker's own name"
+    assert [c.ts for c in got] == [1_700_000_000, 1_700_000_060]
+    assert (got[0].open, got[0].high, got[0].low, got[0].close) == (1.08, 1.09, 1.07, 1.085)
+
+
+def test_rates_for_a_symbol_the_broker_lacks_answer_why(tmp_path: Path) -> None:
+    session, mt5 = rates_session([BAR])
+    got = session.read_rates(RatesRequest(symbol="GER40", timeframe=5, symbol_suffix="m"))
+    assert isinstance(got, str)
+    assert mt5.rates_calls == [], "nothing was read"
+
+
+def test_rates_the_terminal_will_not_give_answer_why(tmp_path: Path) -> None:
+    session, _ = rates_session(None)
+    got = session.read_rates(RatesRequest(symbol="EURUSD", timeframe=5, symbol_suffix="m"))
+    assert got == "the terminal answered no bars"
+
+
+def test_the_worker_loop_answers_a_rates_request(tmp_path: Path) -> None:
+    mt5 = RatesMT5(
+        rates=[BAR],
+        names=("EURUSDm",),
+        ticks={"EURUSDm": FakeTick(bid=1.08500, ask=1.08520)},
+        symbol_info_data={"EURUSDm": FakeSymbolInfo(name="EURUSDm")},
+    )
+    out_q: queue.Queue = queue.Queue()
+    cmd_q: queue.Queue = queue.Queue()
+
+    thread = threading.Thread(
+        target=run_worker,
+        args=("TID12345", "x.exe", out_q, cmd_q, str(tmp_path / "w.log"), 50, [0.01]),
+        kwargs={"_session_factory": lambda path: _Session(mt5, path)},
+        daemon=True,
+    )
+    thread.start()
+    wait = threading.Event()
+    collected: list[object] = []
+    # Ask once it is connected, as the engine does: it only asks a connected feed.
+    for _ in range(100):
+        collected += drain(out_q)
+        if any(isinstance(s, Snapshot) and s.state is WorkerState.CONNECTED for s in collected):
+            break
+        wait.wait(0.05)
+    cmd_q.put(RatesRequest(symbol="EURUSD", timeframe=5, count=1, symbol_suffix="m"))
+    for _ in range(100):
+        collected += drain(out_q)
+        if any(isinstance(item, RatesResult) for item in collected):
+            break
+        wait.wait(0.05)
+    cmd_q.put(_PLAIN_STOP)
+    thread.join(timeout=5.0)
+    assert not thread.is_alive(), "worker did not stop"
+    answer = next(item for item in collected if isinstance(item, RatesResult))
+    assert answer.error is None and answer.symbol == "EURUSD" and answer.timeframe == 5
+    assert [c.close for c in answer.candles] == [1.085]
+
+
+def test_a_rates_request_while_disconnected_answers_why(tmp_path: Path) -> None:
+    mt5 = RatesMT5(
+        rates=[BAR],
+        names=("EURUSDm",),
+        ticks={},
+        symbol_info_data={},
+        init_ok=False,
+    )
+    out_q: queue.Queue = queue.Queue()
+    cmd_q: queue.Queue = queue.Queue()
+    cmd_q.put(RatesRequest(symbol="EURUSD", timeframe=5, symbol_suffix="m"))
+    thread = threading.Thread(
+        target=run_worker,
+        args=("TID12345", "x.exe", out_q, cmd_q, str(tmp_path / "w.log"), 50, [0.01]),
+        kwargs={"_session_factory": lambda path: _Session(mt5, path)},
+        daemon=True,
+    )
+    thread.start()
+    wait = threading.Event()
+    collected: list[object] = []
+    for _ in range(100):
+        collected += drain(out_q)
+        if any(isinstance(item, RatesResult) for item in collected):
+            break
+        wait.wait(0.05)
+    cmd_q.put(_PLAIN_STOP)
+    thread.join(timeout=5.0)
+    assert not thread.is_alive(), "worker did not stop"
+    answer = next(item for item in collected if isinstance(item, RatesResult))
+    assert answer.error == "the feed terminal is not connected"
 
 
 def test_the_worker_loop_applies_a_watch_command(tmp_path: Path) -> None:

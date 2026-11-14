@@ -24,9 +24,12 @@ from mt5copier.config import (
 from mt5copier.engine import Engine
 from mt5copier.protocol import (
     ActionKind,
+    Candle,
     OrderType,
     PositionType,
     Quote,
+    RatesRequest,
+    RatesResult,
     Snapshot,
     WatchCommand,
     WorkerState,
@@ -389,3 +392,40 @@ def test_the_book_survives_a_restart_through_the_engine(
         virtual_path=tmp_path / "virtual_master.json",
     )
     assert [p.ticket for p in eng2.direct_positions()] == [1]
+
+
+# --- the minichart's bars ---------------------------------------------------------------
+
+
+def test_direct_rates_asks_the_feed_worker_once_per_key(engine: Engine) -> None:
+    feed(engine, EURUSD_QUOTE)
+    assert engine.direct_rates("EURUSD", 5) is None, "nothing has landed yet"
+    worker = engine._workers[SLAVE]
+    asked = [c for c in worker.cmd_q.sent if isinstance(c, RatesRequest)]
+    assert len(asked) == 1 and (asked[0].symbol, asked[0].timeframe) == ("EURUSD", 5)
+    engine.direct_rates("EURUSD", 5)
+    asked = [c for c in worker.cmd_q.sent if isinstance(c, RatesRequest)]
+    assert len(asked) == 1, "an unchanged ask inside the refresh window is not resent"
+    engine.direct_rates("EURUSD", 15)
+    asked = [c for c in worker.cmd_q.sent if isinstance(c, RatesRequest)]
+    assert len(asked) == 2, "a new timeframe asks at once"
+
+
+def test_direct_rates_answers_the_feeds_bars(engine: Engine) -> None:
+    feed(engine, EURUSD_QUOTE)
+    bars = RatesResult(
+        terminal_id=SLAVE,
+        symbol="EURUSD",
+        timeframe=5,
+        candles=(Candle(ts=1, open=1.08, high=1.09, low=1.07, close=1.085),),
+    )
+    engine._rates = bars  # what the drain thread would have filed
+    assert engine.direct_rates("EURUSD", 5) is bars
+    assert engine.direct_rates("EURUSD", 1) is None, "another timeframe waits for its own"
+    assert engine.direct_rates("XAUUSD", 5) is None, "so does another symbol"
+
+
+def test_direct_rates_needs_a_feed(engine: Engine) -> None:
+    assert engine.direct_rates("EURUSD", 5) is None
+    worker = engine._workers[SLAVE]
+    assert not any(isinstance(c, RatesRequest) for c in worker.cmd_q.sent)
