@@ -221,6 +221,11 @@ input.accent-green { border-left: 3px solid var(--green); }
 .combo { display: flex; gap: 8px; }
 .combo input { flex: 1 1 auto; min-width: 0; }
 
+/* The chart's right-click menu on a trade's line: a dropdown that follows the cursor. */
+#ctx-menu { position: fixed; right: auto; min-width: 220px; z-index: 70; }
+#ctx-menu button { font-family: 'Inter', system-ui, sans-serif; }
+#ctx-menu button.danger { color: var(--red); }
+
 #sizing-block { display: flex; flex-direction: column; gap: 6px; }
 .sizing-head {
   display: flex; align-items: baseline; justify-content: space-between; gap: 12px;

@@ -204,13 +204,26 @@ class VirtualBook:
         return None
 
     def modify_position(self, ticket: int, sl: float, tp: float) -> str | None:
-        """Move a position's stop and target. The stop stays required."""
+        """Move a position's stop and target. The stop stays required.
+
+        Unlike an opening's levels, a held position's stop may sit AT or PAST its entry:
+        that is breakeven, or profit locked in, not a mistake -- the entry-side rule only
+        protects the risk distance that sizing needs, and the copies were sized when the
+        trade opened. The target keeps the opening rule: one on the losing side of the
+        entry would be an instant fill pretending to be a target.
+        """
         p = self._positions.get(ticket)
         if p is None:
             return f"#{ticket} is not an open position in this book"
-        problem = _check_levels(p.type, p.price_open, sl, tp)
-        if problem is not None:
-            return problem
+        if sl <= 0:
+            return _SL_REQUIRED
+        if p.type is PositionType.BUY:
+            if tp and tp <= p.price_open:
+                return (
+                    f"a buy's target must be above its price ({tp:g} is not above {p.price_open:g})"
+                )
+        elif tp and tp >= p.price_open:
+            return f"a sell's target must be below its price ({tp:g} is not below {p.price_open:g})"
         if sl == p.sl and tp == p.tp:
             return None
         self._positions[ticket] = replace(p, sl=sl, tp=tp)

@@ -239,6 +239,23 @@ def test_modify_position_keeps_the_stop_required(book: VirtualBook) -> None:
     assert why is not None and "stop loss is required" in why
 
 
+def test_modify_position_allows_breakeven_and_locked_profit(book: VirtualBook) -> None:
+    """A held position's stop may sit at or past its entry: breakeven and profit locking
+    are trade management, not mistakes -- only an opening needs a losing-side stop."""
+    book.open_market("EURUSD", PositionType.BUY, 1.0, 1.08, 0.0, quote(), now=NOW)
+    fill = book.positions()[0].price_open
+    assert book.modify_position(1, fill, 0.0) is None  # breakeven: stop at the entry
+    assert book.modify_position(1, fill + 0.0020, 0.0) is None  # profit locked past it
+    assert book.positions()[0].sl == fill + 0.0020
+
+
+def test_modify_position_still_keeps_the_target_on_the_winning_side(book: VirtualBook) -> None:
+    book.open_market("EURUSD", PositionType.BUY, 1.0, 1.08, 0.0, quote(), now=NOW)
+    fill = book.positions()[0].price_open
+    why = book.modify_position(1, 1.08, fill - 0.0010)
+    assert why is not None and "must be above" in why
+
+
 def test_modify_order_can_move_the_entry(book: VirtualBook) -> None:
     seed_buy_limit(book)
     assert book.modify_order(1, 1.07800, 1.07300, 1.08800, 0) is None

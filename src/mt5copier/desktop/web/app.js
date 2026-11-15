@@ -18,7 +18,8 @@ var S = {
   candles: [],         // last rates() answer, oldest first
   candlesKey: '',      // symbol|tf the candles belong to
   digits: 2,           // decimals seen in the data, for formatting dragged prices
-  dragging: null,      // 'sl' | 'tp' | 'entry' while a line is held
+  dragging: null,      // 'sl' | 'tp' | 'entry' while a ticket line is held
+  draggingBook: null,  // a bookLines item while a live trade's line is held
   notice: '', noticeTone: '',
   modal: null,         // {ticket, open} while the modify dialog is up
   placing: false,
@@ -45,6 +46,8 @@ function decimalsOf(x) {
 
 // --- the chart -----------------------------------------------------------------------------
 var chart = null, series = null, lineSl = null, lineTp = null, lineEntry = null;
+var bookLines = [];    // the live trades' lines on this symbol: {row, which, open, price, line, drag}
+var bookLinesKey = '';
 
 function makeChart() {
   var el = $('chart');
@@ -79,20 +82,29 @@ function makeChart() {
   // Dragging the levels: grab the nearest line within reach, write the price it is let
   // go at straight into the ticket's field — the field is what actually moves.
   function nearestLine(y) {
+    // Both the ticket's draft lines and the book's live ones are up for grabs; the
+    // closest within reach wins, whichever family it belongs to.
+    var best = null, bestAway = 9;
     var held = [['sl', num($('f-stop').value)], ['tp', num($('f-tp').value)]];
     if (S.type !== 'market') held.push(['entry', num($('f-entry').value)]);
-    var best = null, bestAway = 9;
     held.forEach(function (pair) {
       if (!isFinite(pair[1]) || pair[1] <= 0) return;
       var at = series.priceToCoordinate(pair[1]);
       if (at === null) return;
       var away = Math.abs(at - y);
-      if (away < bestAway) { bestAway = away; best = pair[0]; }
+      if (away < bestAway) { bestAway = away; best = { kind: 'ticket', which: pair[0] }; }
+    });
+    bookLines.forEach(function (b) {
+      if (!b.drag) return;
+      var at = series.priceToCoordinate(b.price);
+      if (at === null) return;
+      var away = Math.abs(at - y);
+      if (away < bestAway) { bestAway = away; best = { kind: 'book', item: b }; }
     });
     return best;
   }
   el.addEventListener('mousedown', function (ev) {
-    if (!S.candles.length) return;
+    if (!S.candles.length || ev.button !== 0) return;
     var y = ev.clientY - el.getBoundingClientRect().top;
     var best = nearestLine(y);
     if (best === null) {
@@ -105,10 +117,25 @@ function makeChart() {
       }
       return;
     }
-    S.dragging = best;
+    if (best.kind === 'book') S.draggingBook = best.item;
+    else S.dragging = best.which;
     el.classList.add('dragging');
     chart.applyOptions({ handleScroll: false, handleScale: false });
     ev.preventDefault();
+  });
+  // Right-click on a trade's line: the quick acts that need no form.
+  el.addEventListener('contextmenu', function (ev) {
+    ev.preventDefault();
+    var y = ev.clientY - el.getBoundingClientRect().top;
+    var best = null, bestAway = 11;
+    bookLines.forEach(function (b) {
+      var at = series.priceToCoordinate(b.price);
+      if (at === null) return;
+      var away = Math.abs(at - y);
+      if (away < bestAway) { bestAway = away; best = b; }
+    });
+    if (best) showCtxMenu(ev.clientX, ev.clientY, best.row);
+    else hideCtxMenu();
   });
   // A line within grab reach shows its cursor, so it reads as draggable before it is.
   el.addEventListener('mousemove', function (ev) {
@@ -118,15 +145,43 @@ function makeChart() {
   });
   el.addEventListener('mouseleave', function () { el.classList.remove('line-hover'); });
   window.addEventListener('mousemove', function (ev) {
-    if (!S.dragging) return;
+    if (!S.dragging && !S.draggingBook) return;
     var y = ev.clientY - el.getBoundingClientRect().top;
     var price = series.coordinateToPrice(y);
     if (price === null) return;
+    if (S.draggingBook) {
+      S.draggingBook.price = Number(fmt(price));
+      S.draggingBook.line.applyOptions({ price: S.draggingBook.price });
+      return;
+    }
     var box = $(S.dragging === 'sl' ? 'f-stop' : S.dragging === 'tp' ? 'f-tp' : 'f-entry');
     box.value = fmt(price);
     onLevelTyped(S.dragging);
   });
   window.addEventListener('mouseup', function () {
+    if (S.draggingBook) {
+      var item = S.draggingBook;
+      S.draggingBook = null;
+      el.classList.remove('dragging');
+      chart.applyOptions({ handleScroll: true, handleScale: true });
+      bookLinesKey = ''; // the next poll redraws from whatever the engine ruled
+      var r = item.row, p = item.price;
+      if (item.open) {
+        act(api().modify_position(
+          r.ticket,
+          item.which === 'sl' ? p : r.sl,
+          item.which === 'tp' ? p : (r.tp || 0)
+        ));
+      } else {
+        act(api().modify_order(
+          r.ticket,
+          item.which === 'entry' ? p : r.entry,
+          item.which === 'sl' ? p : r.sl,
+          item.which === 'tp' ? p : (r.tp || 0)
+        ));
+      }
+      return;
+    }
     if (!S.dragging) return;
     S.dragging = null;
     el.classList.remove('dragging');
@@ -155,6 +210,83 @@ function showCandles(data) {
   S.digits = Math.max(d, 1);
   if (fresh) series.setData(data);
   else series.update(data[data.length - 1]);
+}
+
+function renderBookLines() {
+  // The book's trades on this symbol, drawn solid where the ticket draws dashed: the
+  // entry as a quiet reference on positions and a draggable line on pendings, the stop
+  // and target draggable on both — dragging one IS modifying the trade.
+  if (!series || S.draggingBook) return;
+  var rows = ((S.live && S.live.book) || []).filter(function (r) { return r.symbol === S.symbol; });
+  var key = S.symbol + '|' + rows.map(function (r) {
+    return [r.ticket, r.open, r.side, r.kind, r.entry, r.sl, r.tp].join(',');
+  }).join(';');
+  if (key === bookLinesKey) return;
+  bookLinesKey = key;
+  bookLines.forEach(function (b) {
+    try { series.removePriceLine(b.line); } catch (e) { /* series may have been reset */ }
+  });
+  bookLines = [];
+  rows.forEach(function (r) {
+    function add(which, price, opts, drag) {
+      if (!price || !isFinite(price)) return;
+      var line = series.createPriceLine(Object.assign({ price: price, axisLabelVisible: true }, opts));
+      bookLines.push({ row: r, which: which, open: r.open, price: price, line: line, drag: drag });
+    }
+    var tag = '#' + r.ticket + ' ';
+    if (r.open) {
+      add('entry', r.entry, {
+        color: '#6f6757', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted,
+        title: tag + r.side, axisLabelVisible: false
+      }, false);
+    } else {
+      add('entry', r.entry, {
+        color: '#7ea6e0', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
+        title: tag + r.side + ' ' + r.kind
+      }, true);
+    }
+    add('sl', r.sl, {
+      color: '#e5645a', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, title: tag + 'SL'
+    }, true);
+    add('tp', r.tp, {
+      color: '#7fbf6e', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, title: tag + 'TP'
+    }, true);
+  });
+}
+
+function hideCtxMenu() { $('ctx-menu').hidden = true; }
+
+function showCtxMenu(x, y, row) {
+  var menu = $('ctx-menu');
+  menu.textContent = '';
+  function item(label, run, danger) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = label;
+    if (danger) b.className = 'danger';
+    b.addEventListener('click', function () { hideCtxMenu(); run(); });
+    menu.appendChild(b);
+  }
+  if (row.open) {
+    item('Breakeven — stop to entry', function () {
+      act(api().modify_position(row.ticket, row.entry, row.tp || 0));
+    });
+    if (row.tp) item('Remove take profit', function () {
+      act(api().modify_position(row.ticket, row.sl, 0));
+    });
+    item('Close position', function () { act(api().close(row.ticket)); }, true);
+  } else {
+    if (row.tp) item('Remove take profit', function () {
+      act(api().modify_order(row.ticket, row.entry, row.sl, 0));
+    });
+    item('Cancel order', function () { act(api().cancel(row.ticket)); }, true);
+  }
+  menu.hidden = false;
+  menu.style.left = x + 'px';
+  menu.style.top = y + 'px';
+  var rect = menu.getBoundingClientRect();
+  if (rect.right > innerWidth - 8) menu.style.left = (innerWidth - rect.width - 8) + 'px';
+  if (rect.bottom > innerHeight - 8) menu.style.top = (y - rect.height) + 'px';
 }
 
 function nudgeLastBar(bid) {
@@ -423,6 +555,17 @@ function renderBook() {
 
     var actions = document.createElement('td');
     actions.className = 'actions-cell';
+    if (r.open) {
+      var be = document.createElement('button');
+      be.type = 'button';
+      be.className = 'row-btn';
+      be.textContent = 'BE';
+      be.title = 'Breakeven: move the stop to the entry price';
+      be.addEventListener('click', function () {
+        act(api().modify_position(r.ticket, r.entry, r.tp || 0));
+      });
+      actions.appendChild(be);
+    }
     var modify = document.createElement('button');
     modify.type = 'button';
     modify.className = 'row-btn';
@@ -610,6 +753,7 @@ function poll() {
     S.live = live;
     renderShell();
     renderBook();
+    renderBookLines();
     seedEntry();
     renderTicket();
     if (live.quote) nudgeLastBar(live.quote.bid);
@@ -740,9 +884,9 @@ function wire() {
     if (ev.key === 'Enter' && !S.modal && ev.target.tagName === 'INPUT' && ev.target.id.indexOf('f-') === 0) {
       placeOrder();
     }
-    if (ev.key === 'Escape') { closeDropdowns(); if (S.modal) closeModal(); }
+    if (ev.key === 'Escape') { closeDropdowns(); hideCtxMenu(); if (S.modal) closeModal(); }
   });
-  document.addEventListener('click', closeDropdowns);
+  document.addEventListener('click', function () { closeDropdowns(); hideCtxMenu(); });
 
   $('reset-btn').addEventListener('click', function () {
     ['f-stop', 'f-rr', 'f-tp', 'f-entry'].forEach(function (id) { $(id).value = ''; });
