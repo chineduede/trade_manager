@@ -958,6 +958,15 @@ function renderTerminals() {
   dc.textContent = '';
   live.detected.forEach(function (c) { dc.appendChild(terminalCard(c, live)); });
   $('detected-note').hidden = live.detected.length > 0;
+
+  // A rebuild replaced the card the open popover was anchored to; hand it the new
+  // element and the fresh numbers, so it stays up and current under the pointer.
+  if (P.tid) {
+    var pc = findLiveCard(P.tid);
+    var pe = document.querySelector('.tcard[data-tid="' + P.tid + '"]');
+    if (pc && pe) showPop(pe, pc);
+    else hidePop();
+  }
 }
 
 function pill(text, tone) {
@@ -1015,10 +1024,14 @@ function cardLine(cls, text) {
   return s;
 }
 
-function acctLine(c) {
-  return cardLine('tcard-acct mono', c.login
+function acctText(c) {
+  return c.login
     ? c.login + (c.server ? ' · ' + c.server : '')
-    : (c.isCtrader ? 'cTrader · Spotware' : 'not logged in'));
+    : (c.isCtrader ? 'cTrader · Spotware' : 'not logged in');
+}
+
+function acctLine(c) {
+  return cardLine('tcard-acct mono', acctText(c));
 }
 
 function openWord(c) {
@@ -1156,8 +1169,222 @@ function virtualCard(live) {
   return el;
 }
 
+// --- the card's hover popover ---------------------------------------------------------------
+// The cards keep every row to one clipped line so they line up; the popover is the full
+// readout — the whole server name, equity, the exact margin, the guard's word, and any
+// hold or claim sentence unabridged. It is display only (pointer-events: none in the
+// CSS), so it can never swallow a hover or a drag, and it re-anchors itself across the
+// rebuilds the poll causes, so it does not flicker while held open.
+var P = { tid: null, el: null, show: 0, hide: 0 };
+
+function findLiveCard(tid) {
+  var live = T.live;
+  if (!live) return null;
+  if (live.master && live.master.tid === tid) return live.master;
+  var pools = [live.slaves, live.detected];
+  for (var p = 0; p < pools.length; p++)
+    for (var i = 0; i < pools[p].length; i++)
+      if (pools[p][i].tid === tid) return pools[p][i];
+  return null;
+}
+
+function popDiv(cls, text) {
+  var d = document.createElement('div');
+  d.className = cls;
+  if (text !== undefined) d.textContent = text;
+  return d;
+}
+
+function popHr() {
+  var h = document.createElement('hr');
+  h.className = 'pop-hr';
+  return h;
+}
+
+function popGauge(c) {
+  var wrap = document.createElement('span');
+  wrap.className = 'pop-gauge';
+  var bar = document.createElement('span');
+  bar.className = 'mbar';
+  var fill = document.createElement('span');
+  var tier = { good: 'blue', warning: 'yellow', serious: 'red', critical: 'red' }[c.marginTier] || 'muted';
+  fill.className = 'mbar-fill ' + tier;
+  fill.style.width = c.marginUsed === null || c.marginUsed === undefined
+    ? '0%' : Math.min(100, Math.round(c.marginUsed * 100)) + '%';
+  bar.appendChild(fill);
+  wrap.appendChild(bar);
+  wrap.appendChild(document.createTextNode(c.marginUsed === null || c.marginUsed === undefined
+    ? '—' : (c.marginUsed * 100).toFixed(1).replace(/\.0$/, '') + '%'));
+  return wrap;
+}
+
+function popContent(c, live) {
+  var frag = document.createDocumentFragment();
+
+  var head = popDiv('pop-head');
+  var dot = document.createElement('span');
+  dot.className = 'dot ' + ({ good: 'green', warning: 'yellow', serious: 'red', critical: 'red' }[c.tier] || '');
+  dot.setAttribute('aria-hidden', 'true');
+  head.appendChild(dot);
+  var name = document.createElement('span');
+  name.className = 'pop-name';
+  name.textContent = c.name;
+  head.appendChild(name);
+  var word = null;
+  if (c.role === 'unassigned') {
+    var tag = c.isCtrader ? 'SLAVE ONLY' : !c.hasExe ? 'NOT INSTALLED' : !c.login ? 'NO ACCOUNT' : '';
+    if (tag) head.appendChild(cardLine('pop-word muted', tag));
+  } else {
+    word = stateWord(c, live);
+    head.appendChild(cardLine('pop-word ' + word.cls, word.text));
+  }
+  frag.appendChild(head);
+  frag.appendChild(popDiv('pop-acct', acctText(c)));
+
+  if (c.role === 'unassigned') {
+    // The card's info line, with room to finish its sentence.
+    var said;
+    if (!c.hasExe && !c.isCtrader) said = 'found in config · cannot be launched from here';
+    else {
+      said = c.login ? 'logged in' : 'not logged in';
+      if (c.isCtrader) said += ' · can copy, cannot feed';
+    }
+    frag.appendChild(popDiv('pop-status', said));
+  } else {
+    if (c.statusText && c.statusText !== word.text) frag.appendChild(popDiv('pop-status', c.statusText));
+
+    frag.appendChild(popHr());
+    var dl = document.createElement('dl');
+    dl.className = 'pop-grid';
+    function row(label, node) {
+      var dt = document.createElement('dt');
+      dt.textContent = label;
+      dl.appendChild(dt);
+      var dd = document.createElement('dd');
+      dd.appendChild(node);
+      dl.appendChild(dd);
+    }
+    var bal = document.createElement('span');
+    bal.textContent = c.balance === null ? '—' : money(c.balance);
+    if (c.currency) {
+      var cur = document.createElement('span');
+      cur.className = 'pop-cur';
+      cur.textContent = c.currency;
+      bal.appendChild(cur);
+    }
+    row('balance', bal);
+    row('equity', document.createTextNode(
+      c.equity === null || c.equity === undefined ? '—' : money(c.equity)));
+    var pl = c.floatingPl;
+    row('floating', cardLine(pl > 0 ? 'green' : pl < 0 ? 'red' : 'muted',
+      pl === null || pl === undefined ? '—' : (pl >= 0 ? '+' : '') + money(pl)));
+    row('margin', popGauge(c));
+    frag.appendChild(dl);
+
+    frag.appendChild(popHr());
+    var copy = popDiv('pop-copy');
+    if (c.role === 'slave') {
+      var risk = document.createElement('b');
+      risk.textContent = c.risk || 'risk —';
+      copy.appendChild(risk);
+      var rules = c.guard ? c.guard.rules : 0;
+      copy.appendChild(document.createTextNode(' · ' + openWord(c) + ' · '
+        + rules + ' guard rule' + (rules === 1 ? '' : 's')));
+      if (c.guard && c.guard.text) {
+        copy.appendChild(document.createTextNode(' — '));
+        copy.appendChild(cardLine('mono ' + (c.guard.tone || ''), c.guard.text));
+      }
+    } else {
+      copy.textContent = openWord(c) + ' · feeds ' + live.slaves.length
+        + ' slave' + (live.slaves.length === 1 ? '' : 's');
+    }
+    frag.appendChild(copy);
+  }
+
+  // Anything wrong gets its whole sentence, stacked in the card's own precedence.
+  if (c.claimRefused) {
+    frag.appendChild(popDiv('pop-alert', c.claimRefused + ' — frees itself when that app closes'));
+  }
+  if (c.demoBlocked) {
+    frag.appendChild(popDiv('pop-alert red', 'not a demo account — right-click the card to allow live trading'));
+  }
+  if (c.holdReason) frag.appendChild(popDiv('pop-alert', c.holdReason));
+
+  var facts = [];
+  if (c.role === 'slave') {
+    facts.push(c.allowLive ? 'live trading allowed' : 'demo-only (live trading not allowed)');
+    if (c.paused) facts.push('paused');
+    if (live.dryRun) facts.push('dry run');
+    facts.push(live.copying ? 'copying on' : 'copying halted');
+  } else if (c.role === 'master') {
+    facts.push(live.copying ? 'copying on' : 'copying halted');
+  } else if ((c.hasExe || c.isCtrader) && c.login) {
+    facts.push('ready to connect — drag it to a zone above');
+  }
+  if (facts.length) frag.appendChild(popDiv('pop-foot', facts.join(' · ')));
+  return frag;
+}
+
+function placePop(el) {
+  // Prefer the card's right; flip left, then drop below, and clamp to the window.
+  var pop = $('tcard-pop');
+  var r = el.getBoundingClientRect();
+  var pw = pop.offsetWidth, ph = pop.offsetHeight, gap = 10, pad = 12;
+  var x = r.right + gap, y = r.top;
+  if (x + pw > window.innerWidth - pad) x = r.left - gap - pw;
+  if (x < pad) {
+    x = Math.min(Math.max(pad, r.left), window.innerWidth - pw - pad);
+    y = r.bottom + gap;
+  }
+  if (y + ph > window.innerHeight - pad) y = Math.max(pad, window.innerHeight - ph - pad);
+  pop.style.left = x + 'px';
+  pop.style.top = y + 'px';
+}
+
+function showPop(el, c) {
+  var live = T.live;
+  if (!live || T.drag || T.dragPending || !$('ctx-menu').hidden) return;
+  var pop = $('tcard-pop');
+  pop.textContent = '';
+  pop.appendChild(popContent(c, live));
+  pop.hidden = false;
+  P.tid = c.tid;
+  P.el = el;
+  placePop(el);
+}
+
+function hidePop() {
+  clearTimeout(P.show);
+  clearTimeout(P.hide);
+  P.tid = null;
+  P.el = null;
+  $('tcard-pop').hidden = true;
+}
+
+function wirePop(el, c) {
+  el.addEventListener('mouseenter', function () {
+    clearTimeout(P.show);
+    clearTimeout(P.hide);
+    // Already open on another card: follow the pointer at once, no second wait.
+    if (P.tid) showPop(el, c);
+    else P.show = setTimeout(function () { showPop(el, c); }, 250);
+  });
+  el.addEventListener('mouseleave', function () {
+    clearTimeout(P.show);
+    P.hide = setTimeout(hidePop, 120);
+  });
+}
+
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') hidePop();
+});
+window.addEventListener('scroll', function () {
+  if (P.tid) hidePop();
+}, true);
+
 // --- dragging a card between zones ---------------------------------------------------------
 function wireCard(el, c) {
+  wirePop(el, c);
   el.addEventListener('contextmenu', function (ev) {
     ev.preventDefault();
     openMenu(c, ev.clientX, ev.clientY);
@@ -1167,6 +1394,7 @@ function wireCard(el, c) {
   el.addEventListener('dragstart', function (ev) { ev.preventDefault(); });
   el.addEventListener('pointerdown', function (ev) {
     if (ev.button !== 0 || ev.target.closest('button')) return;
+    hidePop();
     var startX = ev.clientX, startY = ev.clientY;
     var started = false;
     T.dragPending = true;
@@ -1201,6 +1429,7 @@ function wireCard(el, c) {
 
 function beginDrag(el, c, e) {
   closeMenu();
+  hidePop();
   if (!el.isConnected) {
     // A rebuild slipped in before the hold took effect: the grabbed element is out of
     // the page. Its replacement carries the same terminal, so the drag follows it.
@@ -1263,6 +1492,7 @@ function closeMenu() {
 function openMenu(c, x, y) {
   var live = T.live;
   if (!live) return;
+  hidePop();
   var menu = $('ctx-menu');
   menu.textContent = '';
   var head = document.createElement('span');
