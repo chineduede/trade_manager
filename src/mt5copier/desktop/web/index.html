@@ -86,13 +86,21 @@
             </div>
             <div class="field">
               <label for="f-expiry" class="flabel">Expiry</label>
-              <select id="f-expiry">
-                <option value="">Until cancelled</option>
-                <option value="15">15 minutes</option>
-                <option value="45">45 minutes</option>
-                <option value="240">4 hours</option>
-                <option value="eod">End of day</option>
-              </select>
+              <div class="combo">
+                <input id="f-expiry" placeholder="until cancelled" autocomplete="off" spellcheck="false">
+                <div class="dd" id="dd-expiry">
+                  <button type="button" class="dd-btn dd-btn-icon" aria-haspopup="listbox" aria-expanded="false" aria-label="Expiry presets"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg></button>
+                  <div class="dd-menu" role="listbox" hidden>
+                    <button type="button" role="option" data-value="">Until cancelled</button>
+                    <button type="button" role="option" data-value="15m">15 minutes</button>
+                    <button type="button" role="option" data-value="45m">45 minutes</button>
+                    <button type="button" role="option" data-value="1h">1 hour</button>
+                    <button type="button" role="option" data-value="4h">4 hours</button>
+                    <button type="button" role="option" data-value="eod">End of day</button>
+                  </div>
+                </div>
+              </div>
+              <span class="field-note muted">minutes, 45m, 2h, eod — blank rests it until cancelled</span>
             </div>
           </div>
 
@@ -102,13 +110,15 @@
             <label for="f-rr" class="flabel">Risk : reward</label>
             <div class="rr-row">
               <input id="f-rr" inputmode="decimal" autocomplete="off">
-              <select id="f-rr-pick" aria-label="Fixed risk to reward">
-                <option value="">fixed…</option>
-                <option value="1">1 : 1</option>
-                <option value="1.5">1 : 1.5</option>
-                <option value="2">1 : 2</option>
-                <option value="3">1 : 3</option>
-              </select>
+              <div class="dd" id="dd-rr">
+                <button type="button" class="dd-btn" aria-haspopup="listbox" aria-expanded="false">fixed…<svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg></button>
+                <div class="dd-menu" role="listbox" hidden>
+                  <button type="button" role="option" data-value="1">1 : 1</button>
+                  <button type="button" role="option" data-value="1.5">1 : 1.5</button>
+                  <button type="button" role="option" data-value="2">1 : 2</button>
+                  <button type="button" role="option" data-value="3">1 : 3</button>
+                </div>
+              </div>
             </div>
           </div>
 

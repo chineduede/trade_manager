@@ -77,9 +77,7 @@ function makeChart() {
 
   // Dragging the levels: grab the nearest line within reach, write the price it is let
   // go at straight into the ticket's field — the field is what actually moves.
-  el.addEventListener('mousedown', function (ev) {
-    if (!S.candles.length) return;
-    var y = ev.clientY - el.getBoundingClientRect().top;
+  function nearestLine(y) {
     var held = [['sl', num($('f-stop').value)], ['tp', num($('f-tp').value)]];
     if (S.type !== 'market') held.push(['entry', num($('f-entry').value)]);
     var best = null, bestAway = 9;
@@ -90,6 +88,12 @@ function makeChart() {
       var away = Math.abs(at - y);
       if (away < bestAway) { bestAway = away; best = pair[0]; }
     });
+    return best;
+  }
+  el.addEventListener('mousedown', function (ev) {
+    if (!S.candles.length) return;
+    var y = ev.clientY - el.getBoundingClientRect().top;
+    var best = nearestLine(y);
     if (best === null) {
       // A click with no stop yet starts the ticket: the stop lands where the click is,
       // and the side falls out of it as always.
@@ -105,6 +109,13 @@ function makeChart() {
     chart.applyOptions({ handleScroll: false, handleScale: false });
     ev.preventDefault();
   });
+  // A line within grab reach shows its cursor, so it reads as draggable before it is.
+  el.addEventListener('mousemove', function (ev) {
+    if (S.dragging || !S.candles.length) return;
+    var y = ev.clientY - el.getBoundingClientRect().top;
+    el.classList.toggle('line-hover', nearestLine(y) !== null);
+  });
+  el.addEventListener('mouseleave', function () { el.classList.remove('line-hover'); });
   window.addEventListener('mousemove', function (ev) {
     if (!S.dragging) return;
     var y = ev.clientY - el.getBoundingClientRect().top;
@@ -126,7 +137,7 @@ function setLine(which, price, opts) {
   var have = which === 'sl' ? lineSl : which === 'tp' ? lineTp : lineEntry;
   if (have) { series.removePriceLine(have); have = null; }
   if (price && isFinite(price)) {
-    have = series.createPriceLine(Object.assign({ price: price, lineWidth: 1, axisLabelVisible: true }, opts));
+    have = series.createPriceLine(Object.assign({ price: price, lineWidth: 2, axisLabelVisible: true }, opts));
   }
   if (which === 'sl') lineSl = have; else if (which === 'tp') lineTp = have; else lineEntry = have;
 }
@@ -204,6 +215,7 @@ function compute() {
     : 'No feed: connect an MT5 slave to quote prices.';
   else if (!stopIn) problem = 'Set a stop loss — the side and every slave’s size come from it.';
   else if (isPending && !(isFinite(entryIn) && entryIn > 0)) problem = 'Enter an entry price.';
+  else if (isPending && parseExpiry($('f-expiry').value) === null) problem = 'The expiry did not read — use minutes, 45m, 2h or eod; blank rests it until cancelled.';
   else if (side === null) problem = isPending ? 'Stop equals the entry — move one of them.'
     : 'The stop sits inside the spread — nudge it to pick a side.';
   else if (!isFinite(rr) || rr <= 0) problem = 'Enter a risk : reward or a take profit.';
@@ -294,7 +306,11 @@ function renderTicket() {
   setLine('sl', isFinite(slv) && slv > 0 ? slv : NaN, {
     color: '#e5645a', lineStyle: LightweightCharts.LineStyle.Dashed, title: 'SL'
   });
-  setLine('tp', t.ok ? t.tp : NaN, {
+  // The TP line follows the field, valid or not: dragging the stop across the price flips
+  // the side and may make the target momentarily wrong, but a vanishing line reads as a
+  // bug — the notice already says what is wrong, so the line stays put to be dragged.
+  var tpLine = S.lastTouched === 'tp' ? num($('f-tp').value) : (isFinite(t.tp) ? t.tp : num($('f-tp').value));
+  setLine('tp', isFinite(tpLine) && tpLine > 0 ? tpLine : NaN, {
     color: '#7fbf6e', lineStyle: LightweightCharts.LineStyle.Dashed, title: 'TP'
   });
 
@@ -450,15 +466,51 @@ function act(promise) {
   promise.then(function (r) { say(r.message, r.ok ? 'ok' : 'bad'); poll(); });
 }
 
-function expiryMinutes() {
-  var v = $('f-expiry').value;
-  if (!v) return 0;
-  if (v === 'eod') {
+function parseExpiry(text) {
+  // Anything a person would type: "45" (minutes), "45m", "2h", "1d", "eod"; blank = GTC.
+  // null means it will not read, which the ticket surfaces before placing.
+  text = (text || '').trim().toLowerCase();
+  if (!text || text === 'gtc' || text.indexOf('until') === 0) return 0;
+  if (text === 'eod' || text.indexOf('end') === 0) {
     var now = new Date();
     var end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0);
     return Math.max(1, Math.round((end - now) / 60000));
   }
-  return parseFloat(v);
+  var m = text.match(/^(\d+(?:\.\d+)?)\s*(m|min|mins|minutes?|h|hr|hrs|hours?|d|days?)?$/);
+  if (!m) return null;
+  var v = parseFloat(m[1]);
+  if (!isFinite(v) || v <= 0) return null;
+  var unit = (m[2] || 'm').charAt(0);
+  if (unit === 'h') v *= 60;
+  else if (unit === 'd') v *= 1440;
+  return v;
+}
+
+function seedEntry() {
+  // A pending ticket starts with its entry line on the chart, ready to drag: a limit on
+  // the pullback side of the market, a stop on the breakout side once the stop has said
+  // which way the trade points, the middle of the spread until then. Only an empty,
+  // unfocused field is seeded — a number the person typed or dragged is theirs.
+  if (S.type === 'market') return;
+  var box = $('f-entry');
+  if (box.value.trim() || document.activeElement === box) return;
+  var q = S.live && S.live.quote;
+  if (!q) return;
+  var span = 0;
+  if (S.candles.length > 1) {
+    var hi = -Infinity, lo = Infinity;
+    S.candles.forEach(function (c) { hi = Math.max(hi, c.high); lo = Math.min(lo, c.low); });
+    span = hi - lo;
+  }
+  if (!span) span = q.ask * 0.004;
+  var stop = num($('f-stop').value);
+  var side = isFinite(stop) && stop > 0 ? (stop < q.bid ? 'buy' : stop > q.ask ? 'sell' : null) : null;
+  var price;
+  if (side === 'buy') price = S.type === 'limit' ? q.bid - 0.15 * span : q.ask + 0.15 * span;
+  else if (side === 'sell') price = S.type === 'limit' ? q.ask + 0.15 * span : q.bid - 0.15 * span;
+  else price = (q.bid + q.ask) / 2;
+  box.value = fmt(price);
+  renderTicket();
 }
 
 function placeOrder() {
@@ -472,7 +524,7 @@ function placeOrder() {
     entry: t.isPending ? num($('f-entry').value) : 0,
     sl: num($('f-stop').value),
     tp: t.tp,
-    expiryMinutes: t.isPending ? expiryMinutes() : 0
+    expiryMinutes: t.isPending ? (parseExpiry($('f-expiry').value) || 0) : 0
   }).then(function (r) {
     S.placing = false;
     say(r.message, r.ok ? 'ok' : 'bad');
@@ -492,6 +544,7 @@ function poll() {
     S.live = live;
     renderShell();
     renderBook();
+    seedEntry();
     renderTicket();
     if (live.quote) nudgeLastBar(live.quote.bid);
   }, function () { polling = false; });
@@ -518,6 +571,30 @@ function pollRates() {
 function setMsg(text) { $('chart-msg').textContent = text; }
 
 // --- events --------------------------------------------------------------------------------
+function closeDropdowns() {
+  document.querySelectorAll('.dd-menu').forEach(function (m) { m.hidden = true; });
+  document.querySelectorAll('.dd-btn').forEach(function (b) { b.setAttribute('aria-expanded', 'false'); });
+}
+
+function wireDropdown(id, onPick) {
+  var root = $(id);
+  var btn = root.querySelector('.dd-btn');
+  var menu = root.querySelector('.dd-menu');
+  btn.addEventListener('click', function (ev) {
+    ev.stopPropagation();
+    var opening = menu.hidden;
+    closeDropdowns();
+    menu.hidden = !opening;
+    btn.setAttribute('aria-expanded', String(opening));
+  });
+  menu.addEventListener('click', function (ev) {
+    var opt = ev.target.closest('button[role="option"]');
+    if (!opt) return;
+    onPick(opt.dataset.value);
+    closeDropdowns();
+  });
+}
+
 function onLevelTyped(which) {
   if (which === 'rr') S.lastTouched = 'rr';
   else if (which === 'tp') S.lastTouched = 'tp';
@@ -550,11 +627,16 @@ function wire() {
   });
   $('f-rr').addEventListener('input', function () { onLevelTyped('rr'); });
   $('f-tp').addEventListener('input', function () { onLevelTyped('tp'); });
-  $('f-rr-pick').addEventListener('change', function (ev) {
-    if (!ev.target.value) return;
-    $('f-rr').value = ev.target.value;
-    ev.target.value = '';
+  $('f-expiry').addEventListener('input', function () { S.notice = ''; renderTicket(); });
+
+  wireDropdown('dd-rr', function (value) {
+    $('f-rr').value = value;
     onLevelTyped('rr');
+  });
+  wireDropdown('dd-expiry', function (value) {
+    $('f-expiry').value = value;
+    S.notice = '';
+    renderTicket();
   });
 
   $('type-row').addEventListener('click', function (ev) {
@@ -566,6 +648,7 @@ function wire() {
     });
     $('pending-fields').hidden = S.type === 'market';
     S.notice = '';
+    seedEntry();
     renderTicket();
   });
 
@@ -591,8 +674,9 @@ function wire() {
     if (ev.key === 'Enter' && !S.modal && ev.target.tagName === 'INPUT' && ev.target.id.indexOf('f-') === 0) {
       placeOrder();
     }
-    if (ev.key === 'Escape' && S.modal) closeModal();
+    if (ev.key === 'Escape') { closeDropdowns(); if (S.modal) closeModal(); }
   });
+  document.addEventListener('click', closeDropdowns);
 
   $('reset-btn').addEventListener('click', function () {
     ['f-stop', 'f-rr', 'f-tp', 'f-entry'].forEach(function (id) { $(id).value = ''; });
