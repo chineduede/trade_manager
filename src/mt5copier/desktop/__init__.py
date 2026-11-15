@@ -78,11 +78,18 @@ def run() -> None:
     def _native_frame(*_args: object) -> None:
         """Once the window exists, give it back the styles Snap needs -- without the frame
         they would normally paint. See :mod:`.winframe`."""
+        from System import Action  # pythonnet, loaded with webview
+
         from . import winframe
 
         try:
             # ``native`` is the WinForms form; pywebview types it as None until shown.
-            winframe.adopt(int(window.native.Handle.ToInt64()))  # type: ignore[attr-defined]
+            form = window.native
+            hwnd = int(form.Handle.ToInt64())  # type: ignore[attr-defined]
+            # comctl32's subclassing helpers refuse to work across threads, and pywebview
+            # fires ``shown`` off the UI thread -- marshal onto the thread that owns the
+            # window, or SetWindowSubclass fails and the frame stays borderless.
+            form.Invoke(Action(lambda: winframe.adopt(hwnd)))  # type: ignore[attr-defined]
         except Exception:
             log.exception("could not adopt native frame behaviours; the window still runs")
 
