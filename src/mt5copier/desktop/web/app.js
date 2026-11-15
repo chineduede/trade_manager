@@ -22,6 +22,7 @@ var S = {
   notice: '', noticeTone: '',
   modal: null,         // {ticket, open} while the modify dialog is up
   placing: false,
+  placedUntil: 0,      // while now < this, the place button says "✓ Placed" and stays dead
   haltBusy: false
 };
 
@@ -277,13 +278,25 @@ function renderTicket() {
     sizing.textContent = '';
   }
 
+  // The button narrates the act: Placing… while the engine rules, ✓ Placed while the
+  // order is fresh — dead both times, so an impatient second click cannot double an order.
   var place = $('place-btn');
   var typeWord = t.isPending ? ' ' + S.type : '';
-  place.textContent = t.side
-    ? (t.side === 'buy' ? 'Buy' : 'Sell') + typeWord + ' ' + S.symbol
-    : 'Set the levels first';
-  place.disabled = t.problem !== '' || S.placing;
-  place.className = t.problem === '' ? t.side : '';
+  if (S.placing) {
+    place.textContent = 'Placing…';
+    place.disabled = true;
+    place.className = t.side || '';
+  } else if (Date.now() < S.placedUntil) {
+    place.textContent = '✓ Placed';
+    place.disabled = true;
+    place.className = 'placed';
+  } else {
+    place.textContent = t.side
+      ? (t.side === 'buy' ? 'Buy' : 'Sell') + typeWord + ' ' + S.symbol
+      : 'Set the levels first';
+    place.disabled = t.problem !== '';
+    place.className = t.problem === '' ? t.side : '';
+  }
 
   var noticeEl = $('notice');
   if (t.problem && S.live && S.live.direct) {
@@ -346,6 +359,7 @@ function renderShell() {
 
 // --- the book ------------------------------------------------------------------------------
 var bookDrawn = '';
+var bookTickets = null; // tickets drawn last time; a row not among them flashes as new
 
 function renderBook() {
   var rows = (S.live && S.live.book) || [];
@@ -359,8 +373,11 @@ function renderBook() {
 
   var body = $('book-body');
   body.textContent = '';
+  var seen = {};
   rows.forEach(function (r) {
+    seen[r.ticket] = true;
     var tr = document.createElement('tr');
+    if (bookTickets && !bookTickets[r.ticket]) tr.className = 'row-new';
     function cell(text, cls) {
       var td = document.createElement('td');
       if (cls) td.className = cls;
@@ -403,6 +420,7 @@ function renderBook() {
     tr.appendChild(actions);
     body.appendChild(tr);
   });
+  bookTickets = seen;
 }
 
 // --- the modify dialog ---------------------------------------------------------------------
@@ -445,7 +463,7 @@ function submitModal() {
     call = api().modify_order(row.ticket, entry, sl, isFinite(tp) ? tp : 0);
   }
   call.then(function (r) {
-    if (r.ok) { closeModal(); say(r.message, 'ok'); poll(); }
+    if (r.ok) { closeModal(); toast(r.message, 'ok'); poll(); }
     else {
       $('modal-notice').textContent = r.message;
       $('modal-notice').className = 'notice bad';
@@ -462,8 +480,26 @@ function say(message, tone) {
   renderTicket();
 }
 
+function toast(message, tone) {
+  var t = document.createElement('div');
+  t.className = 'toast ' + (tone || '');
+  t.textContent = message;
+  $('toasts').appendChild(t);
+  function leave() {
+    if (!t.parentNode) return;
+    t.classList.add('leaving');
+    setTimeout(function () { t.remove(); }, 260);
+  }
+  t.addEventListener('click', leave);
+  setTimeout(leave, 4500);
+}
+
 function act(promise) {
-  promise.then(function (r) { say(r.message, r.ok ? 'ok' : 'bad'); poll(); });
+  promise.then(function (r) {
+    toast(r.message, r.ok ? 'ok' : 'bad');
+    say(r.ok ? '' : r.message, r.ok ? '' : 'bad');
+    poll();
+  });
 }
 
 function parseExpiry(text) {
@@ -527,12 +563,22 @@ function placeOrder() {
     expiryMinutes: t.isPending ? (parseExpiry($('f-expiry').value) || 0) : 0
   }).then(function (r) {
     S.placing = false;
-    say(r.message, r.ok ? 'ok' : 'bad');
+    if (r.ok) {
+      S.placedUntil = Date.now() + 1500;
+      setTimeout(renderTicket, 1600);
+      toast(r.message, 'ok');
+      say('', '');
+    } else {
+      toast(r.message, 'bad');
+      say(r.message, 'bad');
+    }
     poll();
   }, function () {
     S.placing = false;
+    toast('The engine did not answer; try again.', 'bad');
     say('The engine did not answer; try again.', 'bad');
   });
+  renderTicket();
 }
 
 var polling = false;
@@ -695,7 +741,7 @@ function wire() {
     S.haltBusy = true;
     api().toggle_halt().then(function (r) {
       S.haltBusy = false;
-      say(r.message, r.ok ? 'ok' : 'bad');
+      toast(r.message, r.ok ? 'ok' : 'bad');
       poll();
     }, function () { S.haltBusy = false; });
   });
