@@ -189,7 +189,7 @@ function enterModify(row) {
     // The chart follows the trade: modifying is meaningless over another symbol's bars.
     S.symbol = row.symbol;
     $('f-symbol').value = row.symbol;
-    S.candlesKey = '';
+    symbolChanged(); // the ticket's levels were the old symbol's; they come back blank
     $('chart-title').firstChild.textContent = row.symbol + ' ';
     pollRates();
   }
@@ -320,6 +320,10 @@ function applyModify() {
 
 function nudgeLastBar(bid) {
   // Between bar refreshes the last candle moves live off the quote, like the TUI's chart.
+  // Only once the bars on the chart are this symbol's own: right after a symbol change
+  // the old symbol's candles are still up while the feed warms, and nudging those with
+  // the new quote smears one symbol's price into another's bar and wrecks the scale.
+  if (S.candlesKey !== S.symbol + '|' + S.tf) return;
   if (!S.candles.length || !isFinite(bid)) return;
   var last = S.candles[S.candles.length - 1];
   if (bid === last.close) return;
@@ -786,6 +790,15 @@ function poll() {
 }
 
 var ratesBusy = false;
+function symbolChanged() {
+  // A new symbol invalidates everything priced in the old one: the typed levels, the
+  // bars, and the lines drawn from both. Left standing, the old stop draws thousands
+  // away from the new price and the old candles pin the scale to the wrong range.
+  ['f-stop', 'f-entry', 'f-tp'].forEach(function (id) { $(id).value = ''; });
+  S.candlesKey = '';
+  showCandles([]);
+}
+
 function pollRates() {
   if (ratesBusy || !window.pywebview) return;
   if (!S.symbol) { showCandles([]); setMsg('type a symbol to chart it'); return; }
@@ -852,7 +865,7 @@ function wire() {
       ev.target.setSelectionRange(at, at);
     }
     S.symbol = up.trim();
-    S.candlesKey = '';
+    symbolChanged();
     try { localStorage.setItem('dt-symbol', S.symbol); } catch (e) { /* fine */ }
     $('chart-title').firstChild.textContent = (S.symbol || '—') + ' ';
     S.notice = '';
