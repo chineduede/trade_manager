@@ -133,7 +133,14 @@
 
           <div class="hairline"></div>
 
-          <div id="sizing-line" aria-live="polite" class="field-note muted"></div>
+          <div id="sizing-block" aria-live="polite" hidden>
+            <div class="sizing-head">
+              <span>Slave sizing</span>
+              <span class="muted" id="sizing-sub">risk per trade</span>
+            </div>
+            <div id="sizing-rows"></div>
+            <div class="field-note muted" id="sizing-note"></div>
+          </div>
 
           <div class="actions-row">
             <button type="button" id="place-btn" disabled>Set the levels first</button>

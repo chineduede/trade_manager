@@ -221,6 +221,23 @@ input.accent-green { border-left: 3px solid var(--green); }
 .combo { display: flex; gap: 8px; }
 .combo input { flex: 1 1 auto; min-width: 0; }
 
+#sizing-block { display: flex; flex-direction: column; gap: 6px; }
+.sizing-head {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  font-size: 13px; font-weight: 600;
+}
+.sizing-head .muted { font-weight: 400; }
+.sizing-row {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  font-size: 13px; min-height: 22px;
+}
+.sizing-row .name {
+  color: var(--muted); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sizing-row .lots { font-family: var(--mono); font-size: 13.5px; }
+.sizing-row .lots.unknown { color: var(--yellow); }
+
 .actions-row { display: flex; gap: 10px; }
 #place-btn {
   flex: 1 1 auto; min-height: 48px; border: 0; border-radius: 8px;

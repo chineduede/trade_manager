@@ -261,21 +261,41 @@ function renderTicket() {
     }
   }
 
-  // Slaves size themselves from their own risk; show what each would roughly open.
-  var sizing = $('sizing-line');
-  if (t.ok && S.live && S.live.sizing.length) {
-    var bits = S.live.sizing.map(function (s) {
-      if (s.budget === null || !t.dist) return s.name + ' (' + s.risk + ', balance unknown)';
-      return s.name + ' ≈' + Math.max(0.01, s.budget / t.dist).toFixed(2);
+  // Slaves size themselves from their own risk: a row per slave, name left, lots right.
+  var block = $('sizing-block');
+  var rowsEl = $('sizing-rows');
+  var sizing = (S.live && S.live.sizing) || [];
+  if (S.live && S.live.direct && !sizing.length) {
+    block.hidden = false;
+    rowsEl.textContent = '';
+    $('sizing-sub').textContent = '';
+    $('sizing-note').textContent = 'No enabled slaves — nothing will be copied.';
+  } else if (t.ok && sizing.length) {
+    block.hidden = false;
+    $('sizing-sub').textContent = 'each from its own risk per trade';
+    rowsEl.textContent = '';
+    sizing.forEach(function (s) {
+      var row = document.createElement('div');
+      row.className = 'sizing-row';
+      var name = document.createElement('span');
+      name.className = 'name';
+      name.textContent = s.name;
+      var lots = document.createElement('span');
+      if (s.budget === null || !t.dist) {
+        lots.className = 'lots unknown';
+        lots.textContent = s.risk + ' · balance unknown';
+      } else {
+        lots.className = 'lots';
+        lots.textContent = '≈' + Math.max(0.01, s.budget / t.dist).toFixed(2) + ' lots';
+      }
+      row.appendChild(name);
+      row.appendChild(lots);
+      rowsEl.appendChild(row);
     });
-    sizing.textContent = 'Each slave sizes from its own risk per trade: ' + bits.join(' · ') +
-      ' lots — its terminal prices the stop and adds commission, so the real size may differ.';
-  } else if (t.stopIn && S.live && S.live.sizing.length) {
-    sizing.textContent = 'Lots come from each slave’s risk per trade once the levels are set.';
-  } else if (S.live && S.live.direct && !S.live.sizing.length) {
-    sizing.textContent = 'No enabled slaves — nothing will be copied.';
+    $('sizing-note').textContent =
+      '≈ estimated — each terminal prices the stop and adds its commission';
   } else {
-    sizing.textContent = '';
+    block.hidden = true;
   }
 
   // The button narrates the act: Placing… while the engine rules, ✓ Placed while the
