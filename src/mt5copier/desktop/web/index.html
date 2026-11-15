@@ -150,6 +150,44 @@
           <div id="notice" aria-live="polite" class="notice"></div>
         </section>
 
+        <section aria-label="Modify a trade" id="modify-panel" class="panel" hidden>
+          <div class="panel-head">
+            <h2 id="mod-title">Modify</h2>
+            <span id="mod-quote" class="mono muted"></span>
+          </div>
+          <div id="mod-facts" class="mod-facts"></div>
+          <div class="field" id="mod-entry-field" hidden>
+            <div class="flabel-row">
+              <label for="m-entry" class="flabel">Entry price</label>
+              <span id="m-entry-delta" class="mono delta blue"></span>
+            </div>
+            <input id="m-entry" class="accent-blue" inputmode="decimal" autocomplete="off">
+          </div>
+          <div class="field">
+            <div class="flabel-row">
+              <label for="m-sl" class="flabel">Stop loss</label>
+              <button type="button" id="m-be" class="linklike">to entry — BE</button>
+            </div>
+            <input id="m-sl" class="accent-red" inputmode="decimal" autocomplete="off">
+            <span id="m-sl-delta" class="field-note"></span>
+          </div>
+          <div class="field">
+            <div class="flabel-row">
+              <label for="m-tp" class="flabel">Take profit</label>
+              <span id="m-tp-delta" class="mono delta green"></span>
+            </div>
+            <input id="m-tp" class="accent-green" inputmode="decimal" autocomplete="off">
+            <span class="field-note muted">blank removes the target</span>
+          </div>
+          <div class="hairline"></div>
+          <div class="actions-row">
+            <button type="button" id="mod-apply">Apply</button>
+            <button type="button" id="mod-cancel">Back</button>
+          </div>
+          <div id="mod-notice" aria-live="polite" class="notice"></div>
+          <span class="field-note muted">drag the lines on the chart — nothing changes until Apply</span>
+        </section>
+
         <section aria-label="Chart" id="chart-panel" class="panel">
           <div class="panel-head">
             <h2 id="chart-title">— <span class="muted chart-tf">· M5</span></h2>
@@ -165,7 +203,7 @@
             <div id="chart"></div>
             <div id="chart-msg" class="muted"></div>
           </div>
-          <span class="field-note muted">drag any line — the ticket's or a trade's · right-click a trade's line to manage it · click with no stop to set one</span>
+          <span class="field-note muted" id="chart-hint">drag the SL / TP lines · click with no stop to set one</span>
         </section>
       </div>
 
@@ -197,8 +235,6 @@
 
   <div id="toasts" aria-live="polite"></div>
 
-  <div id="ctx-menu" class="dd-menu" role="menu" hidden></div>
-
   <div id="resize-zones" aria-hidden="true">
     <div class="rz rz-t" data-edge="top"></div>
     <div class="rz rz-b" data-edge="bottom"></div>
@@ -210,28 +246,6 @@
     <div class="rz rz-br" data-edge="bottomright"></div>
   </div>
 
-  <div id="modal-backdrop" hidden>
-    <div role="dialog" aria-modal="true" aria-labelledby="modal-title" id="modal">
-      <h3 id="modal-title">Modify</h3>
-      <div class="field" id="modal-entry-field" hidden>
-        <label for="m-entry" class="flabel">Entry price</label>
-        <input id="m-entry" inputmode="decimal" autocomplete="off">
-      </div>
-      <div class="field">
-        <label for="m-sl" class="flabel">Stop loss</label>
-        <input id="m-sl" class="accent-red" inputmode="decimal" autocomplete="off">
-      </div>
-      <div class="field">
-        <label for="m-tp" class="flabel">Take profit <span class="muted">(blank for none)</span></label>
-        <input id="m-tp" class="accent-green" inputmode="decimal" autocomplete="off">
-      </div>
-      <div class="actions-row">
-        <button type="button" id="modal-ok">Apply</button>
-        <button type="button" id="modal-cancel">Cancel</button>
-      </div>
-      <div id="modal-notice" class="notice"></div>
-    </div>
-  </div>
 
 </div>
 <script src="vendor/lightweight-charts.standalone.production.js"></script>

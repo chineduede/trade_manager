@@ -18,10 +18,10 @@ var S = {
   candles: [],         // last rates() answer, oldest first
   candlesKey: '',      // symbol|tf the candles belong to
   digits: 2,           // decimals seen in the data, for formatting dragged prices
-  dragging: null,      // 'sl' | 'tp' | 'entry' while a ticket line is held
-  draggingBook: null,  // a bookLines item while a live trade's line is held
+  dragging: null,      // 'sl' | 'tp' | 'entry' while a line is held, whichever mode owns it
   notice: '', noticeTone: '',
-  modal: null,         // {ticket, open} while the modify dialog is up
+  mode: 'new',         // 'new' places orders; 'modify' takes the panel AND the chart for one trade
+  modRow: null,        // the trade being modified, as its book row read at entry
   placing: false,
   placedUntil: 0,      // while now < this, the place button says "✓ Placed" and stays dead
   haltBusy: false
@@ -56,8 +56,19 @@ function decimalsOf(x) {
 
 // --- the chart -----------------------------------------------------------------------------
 var chart = null, series = null, lineSl = null, lineTp = null, lineEntry = null;
-var bookLines = [];    // the live trades' lines on this symbol: {row, which, open, price, line, drag}
-var bookLinesKey = '';
+
+function activeFieldIds() {
+  // The chart always drags the fields of whichever panel owns it: the ticket's in new
+  // mode, the modify form's in modify mode. One chart, one job at a time.
+  if (S.mode === 'modify') {
+    var ids = { sl: 'm-sl', tp: 'm-tp' };
+    if (S.modRow && !S.modRow.open) ids.entry = 'm-entry';
+    return ids;
+  }
+  var ids2 = { sl: 'f-stop', tp: 'f-tp' };
+  if (S.type !== 'market') ids2.entry = 'f-entry';
+  return ids2;
+}
 
 function makeChart() {
   var el = $('chart');
@@ -92,24 +103,15 @@ function makeChart() {
   // Dragging the levels: grab the nearest line within reach, write the price it is let
   // go at straight into the ticket's field — the field is what actually moves.
   function nearestLine(y) {
-    // Both the ticket's draft lines and the book's live ones are up for grabs; the
-    // closest within reach wins, whichever family it belongs to.
+    var ids = activeFieldIds();
     var best = null, bestAway = 9;
-    var held = [['sl', num($('f-stop').value)], ['tp', num($('f-tp').value)]];
-    if (S.type !== 'market') held.push(['entry', num($('f-entry').value)]);
-    held.forEach(function (pair) {
-      if (!isFinite(pair[1]) || pair[1] <= 0) return;
-      var at = series.priceToCoordinate(pair[1]);
+    Object.keys(ids).forEach(function (which) {
+      var price = num($(ids[which]).value);
+      if (!isFinite(price) || price <= 0) return;
+      var at = series.priceToCoordinate(price);
       if (at === null) return;
       var away = Math.abs(at - y);
-      if (away < bestAway) { bestAway = away; best = { kind: 'ticket', which: pair[0] }; }
-    });
-    bookLines.forEach(function (b) {
-      if (!b.drag) return;
-      var at = series.priceToCoordinate(b.price);
-      if (at === null) return;
-      var away = Math.abs(at - y);
-      if (away < bestAway) { bestAway = away; best = { kind: 'book', item: b }; }
+      if (away < bestAway) { bestAway = away; best = which; }
     });
     return best;
   }
@@ -119,33 +121,18 @@ function makeChart() {
     var best = nearestLine(y);
     if (best === null) {
       // A click with no stop yet starts the ticket: the stop lands where the click is,
-      // and the side falls out of it as always.
+      // and the side falls out of it as always. Only the ticket seeds this way.
       var stopBox = $('f-stop');
-      if (!stopBox.value.trim()) {
+      if (S.mode === 'new' && !stopBox.value.trim()) {
         var price = series.coordinateToPrice(y);
         if (price !== null) { stopBox.value = fmt(price); onLevelTyped('sl'); }
       }
       return;
     }
-    if (best.kind === 'book') S.draggingBook = best.item;
-    else S.dragging = best.which;
+    S.dragging = best;
     el.classList.add('dragging');
     chart.applyOptions({ handleScroll: false, handleScale: false });
     ev.preventDefault();
-  });
-  // Right-click on a trade's line: the quick acts that need no form.
-  el.addEventListener('contextmenu', function (ev) {
-    ev.preventDefault();
-    var y = ev.clientY - el.getBoundingClientRect().top;
-    var best = null, bestAway = 11;
-    bookLines.forEach(function (b) {
-      var at = series.priceToCoordinate(b.price);
-      if (at === null) return;
-      var away = Math.abs(at - y);
-      if (away < bestAway) { bestAway = away; best = b; }
-    });
-    if (best) showCtxMenu(ev.clientX, ev.clientY, best.row);
-    else hideCtxMenu();
   });
   // A line within grab reach shows its cursor, so it reads as draggable before it is.
   el.addEventListener('mousemove', function (ev) {
@@ -155,43 +142,15 @@ function makeChart() {
   });
   el.addEventListener('mouseleave', function () { el.classList.remove('line-hover'); });
   window.addEventListener('mousemove', function (ev) {
-    if (!S.dragging && !S.draggingBook) return;
+    if (!S.dragging) return;
     var y = ev.clientY - el.getBoundingClientRect().top;
     var price = series.coordinateToPrice(y);
     if (price === null) return;
-    if (S.draggingBook) {
-      S.draggingBook.price = Number(fmt(price));
-      S.draggingBook.line.applyOptions({ price: S.draggingBook.price });
-      return;
-    }
-    var box = $(S.dragging === 'sl' ? 'f-stop' : S.dragging === 'tp' ? 'f-tp' : 'f-entry');
-    box.value = fmt(price);
-    onLevelTyped(S.dragging);
+    $(activeFieldIds()[S.dragging]).value = fmt(price);
+    if (S.mode === 'modify') renderModify();
+    else onLevelTyped(S.dragging);
   });
   window.addEventListener('mouseup', function () {
-    if (S.draggingBook) {
-      var item = S.draggingBook;
-      S.draggingBook = null;
-      el.classList.remove('dragging');
-      chart.applyOptions({ handleScroll: true, handleScale: true });
-      bookLinesKey = ''; // the next poll redraws from whatever the engine ruled
-      var r = item.row, p = item.price;
-      if (item.open) {
-        act(api().modify_position(
-          r.ticket,
-          item.which === 'sl' ? p : r.sl,
-          item.which === 'tp' ? p : (r.tp || 0)
-        ));
-      } else {
-        act(api().modify_order(
-          r.ticket,
-          item.which === 'entry' ? p : r.entry,
-          item.which === 'sl' ? p : r.sl,
-          item.which === 'tp' ? p : (r.tp || 0)
-        ));
-      }
-      return;
-    }
     if (!S.dragging) return;
     S.dragging = null;
     el.classList.remove('dragging');
@@ -222,81 +181,133 @@ function showCandles(data) {
   else series.update(data[data.length - 1]);
 }
 
-function renderBookLines() {
-  // The book's trades on this symbol, drawn solid where the ticket draws dashed: the
-  // entry as a quiet reference on positions and a draggable line on pendings, the stop
-  // and target draggable on both — dragging one IS modifying the trade.
-  if (!series || S.draggingBook) return;
-  var rows = ((S.live && S.live.book) || []).filter(function (r) { return r.symbol === S.symbol; });
-  var key = S.symbol + '|' + rows.map(function (r) {
-    return [r.ticket, r.open, r.side, r.kind, r.entry, r.sl, r.tp].join(',');
-  }).join(';');
-  if (key === bookLinesKey) return;
-  bookLinesKey = key;
-  bookLines.forEach(function (b) {
-    try { series.removePriceLine(b.line); } catch (e) { /* series may have been reset */ }
-  });
-  bookLines = [];
-  rows.forEach(function (r) {
-    function add(which, price, opts, drag) {
-      if (!price || !isFinite(price)) return;
-      var line = series.createPriceLine(Object.assign({ price: price, axisLabelVisible: true }, opts));
-      bookLines.push({ row: r, which: which, open: r.open, price: price, line: line, drag: drag });
-    }
-    var tag = '#' + r.ticket + ' ';
-    if (r.open) {
-      add('entry', r.entry, {
-        color: '#6f6757', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted,
-        title: tag + r.side, axisLabelVisible: false
-      }, false);
+// --- modify mode: the panel and the chart belong to one trade ------------------------------
+function enterModify(row) {
+  S.mode = 'modify';
+  S.modRow = row;
+  if (row.symbol !== S.symbol) {
+    // The chart follows the trade: modifying is meaningless over another symbol's bars.
+    S.symbol = row.symbol;
+    $('f-symbol').value = row.symbol;
+    S.candlesKey = '';
+    $('chart-title').firstChild.textContent = row.symbol + ' ';
+    pollRates();
+  }
+  $('m-entry').value = row.open ? '' : String(row.entry);
+  $('m-sl').value = row.sl ? String(row.sl) : '';
+  $('m-tp').value = row.tp ? String(row.tp) : '';
+  $('mod-notice').textContent = '';
+  $('mod-notice').className = 'notice';
+  $('ticket').hidden = true;
+  $('modify-panel').hidden = false;
+  $('chart-hint').textContent = 'drag the lines — nothing changes until Apply';
+  renderModify();
+  $('m-sl').focus();
+}
+
+function exitModify() {
+  S.mode = 'new';
+  S.modRow = null;
+  $('modify-panel').hidden = true;
+  $('ticket').hidden = false;
+  $('chart-hint').textContent = 'drag the SL / TP lines · click with no stop to set one';
+  renderTicket();
+}
+
+function renderModify() {
+  var row = S.modRow;
+  if (!row) return;
+  var q = S.live && S.live.quote;
+  $('mod-title').textContent = 'Modify #' + row.ticket + ' · ' + row.symbol;
+  $('mod-quote').textContent = q ? 'bid ' + q.bid + ' · ask ' + q.ask : '';
+
+  var facts = $('mod-facts');
+  facts.textContent = '';
+  var side = document.createElement('span');
+  side.className = row.side === 'buy' ? 'side-buy' : 'side-sell';
+  side.textContent = row.side + (row.kind === 'market' ? '' : ' ' + row.kind);
+  facts.appendChild(side);
+  var lots = document.createElement('span');
+  lots.textContent = row.lots + ' lots';
+  facts.appendChild(lots);
+  var at = document.createElement('span');
+  at.textContent = (row.open ? 'in at ' : 'resting at ') + row.entry;
+  facts.appendChild(at);
+
+  $('mod-entry-field').hidden = row.open;
+
+  var way = row.side === 'buy' ? 1 : -1;
+  var entry = row.open ? row.entry : num($('m-entry').value);
+  var sl = num($('m-sl').value), tp = num($('m-tp').value);
+  var entryOk = isFinite(entry) && entry > 0;
+  var slOk = isFinite(sl) && sl > 0;
+  var tpIn = isFinite(tp) && tp > 0;
+
+  var slDelta = $('m-sl-delta');
+  if (slOk && entryOk) {
+    var risk = way * (entry - sl);
+    if (risk > 0) {
+      slDelta.textContent = '−' + fmt(risk) + ' from the entry';
+      slDelta.className = 'field-note red';
+    } else if (risk === 0) {
+      slDelta.textContent = 'at the entry — breakeven';
+      slDelta.className = 'field-note blue';
     } else {
-      add('entry', r.entry, {
-        color: '#7ea6e0', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid,
-        title: tag + r.side + ' ' + r.kind
-      }, true);
+      slDelta.textContent = '+' + fmt(-risk) + ' past the entry — profit locked';
+      slDelta.className = 'field-note blue';
     }
-    add('sl', r.sl, {
-      color: '#e5645a', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, title: tag + 'SL'
-    }, true);
-    add('tp', r.tp, {
-      color: '#7fbf6e', lineWidth: 2, lineStyle: LightweightCharts.LineStyle.Solid, title: tag + 'TP'
-    }, true);
+  } else {
+    slDelta.textContent = '';
+    slDelta.className = 'field-note';
+  }
+  $('m-tp-delta').textContent = tpIn && entryOk
+    ? (way * (tp - entry) >= 0 ? '+' : '−') + fmt(Math.abs(tp - entry))
+    : '';
+  if (!row.open && entryOk && q) {
+    var away = entry - (row.side === 'buy' ? q.ask : q.bid);
+    $('m-entry-delta').textContent = (away >= 0 ? '+' : '−') + fmt(Math.abs(away)) + ' from price';
+  } else {
+    $('m-entry-delta').textContent = '';
+  }
+
+  var apply = $('mod-apply');
+  apply.textContent = 'Apply to #' + row.ticket;
+  apply.disabled = !slOk || (!row.open && !entryOk);
+
+  // The chart carries only this trade, as a draft: dashed until Apply makes it real.
+  setLine('entry', entryOk ? entry : NaN, row.open
+    ? { color: '#6f6757', lineWidth: 1, lineStyle: LightweightCharts.LineStyle.Dotted, title: 'entry' }
+    : { color: '#7ea6e0', lineStyle: LightweightCharts.LineStyle.Dashed, title: 'entry' });
+  setLine('sl', slOk ? sl : NaN, {
+    color: '#e5645a', lineStyle: LightweightCharts.LineStyle.Dashed, title: '#' + row.ticket + ' SL'
+  });
+  setLine('tp', tpIn ? tp : NaN, {
+    color: '#7fbf6e', lineStyle: LightweightCharts.LineStyle.Dashed, title: '#' + row.ticket + ' TP'
   });
 }
 
-function hideCtxMenu() { $('ctx-menu').hidden = true; }
-
-function showCtxMenu(x, y, row) {
-  var menu = $('ctx-menu');
-  menu.textContent = '';
-  function item(label, run, danger) {
-    var b = document.createElement('button');
-    b.type = 'button';
-    b.textContent = label;
-    if (danger) b.className = 'danger';
-    b.addEventListener('click', function () { hideCtxMenu(); run(); });
-    menu.appendChild(b);
+function applyModify() {
+  var row = S.modRow;
+  if (!row) return;
+  function bad(msg) {
+    var n = $('mod-notice');
+    n.textContent = msg;
+    n.className = 'notice bad';
   }
+  var sl = num($('m-sl').value), tp = num($('m-tp').value);
+  if (!isFinite(sl) || sl <= 0) { bad('The stop loss is required.'); return; }
+  var call;
   if (row.open) {
-    item('Breakeven — stop to entry', function () {
-      act(api().modify_position(row.ticket, row.entry, row.tp || 0));
-    });
-    if (row.tp) item('Remove take profit', function () {
-      act(api().modify_position(row.ticket, row.sl, 0));
-    });
-    item('Close position', function () { act(api().close(row.ticket)); }, true);
+    call = api().modify_position(row.ticket, sl, isFinite(tp) && tp > 0 ? tp : 0);
   } else {
-    if (row.tp) item('Remove take profit', function () {
-      act(api().modify_order(row.ticket, row.entry, row.sl, 0));
-    });
-    item('Cancel order', function () { act(api().cancel(row.ticket)); }, true);
+    var entry = num($('m-entry').value);
+    if (!isFinite(entry) || entry <= 0) { bad('The entry price is required.'); return; }
+    call = api().modify_order(row.ticket, entry, sl, isFinite(tp) && tp > 0 ? tp : 0);
   }
-  menu.hidden = false;
-  menu.style.left = x + 'px';
-  menu.style.top = y + 'px';
-  var rect = menu.getBoundingClientRect();
-  if (rect.right > innerWidth - 8) menu.style.left = (innerWidth - rect.width - 8) + 'px';
-  if (rect.bottom > innerHeight - 8) menu.style.top = (y - rect.height) + 'px';
+  call.then(function (r) {
+    if (r.ok) { toast(r.message, 'ok'); exitModify(); poll(); }
+    else bad(r.message);
+  });
 }
 
 function nudgeLastBar(bid) {
@@ -372,6 +383,10 @@ function compute() {
 }
 
 function renderTicket() {
+  if (S.mode === 'modify') {
+    renderModify();
+    return null;
+  }
   var t = compute();
   var q = S.live && S.live.quote;
 
@@ -580,7 +595,7 @@ function renderBook() {
     modify.type = 'button';
     modify.className = 'row-btn';
     modify.textContent = 'Modify';
-    modify.addEventListener('click', function () { openModal(r); });
+    modify.addEventListener('click', function () { enterModify(r); });
     var remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'row-btn danger';
@@ -594,54 +609,6 @@ function renderBook() {
     body.appendChild(tr);
   });
   bookTickets = seen;
-}
-
-// --- the modify dialog ---------------------------------------------------------------------
-function openModal(row) {
-  S.modal = row;
-  $('modal-title').textContent = 'Modify #' + row.ticket + ' · ' + row.symbol;
-  $('modal-entry-field').hidden = row.open;
-  $('m-entry').value = row.open ? '' : String(row.entry);
-  $('m-sl').value = row.sl ? String(row.sl) : '';
-  $('m-tp').value = row.tp ? String(row.tp) : '';
-  $('modal-notice').textContent = '';
-  $('modal-backdrop').hidden = false;
-  $(row.open ? 'm-sl' : 'm-entry').focus();
-}
-
-function closeModal() {
-  S.modal = null;
-  $('modal-backdrop').hidden = true;
-}
-
-function submitModal() {
-  var row = S.modal;
-  if (!row) return;
-  var sl = num($('m-sl').value), tp = num($('m-tp').value);
-  if (!isFinite(sl) || sl <= 0) {
-    $('modal-notice').textContent = 'The stop loss is required.';
-    $('modal-notice').className = 'notice bad';
-    return;
-  }
-  var call;
-  if (row.open) {
-    call = api().modify_position(row.ticket, sl, isFinite(tp) ? tp : 0);
-  } else {
-    var entry = num($('m-entry').value);
-    if (!isFinite(entry) || entry <= 0) {
-      $('modal-notice').textContent = 'The entry price is required.';
-      $('modal-notice').className = 'notice bad';
-      return;
-    }
-    call = api().modify_order(row.ticket, entry, sl, isFinite(tp) ? tp : 0);
-  }
-  call.then(function (r) {
-    if (r.ok) { closeModal(); toast(r.message, 'ok'); poll(); }
-    else {
-      $('modal-notice').textContent = r.message;
-      $('modal-notice').className = 'notice bad';
-    }
-  });
 }
 
 // --- talking to the engine -----------------------------------------------------------------
@@ -700,7 +667,7 @@ function seedEntry() {
   // the pullback side of the market, a stop on the breakout side once the stop has said
   // which way the trade points, the middle of the spread until then. Only an empty,
   // unfocused field is seeded — a number the person typed or dragged is theirs.
-  if (S.type === 'market') return;
+  if (S.mode !== 'new' || S.type === 'market') return;
   var box = $('f-entry');
   if (box.value.trim() || document.activeElement === box) return;
   var q = S.live && S.live.quote;
@@ -724,7 +691,7 @@ function seedEntry() {
 
 function placeOrder() {
   var t = renderTicket();
-  if (t.problem || S.placing) return;
+  if (!t || t.problem || S.placing) return;
   S.placing = true;
   api().place({
     symbol: S.symbol,
@@ -763,7 +730,17 @@ function poll() {
     S.live = live;
     renderShell();
     renderBook();
-    renderBookLines();
+    if (S.mode === 'modify' && S.modRow) {
+      // The trade may have closed, filled or been partially closed under us.
+      var held = null;
+      (live.book || []).forEach(function (r) { if (r.ticket === S.modRow.ticket) held = r; });
+      if (held === null) {
+        toast('#' + S.modRow.ticket + ' is no longer in the book.', 'bad');
+        exitModify();
+      } else {
+        S.modRow = held;
+      }
+    }
     seedEntry();
     renderTicket();
     if (live.quote) nudgeLastBar(live.quote.bid);
@@ -896,12 +873,16 @@ function wire() {
 
   $('place-btn').addEventListener('click', placeOrder);
   document.addEventListener('keydown', function (ev) {
-    if (ev.key === 'Enter' && !S.modal && ev.target.tagName === 'INPUT' && ev.target.id.indexOf('f-') === 0) {
-      placeOrder();
+    if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') {
+      if (S.mode === 'new' && ev.target.id.indexOf('f-') === 0) placeOrder();
+      else if (S.mode === 'modify' && ev.target.id.indexOf('m-') === 0) applyModify();
     }
-    if (ev.key === 'Escape') { closeDropdowns(); hideCtxMenu(); if (S.modal) closeModal(); }
+    if (ev.key === 'Escape') {
+      closeDropdowns();
+      if (S.mode === 'modify') exitModify();
+    }
   });
-  document.addEventListener('click', function () { closeDropdowns(); hideCtxMenu(); });
+  document.addEventListener('click', closeDropdowns);
 
   $('reset-btn').addEventListener('click', function () {
     ['f-stop', 'f-rr', 'f-tp', 'f-entry'].forEach(function (id) { $(id).value = ''; });
@@ -956,13 +937,20 @@ function wire() {
     });
   });
 
-  $('modal-ok').addEventListener('click', submitModal);
-  $('modal-cancel').addEventListener('click', closeModal);
-  $('modal-backdrop').addEventListener('mousedown', function (ev) {
-    if (ev.target === ev.currentTarget) closeModal();
+  $('mod-apply').addEventListener('click', applyModify);
+  $('mod-cancel').addEventListener('click', exitModify);
+  $('m-be').addEventListener('click', function () {
+    if (S.modRow) {
+      $('m-sl').value = String(S.modRow.entry);
+      $('mod-notice').textContent = '';
+      renderModify();
+    }
   });
-  $('modal').addEventListener('keydown', function (ev) {
-    if (ev.key === 'Enter') submitModal();
+  ['m-entry', 'm-sl', 'm-tp'].forEach(function (id) {
+    $(id).addEventListener('input', function () {
+      $('mod-notice').textContent = '';
+      renderModify();
+    });
   });
 
   document.querySelectorAll('.nav-item.disabled').forEach(function (a) {

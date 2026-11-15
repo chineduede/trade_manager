@@ -150,8 +150,31 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
 #quote-line { font-size: 12.5px; }
 .hairline { height: 1px; background: var(--hairline); flex: 0 0 auto; }
 
-/* --- the ticket ------------------------------------------------------------------------- */
-#ticket { flex: 1 1 380px; max-width: 460px; min-width: 0; }
+/* --- the ticket (and the modify panel that takes its place) ------------------------------ */
+#ticket, #modify-panel { flex: 1 1 380px; max-width: 460px; min-width: 0; }
+
+.mod-facts {
+  display: flex; flex-wrap: wrap; gap: 4px 14px;
+  font-family: var(--mono); font-size: 13.5px; color: var(--muted);
+}
+.mod-facts .side-buy { color: var(--blue); font-weight: 700; }
+.mod-facts .side-sell { color: var(--red); font-weight: 700; }
+.delta.blue { color: var(--blue); }
+.linklike {
+  border: 0; background: transparent; padding: 0;
+  color: var(--blue); font-size: 12.5px; font-weight: 600;
+}
+.linklike:hover { text-decoration: underline; }
+#mod-apply {
+  flex: 1 1 auto; min-height: 48px; border: 0; border-radius: 8px;
+  background: var(--fg); color: var(--bg); font-weight: 700; font-size: 15px;
+}
+#mod-apply:disabled { background: var(--disabled-bg); color: var(--muted); }
+#mod-cancel {
+  flex: 0 0 auto; min-height: 48px; padding: 0 18px;
+  border-radius: 8px; border: 1px solid var(--border);
+  background: transparent; color: var(--fg); font-weight: 500;
+}
 
 .field { display: flex; flex-direction: column; gap: 6px; }
 .flabel { font-size: 13px; color: var(--muted); }
@@ -221,10 +244,6 @@ input.accent-green { border-left: 3px solid var(--green); }
 .combo { display: flex; gap: 8px; }
 .combo input { flex: 1 1 auto; min-width: 0; }
 
-/* The chart's right-click menu on a trade's line: a dropdown that follows the cursor. */
-#ctx-menu { position: fixed; right: auto; min-width: 220px; z-index: 70; }
-#ctx-menu button { font-family: 'Inter', system-ui, sans-serif; }
-#ctx-menu button.danger { color: var(--red); }
 
 #sizing-block { display: flex; flex-direction: column; gap: 6px; }
 .sizing-head {
@@ -251,7 +270,7 @@ input.accent-green { border-left: 3px solid var(--green); }
 }
 #place-btn.buy { background: var(--blue); color: var(--bg); }
 #place-btn.sell { background: var(--red); color: var(--bg); }
-#reset-btn, #modal-cancel {
+#reset-btn {
   flex: 0 0 auto; min-height: 48px; padding: 0 18px;
   border-radius: 8px; border: 1px solid var(--border);
   background: transparent; color: var(--fg); font-weight: 500;
@@ -371,18 +390,3 @@ tr.row-new td { animation: row-flash 1.6s ease-out; }
   to { background: transparent; }
 }
 
-/* --- modify dialog ---------------------------------------------------------------------- */
-#modal-backdrop {
-  position: fixed; inset: 0; background: rgba(12, 11, 9, 0.7);
-  display: flex; align-items: center; justify-content: center; z-index: 10;
-}
-#modal {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
-  padding: 22px; width: min(380px, calc(100vw - 32px));
-  display: flex; flex-direction: column; gap: 14px;
-}
-#modal h3 { margin: 0; font-size: 16px; font-weight: 600; }
-#modal-ok {
-  flex: 1 1 auto; min-height: 48px; border: 0; border-radius: 8px;
-  background: var(--fg); color: var(--bg); font-weight: 700;
-}
