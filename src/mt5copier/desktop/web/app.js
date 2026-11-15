@@ -554,6 +554,17 @@ function renderShell() {
     ? 'Orders placed here are copied to ' + live.slaves + ' slave' + (live.slaves === 1 ? '' : 's')
     : 'This profile copies a master — direct trading is off.';
 
+  // With a real master, orders are placed in its own terminal and only copied from
+  // there — the ticket has nothing to do. The tab greys out and carries the reason,
+  // and anyone already on the page is walked off it.
+  var tradingTab = document.querySelector('#sidebar .nav-item[data-page="trading"]');
+  tradingTab.classList.toggle('disabled', !live.direct);
+  tradingTab.title = live.direct
+    ? 'Trading'
+    : 'This profile copies a master terminal' + (live.feed ? ' (' + live.feed + ')' : '')
+      + ' — place trades there. Direct trading (no master) turns this page back on.';
+  if (!live.direct && S.page === 'trading') showPage('terminals');
+
   $('dot-worker').className = 'dot ' + (live.workersLive > 0 ? 'green' : 'red');
   $('status-worker').textContent = live.workersLive + '/' + live.workersTotal + ' workers';
   $('dot-feed').className = 'dot ' + (live.feed ? 'green' : 'red');
@@ -2396,6 +2407,7 @@ function wire() {
   document.querySelectorAll('#sidebar .nav-item[data-page]').forEach(function (a) {
     a.addEventListener('click', function (ev) {
       ev.preventDefault();
+      if (a.classList.contains('disabled')) return;
       showPage(a.dataset.page);
     });
   });
