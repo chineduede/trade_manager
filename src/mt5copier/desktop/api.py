@@ -471,6 +471,9 @@ class DesktopApi:
             "name": info.label,
             "role": str(tcfg.role),
             "statusText": info.status_text,
+            # The full sentence rides separately: the card's state word stays short and the
+            # info line carries the story ("the terminal is in use by profile 'x'").
+            "claimRefused": view.claim_refused,
             "tier": info.tier,
             "login": info.login,
             "server": info.server,

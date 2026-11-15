@@ -157,8 +157,8 @@ class TerminalView:
     """Whether the engine currently has a worker for this terminal."""
     claim_refused: str | None = None
     """Why no worker was spawned: another running profile holds this terminal or its
-    account. The engine keeps retrying on every sync, so this clears by itself once the
-    other instance lets go."""
+    account. The engine retries every few seconds, so this clears by itself once the
+    other instance lets go -- its locks die with its process, close included."""
 
     def is_stale(self, timeout_s: float) -> bool:
         """True when a supervised worker has stopped reporting.
@@ -255,7 +255,10 @@ class Engine:
         self._claimed: dict[str, tuple[str, ...]] = {}
         """Per terminal: the claim keys its worker holds, released when the worker is reaped."""
         self._claim_refused: dict[str, str] = {}
-        """Per terminal: why its worker was not spawned, for the UI. Retried on every sync."""
+        """Per terminal: why its worker was not spawned, for the UI. Retried on every sync,
+        and every few seconds by the drain loop (see :meth:`_retry_refused_claims`)."""
+        self._claims_retry_at = 0.0
+        """Monotonic time before which :meth:`_retry_refused_claims` stays quiet."""
         self._snapshots: dict[str, Snapshot] = {}
         self._received_at: dict[str, float] = {}
         self._lock = threading.RLock()
@@ -461,6 +464,35 @@ class Engine:
                     self._reap(tid)
                 self._spawn_worker(tcfg)
 
+    def _retry_refused_claims(self) -> None:
+        """Re-attempt claims another profile refused us, on a slow tick.
+
+        The locks behind a claim die with the process that holds them, so the moment the
+        other window closes -- X button, crash, anything -- the terminal is free. But
+        nothing used to try again until the person forced a sync (a rescan, a role
+        change), and the card said "in use" long after it wasn't. The drain loop calls
+        this every pass; it costs nothing unless a refusal is on record and a few
+        seconds have gone by since the last try.
+        """
+        if not self._claim_refused or time.monotonic() < self._claims_retry_at:
+            return
+        with self._lock:
+            self._claims_retry_at = time.monotonic() + 3.0
+            for tid in list(self._claim_refused):
+                tcfg = self._cfg.terminals.get(tid)
+                if tcfg is None or tcfg.role is Role.UNASSIGNED or not tcfg.enabled:
+                    # Same rule as sync(): a terminal no longer wanted keeps no stale note.
+                    del self._claim_refused[tid]
+                    continue
+                if tid in self._workers:
+                    self._claim_refused.pop(tid, None)
+                    continue
+                if not tcfg.is_ctrader and (
+                    tcfg.exe_path is None or not Path(tcfg.exe_path).is_file()
+                ):
+                    continue
+                self._spawn_worker(tcfg)
+
     def restart(self, terminal_id: str) -> None:
         """Force a full worker restart (as opposed to an in-worker reconnect).
 
@@ -618,6 +650,7 @@ class Engine:
         happened.
         """
         while not self._stop_drain.is_set():
+            self._retry_refused_claims()
             try:
                 snap = self._out_q.get(timeout=0.2)
             except queue.Empty:

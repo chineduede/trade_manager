@@ -657,3 +657,47 @@ def test_unassigning_a_refused_terminal_drops_the_stale_note(
     engine.sync()
     view = next(v for v in engine.views() if v.cfg.terminal_id == TID_A)
     assert view.claim_refused is None
+
+
+def test_the_retry_tick_spawns_a_refused_terminal_once_the_claim_is_free(
+    engine: Engine,
+) -> None:
+    """Closing the other profile's window frees its locks with its process; the drain
+    loop's tick must then bring the terminal up without anyone pressing Rescan."""
+    engine._claim_refused[TID_A] = "the terminal is in use by profile 'funded'"
+    engine._retry_refused_claims()
+    assert engine.spawned == [TID_A]  # type: ignore[attr-defined]
+    assert engine._claims_retry_at > 0, "the tick paces itself"
+    # The fixture's fake spawn does not clear the note (the real one does); the next
+    # tick sees the worker standing and drops it.
+    engine._claims_retry_at = 0.0
+    engine._retry_refused_claims()
+    assert TID_A not in engine._claim_refused
+
+
+def test_the_retry_tick_waits_between_tries_and_skips_the_exeless(engine: Engine) -> None:
+    engine._claim_refused[TID_NOEXE] = "the account is in use by profile 'funded'"
+    engine._retry_refused_claims()
+    assert engine.spawned == [], "no executable: nothing to bring up"  # type: ignore[attr-defined]
+    engine._claim_refused[TID_A] = "the terminal is in use by profile 'funded'"
+    engine._retry_refused_claims()  # inside the pacing window from the first call
+    assert engine.spawned == [], "a tick within the pause does nothing"  # type: ignore[attr-defined]
+
+
+def test_the_retry_tick_keeps_the_note_while_the_claim_is_still_held(
+    cfg: AppConfig, tmp_path: Path
+) -> None:
+    """The real ``_spawn_worker`` against a live lock: the note survives the retry."""
+    from mt5copier.claims import ClaimBook
+
+    other = ClaimBook(tmp_path / "claims", "funded")
+    other.acquire([f"terminal:{TID_A}"])
+    try:
+        eng = Engine(cfg, claims=ClaimBook(tmp_path / "claims", "scalp"))
+        eng._spawn_worker(cfg.terminals[TID_A])
+        eng._retry_refused_claims()
+        assert TID_A not in eng._workers
+        view = next(v for v in eng.views() if v.cfg.terminal_id == TID_A)
+        assert view.claim_refused is not None and "funded" in view.claim_refused
+    finally:
+        other.release_all()

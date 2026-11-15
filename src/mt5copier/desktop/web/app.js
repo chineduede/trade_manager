@@ -970,6 +970,9 @@ function pill(text, tone) {
 function stateWord(c, live) {
   // The card's top-right word, with the TUI card's exact precedence: a link that is
   // down outranks the demo guard, which outranks a hold, which outranks a pause.
+  // A claim another profile holds would arrive as a whole sentence in statusText —
+  // too long for this corner, so the word stays short and the info line explains.
+  if (c.claimRefused) return { text: 'in use elsewhere', cls: 'yellow' };
   var down = c.tier === 'serious' || c.tier === 'critical' || c.tier === 'muted'
     || (c.tier === 'warning' && !c.holdReason);
   if (c.role === 'master') {
@@ -1096,8 +1099,13 @@ function terminalCard(c, live) {
   var plCls = pl > 0 ? 'green' : pl < 0 ? 'red' : 'muted';
   el.appendChild(cardLine('tcard-float mono ' + plCls, plSaid));
 
-  var info, infoCls = 'tcard-info';
-  if (c.role === 'slave') {
+  var info, infoCls = 'tcard-info', infoTitle = '';
+  if (c.claimRefused) {
+    // The whole story in one line: whose it is, and that no rescan is needed.
+    info = c.claimRefused + ' — frees itself when that app closes';
+    infoTitle = info;
+    infoCls += ' yellow';
+  } else if (c.role === 'slave') {
     if (c.demoBlocked) {
       info = 'not a demo — right-click to allow live trading';
       infoCls += ' red';
@@ -1115,7 +1123,9 @@ function terminalCard(c, live) {
     info = openWord(c) + ' · feeds ' + live.slaves.length
       + ' slave' + (live.slaves.length === 1 ? '' : 's');
   }
-  el.appendChild(cardLine(infoCls, info));
+  var infoLine = cardLine(infoCls, info);
+  if (infoTitle) infoLine.title = infoTitle;
+  el.appendChild(infoLine);
   el.appendChild(marginRow(c));
 
   wireCard(el, c);
