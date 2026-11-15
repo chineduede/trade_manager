@@ -24,7 +24,8 @@ var S = {
   modRow: null,        // the trade being modified, as its book row read at entry
   placing: false,
   placedUntil: 0,      // while now < this, the place button says "✓ Placed" and stays dead
-  haltBusy: false
+  haltBusy: false,
+  page: 'trading'      // which page owns #main: 'trading' or 'terminals'
 };
 
 var defaultRr = '';
@@ -32,6 +33,8 @@ try {
   S.symbol = localStorage.getItem('dt-symbol') || '';
   S.tf = localStorage.getItem('dt-tf') || 'M5';
   defaultRr = localStorage.getItem('dt-rr') || '';
+  var savedPage = localStorage.getItem('dt-page');
+  if (savedPage === 'terminals') S.page = savedPage;
 } catch (e) { /* storage may be unavailable; defaults are fine */ }
 
 function rememberRr(text) {
@@ -832,6 +835,509 @@ function pollRates() {
 
 function setMsg(text) { $('chart-msg').textContent = text; }
 
+// --- the terminals page --------------------------------------------------------------------
+// Who is master, who copies, what was detected: the TUI Map's job, as three drop zones.
+// Dragging a card between zones is the assignment; the engine still rules on every move,
+// and a refused drop bounces back with the reason in a toast.
+var T = {
+  live: null,       // last terminals_state() answer
+  drawn: '',        // what the zones were last built from
+  drag: null,       // { card, ghost, el } while a card is held
+  rescanning: false
+};
+var modalOnConfirm = null;
+
+function showPage(name) {
+  S.page = name;
+  try { localStorage.setItem('dt-page', name); } catch (e) { /* fine */ }
+  $('page-trading').hidden = name !== 'trading';
+  $('page-terminals').hidden = name !== 'terminals';
+  document.querySelectorAll('#sidebar .nav-item[data-page]').forEach(function (a) {
+    var active = a.dataset.page === name;
+    a.classList.toggle('active', active);
+    if (active) a.setAttribute('aria-current', 'page');
+    else a.removeAttribute('aria-current');
+  });
+  if (name === 'terminals') pollTerminals();
+}
+
+var terminalsBusy = false;
+function pollTerminals() {
+  if (terminalsBusy || !window.pywebview || S.page !== 'terminals') return;
+  terminalsBusy = true;
+  api().terminals_state().then(function (live) {
+    terminalsBusy = false;
+    T.live = live;
+    renderTerminals();
+  }, function () { terminalsBusy = false; });
+}
+
+function tact(promise) {
+  // A terminals action: toast the outcome and redraw from fresh state either way.
+  promise.then(function (r) {
+    toast(r.message, r.ok ? 'ok' : 'bad');
+    T.drawn = '';
+    pollTerminals();
+  }, function () {
+    toast('The engine did not answer; try again.', 'bad');
+  });
+}
+
+function money(v) {
+  if (v === null || v === undefined || !isFinite(v)) return '—';
+  var parts = Math.abs(v).toFixed(2).split('.');
+  parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+  return (v < 0 ? '−' : '') + parts.join('.');
+}
+
+function renderTerminals() {
+  var live = T.live;
+  // Mid-drag the source card must stay the element the pointer started on, so the
+  // rebuild waits; the next poll after the drop catches everything up.
+  if (!live || T.drag) return;
+  var key = JSON.stringify(live);
+  if (key === T.drawn) return;
+  T.drawn = key;
+
+  var mc = $('master-cards');
+  mc.textContent = '';
+  if (live.virtual) mc.appendChild(virtualCard(live));
+  else if (live.master) mc.appendChild(terminalCard(live.master, live));
+  $('master-note').textContent = live.virtual
+    ? 'This profile trades directly: the order ticket is the master, so no terminal can take the role.'
+    : (live.master
+      ? 'Only one terminal can be master. Dropping a second one here bounces back with the reason.'
+      : 'none yet — drag a detected terminal here to make it the master');
+
+  var sc = $('slave-cards');
+  sc.textContent = '';
+  live.slaves.forEach(function (c) { sc.appendChild(terminalCard(c, live)); });
+  $('slaves-note').hidden = live.slaves.length > 0;
+
+  var dc = $('detected-cards');
+  dc.textContent = '';
+  live.detected.forEach(function (c) { dc.appendChild(terminalCard(c, live)); });
+  $('detected-note').hidden = live.detected.length > 0;
+}
+
+function pill(text, tone) {
+  var p = document.createElement('span');
+  p.className = 'pill ' + (tone || 'muted');
+  p.textContent = text;
+  return p;
+}
+
+function cardPills(c, live) {
+  var out = [];
+  if (c.role === 'master') {
+    out.push(pill('MASTER', 'blue'));
+    out.push(live.dryRun ? pill('DRY RUN', 'yellow') : pill('LIVE', 'red'));
+    return out;
+  }
+  if (c.role === 'slave') {
+    if (c.demoBlocked) out.push(pill('HELD BACK', 'red'));
+    else if (c.holdReason) out.push(pill('HELD', 'red'));
+    out.push(live.dryRun ? pill('DRY RUN', 'yellow') : pill('LIVE', 'red'));
+    if (c.paused) out.push(pill('PAUSED', 'muted'));
+    return out;
+  }
+  if (c.isCtrader) out.push(pill('SLAVE ONLY', 'muted'));
+  else if (!c.hasExe) out.push(pill('NOT INSTALLED', 'muted'));
+  else if (!c.login) out.push(pill('NO ACCOUNT', 'muted'));
+  return out;
+}
+
+function stateLine(c, live) {
+  if (c.role === 'unassigned') {
+    if (!c.hasExe && !c.isCtrader) return 'found in config · cannot be launched from here';
+    var who = c.isCtrader ? 'can copy, cannot feed' : '';
+    var logged = c.login ? 'logged in' : 'not logged in';
+    return who ? logged + ' · ' + who : logged;
+  }
+  var open = c.openTrades === null ? null
+    : c.openTrades + ' position' + (c.openTrades === 1 ? '' : 's');
+  var first;
+  if (c.tier === 'serious' || c.tier === 'critical' || c.tier === 'muted'
+    || (c.tier === 'warning' && !c.holdReason)) {
+    first = c.role === 'slave' && c.badge ? c.badge.toLowerCase() : c.statusText;
+  } else if (c.role === 'master') {
+    first = 'connected';
+  } else if (c.demoBlocked) {
+    first = 'held back: not a demo';
+  } else if (c.holdReason) {
+    first = c.holdReason.toLowerCase();
+  } else if (c.paused) {
+    first = 'paused';
+  } else if (!live.copying) {
+    first = 'not copying';
+  } else {
+    first = live.dryRun ? 'dry run' : 'copying';
+  }
+  return open === null ? first : first + ' · ' + open;
+}
+
+function terminalCard(c, live) {
+  var el = document.createElement('article');
+  el.className = 'tcard';
+  el.dataset.tid = c.tid;
+  el.setAttribute('aria-label', c.name);
+
+  var head = document.createElement('div');
+  head.className = 'tcard-head';
+  var dot = document.createElement('span');
+  var dotTone = { good: 'green', warning: 'yellow', serious: 'red', critical: 'red' }[c.tier] || '';
+  dot.className = 'dot ' + dotTone;
+  dot.setAttribute('aria-hidden', 'true');
+  head.appendChild(dot);
+  var name = document.createElement('span');
+  name.className = 'tcard-name';
+  name.textContent = c.name;
+  head.appendChild(name);
+  var space = document.createElement('span');
+  space.className = 'tcard-space';
+  head.appendChild(space);
+  cardPills(c, live).forEach(function (p) { head.appendChild(p); });
+  el.appendChild(head);
+
+  var acct = document.createElement('span');
+  acct.className = 'tcard-acct mono';
+  acct.textContent = c.login
+    ? c.login + (c.server ? ' · ' + c.server : '')
+    : (c.isCtrader ? 'cTrader · Spotware' : 'not logged in');
+  el.appendChild(acct);
+
+  if (c.equity !== null && c.equity !== undefined) {
+    var eq = document.createElement('div');
+    eq.className = 'tcard-eq mono';
+    var left = document.createElement('span');
+    left.textContent = 'equity ' + money(c.equity);
+    var right = document.createElement('span');
+    var pl = c.floatingPl;
+    if (pl !== null && pl !== undefined) {
+      right.textContent = (pl >= 0 ? '+' : '') + money(pl);
+      right.className = pl > 0 ? 'green' : pl < 0 ? 'red' : 'muted';
+    }
+    eq.appendChild(left);
+    eq.appendChild(right);
+    el.appendChild(eq);
+  }
+
+  var state = document.createElement('span');
+  state.className = 'tcard-state';
+  state.textContent = stateLine(c, live);
+  el.appendChild(state);
+
+  if (c.guard && (c.guard.text || c.guard.rules)) {
+    var g = document.createElement('span');
+    g.className = 'tcard-guard ' + (c.guard.text ? (c.guard.tone || '') : 'quiet');
+    g.textContent = c.guard.text
+      || ('guards ' + c.guard.rules + ' rule' + (c.guard.rules === 1 ? '' : 's'));
+    el.appendChild(g);
+  }
+
+  wireCard(el, c);
+  return el;
+}
+
+function virtualCard(live) {
+  var el = document.createElement('article');
+  el.className = 'tcard tcard-still';
+  var v = live.virtual;
+
+  var head = document.createElement('div');
+  head.className = 'tcard-head';
+  var dot = document.createElement('span');
+  dot.className = 'dot ' + (v.feed ? 'green' : 'red');
+  dot.setAttribute('aria-hidden', 'true');
+  head.appendChild(dot);
+  var name = document.createElement('span');
+  name.className = 'tcard-name';
+  name.textContent = 'Direct trading';
+  head.appendChild(name);
+  var space = document.createElement('span');
+  space.className = 'tcard-space';
+  head.appendChild(space);
+  head.appendChild(pill('MASTER', 'blue'));
+  el.appendChild(head);
+
+  var acct = document.createElement('span');
+  acct.className = 'tcard-acct';
+  acct.textContent = 'you are the master';
+  el.appendChild(acct);
+
+  var book = document.createElement('span');
+  book.className = 'tcard-eq mono';
+  book.textContent = v.positions + ' open · ' + v.orders + ' resting';
+  el.appendChild(book);
+
+  var state = document.createElement('span');
+  state.className = 'tcard-state';
+  var feeds = 'feeds ' + live.slaves.length + ' slave' + (live.slaves.length === 1 ? '' : 's');
+  state.textContent = (v.feed ? 'feed ' + v.feed : 'no feed — connect an MT5 slave') + ' · ' + feeds;
+  el.appendChild(state);
+
+  var go = document.createElement('button');
+  go.type = 'button';
+  go.className = 'row-btn tcard-btn';
+  go.textContent = 'Order ticket';
+  go.addEventListener('click', function () { showPage('trading'); });
+  el.appendChild(go);
+  return el;
+}
+
+// --- dragging a card between zones ---------------------------------------------------------
+function wireCard(el, c) {
+  el.addEventListener('contextmenu', function (ev) {
+    ev.preventDefault();
+    openMenu(c, ev.clientX, ev.clientY);
+  });
+  el.addEventListener('pointerdown', function (ev) {
+    if (ev.button !== 0 || ev.target.closest('button')) return;
+    var startX = ev.clientX, startY = ev.clientY;
+    var started = false;
+    function move(e) {
+      if (!started) {
+        if (Math.abs(e.clientX - startX) < 6 && Math.abs(e.clientY - startY) < 6) return;
+        started = true;
+        beginDrag(el, c, e);
+      }
+      moveDrag(e);
+    }
+    function up(e) {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      if (started) endDrag(e);
+    }
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+    ev.preventDefault();
+  });
+}
+
+function beginDrag(el, c, e) {
+  closeMenu();
+  var ghost = el.cloneNode(true);
+  ghost.className = 'tcard tcard-ghost';
+  ghost.style.width = el.offsetWidth + 'px';
+  document.body.appendChild(ghost);
+  el.classList.add('drag-src');
+  document.body.classList.add('dragging-terminals');
+  T.drag = { card: c, ghost: ghost, el: el };
+  moveDrag(e);
+}
+
+function zoneUnder(e) {
+  var at = document.elementFromPoint(e.clientX, e.clientY);
+  return at ? at.closest('.zone') : null;
+}
+
+function moveDrag(e) {
+  if (!T.drag) return;
+  T.drag.ghost.style.left = (e.clientX + 10) + 'px';
+  T.drag.ghost.style.top = (e.clientY - 20) + 'px';
+  var over = zoneUnder(e);
+  document.querySelectorAll('.zone').forEach(function (z) {
+    z.classList.toggle('drop-hot', z === over);
+  });
+}
+
+function endDrag(e) {
+  var drag = T.drag;
+  if (!drag) return;
+  T.drag = null;
+  drag.ghost.remove();
+  drag.el.classList.remove('drag-src');
+  document.body.classList.remove('dragging-terminals');
+  document.querySelectorAll('.zone').forEach(function (z) { z.classList.remove('drop-hot'); });
+  var zone = zoneUnder(e);
+  if (!zone) return;
+  var c = drag.card;
+  var want = zone.dataset.zone;
+  if (want === 'master' && c.role !== 'master') tact(api().assign_master(c.tid));
+  else if (want === 'slaves' && c.role !== 'slave') tact(api().assign_slave(c.tid));
+  else if (want === 'detected' && c.role !== 'unassigned') unassignFlow(c);
+}
+
+// --- the card's menu and the asking dialogs -------------------------------------------------
+function closeMenu() {
+  $('ctx-menu').hidden = true;
+}
+
+function openMenu(c, x, y) {
+  var live = T.live;
+  if (!live) return;
+  var menu = $('ctx-menu');
+  menu.textContent = '';
+  var head = document.createElement('span');
+  head.className = 'menu-head';
+  head.textContent = c.name + (c.login ? ' · ' + c.login : '');
+  menu.appendChild(head);
+
+  var items = menuItems(c, live);
+  items.forEach(function (item) {
+    if (item.sep) {
+      var sep = document.createElement('div');
+      sep.className = 'menu-sep';
+      sep.setAttribute('aria-hidden', 'true');
+      menu.appendChild(sep);
+      return;
+    }
+    if (!item.fn) {
+      var note = document.createElement('span');
+      note.className = 'menu-note';
+      note.textContent = item.label;
+      menu.appendChild(note);
+      return;
+    }
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.setAttribute('role', 'menuitem');
+    btn.className = item.cls || '';
+    btn.textContent = item.label;
+    btn.addEventListener('click', function () {
+      closeMenu();
+      item.fn();
+    });
+    menu.appendChild(btn);
+  });
+
+  menu.hidden = false;
+  // Clamp to the window once its size is real.
+  var w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.max(8, Math.min(x, window.innerWidth - w - 8)) + 'px';
+  menu.style.top = Math.max(8, Math.min(y, window.innerHeight - h - 8)) + 'px';
+}
+
+function menuItems(c, live) {
+  var items = [];
+  function does(label, fn, cls) { items.push({ label: label, fn: fn, cls: cls }); }
+  function says(label) { items.push({ label: label }); }
+
+  if (c.role === 'unassigned') {
+    if (c.isCtrader) {
+      if (live.hasMaster) does('Make it a slave', function () { tact(api().assign_slave(c.tid)); });
+      else says('a cTrader account can only be a slave: make an MT5 master first');
+    } else if (!c.hasExe) {
+      says('not installed here, so it cannot be launched');
+    } else if (live.hasMaster) {
+      does('Make it a slave', function () { tact(api().assign_slave(c.tid)); });
+    } else {
+      does('Make it the master', function () { tact(api().assign_master(c.tid)); });
+    }
+    says('account login and per-terminal settings live in the TUI for now');
+    return items;
+  }
+
+  if (c.role === 'slave') {
+    if (c.orphans) {
+      does('Acknowledge orphans: sign off its untracked positions', function () {
+        tact(api().acknowledge_orphans(c.tid));
+      });
+    }
+    if (c.paused) does('Resume copying', function () { tact(api().set_pause(c.tid, false)); });
+    else does('Pause: take no new trades', function () { tact(api().set_pause(c.tid, true)); });
+  }
+  if (c.allowLive) {
+    does('Live trading is allowed — turn it off', function () { liveOverrideFlow(c, false); });
+  } else if (c.role === 'slave' && c.demoBlocked) {
+    does('Allow live trading: not a demo account…', function () { liveOverrideFlow(c, true); });
+  }
+  if (c.statusText !== 'connected') {
+    does('Reconnect to the terminal', function () { tact(api().reconnect(c.tid)); });
+    does('Restart its worker process', function () { tact(api().restart_worker(c.tid)); });
+  }
+  items.push({ sep: true });
+  does(
+    c.role === 'slave' ? 'Unassign: stop copying to it' : 'Unassign the master',
+    function () { unassignFlow(c); },
+    'danger'
+  );
+  return items;
+}
+
+function showModal(opts) {
+  $('modal-title').textContent = opts.title;
+  var body = $('modal-body');
+  body.textContent = '';
+  if (opts.body) body.appendChild(opts.body);
+  var ok = $('modal-confirm');
+  ok.textContent = opts.confirm;
+  ok.className = opts.danger ? 'danger' : '';
+  modalOnConfirm = opts.onConfirm;
+  $('modal-back').hidden = false;
+  ok.focus();
+}
+
+function closeModal() {
+  $('modal-back').hidden = true;
+  modalOnConfirm = null;
+}
+
+function unassignFlow(c) {
+  // The engine says what unassigning strands; stranding anything has to be agreed to
+  // first, exactly as in the TUI. Nothing at stake commits straight away.
+  api().unassign_stake(c.tid).then(function (r) {
+    if (!r.ok) { toast(r.message, 'bad'); return; }
+    var stake = r.stake || [];
+    if (!stake.length) { tact(api().unassign(c.tid, null)); return; }
+
+    var agreed = {};
+    var total = 0;
+    var body = document.createElement('div');
+    var warn = document.createElement('p');
+    warn.textContent = 'These copies stay open and stop being managed — nothing will close '
+      + 'them with the master, move their stops, or mirror partials. They become yours to '
+      + 'close by hand.';
+    body.appendChild(warn);
+    stake.forEach(function (s) {
+      agreed[s.tid] = s.copies.map(function (cp) { return cp.masterTicket; });
+      total += s.copies.length;
+      var h = document.createElement('div');
+      h.className = 'modal-sub';
+      h.textContent = s.name;
+      body.appendChild(h);
+      s.copies.forEach(function (cp) {
+        var line = document.createElement('div');
+        line.className = 'modal-line mono';
+        line.textContent = (cp.resting ? 'resting · ' : '') + cp.symbol
+          + (cp.volume ? ' · ' + cp.volume + ' lots' : '')
+          + (cp.slaveTicket ? ' · #' + cp.slaveTicket : '');
+        body.appendChild(line);
+      });
+    });
+    showModal({
+      title: 'Unassign ' + c.name + '?',
+      body: body,
+      confirm: 'Unassign — orphan ' + total + (total === 1 ? ' copy' : ' copies'),
+      danger: true,
+      onConfirm: function () { tact(api().unassign(c.tid, agreed)); }
+    });
+  });
+}
+
+function liveOverrideFlow(c, allow) {
+  if (!allow) {
+    // Putting the guard back on risks nothing; it needs no ceremony.
+    tact(api().live_override(c.tid, false));
+    return;
+  }
+  var body = document.createElement('div');
+  var p1 = document.createElement('p');
+  p1.textContent = 'This account is not a demo. With the override on, real orders with real '
+    + 'money are sent to it whenever copying is live.';
+  var p2 = document.createElement('p');
+  p2.textContent = 'The override stays until you turn it off from this same menu.';
+  body.appendChild(p1);
+  body.appendChild(p2);
+  showModal({
+    title: 'Allow live trading on ' + c.name + '?',
+    body: body,
+    confirm: 'Allow live trading',
+    danger: true,
+    onConfirm: function () { tact(api().live_override(c.tid, true)); }
+  });
+}
+
 // --- events --------------------------------------------------------------------------------
 function closeDropdowns() {
   document.querySelectorAll('.dd-menu').forEach(function (m) { m.hidden = true; });
@@ -944,10 +1450,15 @@ function wire() {
     }
     if (ev.key === 'Escape') {
       closeDropdowns();
+      if (!$('modal-back').hidden) { closeModal(); return; }
+      if (!$('ctx-menu').hidden) { closeMenu(); return; }
       if (S.mode === 'modify') exitModify();
     }
   });
-  document.addEventListener('click', closeDropdowns);
+  document.addEventListener('click', function () {
+    closeDropdowns();
+    closeMenu();
+  });
 
   $('reset-btn').addEventListener('click', function () {
     ['f-stop', 'f-rr', 'f-tp', 'f-entry'].forEach(function (id) { $(id).value = ''; });
@@ -1021,15 +1532,56 @@ function wire() {
   document.querySelectorAll('.nav-item.disabled').forEach(function (a) {
     a.addEventListener('click', function (ev) { ev.preventDefault(); });
   });
+  document.querySelectorAll('#sidebar .nav-item[data-page]').forEach(function (a) {
+    a.addEventListener('click', function (ev) {
+      ev.preventDefault();
+      showPage(a.dataset.page);
+    });
+  });
+
+  // --- terminals page ---
+  $('rescan-btn').addEventListener('click', function () {
+    if (T.rescanning) return;
+    T.rescanning = true;
+    var btn = $('rescan-btn');
+    btn.textContent = 'Rescanning…';
+    btn.disabled = true;
+    function done() {
+      T.rescanning = false;
+      btn.textContent = 'Rescan';
+      btn.disabled = false;
+    }
+    api().rescan().then(function (r) {
+      done();
+      toast(r.message, r.ok ? 'ok' : 'bad');
+      T.drawn = '';
+      pollTerminals();
+    }, function () {
+      done();
+      toast('The engine did not answer; try again.', 'bad');
+    });
+  });
+  $('modal-confirm').addEventListener('click', function () {
+    var fn = modalOnConfirm;
+    closeModal();
+    if (fn) fn();
+  });
+  $('modal-cancel').addEventListener('click', closeModal);
+  $('modal-back').addEventListener('click', function (ev) {
+    if (ev.target === $('modal-back')) closeModal();
+  });
+  $('ctx-menu').addEventListener('click', function (ev) { ev.stopPropagation(); });
 }
 
 function start() {
   makeChart();
   wire();
+  showPage(S.page);
   poll();
   pollRates();
   setInterval(poll, 600);
   setInterval(pollRates, 1500);
+  setInterval(pollTerminals, 1000);
 }
 
 if (window.pywebview) start();

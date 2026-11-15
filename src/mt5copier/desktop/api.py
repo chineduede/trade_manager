@@ -16,9 +16,13 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from .. import config as config_mod
-from ..config import AppMode, Role, SizingMode
+from .. import role_actions
+from ..config import AppMode, Role, SizingMode, TerminalConfig
+from ..discovery import discover_terminals
+from ..guards import Level
 from ..logging_setup import get_logger
 from ..paths import active_profile
+from ..presentation import row_info, slave_badge
 from ..protocol import CHART_TIMEFRAMES, OrderType, PendingOrder, Position, PositionType
 from . import winframe
 
@@ -368,3 +372,294 @@ class DesktopApi:
         if why is not None:
             return {"ok": False, "message": why}
         return {"ok": True, "message": f"{done}; copies follow on the next tick."}
+
+    # --- the terminals page -----------------------------------------------------------------
+
+    def _persist(self) -> str | None:
+        """Save the config and wake the engine, exactly as the TUI's _persist_and_sync does.
+        Returns why the save failed, or None; the engine syncs either way, so what the person
+        was told happened is at least true for this run."""
+        why: str | None = None
+        try:
+            config_mod.save(self._cfg)
+        except OSError as exc:
+            log.exception("config save failed")
+            why = f"could not save config: {exc}"
+        self._engine.sync()
+        return why
+
+    def _guard_info(self, terminal_id: str) -> dict[str, Any]:
+        """The card's guard corner: the TUI's guard_badge wording, plus how many rules are on."""
+        report = self._engine.guard_report(terminal_id)
+        live = [r for r in report.rules if r.level is not Level.OFF]
+        text, tone = "", ""
+        if report.holding_back:
+            text, tone = "GUARD: NO NEW TRADES", "red"
+        else:
+            worst = report.worst
+            if worst is not None and worst.level is not Level.OK:
+                if worst.level is Level.BREACHED:
+                    text, tone = "GUARD BREACHED", "red"
+                else:
+                    said = f" {worst.fraction:.0%}" if worst.fraction is not None else ""
+                    text, tone = f"GUARD{said}", "yellow"
+        return {"rules": len(live), "text": text, "tone": tone}
+
+    def _card(self, view: Any, holds: dict[str, str]) -> dict[str, Any]:
+        cfg = self._cfg
+        tcfg = view.cfg
+        tid = tcfg.terminal_id
+        info = row_info(
+            view,
+            timeout_s=cfg.heartbeat_timeout_s,
+            hold_reason=holds.get(tid),
+            display_name=cfg.display_name(tid),
+        )
+        is_slave = tcfg.role is Role.SLAVE
+        badge_text, badge_tier = slave_badge(info, cfg.dry_run) if is_slave else ("", "")
+        return {
+            "tid": tid,
+            "name": info.label,
+            "role": str(tcfg.role),
+            "statusText": info.status_text,
+            "tier": info.tier,
+            "login": info.login,
+            "server": info.server,
+            "balance": info.balance,
+            "equity": info.equity,
+            "floatingPl": info.floating_pl,
+            "currency": info.currency,
+            "openTrades": info.open_trades,
+            "paused": info.paused,
+            "holdReason": info.hold_reason,
+            "demoBlocked": info.demo_guard_blocked,
+            "badge": badge_text,
+            "badgeTier": badge_tier,
+            "isCtrader": tcfg.is_ctrader,
+            "hasExe": tcfg.exe_path is not None,
+            "usable": tcfg.usable,
+            "enabled": tcfg.enabled,
+            "allowLive": tcfg.allow_live_trading,
+            "orphans": tid in holds and bool(self._engine.orphans(tid)),
+            "guard": self._guard_info(tid) if is_slave else None,
+        }
+
+    def terminals_state(self) -> dict[str, Any]:
+        """Everything the Terminals page redraws from, in one call per poll."""
+        engine = self._engine
+        cfg = self._cfg
+        holds = engine.holds()
+        master: dict[str, Any] | None = None
+        slaves: list[dict[str, Any]] = []
+        detected: list[dict[str, Any]] = []
+        for view in engine.views():
+            card = self._card(view, holds)
+            if view.cfg.role is Role.MASTER:
+                master = card
+            elif view.cfg.role is Role.SLAVE:
+                slaves.append(card)
+            else:
+                detected.append(card)
+        virtual: dict[str, Any] | None = None
+        if cfg.mode is AppMode.TRADING:
+            feed_tid = engine.direct_feed()
+            virtual = {
+                "feed": cfg.display_name(feed_tid) if feed_tid is not None else None,
+                "positions": len(engine.direct_positions()),
+                "orders": len(engine.direct_orders()),
+            }
+        return {
+            "master": master,
+            "virtual": virtual,
+            "slaves": slaves,
+            "detected": detected,
+            "dryRun": cfg.dry_run,
+            "copying": cfg.copying_enabled,
+            "hasMaster": virtual is not None or master is not None,
+        }
+
+    def assign_master(self, tid: str) -> dict[str, Any]:
+        tid = str(tid)
+        if tid not in self._cfg.terminals:
+            return {"ok": False, "message": "that terminal is gone; rescan"}
+        refusal = role_actions.set_master(self._cfg, tid)
+        if refusal is not None:
+            return {"ok": False, "message": refusal}
+        why = self._persist()
+        if why is not None:
+            return {"ok": False, "message": why}
+        return {"ok": True, "message": f"master: {self._cfg.display_name(tid)}"}
+
+    def assign_slave(self, tid: str) -> dict[str, Any]:
+        tid = str(tid)
+        if tid not in self._cfg.terminals:
+            return {"ok": False, "message": "that terminal is gone; rescan"}
+        refusal = role_actions.set_slave(self._cfg, tid)
+        if refusal is not None:
+            return {"ok": False, "message": refusal}
+        why = self._persist()
+        if why is not None:
+            return {"ok": False, "message": why}
+        name = self._cfg.display_name(tid)
+        return {"ok": True, "message": f"{name} is now a slave; it connects on the next tick."}
+
+    def unassign_stake(self, tid: str) -> dict[str, Any]:
+        """What unassigning would give up, for the page to show before anything happens.
+        The engine checks again at the moment of commitment; this is only the asking."""
+        tid = str(tid)
+        if tid not in self._cfg.terminals:
+            return {"ok": False, "message": "that terminal is gone; rescan"}
+        stake = self._engine.copies_at_stake(tid)
+        if stake is None:
+            return {
+                "ok": False,
+                "message": "its open copies could not be read, so they cannot be given up safely",
+            }
+        out = [
+            {
+                "tid": slave_tid,
+                "name": self._cfg.display_name(slave_tid),
+                "copies": [
+                    {
+                        "masterTicket": c.master_ticket,
+                        "slaveTicket": c.slave_ticket,
+                        "symbol": c.symbol,
+                        "volume": c.volume,
+                        "resting": c.resting,
+                    }
+                    for c in held
+                ],
+            }
+            for slave_tid, held in stake.items()
+        ]
+        return {"ok": True, "stake": out}
+
+    def unassign(self, tid: str, agreed: dict[str, list[int]] | None = None) -> dict[str, Any]:
+        """Commit the unassign. ``agreed`` is what the person was shown and said yes to,
+        per slave the master tickets, exactly as the engine re-checks it."""
+        tid = str(tid)
+        if tid not in self._cfg.terminals:
+            return {"ok": False, "message": "that terminal is gone; rescan"}
+        name = self._cfg.display_name(tid)
+        was_master = self._cfg.terminals[tid].role is Role.MASTER
+        swept = [t.terminal_id for t in self._cfg.slaves] if was_master else []
+        orphan = (
+            {str(t): [int(n) for n in tickets] for t, tickets in agreed.items()}
+            if agreed
+            else None
+        )
+        refusal = self._engine.unassign(tid, orphan=orphan)
+        if refusal is not None:
+            return {"ok": False, "message": f"{name} was not unassigned: {refusal}"}
+        why = self._persist()
+        if why is not None:
+            return {"ok": False, "message": why}
+        message = f"{name} unassigned."
+        if swept:
+            names = ", ".join(self._cfg.display_name(t) for t in swept)
+            message = f"Master unassigned; also unassigned slave(s) left with no master: {names}"
+        if orphan:
+            total = sum(len(t) for t in orphan.values())
+            message += f" {total} cop{'y' if total == 1 else 'ies'} orphaned: they stay open and are no longer managed."
+        return {"ok": True, "message": message}
+
+    def set_pause(self, tid: str, paused: bool) -> dict[str, Any]:
+        tid = str(tid)
+        if tid not in self._cfg.terminals:
+            return {"ok": False, "message": "that terminal is gone; rescan"}
+        name = self._cfg.display_name(tid)
+        try:
+            self._engine.set_paused(tid, bool(paused))
+        except ValueError as exc:
+            return {"ok": False, "message": str(exc)}
+        why = self._persist()
+        if why is not None:
+            return {"ok": False, "message": why}
+        if paused:
+            log.warning("%s paused: no new trades will be copied to it", name)
+            return {
+                "ok": True,
+                "message": f"{name} paused: no new trades are copied to it. "
+                "Copies it already holds are still closed, reduced and kept in sync.",
+            }
+        log.warning("%s resumed", name)
+        return {
+            "ok": True,
+            "message": f"{name} resumed: trades opened from now on are copied. "
+            "Any opened while paused are not.",
+        }
+
+    def reconnect(self, tid: str) -> dict[str, Any]:
+        self._engine.reconnect(str(tid))
+        return {"ok": True, "message": "Reconnect requested."}
+
+    def restart_worker(self, tid: str) -> dict[str, Any]:
+        self._engine.restart(str(tid))
+        return {"ok": True, "message": "Worker restarted."}
+
+    def acknowledge_orphans(self, tid: str) -> dict[str, Any]:
+        tid = str(tid)
+        if tid not in self._cfg.terminals:
+            return {"ok": False, "message": "that terminal is gone; rescan"}
+        name = self._cfg.display_name(tid)
+        count = self._engine.acknowledge_orphans(tid)
+        if count == 0:
+            return {"ok": True, "message": f"{name} has no unacknowledged orphans."}
+        return {
+            "ok": True,
+            "message": f"Acknowledged {count} orphan(s) on {name}. They stay open and "
+            "untracked; anything the master opened while it was held is not copied to it.",
+        }
+
+    def live_override(self, tid: str, allow: bool) -> dict[str, Any]:
+        """The demo-only guard's override: deliberate, logged as a warning, like the TUI's
+        LiveDialog. The page asks before calling this; the engine applies it atomically."""
+        tid = str(tid)
+        if tid not in self._cfg.terminals:
+            return {"ok": False, "message": "that terminal is gone; rescan"}
+        old = self._cfg.terminals[tid]
+        allow = bool(allow)
+        name = self._cfg.display_name(tid)
+        if old.allow_live_trading == allow:
+            return {"ok": True, "message": f"{name}: already so."}
+        new: TerminalConfig = old.model_copy(update={"allow_live_trading": allow})
+        refusal = self._engine.apply_settings(new)
+        if refusal is not None:
+            return {"ok": False, "message": refusal}
+        log.warning(
+            "settings changed for %s (%s): %s",
+            name,
+            tid[:8],
+            "live trading allowed (demo-only guard off)"
+            if allow
+            else "live trading disallowed (demo-only guard back on)",
+        )
+        why = self._persist()
+        if why is not None:
+            return {"ok": False, "message": why}
+        if allow:
+            return {
+                "ok": True,
+                "message": f"{name}: live trading allowed. Real orders will be sent to this "
+                "account whenever copying is live.",
+            }
+        return {"ok": True, "message": f"{name}: demo-only guard back on."}
+
+    def rescan(self) -> dict[str, Any]:
+        """Passive discovery, on the bridge's own worker thread -- the page awaits the
+        promise. Launches no terminals and opens no connections."""
+        try:
+            found = discover_terminals()
+        except Exception as exc:
+            log.exception("discovery failed")
+            return {"ok": False, "message": f"discovery failed: {exc}"}
+        before = set(self._cfg.terminals)
+        config_mod.merge_discovery(self._cfg, found)
+        new = set(self._cfg.terminals) - before
+        why = self._persist()
+        if why is not None:
+            return {"ok": False, "message": why}
+        message = f"{len(found)} terminals found"
+        if new:
+            message += f", {len(new)} new"
+        return {"ok": True, "message": message + "."}
