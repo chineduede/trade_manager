@@ -704,6 +704,32 @@ function wire() {
   $('win-max').addEventListener('click', function () { api().win_toggle_max(); });
   $('win-close').addEventListener('click', function () { api().win_close(); });
 
+  // The title bar drags the window natively — the system move loop gives edge snapping
+  // and restore-from-maximized for free. The native loop swallows the mouseups, so a
+  // double click is detected by timing two downs rather than waiting for dblclick.
+  var lastDragDown = 0;
+  document.querySelectorAll('.drag-region').forEach(function (el) {
+    el.addEventListener('mousedown', function (ev) {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      var now = Date.now();
+      if (now - lastDragDown < 350) {
+        lastDragDown = 0;
+        api().win_toggle_max();
+        return;
+      }
+      lastDragDown = now;
+      api().win_drag();
+    });
+  });
+  document.querySelectorAll('#resize-zones .rz').forEach(function (el) {
+    el.addEventListener('mousedown', function (ev) {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      api().win_resize(el.dataset.edge);
+    });
+  });
+
   $('modal-ok').addEventListener('click', submitModal);
   $('modal-cancel').addEventListener('click', closeModal);
   $('modal-backdrop').addEventListener('mousedown', function (ev) {

@@ -19,6 +19,7 @@ from ..config import AppMode, Role, SizingMode
 from ..logging_setup import get_logger
 from ..paths import active_profile
 from ..protocol import CHART_TIMEFRAMES, OrderType, PendingOrder, Position, PositionType
+from . import winframe
 
 if TYPE_CHECKING:
     import webview
@@ -94,19 +95,50 @@ class DesktopApi:
 
     # --- window chrome ----------------------------------------------------------------------
 
+    def _hwnd(self) -> int | None:
+        try:
+            if self._window is None:
+                return None
+            # ``native`` is the WinForms form; pywebview types it as None until shown.
+            return int(self._window.native.Handle.ToInt64())  # type: ignore[attr-defined]
+        except Exception:
+            return None
+
     def win_minimize(self) -> None:
         if self._window is not None:
             self._window.minimize()
 
+    def win_drag(self) -> None:
+        """The title bar's drag, as a native move loop: fluid, and it snaps at edges."""
+        hwnd = self._hwnd()
+        if hwnd is not None:
+            winframe.begin_drag(hwnd)
+
+    def win_resize(self, edge: str) -> None:
+        hwnd = self._hwnd()
+        if hwnd is not None:
+            winframe.begin_resize(hwnd, str(edge))
+
+    def _is_maximized(self) -> bool:
+        """The window's real state: a drag to the top edge maximizes natively, so a flag
+        of our own would go stale the first time that happens."""
+        try:
+            from System.Windows.Forms import FormWindowState  # pythonnet, loaded with webview
+
+            return bool(self._window.native.WindowState == FormWindowState.Maximized)  # type: ignore[union-attr]
+        except Exception:
+            return self._maximized
+
     def win_toggle_max(self) -> None:
         if self._window is None:
             return
-        if self._maximized:
+        if self._is_maximized():
             self._window.restore()
+            self._maximized = False
         else:
             self._fit_maximized_bounds()
             self._window.maximize()
-        self._maximized = not self._maximized
+            self._maximized = True
 
     def _fit_maximized_bounds(self) -> None:
         """Make maximize behave like a titled window's, taskbar and all.

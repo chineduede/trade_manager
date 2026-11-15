@@ -69,6 +69,19 @@ button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible
   font-weight: 600;
 }
 .titlebar-space { flex: 1 1 auto; min-height: 48px; }
+.drag-region { -webkit-user-select: none; user-select: none; }
+
+/* Invisible native-resize handles along the window's edges; the system move loop takes
+   over on mousedown, so these only need to exist and show the right cursor. */
+#resize-zones .rz { position: fixed; z-index: 40; }
+.rz-t { top: 0; left: 12px; right: 12px; height: 5px; cursor: n-resize; }
+.rz-b { bottom: 0; left: 12px; right: 12px; height: 5px; cursor: s-resize; }
+.rz-l { left: 0; top: 12px; bottom: 12px; width: 5px; cursor: w-resize; }
+.rz-r { right: 0; top: 12px; bottom: 12px; width: 5px; cursor: e-resize; }
+.rz-tl { top: 0; left: 0; width: 12px; height: 12px; cursor: nw-resize; }
+.rz-tr { top: 0; right: 0; width: 12px; height: 12px; cursor: ne-resize; }
+.rz-bl { bottom: 0; left: 0; width: 12px; height: 12px; cursor: sw-resize; }
+.rz-br { bottom: 0; right: 0; width: 12px; height: 12px; cursor: se-resize; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); display: inline-block; flex: 0 0 auto; }
 .dot.green { background: var(--green); }
 .dot.red { background: var(--red); }
