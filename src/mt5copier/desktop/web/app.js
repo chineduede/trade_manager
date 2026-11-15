@@ -25,6 +25,7 @@ var S = {
   placing: false,
   placedUntil: 0,      // while now < this, the place button says "✓ Placed" and stays dead
   haltBusy: false,
+  guardSeen: null,     // guard-event keys already toasted; null until the first poll primes it
   page: 'trading'      // which page owns #main: 'trading' or 'terminals'
 };
 
@@ -679,7 +680,7 @@ function say(message, tone) {
   renderTicket();
 }
 
-function toast(message, tone) {
+function toast(message, tone, ms) {
   var t = document.createElement('div');
   t.className = 'toast ' + (tone || '');
   t.textContent = message;
@@ -690,7 +691,27 @@ function toast(message, tone) {
     setTimeout(function () { t.remove(); }, 260);
   }
   t.addEventListener('click', leave);
-  setTimeout(leave, 4500);
+  setTimeout(leave, ms || 4500);
+}
+
+// A guard acting on a copy says so the moment it happens, wherever the person is —
+// not on the Guards page only, found later. The state poll carries the last couple of
+// minutes of actions on every account; the first poll primes what is already old news,
+// and the seen set is rebuilt from the payload each time, so it prunes itself.
+function noteGuardEvents(events) {
+  var seen = S.guardSeen;
+  S.guardSeen = {};
+  events.forEach(function (e) { S.guardSeen[e.key] = true; });
+  if (seen === null) return;
+  events.forEach(function (e) {
+    if (seen[e.key]) return;
+    var head = e.rule + ' ' + e.action
+      + (e.trade ? ' ' + e.trade : '')
+      + (e.slave ? ' on ' + e.slave : '');
+    var tone = actionTone(e.action) === 'red' ? 'bad' : '';
+    // These carry the reason a trade did not go through; give them time to be read.
+    toast(head + (e.detail ? ' — ' + e.detail : ''), tone, 9000);
+  });
 }
 
 function act(promise) {
@@ -787,6 +808,7 @@ function poll() {
   api().state(S.symbol, S.tf).then(function (live) {
     polling = false;
     S.live = live;
+    noteGuardEvents(live.guardEvents || []);
     renderShell();
     renderBook();
     if (S.mode === 'modify' && S.modRow) {

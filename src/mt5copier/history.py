@@ -510,21 +510,36 @@ class HistoryStore:
             except sqlite3.Error:
                 log.exception("could not read the guard actions")
                 return []
-        return [
-            GuardAction(
-                ts=r["ts"],
-                account=r["account"],
-                terminal_id=r["terminal_id"],
-                rule_id=r["rule_id"],
-                rule=r["rule"],
-                action=r["action"],
-                detail=r["detail"],
-                master_ticket=r["master_ticket"],
-                symbol=r["symbol"],
-                label=r["label"],
-            )
-            for r in rows
-        ]
+        return [_guard_action(r) for r in rows]
+
+    def recent_guard_actions(self, *, since: float, limit: int = 50) -> list[GuardAction]:
+        """What the guards did on any account since ``since``, newest first: the poll's
+        cross-account feed, so an action can surface wherever the person is looking."""
+        with self._lock:
+            try:
+                rows = self._db.execute(
+                    "SELECT * FROM guard_actions WHERE ts >= ? ORDER BY ts DESC, id DESC LIMIT ?",
+                    (since, limit),
+                ).fetchall()
+            except sqlite3.Error:
+                log.exception("could not read the guard actions")
+                return []
+        return [_guard_action(r) for r in rows]
+
+
+def _guard_action(r: sqlite3.Row) -> GuardAction:
+    return GuardAction(
+        ts=r["ts"],
+        account=r["account"],
+        terminal_id=r["terminal_id"],
+        rule_id=r["rule_id"],
+        rule=r["rule"],
+        action=r["action"],
+        detail=r["detail"],
+        master_ticket=r["master_ticket"],
+        symbol=r["symbol"],
+        label=r["label"],
+    )
 
 
 def _group(rows: Iterable[sqlite3.Row], order: list[int]) -> list[Trade]:

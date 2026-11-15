@@ -2111,6 +2111,10 @@ class Engine:
             return []
         return self._history.guard_actions(key, since=since)
 
+    def recent_guard_actions(self, since: float) -> list[GuardAction]:
+        """What the guards did on any account since ``since``, newest first."""
+        return self._history.recent_guard_actions(since=since)
+
     def _record_guard(self, key: str | None, terminal_id: str, note: GuardNote) -> None:
         """Something a guard did to the slave as a whole, rather than to one trade."""
         if key is None:

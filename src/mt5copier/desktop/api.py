@@ -253,9 +253,30 @@ class DesktopApi:
             "quote": {"bid": quote.bid, "ask": quote.ask} if quote is not None else None,
             "book": rows,
             "sizing": self._sizing(),
+            "guardEvents": self._guard_events(now),
             "workersLive": health["live"],
             "workersTotal": health["supervised"],
         }
+
+    def _guard_events(self, now: float) -> list[dict[str, Any]]:
+        """The last couple of minutes of guard actions on any account, so the page can
+        toast each one as it happens: a declined copy must say so where the trade was
+        placed, not wait on the Guards page until the person goes looking."""
+        out: list[dict[str, Any]] = []
+        for a in self._engine.recent_guard_actions(now - 120.0):
+            out.append(
+                {
+                    "key": f"{a.ts:.3f}|{a.terminal_id}|{a.rule_id}|{a.action}|{a.master_ticket}",
+                    "slave": self._cfg.display_name(a.terminal_id),
+                    "rule": a.rule,
+                    "action": a.action,
+                    "trade": f"#{a.master_ticket} {a.symbol} {a.label}".strip()
+                    if a.master_ticket is not None
+                    else "",
+                    "detail": a.detail,
+                }
+            )
+        return out
 
     def _sizing(self) -> list[dict[str, Any]]:
         """Each enabled slave's name and risk budget, for the ticket's sizing line.
@@ -1055,7 +1076,12 @@ class DesktopApi:
         why = self._save_guards(key, guards.model_copy(update={"rules": rules}))
         if why is not None:
             return {"ok": False, "message": why}
-        return {"ok": True, "message": f"{title}: {'on' if flipped.enabled else 'off'}"}
+        if flipped.enabled:
+            return {"ok": True, "message": f"{title} is back on; it is enforced again"}
+        return {
+            "ok": True,
+            "message": f"{title} is off; it will not check or act until switched back on",
+        }
 
     def guard_toggle_all(self, tid: str) -> dict[str, Any]:
         picked = self._account_and_guards(str(tid))
@@ -1068,7 +1094,12 @@ class DesktopApi:
         why = self._save_guards(key, guards.model_copy(update={"enabled": on_now}))
         if why is not None:
             return {"ok": False, "message": why}
-        return {"ok": True, "message": f"guards {'on' if on_now else 'all off'}"}
+        if on_now:
+            return {"ok": True, "message": "all guards on: every rule is enforced again"}
+        return {
+            "ok": True,
+            "message": "all guards off: nothing is checked on this account until switched back on",
+        }
 
     def guard_set_initial(self, tid: str, text: str) -> dict[str, Any]:
         picked = self._account_and_guards(str(tid))
