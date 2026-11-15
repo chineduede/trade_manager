@@ -46,7 +46,9 @@ on every direct trade, so the master's volume never reaches a slave's sizing. On
 keeps partials legible: close 50% and the book row reads 0.50, the fraction left."""
 
 
-def _position_row(p: Position, bid: float | None, ask: float | None) -> dict[str, Any]:
+def _position_row(
+    p: Position, bid: float | None, ask: float | None, copies: list[dict[str, str]]
+) -> dict[str, Any]:
     now = None
     if bid is not None and ask is not None:
         now = bid if p.type is PositionType.BUY else ask
@@ -61,6 +63,9 @@ def _position_row(p: Position, bid: float | None, ask: float | None) -> dict[str
         "sl": p.sl,
         "tp": p.tp,
         "now": now,
+        # The ticket is intent; this is what still stands behind it on the slaves,
+        # from engine.direct_copy_status: per copy, live / closed / unknown.
+        "copies": copies,
     }
 
 
@@ -212,11 +217,13 @@ class DesktopApi:
         for p in positions:
             if p.symbol not in quotes:
                 quotes[p.symbol] = engine.direct_quote(p.symbol)
+        statuses = engine.direct_copy_status()
         rows = [
             _position_row(
                 p,
                 quotes[p.symbol].bid if quotes[p.symbol] else None,
                 quotes[p.symbol].ask if quotes[p.symbol] else None,
+                statuses.get(p.ticket, []),
             )
             for p in positions
         ]

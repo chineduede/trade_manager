@@ -323,6 +323,9 @@ input.accent-green { border-left: 3px solid var(--green); }
 .status-pill.resting { color: var(--yellow); }
 td.side-buy { color: var(--blue); font-weight: 700; }
 td.side-sell { color: var(--red); font-weight: 700; }
+.cp-live { color: var(--green); }
+.cp-part { color: var(--yellow); }
+.cp-dead { color: var(--red); font-weight: 700; }
 td.sym { font-weight: 700; }
 td .row-btn {
   height: 38px; padding: 0 14px; border-radius: 8px;

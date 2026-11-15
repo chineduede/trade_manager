@@ -132,10 +132,12 @@ def test_rows_carry_what_the_page_shows() -> None:
         sl=64317.0,
         tp=65521.0,
     )
-    row = _position_row(p, bid=64784.0, ask=64799.0)
+    copies = [{"name": "IC demo", "state": "live"}, {"name": "FTMO", "state": "closed"}]
+    row = _position_row(p, bid=64784.0, ask=64799.0, copies=copies)
     assert row["side"] == "buy"
     assert row["kind"] == "market"
     assert row["now"] == 64784.0  # a buy closes at the bid
+    assert row["copies"] == copies
 
     o = _Engine().direct_orders()[0]
     row = _order_row(o, now=4200 - 600)

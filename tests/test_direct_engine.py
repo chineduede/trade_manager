@@ -26,6 +26,7 @@ from mt5copier.protocol import (
     ActionKind,
     Candle,
     OrderType,
+    Position,
     PositionType,
     Quote,
     RatesRequest,
@@ -458,3 +459,50 @@ def test_direct_rates_needs_a_feed(engine: Engine) -> None:
     assert engine.direct_rates("EURUSD", 5) is None
     worker = engine._workers[SLAVE]
     assert not any(isinstance(c, RatesRequest) for c in worker.cmd_q.sent)
+
+
+# --- what still stands behind a ticket on the slaves -------------------------------------------
+
+
+def test_copy_status_reads_the_slaves_snapshots(engine: Engine) -> None:
+    feed(engine, EURUSD_QUOTE)
+    engine.virtual_tick()  # baseline
+    engine.place_direct_market("EURUSD", PositionType.BUY, 1.0, 1.08000, 0.0)
+    engine.virtual_tick()
+    (copy,) = engine._ledger.believed(SLAVE)
+
+    # A dry-run copy's ticket is synthetic (the master's negated), so no broker can
+    # vouch for it: unknown, not live and not closed.
+    assert copy.slave_ticket == -1
+    assert engine.direct_copy_status() == {1: [{"name": "Beta", "state": "unknown"}]}
+
+    # As if it had filled live as #777. In the slave's snapshot: live.
+    engine._ledger._store.update(SLAVE, copy.master_ticket, slave_ticket=777)
+
+    def snap(*positions: Position, seq: int) -> None:
+        engine._snapshots[SLAVE] = Snapshot(
+            terminal_id=SLAVE,
+            state=WorkerState.CONNECTED,
+            seq=seq,
+            balance=10_000.0,
+            open_positions=positions,
+            live_positions=(),
+            pending_orders=(),
+            quotes=(EURUSD_QUOTE,),
+        )
+        engine._received_at[SLAVE] = time.monotonic()
+
+    held = Position(
+        ticket=777, symbol="EURUSD", type=PositionType.BUY,
+        volume=0.1, price_open=1.08520, sl=1.08000, tp=0.0,
+    )
+    snap(held, seq=2)
+    assert engine.direct_copy_status() == {1: [{"name": "Beta", "state": "live"}]}
+
+    # Gone from a readable snapshot: closed on the slave on its own.
+    snap(seq=3)
+    assert engine.direct_copy_status() == {1: [{"name": "Beta", "state": "closed"}]}
+
+    # A stale snapshot proves nothing either way.
+    engine._received_at[SLAVE] = time.monotonic() - engine._cfg.heartbeat_timeout_s - 1.0
+    assert engine.direct_copy_status() == {1: [{"name": "Beta", "state": "unknown"}]}

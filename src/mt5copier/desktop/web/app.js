@@ -233,6 +233,14 @@ function renderModify() {
   var at = document.createElement('span');
   at.textContent = (row.open ? 'in at ' : 'resting at ') + row.entry;
   facts.appendChild(at);
+  if (row.open && row.copies && row.copies.length) {
+    var cp = copiesSummary(row);
+    var cps = document.createElement('span');
+    cps.className = cp.cls;
+    cps.textContent = 'copies: ' + cp.text;
+    cps.title = cp.title;
+    facts.appendChild(cps);
+  }
 
   $('mod-entry-field').hidden = row.open;
 
@@ -538,6 +546,33 @@ function renderShell() {
 var bookDrawn = '';
 var bookTickets = null; // tickets drawn last time; a row not among them flashes as new
 
+function copiesSummary(r) {
+  // What still stands behind the ticket on the slaves. 'all closed' is the cue that
+  // closing the master would close nothing real; '?' is a copy that cannot be verified
+  // right now (slave unreadable, or a dry run's copy, which never exists on a broker).
+  var c = (r.open && r.copies) || [];
+  if (!c.length) return { text: '—', cls: 'muted', title: 'no copies tracked' };
+  var live = 0, closed = 0, unknown = 0;
+  c.forEach(function (s) {
+    if (s.state === 'live') live++;
+    else if (s.state === 'closed') closed++;
+    else unknown++;
+  });
+  var title = c.map(function (s) {
+    return s.name + ' — ' + (s.state === 'unknown' ? 'unverified' : s.state);
+  }).join('\n');
+  if (closed === c.length) return { text: 'all closed', cls: 'cp-dead', title: title };
+  var parts = [];
+  if (live) parts.push(live + ' live');
+  if (closed) parts.push(closed + ' closed');
+  if (unknown) parts.push(unknown + ' ?');
+  return {
+    text: parts.join(' · '),
+    cls: closed ? 'cp-part' : (live ? 'cp-live' : 'muted'),
+    title: title
+  };
+}
+
 function renderBook() {
   var rows = (S.live && S.live.book) || [];
   var open = rows.filter(function (r) { return r.open; }).length;
@@ -577,6 +612,9 @@ function renderBook() {
     cell(r.tp ? String(r.tp) : '—', r.tp ? '' : 'muted');
     cell(r.open ? (r.now === null ? '—' : String(r.now))
       : (r.expiresMin === null ? 'GTC' : 'expires ' + r.expiresMin + 'm'), 'muted');
+    var cp = copiesSummary(r);
+    var cpCell = cell(r.open ? cp.text : '—', r.open ? cp.cls : 'muted');
+    if (r.open && cp.title) cpCell.title = cp.title;
 
     var actions = document.createElement('td');
     actions.className = 'actions-cell';

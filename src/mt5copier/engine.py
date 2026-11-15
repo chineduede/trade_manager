@@ -901,6 +901,51 @@ class Engine:
         with self._lock:
             return self._virtual.orders() if self._virtual is not None else ()
 
+    def direct_copy_status(self) -> dict[int, list[dict[str, str]]]:
+        """Each direct ticket's copies, checked against the slaves' latest snapshots:
+        ``{master_ticket: [{"name": slave, "state": "live" | "closed" | "unknown"}]}``.
+
+        The book holds intent; this says what is still real behind it, so the page can
+        tell whether closing the ticket would close anything. A believed copy whose
+        slave ticket is missing from a *readable* snapshot has been closed on the slave
+        on its own (its stop hit there first, or by hand) -- the one state the diff
+        itself never notices, because it only ever compares the master against belief.
+        ``unknown`` refuses to guess: the slave is disconnected or stale, its positions
+        could not be read, or the copy has no real slave ticket -- a dry run's is the
+        master's negated (see ``_simulated_result``), and nothing on a broker can vouch
+        for a copy that was never sent to one.
+        """
+        with self._lock:
+            now = time.monotonic()
+            timeout = self._cfg.heartbeat_timeout_s
+            out: dict[int, list[dict[str, str]]] = {}
+            for cfg in self._cfg.slaves:
+                copies = self._ledger.believed(cfg.terminal_id)
+                if not copies:
+                    continue
+                snap = self._snapshots.get(cfg.terminal_id)
+                received = self._received_at.get(cfg.terminal_id)
+                readable = (
+                    snap is not None
+                    and snap.state is WorkerState.CONNECTED
+                    and received is not None
+                    and (now - received) <= timeout
+                    and snap.open_positions is not None
+                )
+                open_tickets = (
+                    {p.ticket for p in snap.open_positions or ()} if readable and snap else set()
+                )
+                name = self._cfg.display_name(cfg.terminal_id)
+                for copy in copies:
+                    if not readable or copy.slave_ticket is None or copy.slave_ticket < 0:
+                        state = "unknown"
+                    elif copy.slave_ticket in open_tickets:
+                        state = "live"
+                    else:
+                        state = "closed"
+                    out.setdefault(copy.master_ticket, []).append({"name": name, "state": state})
+            return out
+
     def place_direct_market(
         self, symbol: str, direction: PositionType, lots: float, sl: float, tp: float = 0.0
     ) -> str | None:
