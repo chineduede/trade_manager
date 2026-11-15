@@ -843,6 +843,7 @@ var T = {
   live: null,       // last terminals_state() answer
   drawn: '',        // what the zones were last built from
   drag: null,       // { card, ghost, el } while a card is held
+  dragPending: false, // pointer down on a card, drag not yet begun: rebuilds must wait
   rescanning: false
 };
 var modalOnConfirm = null;
@@ -892,9 +893,11 @@ function money(v) {
 
 function renderTerminals() {
   var live = T.live;
-  // Mid-drag the source card must stay the element the pointer started on, so the
-  // rebuild waits; the next poll after the drop catches everything up.
-  if (!live || T.drag) return;
+  // From pointer-down to drop the source card must stay the element the pointer started
+  // on — a rebuild in that window detaches it, and a detached card measures 0 wide, so
+  // the ghost cloned from it collapsed into a scrambled strip. The rebuild waits; the
+  // next poll after the drop catches everything up.
+  if (!live || T.drag || T.dragPending) return;
   var key = JSON.stringify(live);
   if (key === T.drawn) return;
   T.drawn = key;
@@ -1091,10 +1094,20 @@ function wireCard(el, c) {
     ev.preventDefault();
     openMenu(c, ev.clientX, ev.clientY);
   });
+  // The browser must never start its own drag of the card's text — a native drag eats
+  // the pointer events and strands our ghost mid-screen.
+  el.addEventListener('dragstart', function (ev) { ev.preventDefault(); });
   el.addEventListener('pointerdown', function (ev) {
     if (ev.button !== 0 || ev.target.closest('button')) return;
     var startX = ev.clientX, startY = ev.clientY;
     var started = false;
+    T.dragPending = true;
+    function letGo() {
+      T.dragPending = false;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+    }
     function move(e) {
       if (!started) {
         if (Math.abs(e.clientX - startX) < 6 && Math.abs(e.clientY - startY) < 6) return;
@@ -1104,21 +1117,31 @@ function wireCard(el, c) {
       moveDrag(e);
     }
     function up(e) {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
+      letGo();
       if (started) endDrag(e);
+    }
+    function cancel() {
+      letGo();
+      if (started) cleanupDrag();
     }
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
     ev.preventDefault();
   });
 }
 
 function beginDrag(el, c, e) {
   closeMenu();
+  if (!el.isConnected) {
+    // A rebuild slipped in before the hold took effect: the grabbed element is out of
+    // the page. Its replacement carries the same terminal, so the drag follows it.
+    el = document.querySelector('.tcard[data-tid="' + c.tid + '"]') || el;
+  }
+  var width = el.getBoundingClientRect().width;
   var ghost = el.cloneNode(true);
   ghost.className = 'tcard tcard-ghost';
-  ghost.style.width = el.offsetWidth + 'px';
+  if (width) ghost.style.width = width + 'px';
   document.body.appendChild(ghost);
   el.classList.add('drag-src');
   document.body.classList.add('dragging-terminals');
@@ -1141,14 +1164,20 @@ function moveDrag(e) {
   });
 }
 
-function endDrag(e) {
+function cleanupDrag() {
   var drag = T.drag;
-  if (!drag) return;
+  if (!drag) return null;
   T.drag = null;
   drag.ghost.remove();
   drag.el.classList.remove('drag-src');
   document.body.classList.remove('dragging-terminals');
   document.querySelectorAll('.zone').forEach(function (z) { z.classList.remove('drop-hot'); });
+  return drag;
+}
+
+function endDrag(e) {
+  var drag = cleanupDrag();
+  if (!drag) return;
   var zone = zoneUnder(e);
   if (!zone) return;
   var c = drag.card;
