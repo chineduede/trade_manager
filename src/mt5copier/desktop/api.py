@@ -835,11 +835,16 @@ class DesktopApi:
                     seen_keys.add(key)
                 report = engine.guard_report(view.cfg.terminal_id)
                 worst = report.worst
+                snap = view.snapshot
+                server = (
+                    snap.server if snap is not None and snap.server else view.cfg.last_server
+                )
                 chips.append(
                     {
                         "tid": view.cfg.terminal_id,
                         "name": cfg.display_name(view.cfg.terminal_id),
                         "login": view.cfg.last_login,
+                        "server": server,
                         "slave": want_slave,
                         "rules": len(report.rules),
                         "holding": bool(report.holding_back),

@@ -1431,28 +1431,12 @@ function renderGuards() {
   $('guard-none').hidden = !none;
   $('guard-panel').hidden = none;
   $('guard-actions-panel').hidden = none;
-  var chips = $('guard-chips');
-  chips.textContent = '';
+  $('guard-pick').hidden = none;
   if (none) return;
   G.tid = live.selected;
-
-  live.accounts.forEach(function (a) {
-    var b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'chip mono' + (a.tid === live.selected ? ' active' : '');
-    b.setAttribute('aria-pressed', String(a.tid === live.selected));
-    b.textContent = a.name + (a.login ? ' · ' + a.login : '');
-    if (a.holding) b.appendChild(cardLine('chip-flag red', 'HELD'));
-    else if (a.worst === 'near') b.appendChild(cardLine('chip-flag yellow', '!'));
-    if (!a.slave) b.appendChild(cardLine('chip-flag quiet', 'not a slave'));
-    b.addEventListener('click', function () {
-      G.tid = a.tid;
-      G.selected = null;
-      G.drawn = '';
-      pollGuards();
-    });
-    chips.appendChild(b);
-  });
+  renderGuardPickBtn(live);
+  // The open menu is the person's: rebuilding it under their search would fight them.
+  // It is rebuilt fresh each time it opens.
 
   var initial = $('g-initial');
   if (document.activeElement !== initial) {
@@ -1500,6 +1484,81 @@ function renderGuards() {
     acts.appendChild(line);
   });
   $('guard-actions-empty').hidden = live.actions.length > 0;
+}
+
+// --- the account picker: one dropdown, searchable, slaves apart from the rest --------------
+function renderGuardPickBtn(live) {
+  var sel = null;
+  live.accounts.forEach(function (a) { if (a.tid === live.selected) sel = a; });
+  var btn = $('guard-pick-btn');
+  btn.textContent = '';
+  if (sel) {
+    btn.appendChild(cardLine('gp-name', sel.name));
+    var sub = (sel.login ? String(sel.login) : '') + (sel.server ? ' · ' + sel.server : '');
+    if (sub) btn.appendChild(cardLine('gp-sub mono muted', sub));
+    if (sel.holding) btn.appendChild(cardLine('chip-flag red', 'HELD'));
+    if (!sel.slave) btn.appendChild(cardLine('chip-flag quiet', 'not a slave'));
+  } else {
+    btn.appendChild(cardLine('gp-name muted', 'pick an account…'));
+  }
+  var chev = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  chev.setAttribute('width', '14');
+  chev.setAttribute('height', '14');
+  chev.setAttribute('viewBox', '0 0 24 24');
+  chev.setAttribute('aria-hidden', 'true');
+  chev.innerHTML = '<path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>';
+  chev.classList.add('gp-chev');
+  btn.appendChild(chev);
+}
+
+function guardPickMatches(query) {
+  var accounts = G.live ? G.live.accounts : [];
+  var terms = query.toLowerCase().split(/\s+/).filter(function (t) { return t; });
+  return accounts.filter(function (a) {
+    var hay = (a.name + ' ' + (a.login || '') + ' ' + (a.server || '')).toLowerCase();
+    return terms.every(function (t) { return hay.indexOf(t) >= 0; });
+  });
+}
+
+function buildGuardPickList() {
+  var list = $('guard-pick-list');
+  list.textContent = '';
+  var found = guardPickMatches($('guard-pick-search').value);
+  [['SLAVES — guarded as they copy', true],
+   ['NOT A SLAVE — rules wait for the first copied trade', false]].forEach(function (group) {
+    var mine = found.filter(function (a) { return a.slave === group[1]; });
+    if (!mine.length) return;
+    list.appendChild(cardLine('pick-head', group[0]));
+    mine.forEach(function (a) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pick-item gp-item' + (a.tid === G.tid ? ' current' : '');
+      b.setAttribute('role', 'option');
+      var top = document.createElement('span');
+      top.className = 'gp-item-top';
+      top.appendChild(cardLine('pick-label', a.name));
+      if (a.holding) top.appendChild(cardLine('chip-flag red', 'HELD'));
+      else if (a.worst === 'near') top.appendChild(cardLine('chip-flag yellow', 'NEAR'));
+      top.appendChild(cardLine('gp-item-rules muted',
+        a.rules ? a.rules + ' rule' + (a.rules === 1 ? '' : 's') : 'no rules'));
+      b.appendChild(top);
+      var sub = (a.login ? String(a.login) : 'account not known yet')
+        + (a.server ? ' · ' + a.server : '');
+      b.appendChild(cardLine('pick-sub mono muted', sub));
+      b.addEventListener('click', function () {
+        closeDropdowns();
+        if (a.tid === G.tid) return;
+        G.tid = a.tid;
+        G.selected = null;
+        G.drawn = '';
+        pollGuards();
+      });
+      list.appendChild(b);
+    });
+  });
+  if (!list.childNodes.length) {
+    list.appendChild(cardLine('muted gp-none', 'nothing matches that search'));
+  }
 }
 
 function actionTone(action) {
@@ -2158,6 +2217,29 @@ function wire() {
     if (!live) return null;
     return live.rules.filter(function (r) { return r.id === G.selected; })[0] || null;
   }
+  var pickBtn = $('guard-pick-btn');
+  var pickMenu = $('guard-pick-menu');
+  var pickSearch = $('guard-pick-search');
+  pickBtn.addEventListener('click', function (ev) {
+    ev.stopPropagation();
+    var opening = pickMenu.hidden;
+    closeDropdowns();
+    if (opening) {
+      pickSearch.value = '';
+      buildGuardPickList();
+      pickMenu.hidden = false;
+      pickBtn.setAttribute('aria-expanded', 'true');
+      pickSearch.focus();
+    }
+  });
+  pickMenu.addEventListener('click', function (ev) { ev.stopPropagation(); });
+  pickSearch.addEventListener('input', buildGuardPickList);
+  pickSearch.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter') {
+      var first = $('guard-pick-list').querySelector('.gp-item');
+      if (first) first.click();
+    }
+  });
   $('g-add').addEventListener('click', addRuleFlow);
   $('g-templates').addEventListener('click', templatesFlow);
   $('g-copy').addEventListener('click', copyFromFlow);

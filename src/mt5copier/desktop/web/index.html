@@ -268,7 +268,13 @@
         <span class="muted">rules belong to the account, not the terminal · a safety net, never a named firm</span>
       </div>
 
-      <div role="group" aria-label="Account" id="guard-chips"></div>
+      <div id="guard-pick" class="dd">
+        <button type="button" id="guard-pick-btn" class="dd-btn" aria-haspopup="listbox" aria-expanded="false"></button>
+        <div id="guard-pick-menu" class="dd-menu" hidden>
+          <input id="guard-pick-search" placeholder="search name, account id, server…" autocomplete="off" spellcheck="false">
+          <div id="guard-pick-list" role="listbox" aria-label="Accounts"></div>
+        </div>
+      </div>
 
       <section aria-label="Rules" class="panel" id="guard-panel" hidden>
         <div id="guard-toolbar">

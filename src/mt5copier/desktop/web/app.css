@@ -478,20 +478,35 @@ body.dragging-terminals .zone-cue { display: inline-block; }
 #ctx-menu .menu-sep { height: 1px; background: var(--hairline); margin: 4px 8px; }
 
 /* --- the guards page --------------------------------------------------------------------- */
-#guard-chips { display: flex; flex-wrap: wrap; gap: 8px; }
-#guard-chips:empty { display: none; }
-.chip {
-  display: flex; align-items: center; gap: 8px;
-  min-height: 44px; padding: 0 16px;
-  border-radius: 8px; border: 1px solid var(--border);
-  background: var(--panel-raise); color: var(--fg);
-  font-size: 13.5px; font-weight: 500;
-}
-.chip.active { background: var(--fg); color: var(--bg); border-color: var(--fg); font-weight: 600; }
-.chip-flag { font-size: 11px; font-weight: 700; }
-.chip.active .chip-flag.red { color: var(--red); }
+/* One account at a time, picked from a searchable dropdown: slaves apart from the rest. */
+.chip-flag { font-size: 11px; font-weight: 700; white-space: nowrap; }
 .chip-flag.quiet { color: var(--muted); font-weight: 400; font-size: 11.5px; }
-.chip.active .chip-flag.quiet { color: var(--bg); opacity: 0.7; }
+#guard-pick { max-width: 480px; }
+#guard-pick-btn {
+  width: 100%; min-height: 54px; justify-content: flex-start; gap: 10px;
+  font-family: 'Inter', system-ui, sans-serif; font-size: 14px;
+}
+.gp-name { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gp-sub { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gp-chev { margin-left: auto; color: var(--muted); flex: 0 0 auto; }
+#guard-pick-menu {
+  left: 0; right: auto; width: 460px; max-width: calc(100vw - 48px);
+  padding: 10px; gap: 8px;
+}
+#guard-pick-search {
+  height: 42px; font-size: 13px; flex: 0 0 auto;
+  background: var(--bg-deep);
+}
+#guard-pick-list {
+  max-height: 440px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.gp-item { width: 100%; }
+.gp-item.current { background: var(--panel-raise); box-shadow: inset 3px 0 0 var(--blue); }
+.gp-item-top { display: flex; align-items: baseline; gap: 8px; width: 100%; min-width: 0; }
+.gp-item-top .pick-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gp-item-rules { margin-left: auto; font-size: 12px; flex: 0 0 auto; }
+.gp-none { padding: 10px 12px; }
 
 #guard-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 14px; }
 #guard-toolbar #g-initial { width: 150px; }
