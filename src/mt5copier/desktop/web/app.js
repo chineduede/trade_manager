@@ -27,10 +27,20 @@ var S = {
   haltBusy: false
 };
 
+var defaultRr = '';
 try {
   S.symbol = localStorage.getItem('dt-symbol') || '';
   S.tf = localStorage.getItem('dt-tf') || 'M5';
+  defaultRr = localStorage.getItem('dt-rr') || '';
 } catch (e) { /* storage may be unavailable; defaults are fine */ }
+
+function rememberRr(text) {
+  // The last rr that meant something becomes the default, restarts included.
+  var v = parseFloat(text);
+  if (!isFinite(v) || v <= 0) return;
+  defaultRr = text;
+  try { localStorage.setItem('dt-rr', text); } catch (e) { /* fine */ }
+}
 
 function num(text) { var v = parseFloat(text); return isFinite(v) ? v : NaN; }
 
@@ -806,14 +816,19 @@ function wireDropdown(id, onPick) {
 }
 
 function onLevelTyped(which) {
-  if (which === 'rr') S.lastTouched = 'rr';
-  else if (which === 'tp') S.lastTouched = 'tp';
+  if (which === 'rr') {
+    S.lastTouched = 'rr';
+    rememberRr($('f-rr').value.trim());
+  } else if (which === 'tp') {
+    S.lastTouched = 'tp';
+  }
   S.notice = '';
   renderTicket();
 }
 
 function wire() {
   $('f-symbol').value = S.symbol;
+  if (defaultRr) $('f-rr').value = defaultRr; // last used rr, back as the default
   $('f-symbol').addEventListener('input', function (ev) {
     var up = ev.target.value.toUpperCase();
     if (up !== ev.target.value) {
@@ -890,6 +905,7 @@ function wire() {
 
   $('reset-btn').addEventListener('click', function () {
     ['f-stop', 'f-rr', 'f-tp', 'f-entry'].forEach(function (id) { $(id).value = ''; });
+    if (defaultRr) $('f-rr').value = defaultRr; // reset keeps the remembered rr
     $('f-expiry').value = '';
     S.type = 'market';
     S.lastTouched = 'rr';

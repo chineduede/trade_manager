@@ -326,6 +326,19 @@ td .row-btn + .row-btn { margin-left: 8px; }
 .status-space { flex: 1 1 auto; }
 #status-dry { font-weight: 600; }
 
+/* --- narrower windows: the sidebar folds to icons and the ticket takes the row ----------- */
+@media (max-width: 1280px) {
+  #sidebar { flex: 0 0 64px; padding: 14px 8px; }
+  .nav-item { justify-content: center; padding: 0; gap: 0; }
+  .nav-label { display: none; }
+  .sidebar-note { display: none; }
+  #main { padding: 20px 18px 32px 18px; gap: 18px; }
+  /* Stacked below the breakpoint, so the ticket should own the full row rather than
+     leave a dead column beside itself. */
+  #ticket { max-width: none; }
+  #chart-wrap { min-height: 380px; }
+}
+
 /* --- toasts: an action's outcome, where the eye cannot miss it --------------------------- */
 #toasts {
   position: fixed; top: 60px; right: 16px; z-index: 60;
