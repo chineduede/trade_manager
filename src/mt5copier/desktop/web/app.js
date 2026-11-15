@@ -35,7 +35,7 @@ try {
   S.tf = localStorage.getItem('dt-tf') || 'M5';
   defaultRr = localStorage.getItem('dt-rr') || '';
   var savedPage = localStorage.getItem('dt-page');
-  if (savedPage === 'terminals' || savedPage === 'guards') S.page = savedPage;
+  if (savedPage === 'terminals' || savedPage === 'guards' || savedPage === 'news') S.page = savedPage;
 } catch (e) { /* storage may be unavailable; defaults are fine */ }
 
 function rememberRr(text) {
@@ -870,7 +870,7 @@ var T = {
 };
 var modalOnConfirm = null;
 
-var PAGES = ['trading', 'terminals', 'guards'];
+var PAGES = ['trading', 'terminals', 'guards', 'news'];
 
 function showPage(name) {
   if (PAGES.indexOf(name) < 0) name = 'trading';
@@ -885,6 +885,7 @@ function showPage(name) {
   });
   if (name === 'terminals') pollTerminals();
   if (name === 'guards') pollGuards();
+  if (name === 'news') pollNews();
 }
 
 var terminalsBusy = false;
@@ -1999,6 +2000,205 @@ function makeChoiceDropdown(field, onChange) {
   return { el: root, value: function () { return current; } };
 }
 
+// --- the news page -------------------------------------------------------------------------
+// The week's calendar, and against each release what the news rules will do. The engine
+// words the GUARD column from the rules' own parameters; this page only filters and draws.
+var N = {
+  live: null,
+  drawn: '',
+  ccy: 'all',       // 'all' or a currency code
+  impact: 'all',    // 'all' | 'high' | 'highmed'
+  mine: false,      // only currencies the open book touches
+  ccyDd: null,      // the currency dropdown, rebuilt only when the week's currencies change
+  ccyKey: '',
+  impactDd: null,
+  scanning: false
+};
+try {
+  N.ccy = localStorage.getItem('dt-news-ccy') || 'all';
+  N.impact = localStorage.getItem('dt-news-impact') || 'all';
+  N.mine = localStorage.getItem('dt-news-mine') === '1';
+} catch (e) { /* defaults are fine */ }
+
+var newsBusy = false;
+function pollNews() {
+  if (newsBusy || !window.pywebview || S.page !== 'news') return;
+  newsBusy = true;
+  api().news_state().then(function (live) {
+    newsBusy = false;
+    N.live = live;
+    renderNews();
+  }, function () { newsBusy = false; });
+}
+
+function newsFilterPass(e, mineList) {
+  // An 'ALL' release (an OPEC meeting) belongs to no one currency and moves everything,
+  // so no currency narrowing ever hides it.
+  if (N.ccy !== 'all' && e.ccy !== N.ccy && e.ccy !== 'ALL') return false;
+  if (N.impact === 'high' && e.impact !== 'High') return false;
+  if (N.impact === 'highmed' && e.impact !== 'High' && e.impact !== 'Medium') return false;
+  if (N.mine && mineList && mineList.length && e.ccy !== 'ALL'
+    && mineList.indexOf(e.ccy) < 0) return false;
+  return true;
+}
+
+function impactPill(impact) {
+  var map = { High: ['HIGH', 'red'], Medium: ['MED', 'yellow'], Low: ['LOW', 'muted'], Holiday: ['HOL', 'muted'] };
+  var hit = map[impact] || [String(impact).toUpperCase(), 'muted'];
+  var s = document.createElement('span');
+  s.className = 'pill ' + hit[1];
+  s.textContent = hit[0];
+  return s;
+}
+
+function renderNews() {
+  var live = N.live;
+  if (!live) return;
+  var key = JSON.stringify(live) + '|' + N.ccy + '|' + N.impact + '|' + N.mine;
+  if (key === N.drawn) return;
+  N.drawn = key;
+
+  $('news-scanned').textContent = 'Forex Factory weekly feed · '
+    + (live.scanned ? 'scanned ' + live.scanned : 'not scanned yet') + ' · times are local';
+  $('news-problem').hidden = live.known;
+  if (!live.known) $('news-problem').textContent = live.said;
+  $('news-norule').hidden = live.ruled;
+  $('news-filters').hidden = !live.known;
+  $('news-how').hidden = !live.ruled;
+
+  var nx = live.next;
+  $('news-next').hidden = !nx;
+  if (nx) {
+    var pill = $('news-next-impact');
+    pill.textContent = nx.impact === 'High' ? 'HIGH' : nx.impact === 'Medium' ? 'MED' : nx.impact.toUpperCase();
+    pill.className = 'pill ' + (nx.impact === 'High' ? 'red' : 'yellow');
+    $('news-next-title').textContent = nx.ccy + ' · ' + nx.title;
+    $('news-next-when').textContent = nx.clock + ' · ' + nx.inWords;
+    $('news-next-guard').textContent = nx.guard;
+  }
+
+  // The dropdowns: impact once, currency again whenever the week's list changes.
+  if (!N.impactDd) {
+    var idd = makeChoiceDropdown({
+      value: N.impact,
+      choices: [['all', 'Everything'], ['high', 'High only'], ['highmed', 'High + medium']]
+    }, function () {
+      N.impact = idd.value();
+      try { localStorage.setItem('dt-news-impact', N.impact); } catch (e) { /* fine */ }
+      renderNews();
+    });
+    N.impactDd = idd;
+    $('news-impact').appendChild(idd.el);
+  }
+  var ccyKey = live.currencies.join(',');
+  if (!N.ccyDd || N.ccyKey !== ccyKey) {
+    N.ccyKey = ccyKey;
+    var choices = [['all', 'All currencies']];
+    live.currencies.forEach(function (c) { choices.push([c, c]); });
+    if (!choices.some(function (c) { return c[0] === N.ccy; })) N.ccy = 'all';
+    var dd = makeChoiceDropdown({ value: N.ccy, choices: choices }, function () {
+      N.ccy = dd.value();
+      try { localStorage.setItem('dt-news-ccy', N.ccy); } catch (e) { /* fine */ }
+      renderNews();
+    });
+    N.ccyDd = dd;
+    var ccyRoot = $('news-ccy');
+    ccyRoot.textContent = '';
+    ccyRoot.appendChild(dd.el);
+  }
+
+  // The narrowing tick is honest about when it cannot narrow.
+  var mc = live.myCurrencies;
+  var mine = $('news-mine');
+  mine.checked = N.mine;
+  mine.disabled = !mc || !mc.length;
+  var mineLabel = document.querySelector('label[for="news-mine"]');
+  if (mc === null) {
+    mineLabel.title = 'a symbol in the book cannot be read, so any news moves it';
+  } else if (!mc.length) {
+    mineLabel.title = 'nothing is open to narrow by';
+  } else {
+    mineLabel.title = 'shows ' + mc.join(', ');
+  }
+
+  var days = $('news-days');
+  days.textContent = '';
+  var sections = [];
+  var shown = 0;
+  live.events.forEach(function (e) {
+    if (!newsFilterPass(e, mc)) return;
+    shown++;
+    var last = sections[sections.length - 1];
+    if (!last || last.day !== e.day) {
+      last = { day: e.day, rows: [] };
+      sections.push(last);
+    }
+    last.rows.push(e);
+  });
+  sections.forEach(function (sec) { days.appendChild(newsDaySection(sec)); });
+  if (live.known && !live.events.length) {
+    $('news-empty').textContent = 'No more releases this week.';
+    $('news-empty').hidden = false;
+  } else {
+    $('news-empty').textContent = 'Nothing matches the filter.';
+    $('news-empty').hidden = !live.known || shown > 0;
+  }
+}
+
+function newsDaySection(sec) {
+  var panel = document.createElement('section');
+  panel.className = 'panel news-day';
+  panel.setAttribute('aria-label', sec.day);
+  var h = document.createElement('h2');
+  h.className = 'news-day-head';
+  h.textContent = sec.day;
+  panel.appendChild(h);
+  var scroll = document.createElement('div');
+  scroll.className = 'table-scroll';
+  var table = document.createElement('div');
+  table.setAttribute('role', 'table');
+  table.setAttribute('aria-label', sec.day + ' releases');
+  table.className = 'news-table';
+  var head = document.createElement('div');
+  head.setAttribute('role', 'row');
+  head.className = 'nrow nrow-head';
+  ['TIME', 'CCY', 'IMPACT', 'EVENT', 'FORECAST', 'PREVIOUS', 'GUARD'].forEach(function (t) {
+    var c = document.createElement('span');
+    c.setAttribute('role', 'columnheader');
+    c.textContent = t;
+    head.appendChild(c);
+  });
+  table.appendChild(head);
+  sec.rows.forEach(function (e) { table.appendChild(newsRow(e)); });
+  scroll.appendChild(table);
+  panel.appendChild(scroll);
+  return panel;
+}
+
+function newsRow(e) {
+  var row = document.createElement('div');
+  row.setAttribute('role', 'row');
+  row.className = 'nrow' + (e.guarded ? ' guarded' : '') + (e.past ? ' past' : '');
+  function cell(cls, text) {
+    var c = document.createElement('span');
+    c.setAttribute('role', 'cell');
+    c.className = cls;
+    c.textContent = text;
+    return c;
+  }
+  row.appendChild(cell('mono nc-time', e.time));
+  row.appendChild(cell('mono nc-ccy', e.ccy));
+  var ic = document.createElement('span');
+  ic.setAttribute('role', 'cell');
+  ic.appendChild(impactPill(e.impact));
+  row.appendChild(ic);
+  row.appendChild(cell('nc-event', e.title));
+  row.appendChild(cell('mono nc-num', e.forecast || '—'));
+  row.appendChild(cell('mono nc-num muted', e.previous || '—'));
+  row.appendChild(cell(e.guarded ? 'nc-guard' : 'nc-guard muted', e.guard || '—'));
+  return row;
+}
+
 // --- events --------------------------------------------------------------------------------
 function closeDropdowns() {
   document.querySelectorAll('.dd-menu').forEach(function (m) { m.hidden = true; });
@@ -2282,6 +2482,33 @@ function wire() {
     var r = selRule();
     if (r) clearLatchFlow(r);
   });
+
+  $('news-mine').addEventListener('change', function () {
+    N.mine = $('news-mine').checked;
+    try { localStorage.setItem('dt-news-mine', N.mine ? '1' : ''); } catch (e) { /* fine */ }
+    renderNews();
+  });
+  $('news-rescan').addEventListener('click', function () {
+    if (N.scanning) return;
+    N.scanning = true;
+    var b = $('news-rescan');
+    b.disabled = true;
+    b.textContent = 'Scanning…';
+    function back() {
+      N.scanning = false;
+      b.disabled = false;
+      b.textContent = 'Rescan now';
+    }
+    api().news_rescan().then(function (r) {
+      back();
+      toast(r.message, r.ok ? 'ok' : 'bad');
+      N.drawn = '';
+      pollNews();
+    }, function () {
+      back();
+      toast('The engine did not answer; try again.', 'bad');
+    });
+  });
   function commitInitial() {
     var live = G.live;
     if (!live || !live.hasAccount) return;
@@ -2306,6 +2533,7 @@ function start() {
   setInterval(pollRates, 1500);
   setInterval(pollTerminals, 1000);
   setInterval(pollGuards, 1000);
+  setInterval(pollNews, 1000);
 }
 
 if (window.pywebview) start();

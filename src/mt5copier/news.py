@@ -56,6 +56,10 @@ class NewsEvent:
     impact: str
     """``High``, ``Medium``, ``Low`` or ``Holiday``, as the feed says it."""
     title: str
+    forecast: str = ""
+    """The consensus number as the feed gives it (``0.3%``), or empty. Display only."""
+    previous: str = ""
+    """Last release's number, or empty. Display only."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +88,8 @@ def parse_feed(raw: object) -> tuple[NewsEvent, ...]:
                     currency=str(item["country"]).upper(),
                     impact=str(item.get("impact", "")),
                     title=str(item.get("title", "")),
+                    forecast=str(item.get("forecast") or ""),
+                    previous=str(item.get("previous") or ""),
                 )
             )
         except (KeyError, ValueError):
@@ -123,6 +129,11 @@ class NewsCalendar:
         self._load()
 
     # --- reading ---------------------------------------------------------------------------
+
+    def fetched_at(self) -> float:
+        """When the calendar now held was fetched, UTC seconds; 0.0 when it never was."""
+        with self._lock:
+            return self._fetched_at
 
     def current(self) -> Calendar:
         """What is known now. Asking is what makes it wanted, so the thread starts fetching."""

@@ -2115,6 +2115,10 @@ class Engine:
         """What the guards did on any account since ``since``, newest first."""
         return self._history.recent_guard_actions(since=since)
 
+    def news_calendar(self) -> NewsCalendar:
+        """The calendar the news rules read; the News page reads the same one."""
+        return self._calendar
+
     def _record_guard(self, key: str | None, terminal_id: str, note: GuardNote) -> None:
         """Something a guard did to the slave as a whole, rather than to one trade."""
         if key is None:

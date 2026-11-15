@@ -24,6 +24,7 @@ from ..guards import model as guards_model
 from ..guards.base import money
 from ..guards.params import ZONE_HINT, ParamKind, ParamValue
 from ..logging_setup import get_logger
+from ..news import HIGH, MEDIUM, symbol_currencies
 from ..paths import active_profile, guards_path
 from ..presentation import row_info, slave_badge
 from ..protocol import CHART_TIMEFRAMES, OrderType, PendingOrder, Position, PositionType
@@ -37,6 +38,7 @@ if TYPE_CHECKING:
     from ..engine import Engine, TerminalView
     from ..guards import RuleStatus
     from ..history import GuardAction
+    from ..news import NewsEvent
 
 log = get_logger(__name__)
 
@@ -458,7 +460,9 @@ class DesktopApi:
         if is_slave:
             # The TUI card's wording (cards.risk_text): $ only where it reads naturally.
             if tcfg.sizing_mode is SizingMode.FIXED_CASH_RISK:
-                mark = "$" if (info.currency or "").upper() in ("USD", "AUD", "CAD", "NZD", "") else ""
+                mark = (
+                    "$" if (info.currency or "").upper() in ("USD", "AUD", "CAD", "NZD", "") else ""
+                )
                 risk = f"risk {mark}{tcfg.risk_cash:,g}" + ("" if mark else f" {info.currency}")
             else:
                 risk = f"risk {tcfg.risk_percent:g}%"
@@ -592,9 +596,7 @@ class DesktopApi:
         was_master = self._cfg.terminals[tid].role is Role.MASTER
         swept = [t.terminal_id for t in self._cfg.slaves] if was_master else []
         orphan = (
-            {str(t): [int(n) for n in tickets] for t, tickets in agreed.items()}
-            if agreed
-            else None
+            {str(t): [int(n) for n in tickets] for t, tickets in agreed.items()} if agreed else None
         )
         refusal = self._engine.unassign(tid, orphan=orphan)
         if refusal is not None:
@@ -857,9 +859,7 @@ class DesktopApi:
                 report = engine.guard_report(view.cfg.terminal_id)
                 worst = report.worst
                 snap = view.snapshot
-                server = (
-                    snap.server if snap is not None and snap.server else view.cfg.last_server
-                )
+                server = snap.server if snap is not None and snap.server else view.cfg.last_server
                 chips.append(
                     {
                         "tid": view.cfg.terminal_id,
@@ -1127,7 +1127,10 @@ class DesktopApi:
 
     def guard_clear_latch(self, tid: str, rule_id: str) -> dict[str, Any]:
         if self._engine.clear_guard_latch(str(tid), str(rule_id)):
-            return {"ok": True, "message": "Breach cleared; new trades go through again once the rule is back under the point it acts at."}
+            return {
+                "ok": True,
+                "message": "Breach cleared; new trades go through again once the rule is back under the point it acts at.",
+            }
         return {"ok": False, "message": "that rule is not holding a breach"}
 
     def guard_save_template(self, tid: str, name: str) -> dict[str, Any]:
@@ -1172,3 +1175,194 @@ class DesktopApi:
         if why is not None:
             return {"ok": False, "message": why}
         return {"ok": True, "message": f"rules from {said}"}
+
+    # --- the news page ----------------------------------------------------------------------
+    # The calendar as the feed says it, and against each release what the news rules will
+    # do -- computed from the same parameters the guard acts with, so the page never
+    # promises anything the engine would not keep.
+
+    def news_state(self) -> dict[str, Any]:
+        """Everything the News page redraws from: the week's releases from today onward,
+        each with the guard's answer to it, the filter fixings, and the next guarded one."""
+        calendar = self._engine.news_calendar()
+        now = time.time()
+        cal = calendar.current()
+        fetched = calendar.fetched_at()
+        rules = self._news_rules()
+        today = time.localtime(now)
+        day_start = time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, 0, 0, -1))
+
+        events: list[dict[str, Any]] = []
+        currencies: set[str] = set()
+        nxt: dict[str, Any] | None = None
+        for e in cal.events or ():
+            if e.when < day_start:
+                continue
+            counting = [r for r in rules if _news_counts(r["params"], e)]
+            currencies.add(e.currency)
+            events.append(
+                {
+                    "ts": e.when,
+                    "day": self._news_day(e.when, now),
+                    "time": "all day" if e.impact == "Holiday" else self._clock(e.when),
+                    "ccy": e.currency,
+                    "impact": e.impact,
+                    "title": e.title,
+                    "forecast": e.forecast,
+                    "previous": e.previous,
+                    "past": e.when < now,
+                    "guarded": bool(counting),
+                    "guard": self._news_cell(e, counting, rules),
+                }
+            )
+            if nxt is None and e.when > now and counting:
+                nxt = {
+                    "ccy": e.currency,
+                    "title": e.title,
+                    "impact": e.impact,
+                    "clock": self._clock(e.when),
+                    "inWords": self._in_words(e.when - now),
+                    "guard": self._news_banner(e, counting),
+                }
+        return {
+            "known": cal.events is not None,
+            "said": cal.said,
+            "scanned": self._clock(fetched) if fetched else "",
+            "ruled": bool(rules),
+            "events": events,
+            "currencies": sorted(currencies),
+            "myCurrencies": self._my_currencies(),
+            "next": nxt,
+        }
+
+    def news_rescan(self) -> dict[str, Any]:
+        """Fetch the feed now, instead of on the hour. Synchronous: the page's button says
+        it is scanning while this call runs on its own bridge thread."""
+        calendar = self._engine.news_calendar()
+        if calendar.refresh():
+            cal = calendar.current()
+            return {
+                "ok": True,
+                "message": f"calendar scanned: {len(cal.events or ())} releases this week",
+            }
+        cal = calendar.current()
+        why = cal.said or "the feed could not be read"
+        return {"ok": False, "message": f"{why}; the last copy stands"}
+
+    def _news_rules(self) -> list[dict[str, Any]]:
+        """Each enforced news rule: the account's display name and its resolved parameters.
+        Enforced means what the guard book means -- a slave's account, the set switched on,
+        the rule switched on; one entry per account."""
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for view in self._engine.views():
+            if view.cfg.role is not Role.SLAVE:
+                continue
+            key = self._account_of_view(view)
+            if key is None or key in seen:
+                continue
+            seen.add(key)
+            guards = self._guards_doc.for_account(key)
+            if not guards.enabled:
+                continue
+            for r in guards.rules:
+                if r.type != "news" or not r.enabled:
+                    continue
+                params, _problems = r.resolved()
+                out.append({"name": self._cfg.display_name(view.cfg.terminal_id), "params": params})
+        return out
+
+    def _news_cell(
+        self, e: NewsEvent, counting: list[dict[str, Any]], rules: list[dict[str, Any]]
+    ) -> str:
+        """The GUARD column: what will be done about this release, or why nothing will.
+        Identical rules on several accounts read as one line; differing ones are named."""
+        if not counting:
+            if rules and e.impact == MEDIUM and all(r["params"]["impact"] == "high" for r in rules):
+                return "rule counts high impact only"
+            return ""
+        texts: dict[str, list[str]] = {}
+        for r in counting:
+            texts.setdefault(_news_said(r["params"], e), []).append(r["name"])
+        if len(texts) == 1:
+            return next(iter(texts))
+        return " · ".join(f"{said} on {', '.join(names)}" for said, names in texts.items())
+
+    def _news_banner(self, e: NewsEvent, counting: list[dict[str, Any]]) -> str:
+        """The banner's sentence: the cell's answer plus who it protects."""
+        names = sorted({r["name"] for r in counting})
+        return f"{self._news_cell(e, counting, counting)} · guards {', '.join(names)}"
+
+    def _my_currencies(self) -> list[str] | None:
+        """The currencies the open book touches, for the page's narrowing filter. None when
+        a symbol's name cannot be read -- any news moves it, so the filter cannot narrow."""
+        engine = self._engine
+        symbols = {p.symbol for p in engine.direct_positions()}
+        symbols |= {o.symbol for o in engine.direct_orders()}
+        for view in engine.views():
+            snap = view.snapshot
+            if snap is not None and snap.open_positions:
+                symbols |= {p.symbol for p in snap.open_positions}
+        out: set[str] = set()
+        for s in symbols:
+            ccys = symbol_currencies(s)
+            if ccys is None:
+                return None
+            out |= ccys
+        return sorted(out)
+
+    @staticmethod
+    def _clock(ts: float) -> str:
+        return time.strftime("%H:%M", time.localtime(ts))
+
+    @staticmethod
+    def _news_day(ts: float, now: float) -> str:
+        """The section a release files under: TODAY, TOMORROW, else the weekday."""
+        here = time.localtime(ts)
+        today = time.localtime(now)
+        tomorrow = time.localtime(now + 86400)
+        if here[:3] == today[:3]:
+            return "TODAY"
+        if here[:3] == tomorrow[:3]:
+            return "TOMORROW"
+        return time.strftime("%A", here).upper()
+
+    @staticmethod
+    def _in_words(seconds: float) -> str:
+        s = max(0, int(seconds))
+        if s < 60:
+            return "now"
+        if s < 3600:
+            return f"in {s // 60} min"
+        if s < 86400:
+            return f"in {s // 3600} h {(s % 3600) // 60} min"
+        return f"in {s // 86400} d {(s % 86400) // 3600} h"
+
+
+def _news_counts(p: dict[str, ParamValue], e: NewsEvent) -> bool:
+    """Whether this rule counts this release -- the rule's own impact arithmetic."""
+    impacts = {HIGH} if p["impact"] == "high" else {HIGH, MEDIUM}
+    return e.impact in impacts
+
+
+def _news_said(p: dict[str, ParamValue], e: NewsEvent) -> str:
+    """One rule's answer to one release, worded like the design: the action and when, or
+    the no-new-trades window when the rule only declines."""
+
+    def clock(ts: float) -> str:
+        return time.strftime("%H:%M", time.localtime(ts))
+
+    scoped = p["affects"] == "currency" and e.currency != "ALL"
+    if p["before_news"] != "nothing":
+        acts = clock(e.when - float(p["act_before"]) * 60)
+        what = (
+            "breakeven open copies, close losers"
+            if p["before_news"] == "breakeven"
+            else "close open copies"
+        )
+        resting = f"cancel resting {e.currency}" if scoped else "cancel all resting"
+        return f"acts {acts} · {what}, {resting}"
+    start = clock(e.when - float(p["before"]) * 60)
+    end = clock(e.when + float(p["after"]) * 60)
+    which = f"{e.currency} " if scoped else ""
+    return f"no new {which}trades {start}–{end}"
