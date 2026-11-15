@@ -58,7 +58,7 @@ def run() -> None:
     log.info("config at %s (profile %s, desktop)", config_path(), profile)
 
     engine = Engine(cfg, guards=guards, claims=ClaimBook(claims_dir(), profile))
-    api = DesktopApi(cfg, engine)
+    api = DesktopApi(cfg, engine, guards)
     title = "Copier" if profile == DEFAULT_PROFILE else f"Copier — {profile}"
     window = webview.create_window(
         title,

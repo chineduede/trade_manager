@@ -17,11 +17,14 @@ from typing import TYPE_CHECKING, Any
 
 from .. import config as config_mod
 from .. import role_actions
-from ..config import AppMode, Role, SizingMode, TerminalConfig
+from ..config import AppMode, Role, SizingMode, TerminalConfig, account_key
 from ..discovery import discover_terminals
-from ..guards import Level
+from ..guards import REGISTRY, GuardRule, GuardsDoc, Level
+from ..guards import model as guards_model
+from ..guards.base import money
+from ..guards.params import ZONE_HINT, ParamKind, ParamValue
 from ..logging_setup import get_logger
-from ..paths import active_profile
+from ..paths import active_profile, guards_path
 from ..presentation import row_info, slave_badge
 from ..protocol import CHART_TIMEFRAMES, OrderType, PendingOrder, Position, PositionType
 from ..terminal_detail import margin_gauge
@@ -31,7 +34,9 @@ if TYPE_CHECKING:
     import webview
 
     from ..config import AppConfig
-    from ..engine import Engine
+    from ..engine import Engine, TerminalView
+    from ..guards import RuleStatus
+    from ..history import GuardAction
 
 log = get_logger(__name__)
 
@@ -95,9 +100,12 @@ def _order_row(o: PendingOrder, now: float) -> dict[str, Any]:
 class DesktopApi:
     """One instance per window, handed to ``webview.create_window(js_api=...)``."""
 
-    def __init__(self, cfg: AppConfig, engine: Engine) -> None:
+    def __init__(self, cfg: AppConfig, engine: Engine, guards: GuardsDoc | None = None) -> None:
         self._cfg = cfg
         self._engine = engine
+        # The same document the engine enforces from (see tui.run and desktop.run): edits
+        # here are one assignment into it, and the file is written after, as the TUI does.
+        self._guards_doc = guards if guards is not None else GuardsDoc()
         self._window: webview.Window | None = None
         self._maximized = False
 
@@ -682,3 +690,430 @@ class DesktopApi:
         if new:
             message += f", {len(new)} new"
         return {"ok": True, "message": message + "."}
+
+    # --- the guards page --------------------------------------------------------------------
+
+    @staticmethod
+    def _account_of_view(view: TerminalView) -> str | None:
+        """The account logged into this terminal, as the engine resolves it: the latest
+        snapshot's, else the one it was last known to be logged into."""
+        snap = view.snapshot
+        if snap is not None and snap.login is not None:
+            return account_key(snap.login, snap.server)
+        return account_key(view.cfg.last_login, view.cfg.last_server)
+
+    def _guarded_view(self, tid: str) -> TerminalView | None:
+        for view in self._engine.views():
+            if view.cfg.terminal_id == tid:
+                return view
+        return None
+
+    def _save_guards(self, key: str, guards: Any) -> str | None:
+        """One assignment into the shared doc, then the file; the engine reads the doc live.
+        Returns why the write failed, or None -- the change then holds until the app closes,
+        which is said, exactly as the TUI says it."""
+        self._guards_doc.set_account(key, guards)
+        try:
+            guards_model.save(self._guards_doc, guards_path())
+        except OSError as exc:
+            log.exception("guards save failed")
+            return f"could not save the guards: {exc}; the change holds until the copier closes"
+        return None
+
+    @staticmethod
+    def _when_text(ts: float, now: float) -> str:
+        """``13:35`` today, ``Oct 10 13:35`` before -- the TUI guards page's wording."""
+        here, today = time.localtime(ts), time.localtime(now)
+        if here[:3] == today[:3]:
+            return time.strftime("%H:%M", here)
+        return time.strftime("%b %d %H:%M", here)
+
+    @staticmethod
+    def _limit_text(s: RuleStatus, currency: str) -> str:
+        if s.limit is not None:
+            out = money(s.limit, currency)
+            if s.type == "total_margin":
+                out += " in all"
+            elif s.per_trade:
+                out += " a trade"
+            return out
+        if s.type == "stop_required":
+            return "a stop on every trade"
+        if s.level is Level.UNKNOWN and s.enabled and not s.basis:
+            return s.detail or "unknown"
+        return "not known yet" if s.basis and s.enabled else ""
+
+    @staticmethod
+    def _used_cell(s: RuleStatus) -> dict[str, Any]:
+        """The USED column, pre-decided: the page only draws what this says."""
+        if s.latched is not None and s.enabled:
+            return {
+                "kind": "latched",
+                "note": "held until the reset" if s.latched == "reset" else "held until cleared",
+            }
+        if not s.enabled or s.level is Level.OFF:
+            return {"kind": "off"}
+        if s.fraction is not None and s.used is not None:
+            word = "in use" if s.type == "total_margin" else "used"
+            return {
+                "kind": "bar",
+                "fraction": s.fraction,
+                "holdsBack": s.holds_back,
+                "moneyLine": f"{money(s.used)} {word}",
+            }
+        if s.type == "margin_per_trade":
+            return {"kind": "text", "text": "checked as each trade is sent", "tone": "muted"}
+        if s.level is Level.UNKNOWN:
+            return {"kind": "text", "text": s.detail or "unknown", "tone": "yellow"}
+        tone = {Level.OK: "blue", Level.NEAR: "yellow", Level.BREACHED: "red"}.get(s.level, "muted")
+        return {"kind": "text", "text": s.detail, "tone": tone}
+
+    def _rule_row(
+        self, s: RuleStatus, currency: str, last: GuardAction | None, now: float
+    ) -> dict[str, Any]:
+        level_tone = {
+            Level.OFF: "muted",
+            Level.UNKNOWN: "muted",
+            Level.OK: "blue",
+            Level.NEAR: "yellow",
+            Level.BREACHED: "red",
+        }[s.level]
+        last_out = None
+        if last is not None:
+            detail = last.detail.split(": ")[0]
+            if len(detail) > 40:
+                detail = last.detail[:39] + "…"
+            last_out = {
+                "when": self._when_text(last.ts, now),
+                "action": last.action,
+                "ticket": f"#{last.master_ticket}" if last.master_ticket is not None else "",
+                "detail": detail,
+            }
+        return {
+            "id": s.rule_id,
+            "type": s.type,
+            "title": s.title,
+            "enabled": s.enabled,
+            "tone": level_tone,
+            "latched": s.latched,
+            "limitText": self._limit_text(s, currency),
+            "basis": s.basis,
+            "used": self._used_cell(s),
+            "onBreach": s.on_breach,
+            "actAt": s.act_at,
+            "last": last_out,
+        }
+
+    def guards_state(self, tid: str) -> dict[str, Any]:
+        """Everything the Guards page redraws from: the account chips, the chosen account's
+        report row by row (the TUI guards table's own cell logic), and the recent actions."""
+        engine = self._engine
+        cfg = self._cfg
+        now = time.time()
+        tid = str(tid or "")
+        chips: list[dict[str, Any]] = []
+        chosen: TerminalView | None = None
+        for view in engine.views():
+            if view.cfg.role is not Role.SLAVE:
+                continue
+            report = engine.guard_report(view.cfg.terminal_id)
+            worst = report.worst
+            chips.append(
+                {
+                    "tid": view.cfg.terminal_id,
+                    "name": cfg.display_name(view.cfg.terminal_id),
+                    "login": view.cfg.last_login,
+                    "rules": len(report.rules),
+                    "holding": bool(report.holding_back),
+                    "worst": str(worst.level) if worst is not None else "",
+                }
+            )
+            if view.cfg.terminal_id == tid:
+                chosen = view
+        if chosen is None and chips:
+            tid = chips[0]["tid"]
+            chosen = self._guarded_view(tid)
+        if chosen is None:
+            return {"accounts": [], "selected": None}
+
+        report = engine.guard_report(tid)
+        key = self._account_of_view(chosen)
+        guards = self._guards_doc.for_account(key)
+        actions = engine.guard_actions(tid)
+        last_by_rule: dict[str, GuardAction] = {}
+        for a in actions:
+            if a.rule_id not in last_by_rule:
+                last_by_rule[a.rule_id] = a
+        rows = [
+            self._rule_row(s, report.currency, last_by_rule.get(s.rule_id), now)
+            for s in report.rules
+        ]
+        acted = [
+            {
+                "when": self._when_text(a.ts, now),
+                "rule": a.rule,
+                "action": a.action,
+                "trade": f"#{a.master_ticket} {a.symbol} {a.label}".strip()
+                if a.master_ticket is not None
+                else "",
+                "detail": a.detail,
+            }
+            for a in actions[:30]
+        ]
+        others = []
+        for view in engine.views():
+            vkey = account_key(view.cfg.last_login, view.cfg.last_server)
+            if view.cfg.terminal_id == tid or vkey is None or vkey == key:
+                continue
+            if view.cfg.role is not Role.SLAVE:
+                continue
+            held = self._guards_doc.for_account(vkey).rules
+            if held:
+                others.append(
+                    {
+                        "key": vkey,
+                        "name": cfg.display_name(view.cfg.terminal_id),
+                        "rules": len(held),
+                    }
+                )
+        return {
+            "accounts": chips,
+            "selected": tid,
+            "hasAccount": key is not None,
+            "currency": report.currency,
+            "enabled": report.enabled,
+            "initialBalance": guards.initial_balance,
+            "rules": rows,
+            "actions": acted,
+            "ruleTypes": [
+                {"type": t, "title": r.title, "blurb": r.blurb, "perTrade": r.per_trade()}
+                for t, r in REGISTRY.items()
+            ],
+            "templates": [
+                {"name": name, "rules": len(rules)}
+                for name, rules in sorted(self._guards_doc.templates.items())
+            ],
+            "copyFrom": others,
+        }
+
+    def _account_and_guards(self, tid: str) -> tuple[str, Any] | str:
+        """The selected terminal's account key and its guards, or why not."""
+        view = self._guarded_view(str(tid))
+        if view is None:
+            return "that terminal is gone"
+        key = self._account_of_view(view)
+        if key is None:
+            return "this terminal's account is not known yet: connect it once"
+        return key, self._guards_doc.for_account(key)
+
+    def guard_form(self, tid: str, rule_type: str, rule_id: str | None) -> dict[str, Any]:
+        """The form for one rule, built from the parameters the rule declares -- the same
+        declaration the TUI's RuleForm builds from, so a new rule needs nothing here."""
+        rule_type = str(rule_type)
+        kind = REGISTRY.get(rule_type)
+        if kind is None:
+            return {"ok": False, "message": f"{rule_type!r} is not a rule this version knows"}
+        picked = self._account_and_guards(str(tid))
+        if isinstance(picked, str):
+            return {"ok": False, "message": picked}
+        _, guards = picked
+        rule = next((r for r in guards.rules if r.id == rule_id), None)
+        if rule is None:
+            rule = GuardRule(type=rule_type)
+        values, _problems = rule.resolved()
+        fields = []
+        for p in kind.params:
+            value = values.get(p.name, p.default)
+            fields.append(
+                {
+                    "name": p.name,
+                    "label": p.label,
+                    "kind": str(p.kind),
+                    "value": f"{value:g}" if isinstance(value, float) else str(value),
+                    "choices": [[v, w] for v, w in p.choices],
+                    "after": p.after,
+                    "hint": ZONE_HINT if p.kind is ParamKind.ZONE else "",
+                    "onlyIf": list(p.only_if) if p.only_if is not None else None,
+                }
+            )
+        return {
+            "ok": True,
+            "title": kind.title,
+            "blurb": kind.blurb,
+            "enabled": rule.enabled,
+            "fields": fields,
+        }
+
+    def _checked_params(
+        self, rule_type: str, given: dict[str, Any]
+    ) -> tuple[dict[str, ParamValue], dict[str, str]]:
+        kind = REGISTRY[rule_type]
+        values: dict[str, ParamValue] = {}
+        errors: dict[str, str] = {}
+        for p in kind.params:
+            raw = str(given.get(p.name, "")).replace(",", "").strip()
+            value, problem = p.check(raw)
+            if problem is not None or value is None:
+                errors[p.name] = problem or f"{p.label} is missing"
+            else:
+                values[p.name] = value
+        return values, errors
+
+    def guard_check(self, tid: str, rule_type: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Live validation for the form: the problems per field, and the sentence the rule
+        reads as once every value checks."""
+        rule_type = str(rule_type)
+        if rule_type not in REGISTRY:
+            return {"errors": {}, "sentence": ""}
+        values, errors = self._checked_params(rule_type, params or {})
+        sentence = ""
+        if not errors:
+            currency = self._engine.guard_report(str(tid)).currency
+            sentence = REGISTRY[rule_type].sentence(values, currency)
+        return {"errors": errors, "sentence": sentence}
+
+    def guard_save_rule(
+        self,
+        tid: str,
+        rule_type: str,
+        rule_id: str | None,
+        params: dict[str, Any],
+        enabled: bool,
+    ) -> dict[str, Any]:
+        rule_type = str(rule_type)
+        if rule_type not in REGISTRY:
+            return {"ok": False, "message": f"{rule_type!r} is not a rule this version knows"}
+        picked = self._account_and_guards(str(tid))
+        if isinstance(picked, str):
+            return {"ok": False, "message": picked}
+        key, guards = picked
+        values, errors = self._checked_params(rule_type, params or {})
+        if errors:
+            return {"ok": False, "errors": errors, "message": "correct the marked values"}
+        title = REGISTRY[rule_type].title
+        old = next((r for r in guards.rules if r.id == rule_id), None)
+        if old is None:
+            rules = (*guards.rules, GuardRule(type=rule_type, params=values, enabled=bool(enabled)))
+        else:
+            new = old.model_copy(update={"params": values, "enabled": bool(enabled)})
+            rules = tuple(new if r.id == old.id else r for r in guards.rules)
+        why = self._save_guards(key, guards.model_copy(update={"rules": rules}))
+        if why is not None:
+            return {"ok": False, "message": why}
+        return {"ok": True, "message": f"{title}: saved"}
+
+    def guard_remove_rule(self, tid: str, rule_id: str) -> dict[str, Any]:
+        picked = self._account_and_guards(str(tid))
+        if isinstance(picked, str):
+            return {"ok": False, "message": picked}
+        key, guards = picked
+        rule = next((r for r in guards.rules if r.id == rule_id), None)
+        if rule is None:
+            return {"ok": False, "message": "that rule is already gone"}
+        title = REGISTRY[rule.type].title if rule.type in REGISTRY else rule.type
+        rules = tuple(r for r in guards.rules if r.id != rule.id)
+        why = self._save_guards(key, guards.model_copy(update={"rules": rules}))
+        if why is not None:
+            return {"ok": False, "message": why}
+        return {"ok": True, "message": f"{title}: removed"}
+
+    def guard_toggle_rule(self, tid: str, rule_id: str) -> dict[str, Any]:
+        picked = self._account_and_guards(str(tid))
+        if isinstance(picked, str):
+            return {"ok": False, "message": picked}
+        key, guards = picked
+        rule = next((r for r in guards.rules if r.id == rule_id), None)
+        if rule is None:
+            return {"ok": False, "message": "that rule is already gone"}
+        flipped = rule.model_copy(update={"enabled": not rule.enabled})
+        rules = tuple(flipped if r.id == rule.id else r for r in guards.rules)
+        title = REGISTRY[rule.type].title if rule.type in REGISTRY else rule.type
+        why = self._save_guards(key, guards.model_copy(update={"rules": rules}))
+        if why is not None:
+            return {"ok": False, "message": why}
+        return {"ok": True, "message": f"{title}: {'on' if flipped.enabled else 'off'}"}
+
+    def guard_toggle_all(self, tid: str) -> dict[str, Any]:
+        picked = self._account_and_guards(str(tid))
+        if isinstance(picked, str):
+            return {"ok": False, "message": picked}
+        key, guards = picked
+        if not guards.rules:
+            return {"ok": False, "message": "no rules to switch"}
+        on_now = not guards.enabled
+        why = self._save_guards(key, guards.model_copy(update={"enabled": on_now}))
+        if why is not None:
+            return {"ok": False, "message": why}
+        return {"ok": True, "message": f"guards {'on' if on_now else 'all off'}"}
+
+    def guard_set_initial(self, tid: str, text: str) -> dict[str, Any]:
+        picked = self._account_and_guards(str(tid))
+        if isinstance(picked, str):
+            return {"ok": False, "message": picked}
+        key, guards = picked
+        text = str(text or "").replace(",", "").replace(" ", "").strip()
+        if not text:
+            why = self._save_guards(key, guards.model_copy(update={"initial_balance": None}))
+            return (
+                {"ok": False, "message": why}
+                if why
+                else {"ok": True, "message": "initial balance cleared"}
+            )
+        try:
+            value = float(text)
+        except ValueError:
+            return {"ok": False, "message": "the initial balance did not read as an amount"}
+        if value <= 0:
+            return {"ok": False, "message": "the initial balance must be more than 0"}
+        why = self._save_guards(key, guards.model_copy(update={"initial_balance": value}))
+        if why is not None:
+            return {"ok": False, "message": why}
+        return {"ok": True, "message": f"initial balance {money(value)}"}
+
+    def guard_clear_latch(self, tid: str, rule_id: str) -> dict[str, Any]:
+        if self._engine.clear_guard_latch(str(tid), str(rule_id)):
+            return {"ok": True, "message": "Breach cleared; new trades go through again once the rule is back under the point it acts at."}
+        return {"ok": False, "message": "that rule is not holding a breach"}
+
+    def guard_save_template(self, tid: str, name: str) -> dict[str, Any]:
+        picked = self._account_and_guards(str(tid))
+        if isinstance(picked, str):
+            return {"ok": False, "message": picked}
+        _, guards = picked
+        name = str(name or "").strip()
+        if not name:
+            return {"ok": False, "message": "give the template a name"}
+        if not guards.rules:
+            return {"ok": False, "message": "no rules to save"}
+        self._guards_doc.templates[name] = guards.rules
+        try:
+            guards_model.save(self._guards_doc, guards_path())
+        except OSError as exc:
+            log.exception("guards save failed")
+            return {"ok": False, "message": f"could not save the guards: {exc}"}
+        return {"ok": True, "message": f"template {name!r} saved"}
+
+    def guard_apply_rules(self, tid: str, source: dict[str, str]) -> dict[str, Any]:
+        """Replace this account's rules with a template's or another account's -- each under
+        a new id, so nothing one account recorded is mistaken for the other's. The page asks
+        before calling this when rules would be replaced."""
+        picked = self._account_and_guards(str(tid))
+        if isinstance(picked, str):
+            return {"ok": False, "message": picked}
+        key, guards = picked
+        source = source or {}
+        if "template" in source:
+            held = self._guards_doc.templates.get(str(source["template"]))
+            said = f"template {source['template']}"
+        else:
+            held = self._guards_doc.for_account(str(source.get("account", ""))).rules
+            said = str(source.get("name") or "the other account")
+        if not held:
+            return {"ok": False, "message": "nothing to apply from there"}
+        fresh = tuple(
+            GuardRule(type=r.type, enabled=r.enabled, params=dict(r.params)) for r in held
+        )
+        why = self._save_guards(key, guards.model_copy(update={"rules": fresh}))
+        if why is not None:
+            return {"ok": False, "message": why}
+        return {"ok": True, "message": f"rules from {said}"}

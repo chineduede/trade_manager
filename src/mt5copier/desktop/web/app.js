@@ -34,7 +34,7 @@ try {
   S.tf = localStorage.getItem('dt-tf') || 'M5';
   defaultRr = localStorage.getItem('dt-rr') || '';
   var savedPage = localStorage.getItem('dt-page');
-  if (savedPage === 'terminals') S.page = savedPage;
+  if (savedPage === 'terminals' || savedPage === 'guards') S.page = savedPage;
 } catch (e) { /* storage may be unavailable; defaults are fine */ }
 
 function rememberRr(text) {
@@ -848,11 +848,13 @@ var T = {
 };
 var modalOnConfirm = null;
 
+var PAGES = ['trading', 'terminals', 'guards'];
+
 function showPage(name) {
+  if (PAGES.indexOf(name) < 0) name = 'trading';
   S.page = name;
   try { localStorage.setItem('dt-page', name); } catch (e) { /* fine */ }
-  $('page-trading').hidden = name !== 'trading';
-  $('page-terminals').hidden = name !== 'terminals';
+  PAGES.forEach(function (p) { $('page-' + p).hidden = p !== name; });
   document.querySelectorAll('#sidebar .nav-item[data-page]').forEach(function (a) {
     var active = a.dataset.page === name;
     a.classList.toggle('active', active);
@@ -860,6 +862,7 @@ function showPage(name) {
     else a.removeAttribute('aria-current');
   });
   if (name === 'terminals') pollTerminals();
+  if (name === 'guards') pollGuards();
 }
 
 var terminalsBusy = false;
@@ -1306,11 +1309,12 @@ function showModal(opts) {
   body.textContent = '';
   if (opts.body) body.appendChild(opts.body);
   var ok = $('modal-confirm');
-  ok.textContent = opts.confirm;
+  ok.hidden = !opts.confirm;
+  ok.textContent = opts.confirm || '';
   ok.className = opts.danger ? 'danger' : '';
-  modalOnConfirm = opts.onConfirm;
+  modalOnConfirm = opts.onConfirm || null;
   $('modal-back').hidden = false;
-  ok.focus();
+  if (opts.confirm) ok.focus();
 }
 
 function closeModal() {
@@ -1381,6 +1385,528 @@ function liveOverrideFlow(c, allow) {
     danger: true,
     onConfirm: function () { tact(api().live_override(c.tid, true)); }
   });
+}
+
+// --- the guards page -----------------------------------------------------------------------
+// The TUI guards page's report, drawn as the design's table: one account at a time, its
+// rules row by row, and everything the rules did. What a rule means is the engine's; this
+// page only draws the report and edits guards.json through the bridge.
+var G = {
+  live: null,
+  drawn: '',
+  tid: '',          // the chip picked; '' lets the bridge pick the first slave
+  selected: null,   // the selected rule's id
+  form: null        // { tid, type, ruleId, fields } while the rule form is open
+};
+
+var guardsBusy = false;
+function pollGuards() {
+  if (guardsBusy || !window.pywebview || S.page !== 'guards') return;
+  guardsBusy = true;
+  api().guards_state(G.tid).then(function (live) {
+    guardsBusy = false;
+    G.live = live;
+    renderGuards();
+  }, function () { guardsBusy = false; });
+}
+
+function gact(promise) {
+  promise.then(function (r) {
+    toast(r.message, r.ok ? 'ok' : 'bad');
+    G.drawn = '';
+    pollGuards();
+  }, function () {
+    toast('The engine did not answer; try again.', 'bad');
+  });
+}
+
+function renderGuards() {
+  var live = G.live;
+  if (!live) return;
+  var key = JSON.stringify(live) + '|' + G.selected;
+  if (key === G.drawn) return;
+  G.drawn = key;
+
+  var none = !live.accounts.length;
+  $('guard-none').hidden = !none;
+  $('guard-panel').hidden = none;
+  $('guard-actions-panel').hidden = none;
+  var chips = $('guard-chips');
+  chips.textContent = '';
+  if (none) return;
+  G.tid = live.selected;
+
+  live.accounts.forEach(function (a) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chip mono' + (a.tid === live.selected ? ' active' : '');
+    b.setAttribute('aria-pressed', String(a.tid === live.selected));
+    b.textContent = a.name + (a.login ? ' · ' + a.login : '');
+    if (a.holding) b.appendChild(cardLine('chip-flag red', 'HELD'));
+    else if (a.worst === 'near') b.appendChild(cardLine('chip-flag yellow', '!'));
+    b.addEventListener('click', function () {
+      G.tid = a.tid;
+      G.selected = null;
+      G.drawn = '';
+      pollGuards();
+    });
+    chips.appendChild(b);
+  });
+
+  var initial = $('g-initial');
+  if (document.activeElement !== initial) {
+    initial.value = live.initialBalance === null || live.initialBalance === undefined
+      ? '' : String(live.initialBalance);
+  }
+  initial.disabled = !live.hasAccount;
+  $('g-all').checked = !!live.enabled;
+  $('guard-note').textContent = live.hasAccount
+    ? (live.enabled ? '' : 'ALL OFF — every rule is ignored until All on is ticked again')
+    : "this terminal's account is not known yet: connect it once, then its rules can be set";
+
+  // The rules, each row selectable; the footer buttons act on the selection.
+  if (G.selected && !live.rules.some(function (r) { return r.id === G.selected; })) G.selected = null;
+  var rows = $('guard-rows');
+  rows.textContent = '';
+  live.rules.forEach(function (r) { rows.appendChild(guardRow(r)); });
+  $('guard-empty').hidden = live.rules.length > 0;
+  var picked = live.rules.filter(function (r) { return r.id === G.selected; })[0] || null;
+  $('g-change').disabled = !picked;
+  $('g-toggle').disabled = !picked;
+  $('g-remove').disabled = !picked;
+  $('g-toggle').textContent = picked && !picked.enabled ? 'Rule on' : picked ? 'Rule off' : 'Rule on/off';
+  $('g-clear').hidden = !(picked && picked.latched);
+  $('g-clear').disabled = !(picked && picked.latched);
+
+  var acts = $('guard-actions');
+  acts.textContent = '';
+  live.actions.forEach(function (a) {
+    var line = document.createElement('div');
+    line.className = 'gact-line';
+    line.appendChild(cardLine('gact-when', a.when));
+    line.appendChild(cardLine('gact-rule', a.rule));
+    if (a.trade) line.appendChild(cardLine('gact-trade', a.trade));
+    line.appendChild(cardLine('gact-act ' + actionTone(a.action), a.action.toUpperCase()));
+    if (a.detail) line.appendChild(cardLine('gact-detail', a.detail));
+    acts.appendChild(line);
+  });
+  $('guard-actions-empty').hidden = live.actions.length > 0;
+}
+
+function actionTone(action) {
+  if (action === 'declined' || action === 'stopped new trades' || action === 'closed'
+    || action === 'cancelled') return 'red';
+  if (action === 'let new trades through') return 'blue';
+  return 'yellow';
+}
+
+function guardRow(r) {
+  var row = document.createElement('div');
+  row.setAttribute('role', 'row');
+  row.className = 'grule' + (r.id === G.selected ? ' selected' : '')
+    + (r.latched ? ' latched' : '') + (r.enabled ? '' : ' off');
+
+  var title = document.createElement('span');
+  title.setAttribute('role', 'cell');
+  title.className = 'grule-title';
+  title.textContent = r.title;
+  if (!r.enabled) title.appendChild(cardLine('cell-sub muted', 'off'));
+  else if (r.latched) title.appendChild(cardLine('pill red', 'HELD'));
+  row.appendChild(title);
+
+  var limit = document.createElement('span');
+  limit.setAttribute('role', 'cell');
+  limit.className = 'mono grule-limit';
+  limit.textContent = r.limitText || '—';
+  if (r.basis) limit.appendChild(cardLine('cell-sub muted', r.basis));
+  row.appendChild(limit);
+
+  row.appendChild(guardUsedCell(r));
+
+  var breach = document.createElement('span');
+  breach.setAttribute('role', 'cell');
+  breach.textContent = r.onBreach || '—';
+  if (r.actAt !== null && r.actAt !== undefined) {
+    breach.appendChild(cardLine('cell-sub muted', 'at ' + Math.round(r.actAt * 100) + '% of it'));
+  }
+  row.appendChild(breach);
+
+  var last = document.createElement('span');
+  last.setAttribute('role', 'cell');
+  last.className = 'grule-last';
+  if (r.last) {
+    var head = document.createElement('span');
+    head.className = 'cell-line';
+    head.appendChild(cardLine('muted', r.last.when + (r.last.ticket ? ' ' + r.last.ticket : '')));
+    head.appendChild(cardLine('gact-act ' + actionTone(r.last.action), r.last.action));
+    last.appendChild(head);
+    if (r.last.detail) last.appendChild(cardLine('cell-sub muted', r.last.detail));
+    if (r.latched) {
+      var clear = document.createElement('button');
+      clear.type = 'button';
+      clear.className = 'row-btn';
+      clear.textContent = 'Clear';
+      clear.addEventListener('click', function (ev) {
+        ev.stopPropagation();
+        clearLatchFlow(r);
+      });
+      last.appendChild(clear);
+    }
+  } else {
+    last.appendChild(cardLine('muted', 'nothing yet'));
+  }
+  row.appendChild(last);
+
+  row.addEventListener('click', function () {
+    G.selected = r.id === G.selected ? null : r.id;
+    G.drawn = '';
+    renderGuards();
+  });
+  row.addEventListener('dblclick', function () { openRuleForm(r.type, r.id); });
+  return row;
+}
+
+function guardUsedCell(r) {
+  var cell = document.createElement('span');
+  cell.setAttribute('role', 'cell');
+  cell.className = 'grule-used';
+  var u = r.used;
+  if (u.kind === 'latched') {
+    cell.appendChild(cardLine('gused-hold red', 'NO NEW TRADES'));
+    cell.appendChild(cardLine('cell-sub red', u.note + ' · Clear releases it'));
+    return cell;
+  }
+  if (u.kind === 'off') {
+    cell.appendChild(cardLine('muted', 'off'));
+    return cell;
+  }
+  if (u.kind === 'text') {
+    cell.appendChild(cardLine(u.tone || 'muted', u.text || '—'));
+    return cell;
+  }
+  var line = document.createElement('span');
+  line.className = 'gused-row';
+  var track = document.createElement('span');
+  track.className = 'gbar';
+  var fill = document.createElement('span');
+  fill.className = 'gbar-fill ' + r.tone;
+  fill.style.width = Math.min(100, Math.round(u.fraction * 100)) + '%';
+  track.appendChild(fill);
+  if (r.actAt !== null && r.actAt !== undefined) {
+    var tick = document.createElement('span');
+    tick.className = 'gbar-tick';
+    tick.style.left = Math.min(100, Math.round(r.actAt * 100)) + '%';
+    track.appendChild(tick);
+  }
+  line.appendChild(track);
+  line.appendChild(cardLine('mono ' + (r.tone === 'blue' ? 'muted' : r.tone),
+    Math.round(u.fraction * 100) + '%'));
+  if (u.holdsBack) line.appendChild(cardLine('gused-hold red', 'NO NEW TRADES'));
+  cell.appendChild(line);
+  if (u.moneyLine) cell.appendChild(cardLine('cell-sub muted mono', u.moneyLine));
+  return cell;
+}
+
+// --- guards: asking and editing -------------------------------------------------------------
+function pickModal(title, options) {
+  // A list to pick from: each option {label, sub, fn} is a row; picking closes the modal.
+  var body = document.createElement('div');
+  body.className = 'pick-list';
+  options.forEach(function (o) {
+    if (!o.fn) {
+      body.appendChild(cardLine('pick-head', o.label));
+      return;
+    }
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'pick-item';
+    b.appendChild(cardLine('pick-label', o.label));
+    if (o.sub) b.appendChild(cardLine('pick-sub muted', o.sub));
+    b.addEventListener('click', function () {
+      closeModal();
+      o.fn();
+    });
+    body.appendChild(b);
+  });
+  showModal({ title: title, body: body, confirm: '' });
+}
+
+function confirmModal(title, said, go, danger, fn) {
+  var body = document.createElement('div');
+  var p = document.createElement('p');
+  p.textContent = said;
+  body.appendChild(p);
+  showModal({ title: title, body: body, confirm: go, danger: danger, onConfirm: fn });
+}
+
+function addRuleFlow() {
+  var live = G.live;
+  if (!live || !live.hasAccount) {
+    toast("this terminal's account is not known yet: connect it once", 'bad');
+    return;
+  }
+  var options = [];
+  [['THE ACCOUNT', false], ['EACH NEW TRADE', true]].forEach(function (group) {
+    options.push({ label: group[0] });
+    live.ruleTypes.forEach(function (t) {
+      if (t.perTrade !== group[1]) return;
+      options.push({
+        label: t.title,
+        sub: t.blurb,
+        fn: function () { openRuleForm(t.type, null); }
+      });
+    });
+  });
+  pickModal('Add a rule', options);
+}
+
+function templatesFlow() {
+  var live = G.live;
+  if (!live || !live.hasAccount) {
+    toast("this terminal's account is not known yet: connect it once", 'bad');
+    return;
+  }
+  var options = [];
+  if (live.rules.length) {
+    options.push({
+      label: 'Save these rules as a template',
+      sub: live.rules.length + ' rule' + (live.rules.length === 1 ? '' : 's') + ' as they stand',
+      fn: saveTemplateFlow
+    });
+  }
+  live.templates.forEach(function (t) {
+    options.push({
+      label: 'Apply ' + t.name,
+      sub: t.rules + ' rule' + (t.rules === 1 ? '' : 's'),
+      fn: function () { replaceRulesFlow({ template: t.name }, 'template ' + t.name, t.rules); }
+    });
+  });
+  if (!options.length) {
+    toast('no templates yet: add rules, then save them as one', 'bad');
+    return;
+  }
+  pickModal('Templates', options);
+}
+
+function saveTemplateFlow() {
+  var body = document.createElement('div');
+  var field = document.createElement('div');
+  field.className = 'field';
+  var label = document.createElement('label');
+  label.className = 'flabel';
+  label.setAttribute('for', 'gt-name');
+  label.textContent = 'Template name';
+  var input = document.createElement('input');
+  input.id = 'gt-name';
+  input.autocomplete = 'off';
+  field.appendChild(label);
+  field.appendChild(input);
+  body.appendChild(field);
+  showModal({
+    title: 'Save as a template',
+    body: body,
+    confirm: 'Save template',
+    onConfirm: function () { gact(api().guard_save_template(G.tid, input.value)); }
+  });
+  input.focus();
+}
+
+function copyFromFlow() {
+  var live = G.live;
+  if (!live || !live.hasAccount) {
+    toast("this terminal's account is not known yet: connect it once", 'bad');
+    return;
+  }
+  if (!live.copyFrom.length) {
+    toast('no other slave has guards to copy yet', 'bad');
+    return;
+  }
+  pickModal('Copy rules from', live.copyFrom.map(function (o) {
+    return {
+      label: o.name,
+      sub: o.rules + ' rule' + (o.rules === 1 ? '' : 's'),
+      fn: function () { replaceRulesFlow({ account: o.key, name: o.name }, o.name, o.rules); }
+    };
+  }));
+}
+
+function replaceRulesFlow(source, said, count) {
+  var have = G.live ? G.live.rules.length : 0;
+  if (!have) {
+    gact(api().guard_apply_rules(G.tid, source));
+    return;
+  }
+  confirmModal(
+    'Replace ' + have + ' rule' + (have === 1 ? '' : 's') + '?',
+    "This account's rules are replaced by the " + count + ' from ' + said
+    + '. Its initial balance is kept.',
+    'Replace them', true,
+    function () { gact(api().guard_apply_rules(G.tid, source)); }
+  );
+}
+
+function clearLatchFlow(r) {
+  confirmModal(
+    "Clear " + r.title + "'s breach?",
+    'The slave may take new trades again as soon as the rule is back under the point it '
+    + 'acts at. Clear it only if the firm has reset this account, or the breach was a mistake.',
+    'Clear it', true,
+    function () { gact(api().guard_clear_latch(G.tid, r.id)); }
+  );
+}
+
+function removeRuleFlow(r) {
+  confirmModal(
+    'Remove ' + r.title + '?',
+    'The rule and how it is set are forgotten.',
+    'Remove it', true,
+    function () { gact(api().guard_remove_rule(G.tid, r.id)); }
+  );
+}
+
+// The rule form, built from the parameters the rule declares -- a new rule needs nothing
+// here. The engine checks values and words the sentence; the form only asks.
+function openRuleForm(type, ruleId) {
+  api().guard_form(G.tid, type, ruleId).then(function (f) {
+    if (!f.ok) { toast(f.message, 'bad'); return; }
+    var body = document.createElement('div');
+    body.className = 'gform';
+    var inputs = {};
+
+    f.fields.forEach(function (field) {
+      var wrap = document.createElement('div');
+      wrap.className = 'field gform-field';
+      wrap.dataset.name = field.name;
+      var label = document.createElement('label');
+      label.className = 'flabel';
+      label.textContent = field.label;
+      wrap.appendChild(label);
+      var line = document.createElement('div');
+      line.className = 'gform-line';
+      if (field.kind === 'choice') {
+        var dd = makeChoiceDropdown(field, function () { formChanged(); });
+        inputs[field.name] = dd.value;
+        line.appendChild(dd.el);
+      } else {
+        var input = document.createElement('input');
+        input.value = field.value;
+        input.autocomplete = 'off';
+        if (field.kind === 'number') input.inputMode = 'decimal';
+        input.addEventListener('input', function () { formChanged(); });
+        inputs[field.name] = function () { return input.value; };
+        line.appendChild(input);
+      }
+      if (field.after) line.appendChild(cardLine('muted small', field.after));
+      wrap.appendChild(line);
+      if (field.hint) wrap.appendChild(cardLine('field-note muted', field.hint));
+      wrap.appendChild(cardLine('field-note red gform-err', ''));
+      body.appendChild(wrap);
+    });
+
+    var tickWrap = document.createElement('div');
+    tickWrap.className = 'tick-wrap';
+    var tick = document.createElement('input');
+    tick.type = 'checkbox';
+    tick.id = 'gf-enabled';
+    tick.checked = f.enabled;
+    var tickLabel = document.createElement('label');
+    tickLabel.className = 'flabel';
+    tickLabel.setAttribute('for', 'gf-enabled');
+    tickLabel.textContent = 'this rule is switched on';
+    tickWrap.appendChild(tick);
+    tickWrap.appendChild(tickLabel);
+    body.appendChild(tickWrap);
+
+    var sentence = document.createElement('div');
+    sentence.className = 'gform-sentence';
+    sentence.appendChild(cardLine('flabel', 'READS AS'));
+    var sentenceBody = cardLine('gform-reads', '');
+    sentence.appendChild(sentenceBody);
+    body.appendChild(sentence);
+
+    function collect() {
+      var out = {};
+      Object.keys(inputs).forEach(function (name) { out[name] = inputs[name](); });
+      return out;
+    }
+
+    function showParts() {
+      f.fields.forEach(function (field) {
+        if (!field.onlyIf) return;
+        var wrap = body.querySelector('.gform-field[data-name="' + field.name + '"]');
+        wrap.hidden = collect()[field.onlyIf[0]] !== field.onlyIf[1];
+      });
+    }
+
+    var checkTimer = null;
+    function formChanged() {
+      showParts();
+      clearTimeout(checkTimer);
+      checkTimer = setTimeout(function () {
+        api().guard_check(G.tid, type, collect()).then(function (r) {
+          f.fields.forEach(function (field) {
+            var wrap = body.querySelector('.gform-field[data-name="' + field.name + '"]');
+            wrap.querySelector('.gform-err').textContent = r.errors[field.name] || '';
+          });
+          sentenceBody.textContent = r.sentence
+            || (Object.keys(r.errors).length ? 'Correct the values above to read the rule.' : '');
+        });
+      }, 250);
+    }
+
+    showModal({
+      title: (ruleId ? 'Change ' : 'Add ') + f.title,
+      body: body,
+      confirm: 'Save',
+      onConfirm: function () {
+        gact(api().guard_save_rule(G.tid, type, ruleId, collect(), tick.checked));
+      }
+    });
+    showParts();
+    formChanged();
+  });
+}
+
+function makeChoiceDropdown(field, onChange) {
+  var root = document.createElement('div');
+  root.className = 'dd gform-dd';
+  var current = field.value;
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'dd-btn';
+  btn.setAttribute('aria-haspopup', 'listbox');
+  function wordsFor(v) {
+    var hit = field.choices.filter(function (c) { return c[0] === v; })[0];
+    return hit ? hit[1] : v;
+  }
+  btn.textContent = wordsFor(current);
+  var menu = document.createElement('div');
+  menu.className = 'dd-menu';
+  menu.setAttribute('role', 'listbox');
+  menu.hidden = true;
+  field.choices.forEach(function (c) {
+    var opt = document.createElement('button');
+    opt.type = 'button';
+    opt.setAttribute('role', 'option');
+    opt.textContent = c[1];
+    opt.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      current = c[0];
+      btn.textContent = c[1];
+      menu.hidden = true;
+      onChange();
+    });
+    menu.appendChild(opt);
+  });
+  btn.addEventListener('click', function (ev) {
+    ev.stopPropagation();
+    var opening = menu.hidden;
+    closeDropdowns();
+    menu.hidden = !opening;
+  });
+  root.appendChild(btn);
+  root.appendChild(menu);
+  return { el: root, value: function () { return current; } };
 }
 
 // --- events --------------------------------------------------------------------------------
@@ -1616,6 +2142,45 @@ function wire() {
     if (ev.target === $('modal-back')) closeModal();
   });
   $('ctx-menu').addEventListener('click', function (ev) { ev.stopPropagation(); });
+
+  // --- guards page ---
+  function selRule() {
+    var live = G.live;
+    if (!live) return null;
+    return live.rules.filter(function (r) { return r.id === G.selected; })[0] || null;
+  }
+  $('g-add').addEventListener('click', addRuleFlow);
+  $('g-templates').addEventListener('click', templatesFlow);
+  $('g-copy').addEventListener('click', copyFromFlow);
+  $('g-all').addEventListener('change', function () { gact(api().guard_toggle_all(G.tid)); });
+  $('g-change').addEventListener('click', function () {
+    var r = selRule();
+    if (r) openRuleForm(r.type, r.id);
+  });
+  $('g-toggle').addEventListener('click', function () {
+    var r = selRule();
+    if (r) gact(api().guard_toggle_rule(G.tid, r.id));
+  });
+  $('g-remove').addEventListener('click', function () {
+    var r = selRule();
+    if (r) removeRuleFlow(r);
+  });
+  $('g-clear').addEventListener('click', function () {
+    var r = selRule();
+    if (r) clearLatchFlow(r);
+  });
+  function commitInitial() {
+    var live = G.live;
+    if (!live || !live.hasAccount) return;
+    var now = $('g-initial').value.trim();
+    var had = live.initialBalance === null || live.initialBalance === undefined
+      ? '' : String(live.initialBalance);
+    if (now !== had) gact(api().guard_set_initial(G.tid, now));
+  }
+  $('g-initial').addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter') { ev.target.blur(); }
+  });
+  $('g-initial').addEventListener('blur', commitInitial);
 }
 
 function start() {
@@ -1627,6 +2192,7 @@ function start() {
   setInterval(poll, 600);
   setInterval(pollRates, 1500);
   setInterval(pollTerminals, 1000);
+  setInterval(pollGuards, 1000);
 }
 
 if (window.pywebview) start();

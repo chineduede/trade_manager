@@ -31,7 +31,7 @@
     <nav aria-label="Pages" id="sidebar">
       <a href="#" class="nav-item" data-page="terminals" title="Terminals"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect></svg><span class="nav-label">Terminals</span></a>
       <a href="#" class="nav-item active" aria-current="page" data-page="trading" title="Trading"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg><span class="nav-label">Trading</span></a>
-      <a href="#" class="nav-item disabled" title="Guards — still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg><span class="nav-label">Guards</span></a>
+      <a href="#" class="nav-item" data-page="guards" title="Guards"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg><span class="nav-label">Guards</span></a>
       <a href="#" class="nav-item disabled" title="News — still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M16 2v4M8 2v4M3 10h18"></path></svg><span class="nav-label">News</span></a>
       <a href="#" class="nav-item disabled" title="History — still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg><span class="nav-label">History</span></a>
       <a href="#" class="nav-item disabled" title="Setups — still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg><span class="nav-label">Setups</span></a>
@@ -260,6 +260,65 @@
         <div class="zone-cards" id="detected-cards"></div>
         <span class="zone-note" id="detected-note" hidden>every terminal found is assigned · Rescan looks again</span>
       </section>
+    </div>
+
+    <div class="page" id="page-guards" hidden>
+      <div class="page-head">
+        <h1>Guards</h1>
+        <span class="muted">rules belong to the account, not the terminal · a safety net, never a named firm</span>
+      </div>
+
+      <div role="group" aria-label="Account" id="guard-chips"></div>
+
+      <section aria-label="Rules" class="panel" id="guard-panel" hidden>
+        <div id="guard-toolbar">
+          <label for="g-initial" class="flabel">Initial balance, the account size</label>
+          <input id="g-initial" inputmode="decimal" autocomplete="off">
+          <span class="toolbar-space"></span>
+          <button type="button" id="g-add" class="primary-btn">Add a rule</button>
+          <button type="button" id="g-templates" class="plain-btn">Templates</button>
+          <button type="button" id="g-copy" class="plain-btn">Copy from</button>
+          <span class="tick-wrap">
+            <input id="g-all" type="checkbox">
+            <label for="g-all" class="flabel">All on</label>
+          </span>
+        </div>
+
+        <div class="table-scroll">
+          <div role="table" aria-label="Guard rules" id="guard-table">
+            <div role="row" class="grule-head">
+              <span role="columnheader">RULE</span>
+              <span role="columnheader">LIMIT RIGHT NOW</span>
+              <span role="columnheader">USED</span>
+              <span role="columnheader">IF EXCEEDED</span>
+              <span role="columnheader">LAST ACTED</span>
+            </div>
+            <div id="guard-rows"></div>
+          </div>
+        </div>
+        <div id="guard-empty" class="muted" hidden>No rules yet — Add a rule, apply a template, or copy another account's.</div>
+
+        <div id="guard-foot">
+          <span class="muted small" id="guard-legend">tick = the buffer: the rule acts there, not at the firm's hard limit</span>
+          <span class="toolbar-space"></span>
+          <button type="button" id="g-change" class="plain-btn" disabled>Change</button>
+          <button type="button" id="g-toggle" class="plain-btn" disabled>Rule on/off</button>
+          <button type="button" id="g-clear" class="plain-btn" disabled hidden>Clear breach</button>
+          <button type="button" id="g-remove" class="danger-btn" disabled>Remove</button>
+        </div>
+        <div class="muted small" id="guard-note"></div>
+      </section>
+
+      <section aria-label="Recent guard actions" class="panel" id="guard-actions-panel" hidden>
+        <div class="panel-head">
+          <h2>Recent guard actions</h2>
+          <span class="muted small">what the rules declined, shrank, held or closed · newest first</span>
+        </div>
+        <div id="guard-actions" class="mono"></div>
+        <div id="guard-actions-empty" class="muted" hidden>Nothing yet. When a rule declines, shrinks or warns about a trade, or stops new trades, it lands here.</div>
+      </section>
+
+      <div id="guard-none" class="muted" hidden>No slaves yet — guards watch slave accounts. Assign a slave on the Terminals page first.</div>
     </div>
     </main>
   </div>
