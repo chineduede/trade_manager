@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
+import ssl
+import subprocess
 import threading
 import time
 import urllib.request
@@ -40,8 +43,10 @@ FRESH_S = 24 * 3600.0
 _TIMEOUT_S = 20.0
 
 HIGH, MEDIUM = "High", "Medium"
-# The feed resets connections whose User-Agent it does not recognise as a browser, and since
-# 2026-11 the bare "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" prefix is no longer enough.
+# The feed resets connections it does not take for a browser's. A full Chrome User-Agent
+# used to be enough; since mid-2026-11 it also fingerprints the TLS handshake itself, and
+# Python's default OpenSSL hello is reset while a changed cipher list, or Windows curl's
+# Schannel, get through -- hence the ladder of strategies in ``_fetch_feed``.
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -99,11 +104,56 @@ def parse_feed(raw: object) -> tuple[NewsEvent, ...]:
     return tuple(sorted(events, key=lambda e: e.when))
 
 
-def _fetch_feed() -> object:
-    # The feed resets a connection that names an unknown client, so this reads as a browser.
+def _read_urllib(context: ssl.SSLContext | None = None) -> str:
     request = urllib.request.Request(FEED_URL, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(request, timeout=_TIMEOUT_S) as response:  # noqa: S310
-        return json.loads(response.read().decode("utf-8"))
+    with urllib.request.urlopen(request, timeout=_TIMEOUT_S, context=context) as response:  # noqa: S310
+        raw: bytes = response.read()
+    return raw.decode("utf-8")
+
+
+def _read_tweaked() -> str:
+    # A changed cipher list changes the handshake's fingerprint off the blocked one.
+    context = ssl.create_default_context()
+    context.set_ciphers("ECDHE+AESGCM")
+    return _read_urllib(context)
+
+
+def _read_curl() -> str:
+    # Windows curl speaks Schannel: a TLS stack the fingerprinting treats as a browser's.
+    curl = shutil.which("curl")
+    if curl is None:
+        raise OSError("curl is not on this machine")
+    done = subprocess.run(  # noqa: S603
+        [curl, "-sS", "--fail", "--max-time", str(int(_TIMEOUT_S)), "-A", _USER_AGENT, FEED_URL],
+        capture_output=True,
+        timeout=_TIMEOUT_S + 10,
+        check=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    return done.stdout.decode("utf-8")
+
+
+_STRATEGIES: tuple[tuple[str, Callable[[], str]], ...] = (
+    ("urllib", _read_urllib),
+    ("tweaked ciphers", _read_tweaked),
+    ("curl", _read_curl),
+)
+
+
+def _fetch_feed() -> object:
+    """Read the feed by the first strategy that gets through. The feed's blocking has
+    shifted twice already; failing down the ladder keeps a shift from killing the guard,
+    and the first error is the one reported -- it names the real refusal, not curl's."""
+    first: Exception | None = None
+    for name, read in _STRATEGIES:
+        try:
+            return json.loads(read())
+        except Exception as exc:
+            if first is None:
+                first = exc
+            log.debug("news feed via %s failed: %s", name, exc)
+    assert first is not None
+    raise first
 
 
 class NewsCalendar:

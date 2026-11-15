@@ -214,3 +214,34 @@ def test_a_trade_in_a_held_currency_is_declined_and_others_copied() -> None:
     assert _open(usd, "COCOA") is SkipReason.GUARD_NEWS, "a name it cannot read is not risked"
     assert _open(GuardGate(news=frozenset({"*"})), "EURGBP") is SkipReason.GUARD_NEWS
     assert _open(GuardGate(), "EURUSD") is None
+
+
+# --- the fetch ladder ----------------------------------------------------------------------------
+# The feed's blocking has shifted twice (User-Agent, then the TLS fingerprint itself), so the
+# fetch fails down a ladder of strategies. What is pinned here is the ladder, not the network.
+
+
+def test_the_fetch_falls_through_to_the_first_strategy_that_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reset() -> str:
+        raise OSError("[WinError 10054] An existing connection was forcibly closed")
+
+    monkeypatch.setattr(
+        news_mod, "_STRATEGIES", (("a", reset), ("b", lambda: '[{"x": 1}]'), ("c", reset))
+    )
+    assert news_mod._fetch_feed() == [{"x": 1}]
+
+
+def test_when_every_strategy_fails_the_first_error_is_the_one_told(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reset() -> str:
+        raise OSError("the real refusal")
+
+    def no_curl() -> str:
+        raise OSError("curl is not on this machine")
+
+    monkeypatch.setattr(news_mod, "_STRATEGIES", (("a", reset), ("b", no_curl)))
+    with pytest.raises(OSError, match="the real refusal"):
+        news_mod._fetch_feed()
