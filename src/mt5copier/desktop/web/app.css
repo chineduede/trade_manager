@@ -340,6 +340,7 @@ td .row-btn + .row-btn { margin-left: 8px; }
 .page { display: flex; flex-direction: column; gap: 24px; }
 .green { color: var(--green); }
 .red { color: var(--red); }
+.blue { color: var(--blue); }
 
 #zones-row { display: flex; flex-wrap: wrap; gap: 20px; align-items: stretch; }
 #zone-master { flex: 1 1 300px; max-width: 400px; min-width: 0; }
@@ -390,6 +391,12 @@ body.dragging-terminals .zone-cue { display: inline-block; }
   user-select: none;
 }
 .tcard-still { cursor: default; }
+/* The TUI card's state-coloured frame, softened for pixels: green while copying,
+   yellow in a dry run, blue paused, red held or down. */
+.tcard.edge-green { border-color: rgba(127, 191, 110, 0.55); }
+.tcard.edge-yellow { border-color: rgba(232, 184, 74, 0.5); }
+.tcard.edge-red { border-color: rgba(229, 100, 90, 0.55); }
+.tcard.edge-blue { border-color: rgba(126, 166, 224, 0.5); }
 .tcard.drag-src { opacity: 0.45; border-style: dashed; }
 .tcard-ghost {
   position: fixed; z-index: 70; pointer-events: none;
@@ -412,14 +419,40 @@ body.dragging-terminals .zone-cue { display: inline-block; }
 .pill.red { color: var(--red); }
 .pill.yellow { color: var(--yellow); }
 .pill.muted { color: var(--muted); border-color: var(--border); }
-.tcard-acct { font-size: 12.5px; color: var(--muted); }
-.tcard-eq { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; }
-.tcard-state { color: var(--muted); font-size: 12.5px; }
-.tcard-guard { font-size: 12px; font-weight: 700; }
+.tcard-word { font-size: 12.5px; font-weight: 700; white-space: nowrap; flex: 0 0 auto; }
+/* Every row is one line at a fixed height, so the cards' rows line up with each other
+   across a zone — a long server name ellipsizes instead of pushing everything below. */
+.tcard-acct, .tcard-info {
+  font-size: 12.5px; color: var(--muted); line-height: 20px; min-height: 20px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tcard-info.red { color: var(--red); }
+.tcard-info.yellow { color: var(--yellow); }
+.tcard-big {
+  font-size: 27px; font-weight: 700; line-height: 34px;
+  letter-spacing: 0.01em; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.tcard-float { font-size: 13px; line-height: 20px; }
+.tcard-book { font-weight: 700; line-height: 22px; }
+.tcard-margin {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 12px; color: var(--muted); line-height: 20px; min-height: 20px;
+}
+.mbar {
+  flex: 0 0 72px; height: 8px; border-radius: 4px; overflow: hidden;
+  background: var(--hairline-soft);
+}
+.mbar-fill { display: block; height: 100%; }
+.mbar-fill.blue { background: var(--blue); }
+.mbar-fill.yellow { background: var(--yellow); }
+.mbar-fill.red { background: var(--red); }
+.mbar-fill.muted { background: var(--faint); }
+.tcard-guard { font-size: 11.5px; font-weight: 700; white-space: nowrap; }
 .tcard-guard.yellow { color: var(--yellow); }
 .tcard-guard.red { color: var(--red); }
 .tcard-guard.quiet { color: var(--muted); font-weight: 400; }
-.tcard-btn { align-self: flex-start; }
+.tcard-btn { align-self: flex-start; margin-top: 2px; }
 .tcard .row-btn {
   height: 38px; padding: 0 14px; border-radius: 8px;
   border: 1px solid var(--border); background: transparent;

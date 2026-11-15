@@ -24,6 +24,7 @@ from ..logging_setup import get_logger
 from ..paths import active_profile
 from ..presentation import row_info, slave_badge
 from ..protocol import CHART_TIMEFRAMES, OrderType, PendingOrder, Position, PositionType
+from ..terminal_detail import margin_gauge
 from . import winframe
 
 if TYPE_CHECKING:
@@ -417,6 +418,21 @@ class DesktopApi:
         )
         is_slave = tcfg.role is Role.SLAVE
         badge_text, badge_tier = slave_badge(info, cfg.dry_run) if is_slave else ("", "")
+        snap = view.snapshot
+        margin_used: float | None = None
+        margin_tier: str | None = None
+        if snap is not None:
+            gauge = margin_gauge(snap)
+            margin_used = gauge.used_fraction
+            margin_tier = gauge.level_tier
+        risk: str | None = None
+        if is_slave:
+            # The TUI card's wording (cards.risk_text): $ only where it reads naturally.
+            if tcfg.sizing_mode is SizingMode.FIXED_CASH_RISK:
+                mark = "$" if (info.currency or "").upper() in ("USD", "AUD", "CAD", "NZD", "") else ""
+                risk = f"risk {mark}{tcfg.risk_cash:,g}" + ("" if mark else f" {info.currency}")
+            else:
+                risk = f"risk {tcfg.risk_percent:g}%"
         return {
             "tid": tid,
             "name": info.label,
@@ -442,6 +458,9 @@ class DesktopApi:
             "allowLive": tcfg.allow_live_trading,
             "orphans": tid in holds and bool(self._engine.orphans(tid)),
             "guard": self._guard_info(tid) if is_slave else None,
+            "risk": risk,
+            "marginUsed": margin_used,
+            "marginTier": margin_tier,
         }
 
     def terminals_state(self) -> dict[str, Any]:

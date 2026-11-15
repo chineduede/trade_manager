@@ -930,66 +930,32 @@ function pill(text, tone) {
   return p;
 }
 
-function cardPills(c, live) {
-  var out = [];
+function stateWord(c, live) {
+  // The card's top-right word, with the TUI card's exact precedence: a link that is
+  // down outranks the demo guard, which outranks a hold, which outranks a pause.
+  var down = c.tier === 'serious' || c.tier === 'critical' || c.tier === 'muted'
+    || (c.tier === 'warning' && !c.holdReason);
   if (c.role === 'master') {
-    out.push(pill('MASTER', 'blue'));
-    out.push(live.dryRun ? pill('DRY RUN', 'yellow') : pill('LIVE', 'red'));
-    return out;
+    if (down) return { text: c.statusText, cls: c.tier === 'muted' ? 'muted' : 'red' };
+    return { text: 'connected', cls: 'blue' };
   }
-  if (c.role === 'slave') {
-    if (c.demoBlocked) out.push(pill('HELD BACK', 'red'));
-    else if (c.holdReason) out.push(pill('HELD', 'red'));
-    out.push(live.dryRun ? pill('DRY RUN', 'yellow') : pill('LIVE', 'red'));
-    if (c.paused) out.push(pill('PAUSED', 'muted'));
-    return out;
+  if (down) {
+    var cls = c.tier === 'warning' ? 'yellow' : c.tier === 'muted' ? 'muted' : 'red';
+    return { text: c.statusText, cls: cls };
   }
-  if (c.isCtrader) out.push(pill('SLAVE ONLY', 'muted'));
-  else if (!c.hasExe) out.push(pill('NOT INSTALLED', 'muted'));
-  else if (!c.login) out.push(pill('NO ACCOUNT', 'muted'));
-  return out;
+  if (c.demoBlocked) return { text: 'HELD BACK', cls: 'red' };
+  if (c.holdReason) return { text: 'HELD', cls: 'red' };
+  if (c.paused) return { text: 'PAUSED', cls: 'blue' };
+  if (!live.copying) return { text: 'not copying', cls: 'muted' };
+  if (live.dryRun) return { text: 'dry run', cls: 'yellow' };
+  return { text: 'copying', cls: 'green' };
 }
 
-function stateLine(c, live) {
-  if (c.role === 'unassigned') {
-    if (!c.hasExe && !c.isCtrader) return 'found in config · cannot be launched from here';
-    var who = c.isCtrader ? 'can copy, cannot feed' : '';
-    var logged = c.login ? 'logged in' : 'not logged in';
-    return who ? logged + ' · ' + who : logged;
-  }
-  var open = c.openTrades === null ? null
-    : c.openTrades + ' position' + (c.openTrades === 1 ? '' : 's');
-  var first;
-  if (c.tier === 'serious' || c.tier === 'critical' || c.tier === 'muted'
-    || (c.tier === 'warning' && !c.holdReason)) {
-    first = c.role === 'slave' && c.badge ? c.badge.toLowerCase() : c.statusText;
-  } else if (c.role === 'master') {
-    first = 'connected';
-  } else if (c.demoBlocked) {
-    first = 'held back: not a demo';
-  } else if (c.holdReason) {
-    first = c.holdReason.toLowerCase();
-  } else if (c.paused) {
-    first = 'paused';
-  } else if (!live.copying) {
-    first = 'not copying';
-  } else {
-    first = live.dryRun ? 'dry run' : 'copying';
-  }
-  return open === null ? first : first + ' · ' + open;
-}
-
-function terminalCard(c, live) {
-  var el = document.createElement('article');
-  el.className = 'tcard';
-  el.dataset.tid = c.tid;
-  el.setAttribute('aria-label', c.name);
-
+function cardHead(c, dotTone) {
   var head = document.createElement('div');
   head.className = 'tcard-head';
   var dot = document.createElement('span');
-  var dotTone = { good: 'green', warning: 'yellow', serious: 'red', critical: 'red' }[c.tier] || '';
-  dot.className = 'dot ' + dotTone;
+  dot.className = 'dot ' + (dotTone || '');
   dot.setAttribute('aria-hidden', 'true');
   head.appendChild(dot);
   var name = document.createElement('span');
@@ -999,44 +965,116 @@ function terminalCard(c, live) {
   var space = document.createElement('span');
   space.className = 'tcard-space';
   head.appendChild(space);
-  cardPills(c, live).forEach(function (p) { head.appendChild(p); });
-  el.appendChild(head);
+  return head;
+}
 
-  var acct = document.createElement('span');
-  acct.className = 'tcard-acct mono';
-  acct.textContent = c.login
+function cardLine(cls, text) {
+  var s = document.createElement('span');
+  s.className = cls;
+  s.textContent = text;
+  return s;
+}
+
+function acctLine(c) {
+  return cardLine('tcard-acct mono', c.login
     ? c.login + (c.server ? ' · ' + c.server : '')
-    : (c.isCtrader ? 'cTrader · Spotware' : 'not logged in');
-  el.appendChild(acct);
+    : (c.isCtrader ? 'cTrader · Spotware' : 'not logged in'));
+}
 
-  if (c.equity !== null && c.equity !== undefined) {
-    var eq = document.createElement('div');
-    eq.className = 'tcard-eq mono';
-    var left = document.createElement('span');
-    left.textContent = 'equity ' + money(c.equity);
-    var right = document.createElement('span');
-    var pl = c.floatingPl;
-    if (pl !== null && pl !== undefined) {
-      right.textContent = (pl >= 0 ? '+' : '') + money(pl);
-      right.className = pl > 0 ? 'green' : pl < 0 ? 'red' : 'muted';
+function openWord(c) {
+  return c.openTrades === null ? '— open' : c.openTrades + ' open';
+}
+
+function marginRow(c) {
+  // The TUI card's last line: margin ███░░░ 30%, with the guard badge at the right so
+  // a card is no taller for having guards.
+  var row = document.createElement('div');
+  row.className = 'tcard-margin mono';
+  row.appendChild(cardLine('', 'margin'));
+  var bar = document.createElement('span');
+  bar.className = 'mbar';
+  var fill = document.createElement('span');
+  var tier = { good: 'blue', warning: 'yellow', serious: 'red', critical: 'red' }[c.marginTier] || 'muted';
+  fill.className = 'mbar-fill ' + tier;
+  fill.style.width = c.marginUsed === null || c.marginUsed === undefined
+    ? '0%' : Math.round(c.marginUsed * 100) + '%';
+  bar.appendChild(fill);
+  row.appendChild(bar);
+  row.appendChild(cardLine('', c.marginUsed === null || c.marginUsed === undefined
+    ? '—' : Math.round(c.marginUsed * 100) + '%'));
+  var space = document.createElement('span');
+  space.className = 'tcard-space';
+  row.appendChild(space);
+  if (c.guard) {
+    if (c.guard.text) row.appendChild(cardLine('tcard-guard ' + (c.guard.tone || ''), c.guard.text));
+    else if (c.guard.rules) {
+      row.appendChild(cardLine('tcard-guard quiet',
+        'guards ' + c.guard.rules + ' rule' + (c.guard.rules === 1 ? '' : 's')));
     }
-    eq.appendChild(left);
-    eq.appendChild(right);
-    el.appendChild(eq);
+  }
+  return row;
+}
+
+function terminalCard(c, live) {
+  var el = document.createElement('article');
+  el.className = 'tcard';
+  el.dataset.tid = c.tid;
+  el.setAttribute('aria-label', c.name);
+  var dotTone = { good: 'green', warning: 'yellow', serious: 'red', critical: 'red' }[c.tier] || '';
+  var head = cardHead(c, dotTone);
+
+  if (c.role === 'unassigned') {
+    // A detected terminal: what it is and whether it could connect, nothing more.
+    if (c.isCtrader) head.appendChild(pill('SLAVE ONLY', 'muted'));
+    else if (!c.hasExe) head.appendChild(pill('NOT INSTALLED', 'muted'));
+    else if (!c.login) head.appendChild(pill('NO ACCOUNT', 'muted'));
+    el.appendChild(head);
+    el.appendChild(acctLine(c));
+    var said;
+    if (!c.hasExe && !c.isCtrader) said = 'found in config · cannot be launched from here';
+    else {
+      said = c.login ? 'logged in' : 'not logged in';
+      if (c.isCtrader) said += ' · can copy, cannot feed';
+    }
+    el.appendChild(cardLine('tcard-info', said));
+    wireCard(el, c);
+    return el;
   }
 
-  var state = document.createElement('span');
-  state.className = 'tcard-state';
-  state.textContent = stateLine(c, live);
-  el.appendChild(state);
+  // An assigned card reads like the TUI's: state word top-right, the balance big, the
+  // floating line under it, then risk · open, then the margin bar. Every row has its
+  // fixed place, so cards line up with each other whatever their content.
+  var word = stateWord(c, live);
+  if (word.cls !== 'muted') el.classList.add('edge-' + word.cls);
+  head.appendChild(cardLine('tcard-word ' + word.cls, word.text));
+  el.appendChild(head);
+  el.appendChild(acctLine(c));
+  el.appendChild(cardLine('tcard-big mono', c.balance === null ? '—' : money(c.balance)));
 
-  if (c.guard && (c.guard.text || c.guard.rules)) {
-    var g = document.createElement('span');
-    g.className = 'tcard-guard ' + (c.guard.text ? (c.guard.tone || '') : 'quiet');
-    g.textContent = c.guard.text
-      || ('guards ' + c.guard.rules + ' rule' + (c.guard.rules === 1 ? '' : 's'));
-    el.appendChild(g);
+  var pl = c.floatingPl;
+  var plSaid = pl === null || pl === undefined
+    ? '— floating'
+    : (pl >= 0 ? '+' : '') + money(pl) + ' floating';
+  var plCls = pl > 0 ? 'green' : pl < 0 ? 'red' : 'muted';
+  el.appendChild(cardLine('tcard-float mono ' + plCls, plSaid));
+
+  var info, infoCls = 'tcard-info';
+  if (c.role === 'slave') {
+    if (c.demoBlocked) {
+      info = 'not a demo — right-click to allow live trading';
+      infoCls += ' red';
+    } else if (c.holdReason) {
+      info = c.holdReason;
+      infoCls += ' yellow';
+    } else {
+      info = (c.risk ? c.risk + ' · ' : '') + openWord(c);
+    }
+  } else {
+    info = openWord(c) + ' · feeds ' + live.slaves.length
+      + ' slave' + (live.slaves.length === 1 ? '' : 's');
   }
+  el.appendChild(cardLine(infoCls, info));
+  el.appendChild(marginRow(c));
 
   wireCard(el, c);
   return el;
@@ -1044,40 +1082,18 @@ function terminalCard(c, live) {
 
 function virtualCard(live) {
   var el = document.createElement('article');
-  el.className = 'tcard tcard-still';
+  el.className = 'tcard tcard-still edge-blue';
   var v = live.virtual;
-
-  var head = document.createElement('div');
-  head.className = 'tcard-head';
-  var dot = document.createElement('span');
-  dot.className = 'dot ' + (v.feed ? 'green' : 'red');
-  dot.setAttribute('aria-hidden', 'true');
-  head.appendChild(dot);
-  var name = document.createElement('span');
-  name.className = 'tcard-name';
-  name.textContent = 'Direct trading';
-  head.appendChild(name);
-  var space = document.createElement('span');
-  space.className = 'tcard-space';
-  head.appendChild(space);
-  head.appendChild(pill('MASTER', 'blue'));
+  var head = cardHead({ name: 'Direct trading' }, v.feed ? 'green' : 'red');
+  head.appendChild(cardLine('tcard-word ' + (v.feed ? 'blue' : 'red'),
+    v.feed ? 'feed ' + v.feed : 'no feed'));
   el.appendChild(head);
-
-  var acct = document.createElement('span');
-  acct.className = 'tcard-acct';
-  acct.textContent = 'you are the master';
-  el.appendChild(acct);
-
-  var book = document.createElement('span');
-  book.className = 'tcard-eq mono';
-  book.textContent = v.positions + ' open · ' + v.orders + ' resting';
-  el.appendChild(book);
-
-  var state = document.createElement('span');
-  state.className = 'tcard-state';
+  el.appendChild(cardLine('tcard-acct', 'you are the master'));
+  el.appendChild(cardLine('tcard-book',
+    v.positions ? v.positions + ' open · ' + v.orders + ' resting' : 'nothing open'));
   var feeds = 'feeds ' + live.slaves.length + ' slave' + (live.slaves.length === 1 ? '' : 's');
-  state.textContent = (v.feed ? 'feed ' + v.feed : 'no feed — connect an MT5 slave') + ' · ' + feeds;
-  el.appendChild(state);
+  el.appendChild(cardLine('tcard-info',
+    feeds + (v.feed ? '' : ' · connect an MT5 slave for prices')));
 
   var go = document.createElement('button');
   go.type = 'button';
