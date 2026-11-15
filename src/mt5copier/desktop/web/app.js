@@ -1042,12 +1042,13 @@ function marginRow(c) {
   var space = document.createElement('span');
   space.className = 'tcard-space';
   row.appendChild(space);
-  if (c.guard) {
-    if (c.guard.text) row.appendChild(cardLine('tcard-guard ' + (c.guard.tone || ''), c.guard.text));
-    else if (c.guard.rules) {
-      row.appendChild(cardLine('tcard-guard quiet',
-        'guards ' + c.guard.rules + ' rule' + (c.guard.rules === 1 ? '' : 's')));
-    }
+  // Only a guard with something to say earns this corner (the TUI's rule): GUARD 82%,
+  // GUARD BREACHED, GUARD: NO NEW TRADES. The quiet rule count sits on the info line,
+  // where a tight card does not squeeze it into "guards 2…".
+  if (c.guard && c.guard.text) {
+    var badge = cardLine('tcard-guard ' + (c.guard.tone || ''), c.guard.text);
+    badge.title = c.guard.text;
+    row.appendChild(badge);
   }
   return row;
 }
@@ -1104,7 +1105,11 @@ function terminalCard(c, live) {
       info = c.holdReason;
       infoCls += ' yellow';
     } else {
-      info = (c.risk ? c.risk + ' · ' : '') + openWord(c);
+      // The rule count lives here, where there is room — the margin line's corner is
+      // kept for a guard that is actually saying something.
+      var ruled = c.guard && c.guard.rules
+        ? ' · ' + c.guard.rules + ' guard rule' + (c.guard.rules === 1 ? '' : 's') : '';
+      info = (c.risk ? c.risk + ' · ' : '') + openWord(c) + ruled;
     }
   } else {
     info = openWord(c) + ' · feeds ' + live.slaves.length

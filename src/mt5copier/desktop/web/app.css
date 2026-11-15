@@ -436,14 +436,16 @@ body.dragging-terminals .zone-cue { display: inline-block; }
 .tcard-float { font-size: 13px; line-height: 20px; }
 .tcard-book { font-weight: 700; line-height: 22px; }
 .tcard-margin {
-  display: flex; align-items: center; gap: 8px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 2px 8px;
   font-size: 12px; color: var(--muted); line-height: 20px; min-height: 20px;
   min-width: 0;
 }
 /* The gauge gives way first in a tight card — it still reads at half width, while the
-   words beside it do not; the guard badge ellipsizes only after that. */
+   words beside it do not. The large shrink factor makes that an order, not a split:
+   flex shrinks in proportion, and an even split would trim the guard's words while the
+   gauge still had slack. The badge ellipsizes only once the gauge is at its floor. */
 .mbar {
-  flex: 0 1 72px; min-width: 32px; height: 8px; border-radius: 4px; overflow: hidden;
+  flex: 0 20 72px; min-width: 32px; height: 8px; border-radius: 4px; overflow: hidden;
   background: var(--hairline-soft);
 }
 .mbar-fill { display: block; height: 100%; }
@@ -451,13 +453,16 @@ body.dragging-terminals .zone-cue { display: inline-block; }
 .mbar-fill.yellow { background: var(--yellow); }
 .mbar-fill.red { background: var(--red); }
 .mbar-fill.muted { background: var(--faint); }
+/* An acting guard's words are the message and are never cut: when they cannot fit
+   beside the gauge they wrap onto their own right-aligned line instead. Only a card
+   whose guard is acting grows; quiet cards stay one line (their rule count lives on
+   the info line). The ellipsis stays as a floor for text wider than the whole card. */
 .tcard-guard {
   font-size: 11.5px; font-weight: 700; white-space: nowrap;
-  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  flex: 0 1 auto; margin-left: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
 }
 .tcard-guard.yellow { color: var(--yellow); }
 .tcard-guard.red { color: var(--red); }
-.tcard-guard.quiet { color: var(--muted); font-weight: 400; }
 .tcard-btn { align-self: flex-start; margin-top: 2px; }
 .tcard .row-btn {
   height: 38px; padding: 0 14px; border-radius: 8px;
