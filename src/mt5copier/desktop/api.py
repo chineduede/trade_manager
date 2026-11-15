@@ -12,6 +12,7 @@ the same contract the TUI's timer thread already exercises.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from .. import config as config_mod
@@ -108,16 +109,29 @@ class DesktopApi:
         if self._window is not None:
             self._window.minimize()
 
+    def _on_ui(self, fn: Callable[[], None]) -> None:
+        """Run ``fn`` on the thread that owns the window. The bridge calls arrive on
+        worker threads, and both ReleaseCapture and the modal move loop belong to the UI
+        thread; BeginInvoke rather than Invoke, so a drag's whole move loop does not hold
+        a bridge worker hostage."""
+        try:
+            from System import Action  # pythonnet, loaded with webview
+
+            self._window.native.BeginInvoke(Action(fn))  # type: ignore[union-attr]
+        except Exception:
+            log.debug("could not reach the UI thread", exc_info=True)
+
     def win_drag(self) -> None:
         """The title bar's drag, as a native move loop: fluid, and it snaps at edges."""
         hwnd = self._hwnd()
         if hwnd is not None:
-            winframe.begin_drag(hwnd)
+            self._on_ui(lambda: winframe.begin_drag(hwnd))
 
     def win_resize(self, edge: str) -> None:
         hwnd = self._hwnd()
+        edge = str(edge)
         if hwnd is not None:
-            winframe.begin_resize(hwnd, str(edge))
+            self._on_ui(lambda: winframe.begin_resize(hwnd, edge))
 
     def _is_maximized(self) -> bool:
         """The window's real state: a drag to the top edge maximizes natively, so a flag

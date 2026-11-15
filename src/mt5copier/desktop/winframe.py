@@ -107,16 +107,31 @@ def adopt(hwnd: int) -> None:
     log.info("window adopted native frame behaviours (Snap, native drag and resize)")
 
 
+def _cursor_lparam() -> int:
+    """The cursor in screen coordinates, packed the way mouse messages carry it."""
+    pt = wintypes.POINT()
+    _user32.GetCursorPos(ctypes.byref(pt))
+    return ((pt.y & 0xFFFF) << 16) | (pt.x & 0xFFFF)
+
+
+def _hand_mouse_to_system(hwnd: int, hit_code: int) -> None:
+    """Turn the press the page just saw into a native title-bar or border press.
+
+    MUST run on the thread that owns the window: the WebView took mouse capture on the
+    press, and ``ReleaseCapture`` only releases the *calling* thread's capture -- from any
+    other thread it is a no-op and the system ignores the synthesized press entirely.
+    """
+    _user32.ReleaseCapture()
+    _user32.SendMessageW(hwnd, _WM_NCLBUTTONDOWN, hit_code, _cursor_lparam())
+
+
 def begin_drag(hwnd: int) -> None:
     """Hand the mouse to the system as a title-bar drag; the native move loop does the
     rest, edge snapping and restore-from-maximized included."""
-    _user32.ReleaseCapture()
-    _user32.PostMessageW(hwnd, _WM_NCLBUTTONDOWN, _HTCAPTION, 0)
+    _hand_mouse_to_system(hwnd, _HTCAPTION)
 
 
 def begin_resize(hwnd: int, edge: str) -> None:
     code = _HIT_CODES.get(edge)
-    if code is None:
-        return
-    _user32.ReleaseCapture()
-    _user32.PostMessageW(hwnd, _WM_NCLBUTTONDOWN, code, 0)
+    if code is not None:
+        _hand_mouse_to_system(hwnd, code)
