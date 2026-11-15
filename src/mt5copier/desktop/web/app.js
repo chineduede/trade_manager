@@ -1,0 +1,647 @@
+/* The direct-trading page, wired to the engine over pywebview's JS bridge.
+ *
+ * The ticket's rules are the design's, which are the book's: the side falls out of where
+ * the stop sits (below price/entry = buy, above = sell), rr and target sync with
+ * whichever was touched last keeping its meaning, and there is no lots field — every
+ * slave sizes from its own risk budget, so the ticket shows what each would risk instead.
+ * The book still rules on every order; this page's checks only keep the button honest.
+ */
+'use strict';
+
+var $ = function (id) { return document.getElementById(id); };
+
+// --- state ---------------------------------------------------------------------------------
+var S = {
+  symbol: '', type: 'market', tf: 'M5',
+  lastTouched: 'rr',
+  live: null,          // last state() answer from the engine
+  candles: [],         // last rates() answer, oldest first
+  candlesKey: '',      // symbol|tf the candles belong to
+  digits: 2,           // decimals seen in the data, for formatting dragged prices
+  dragging: null,      // 'sl' | 'tp' | 'entry' while a line is held
+  notice: '', noticeTone: '',
+  modal: null,         // {ticket, open} while the modify dialog is up
+  placing: false,
+  haltBusy: false
+};
+
+try {
+  S.symbol = localStorage.getItem('dt-symbol') || '';
+  S.tf = localStorage.getItem('dt-tf') || 'M5';
+} catch (e) { /* storage may be unavailable; defaults are fine */ }
+
+function num(text) { var v = parseFloat(text); return isFinite(v) ? v : NaN; }
+
+function fmt(price) {
+  return (Math.round(price * Math.pow(10, S.digits)) / Math.pow(10, S.digits)).toFixed(S.digits);
+}
+
+function decimalsOf(x) {
+  var s = String(x);
+  var i = s.indexOf('.');
+  return i < 0 ? 0 : Math.min(8, s.length - i - 1);
+}
+
+// --- the chart -----------------------------------------------------------------------------
+var chart = null, series = null, lineSl = null, lineTp = null, lineEntry = null;
+
+function makeChart() {
+  var el = $('chart');
+  chart = LightweightCharts.createChart(el, {
+    layout: {
+      background: { type: 'solid', color: '#221d16' },
+      textColor: '#a39a87',
+      fontFamily: "'JetBrains Mono', Consolas, monospace",
+      fontSize: 12
+    },
+    grid: {
+      vertLines: { color: '#2c2720' },
+      horzLines: { color: '#2c2720' }
+    },
+    rightPriceScale: { borderColor: '#332d23' },
+    timeScale: { borderColor: '#332d23', timeVisible: true, secondsVisible: false },
+    crosshair: {
+      horzLine: { color: '#a39a87', labelBackgroundColor: '#4a4235' },
+      vertLine: { color: '#a39a87', labelBackgroundColor: '#4a4235' }
+    }
+  });
+  series = chart.addCandlestickSeries({
+    upColor: '#7fbf6e', downColor: '#e5645a',
+    wickUpColor: '#7fbf6e', wickDownColor: '#e5645a',
+    borderVisible: false
+  });
+  new ResizeObserver(function () {
+    var r = el.getBoundingClientRect();
+    chart.resize(Math.floor(r.width), Math.floor(r.height));
+  }).observe(el);
+
+  // Dragging the levels: grab the nearest line within reach, write the price it is let
+  // go at straight into the ticket's field — the field is what actually moves.
+  el.addEventListener('mousedown', function (ev) {
+    if (!S.candles.length) return;
+    var y = ev.clientY - el.getBoundingClientRect().top;
+    var held = [['sl', num($('f-stop').value)], ['tp', num($('f-tp').value)]];
+    if (S.type !== 'market') held.push(['entry', num($('f-entry').value)]);
+    var best = null, bestAway = 9;
+    held.forEach(function (pair) {
+      if (!isFinite(pair[1]) || pair[1] <= 0) return;
+      var at = series.priceToCoordinate(pair[1]);
+      if (at === null) return;
+      var away = Math.abs(at - y);
+      if (away < bestAway) { bestAway = away; best = pair[0]; }
+    });
+    if (best === null) {
+      // A click with no stop yet starts the ticket: the stop lands where the click is,
+      // and the side falls out of it as always.
+      var stopBox = $('f-stop');
+      if (!stopBox.value.trim()) {
+        var price = series.coordinateToPrice(y);
+        if (price !== null) { stopBox.value = fmt(price); onLevelTyped('sl'); }
+      }
+      return;
+    }
+    S.dragging = best;
+    el.classList.add('dragging');
+    chart.applyOptions({ handleScroll: false, handleScale: false });
+    ev.preventDefault();
+  });
+  window.addEventListener('mousemove', function (ev) {
+    if (!S.dragging) return;
+    var y = ev.clientY - el.getBoundingClientRect().top;
+    var price = series.coordinateToPrice(y);
+    if (price === null) return;
+    var box = $(S.dragging === 'sl' ? 'f-stop' : S.dragging === 'tp' ? 'f-tp' : 'f-entry');
+    box.value = fmt(price);
+    onLevelTyped(S.dragging);
+  });
+  window.addEventListener('mouseup', function () {
+    if (!S.dragging) return;
+    S.dragging = null;
+    el.classList.remove('dragging');
+    chart.applyOptions({ handleScroll: true, handleScale: true });
+  });
+}
+
+function setLine(which, price, opts) {
+  var have = which === 'sl' ? lineSl : which === 'tp' ? lineTp : lineEntry;
+  if (have) { series.removePriceLine(have); have = null; }
+  if (price && isFinite(price)) {
+    have = series.createPriceLine(Object.assign({ price: price, lineWidth: 1, axisLabelVisible: true }, opts));
+  }
+  if (which === 'sl') lineSl = have; else if (which === 'tp') lineTp = have; else lineEntry = have;
+}
+
+function showCandles(data) {
+  var key = S.symbol + '|' + S.tf;
+  var fresh = key !== S.candlesKey || data.length !== S.candles.length ||
+    (data.length && S.candles.length && data[data.length - 1].time !== S.candles[S.candles.length - 1].time);
+  S.candles = data;
+  S.candlesKey = key;
+  if (!data.length) { series.setData([]); return; }
+  var d = 0;
+  for (var i = Math.max(0, data.length - 20); i < data.length; i++) d = Math.max(d, decimalsOf(data[i].close));
+  S.digits = Math.max(d, 1);
+  if (fresh) series.setData(data);
+  else series.update(data[data.length - 1]);
+}
+
+function nudgeLastBar(bid) {
+  // Between bar refreshes the last candle moves live off the quote, like the TUI's chart.
+  if (!S.candles.length || !isFinite(bid)) return;
+  var last = S.candles[S.candles.length - 1];
+  if (bid === last.close) return;
+  last = {
+    time: last.time, open: last.open,
+    high: Math.max(last.high, bid), low: Math.min(last.low, bid), close: bid
+  };
+  S.candles[S.candles.length - 1] = last;
+  series.update(last);
+}
+
+// --- the ticket's arithmetic ---------------------------------------------------------------
+function compute() {
+  var q = S.live && S.live.quote;
+  var isPending = S.type !== 'market';
+  var stop = num($('f-stop').value);
+  var stopIn = isFinite(stop) && stop > 0;
+  var entryIn = num($('f-entry').value);
+
+  var side = null, entry = NaN;
+  if (stopIn) {
+    if (isPending) {
+      if (isFinite(entryIn) && entryIn > 0) {
+        if (stop < entryIn) side = 'buy';
+        else if (stop > entryIn) side = 'sell';
+        entry = entryIn;
+      }
+    } else if (q) {
+      if (stop < q.bid) { side = 'buy'; entry = q.ask; }
+      else if (stop > q.ask) { side = 'sell'; entry = q.bid; }
+    }
+  }
+  var entryOk = isFinite(entry) && entry > 0 && side !== null;
+  var dist = entryOk ? Math.abs(entry - stop) : 0;
+
+  var rrIn = num($('f-rr').value), tpIn = num($('f-tp').value);
+  var rr = NaN, tp = NaN;
+  if (S.lastTouched === 'tp' && isFinite(tpIn) && tpIn > 0) {
+    tp = tpIn;
+    if (dist > 0) rr = Math.abs(tp - entry) / dist;
+  } else if (isFinite(rrIn) && rrIn > 0) {
+    rr = rrIn;
+    if (entryOk) tp = side === 'buy' ? entry + dist * rr : entry - dist * rr;
+  }
+  var tpOk = entryOk && isFinite(tp) && (side === 'buy' ? tp > entry : tp < entry);
+  var ok = entryOk && tpOk && isFinite(rr) && rr > 0;
+
+  var halted = S.live && !S.live.copying;
+  var problem = '';
+  if (!S.live) problem = 'Starting…';
+  else if (!S.live.direct) problem = 'This profile copies a master — switch it to direct trading in the TUI first.';
+  else if (halted) problem = 'Copying is halted. Resume to place orders.';
+  else if (!S.symbol) problem = 'Name the symbol to trade.';
+  else if (!q) problem = S.live.feed ? 'Waiting for ' + S.live.feed + ' to quote ' + S.symbol + '…'
+    : 'No feed: connect an MT5 slave to quote prices.';
+  else if (!stopIn) problem = 'Set a stop loss — the side and every slave’s size come from it.';
+  else if (isPending && !(isFinite(entryIn) && entryIn > 0)) problem = 'Enter an entry price.';
+  else if (side === null) problem = isPending ? 'Stop equals the entry — move one of them.'
+    : 'The stop sits inside the spread — nudge it to pick a side.';
+  else if (!isFinite(rr) || rr <= 0) problem = 'Enter a risk : reward or a take profit.';
+  else if (!tpOk) problem = side === 'buy' ? 'Take profit must be above the entry for a buy.'
+    : 'Take profit must be below the entry for a sell.';
+
+  return {
+    isPending: isPending, side: side, entry: entry, entryOk: entryOk,
+    dist: dist, rr: rr, tp: tp, ok: ok, problem: problem, halted: !!halted, stopIn: stopIn
+  };
+}
+
+function renderTicket() {
+  var t = compute();
+  var q = S.live && S.live.quote;
+
+  $('quote-line').textContent = q ? 'bid ' + q.bid + ' · ask ' + q.ask : '';
+
+  var note = $('side-note');
+  if (t.stopIn && t.side === 'buy') {
+    note.textContent = 'stop below the ' + (t.isPending ? 'entry' : 'price') + ' → buying';
+    note.className = 'field-note blue';
+  } else if (t.stopIn && t.side === 'sell') {
+    note.textContent = 'stop above the ' + (t.isPending ? 'entry' : 'price') + ' → selling';
+    note.className = 'field-note red';
+  } else {
+    note.textContent = '';
+    note.className = 'field-note';
+  }
+
+  $('stop-delta').textContent = t.ok ? '−' + fmt(t.dist) : '';
+  $('target-delta').textContent = t.ok ? '+' + fmt(Math.abs(t.tp - t.entry)) : '';
+
+  // The field not touched last follows the one that was.
+  if (S.lastTouched === 'rr') {
+    var tpBox = $('f-tp');
+    if (document.activeElement !== tpBox) tpBox.value = t.ok ? fmt(t.tp) : tpBox.value;
+  } else {
+    var rrBox = $('f-rr');
+    if (document.activeElement !== rrBox && t.ok) {
+      rrBox.value = String(Math.round(t.rr * 100) / 100);
+    }
+  }
+
+  // Slaves size themselves from their own risk; show what each would roughly open.
+  var sizing = $('sizing-line');
+  if (t.ok && S.live && S.live.sizing.length) {
+    var bits = S.live.sizing.map(function (s) {
+      if (s.budget === null || !t.dist) return s.name + ' (' + s.risk + ', balance unknown)';
+      return s.name + ' ≈' + Math.max(0.01, s.budget / t.dist).toFixed(2);
+    });
+    sizing.textContent = 'Each slave sizes from its own risk per trade: ' + bits.join(' · ') +
+      ' lots — its terminal prices the stop and adds commission, so the real size may differ.';
+  } else if (t.stopIn && S.live && S.live.sizing.length) {
+    sizing.textContent = 'Lots come from each slave’s risk per trade once the levels are set.';
+  } else if (S.live && S.live.direct && !S.live.sizing.length) {
+    sizing.textContent = 'No enabled slaves — nothing will be copied.';
+  } else {
+    sizing.textContent = '';
+  }
+
+  var place = $('place-btn');
+  var typeWord = t.isPending ? ' ' + S.type : '';
+  place.textContent = t.side
+    ? (t.side === 'buy' ? 'Buy' : 'Sell') + typeWord + ' ' + S.symbol
+    : 'Set the levels first';
+  place.disabled = t.problem !== '' || S.placing;
+  place.className = t.problem === '' ? t.side : '';
+
+  var noticeEl = $('notice');
+  if (t.problem && S.live && S.live.direct) {
+    noticeEl.textContent = t.problem;
+    noticeEl.className = 'notice warn';
+  } else if (!S.live || S.live.direct) {
+    noticeEl.textContent = S.notice;
+    noticeEl.className = 'notice ' + S.noticeTone;
+  } else {
+    noticeEl.textContent = t.problem;
+    noticeEl.className = 'notice warn';
+  }
+
+  // The chart carries the same levels.
+  setLine('entry', t.entryOk ? t.entry : (t.isPending ? num($('f-entry').value) : NaN), {
+    color: '#7ea6e0', lineStyle: LightweightCharts.LineStyle.Dotted,
+    title: t.side ? (t.side === 'buy' ? 'buy' : 'sell') : 'entry'
+  });
+  var slv = num($('f-stop').value);
+  setLine('sl', isFinite(slv) && slv > 0 ? slv : NaN, {
+    color: '#e5645a', lineStyle: LightweightCharts.LineStyle.Dashed, title: 'SL'
+  });
+  setLine('tp', t.ok ? t.tp : NaN, {
+    color: '#7fbf6e', lineStyle: LightweightCharts.LineStyle.Dashed, title: 'TP'
+  });
+
+  return t;
+}
+
+// --- shell chrome --------------------------------------------------------------------------
+function renderShell() {
+  var live = S.live;
+  if (!live) return;
+  $('profile-name').textContent = live.profile;
+  var pill = $('live-pill');
+  pill.className = 'live-pill' + (live.copying ? '' : ' halted');
+  $('live-label').textContent = live.copying ? (live.dryRun ? 'LIVE · DRY' : 'LIVE') : 'HALTED';
+  var halt = $('halt-btn');
+  halt.textContent = live.copying ? 'Halt all' : 'Resume copying';
+  halt.className = 'halt-btn' + (live.copying ? '' : ' resume');
+  halt.disabled = S.haltBusy;
+
+  $('page-sub').textContent = live.direct
+    ? 'Orders placed here are copied to ' + live.slaves + ' slave' + (live.slaves === 1 ? '' : 's')
+    : 'This profile copies a master — direct trading is off.';
+
+  $('dot-worker').className = 'dot ' + (live.workersLive > 0 ? 'green' : 'red');
+  $('status-worker').textContent = live.workersLive + '/' + live.workersTotal + ' workers';
+  $('dot-feed').className = 'dot ' + (live.feed ? 'green' : 'red');
+  $('status-feed').textContent = live.feed ? 'feed: ' + live.feed : 'no feed';
+  $('status-copying').textContent = live.copying
+    ? 'Copying to ' + live.slaves + ' slave' + (live.slaves === 1 ? '' : 's')
+    : 'Copying halted';
+  $('status-dry').hidden = !live.dryRun;
+}
+
+// --- the book ------------------------------------------------------------------------------
+var bookDrawn = '';
+
+function renderBook() {
+  var rows = (S.live && S.live.book) || [];
+  var open = rows.filter(function (r) { return r.open; }).length;
+  $('book-summary').textContent = open + ' open · ' + (rows.length - open) + ' resting';
+  $('book-empty').hidden = rows.length > 0;
+
+  var key = JSON.stringify(rows);
+  if (key === bookDrawn) return;
+  bookDrawn = key;
+
+  var body = $('book-body');
+  body.textContent = '';
+  rows.forEach(function (r) {
+    var tr = document.createElement('tr');
+    function cell(text, cls) {
+      var td = document.createElement('td');
+      if (cls) td.className = cls;
+      td.textContent = text;
+      tr.appendChild(td);
+      return td;
+    }
+    var status = document.createElement('td');
+    var pillEl = document.createElement('span');
+    pillEl.className = 'status-pill ' + (r.open ? 'open' : 'resting');
+    pillEl.textContent = r.open ? 'Open' : 'Resting';
+    status.appendChild(pillEl);
+    tr.appendChild(status);
+    cell('#' + r.ticket, 'muted');
+    cell(r.symbol, 'sym');
+    cell(r.side + (r.kind === 'market' ? '' : ' ' + r.kind), r.side === 'buy' ? 'side-buy' : 'side-sell');
+    cell(String(r.lots));
+    cell(String(r.entry));
+    cell(r.sl ? String(r.sl) : '—', r.sl ? '' : 'muted');
+    cell(r.tp ? String(r.tp) : '—', r.tp ? '' : 'muted');
+    cell(r.open ? (r.now === null ? '—' : String(r.now))
+      : (r.expiresMin === null ? 'GTC' : 'expires ' + r.expiresMin + 'm'), 'muted');
+
+    var actions = document.createElement('td');
+    actions.className = 'actions-cell';
+    var modify = document.createElement('button');
+    modify.type = 'button';
+    modify.className = 'row-btn';
+    modify.textContent = 'Modify';
+    modify.addEventListener('click', function () { openModal(r); });
+    var remove = document.createElement('button');
+    remove.type = 'button';
+    remove.className = 'row-btn danger';
+    remove.textContent = r.open ? 'Close' : 'Cancel';
+    remove.addEventListener('click', function () {
+      act(r.open ? api().close(r.ticket) : api().cancel(r.ticket));
+    });
+    actions.appendChild(modify);
+    actions.appendChild(remove);
+    tr.appendChild(actions);
+    body.appendChild(tr);
+  });
+}
+
+// --- the modify dialog ---------------------------------------------------------------------
+function openModal(row) {
+  S.modal = row;
+  $('modal-title').textContent = 'Modify #' + row.ticket + ' · ' + row.symbol;
+  $('modal-entry-field').hidden = row.open;
+  $('m-entry').value = row.open ? '' : String(row.entry);
+  $('m-sl').value = row.sl ? String(row.sl) : '';
+  $('m-tp').value = row.tp ? String(row.tp) : '';
+  $('modal-notice').textContent = '';
+  $('modal-backdrop').hidden = false;
+  $(row.open ? 'm-sl' : 'm-entry').focus();
+}
+
+function closeModal() {
+  S.modal = null;
+  $('modal-backdrop').hidden = true;
+}
+
+function submitModal() {
+  var row = S.modal;
+  if (!row) return;
+  var sl = num($('m-sl').value), tp = num($('m-tp').value);
+  if (!isFinite(sl) || sl <= 0) {
+    $('modal-notice').textContent = 'The stop loss is required.';
+    $('modal-notice').className = 'notice bad';
+    return;
+  }
+  var call;
+  if (row.open) {
+    call = api().modify_position(row.ticket, sl, isFinite(tp) ? tp : 0);
+  } else {
+    var entry = num($('m-entry').value);
+    if (!isFinite(entry) || entry <= 0) {
+      $('modal-notice').textContent = 'The entry price is required.';
+      $('modal-notice').className = 'notice bad';
+      return;
+    }
+    call = api().modify_order(row.ticket, entry, sl, isFinite(tp) ? tp : 0);
+  }
+  call.then(function (r) {
+    if (r.ok) { closeModal(); say(r.message, 'ok'); poll(); }
+    else {
+      $('modal-notice').textContent = r.message;
+      $('modal-notice').className = 'notice bad';
+    }
+  });
+}
+
+// --- talking to the engine -----------------------------------------------------------------
+function api() { return window.pywebview.api; }
+
+function say(message, tone) {
+  S.notice = message;
+  S.noticeTone = tone;
+  renderTicket();
+}
+
+function act(promise) {
+  promise.then(function (r) { say(r.message, r.ok ? 'ok' : 'bad'); poll(); });
+}
+
+function expiryMinutes() {
+  var v = $('f-expiry').value;
+  if (!v) return 0;
+  if (v === 'eod') {
+    var now = new Date();
+    var end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0);
+    return Math.max(1, Math.round((end - now) / 60000));
+  }
+  return parseFloat(v);
+}
+
+function placeOrder() {
+  var t = renderTicket();
+  if (t.problem || S.placing) return;
+  S.placing = true;
+  api().place({
+    symbol: S.symbol,
+    side: t.side,
+    kind: S.type,
+    entry: t.isPending ? num($('f-entry').value) : 0,
+    sl: num($('f-stop').value),
+    tp: t.tp,
+    expiryMinutes: t.isPending ? expiryMinutes() : 0
+  }).then(function (r) {
+    S.placing = false;
+    say(r.message, r.ok ? 'ok' : 'bad');
+    poll();
+  }, function () {
+    S.placing = false;
+    say('The engine did not answer; try again.', 'bad');
+  });
+}
+
+var polling = false;
+function poll() {
+  if (polling || !window.pywebview) return;
+  polling = true;
+  api().state(S.symbol, S.tf).then(function (live) {
+    polling = false;
+    S.live = live;
+    renderShell();
+    renderBook();
+    renderTicket();
+    if (live.quote) nudgeLastBar(live.quote.bid);
+  }, function () { polling = false; });
+}
+
+var ratesBusy = false;
+function pollRates() {
+  if (ratesBusy || !window.pywebview) return;
+  if (!S.symbol) { showCandles([]); setMsg('type a symbol to chart it'); return; }
+  ratesBusy = true;
+  api().rates(S.symbol, S.tf).then(function (r) {
+    ratesBusy = false;
+    if (r.error) { showCandles([]); setMsg(r.error); return; }
+    if (r.waiting || !r.candles.length) {
+      var feed = S.live && S.live.feed;
+      setMsg(feed ? 'waiting for ' + feed + ' to send bars…' : 'no feed: connect an MT5 slave to chart prices');
+      if (!r.candles.length) return;
+    }
+    setMsg('');
+    showCandles(r.candles);
+  }, function () { ratesBusy = false; });
+}
+
+function setMsg(text) { $('chart-msg').textContent = text; }
+
+// --- events --------------------------------------------------------------------------------
+function onLevelTyped(which) {
+  if (which === 'rr') S.lastTouched = 'rr';
+  else if (which === 'tp') S.lastTouched = 'tp';
+  S.notice = '';
+  renderTicket();
+}
+
+function wire() {
+  $('f-symbol').value = S.symbol;
+  $('f-symbol').addEventListener('input', function (ev) {
+    var up = ev.target.value.toUpperCase();
+    if (up !== ev.target.value) {
+      var at = ev.target.selectionStart;
+      ev.target.value = up;
+      ev.target.setSelectionRange(at, at);
+    }
+    S.symbol = up.trim();
+    S.candlesKey = '';
+    try { localStorage.setItem('dt-symbol', S.symbol); } catch (e) { /* fine */ }
+    $('chart-title').firstChild.textContent = (S.symbol || '—') + ' ';
+    S.notice = '';
+    renderTicket();
+    poll();
+    pollRates();
+  });
+  $('chart-title').firstChild.textContent = (S.symbol || '—') + ' ';
+
+  ['f-stop', 'f-entry'].forEach(function (id) {
+    $(id).addEventListener('input', function () { onLevelTyped(id === 'f-stop' ? 'sl' : 'entry'); });
+  });
+  $('f-rr').addEventListener('input', function () { onLevelTyped('rr'); });
+  $('f-tp').addEventListener('input', function () { onLevelTyped('tp'); });
+  $('f-rr-pick').addEventListener('change', function (ev) {
+    if (!ev.target.value) return;
+    $('f-rr').value = ev.target.value;
+    ev.target.value = '';
+    onLevelTyped('rr');
+  });
+
+  $('type-row').addEventListener('click', function (ev) {
+    var btn = ev.target.closest('button[data-type]');
+    if (!btn) return;
+    S.type = btn.dataset.type;
+    document.querySelectorAll('#type-row button').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b === btn));
+    });
+    $('pending-fields').hidden = S.type === 'market';
+    S.notice = '';
+    renderTicket();
+  });
+
+  $('tf-row').addEventListener('click', function (ev) {
+    var btn = ev.target.closest('button[data-tf]');
+    if (!btn) return;
+    S.tf = btn.dataset.tf;
+    try { localStorage.setItem('dt-tf', S.tf); } catch (e) { /* fine */ }
+    document.querySelectorAll('#tf-row button').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b === btn));
+    });
+    document.querySelector('.chart-tf').textContent = '· ' + S.tf;
+    S.candlesKey = '';
+    pollRates();
+  });
+  document.querySelectorAll('#tf-row button').forEach(function (b) {
+    b.setAttribute('aria-pressed', String(b.dataset.tf === S.tf));
+  });
+  document.querySelector('.chart-tf').textContent = '· ' + S.tf;
+
+  $('place-btn').addEventListener('click', placeOrder);
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter' && !S.modal && ev.target.tagName === 'INPUT' && ev.target.id.indexOf('f-') === 0) {
+      placeOrder();
+    }
+    if (ev.key === 'Escape' && S.modal) closeModal();
+  });
+
+  $('reset-btn').addEventListener('click', function () {
+    ['f-stop', 'f-rr', 'f-tp', 'f-entry'].forEach(function (id) { $(id).value = ''; });
+    $('f-expiry').value = '';
+    S.type = 'market';
+    S.lastTouched = 'rr';
+    document.querySelectorAll('#type-row button').forEach(function (b) {
+      b.setAttribute('aria-pressed', String(b.dataset.type === 'market'));
+    });
+    $('pending-fields').hidden = true;
+    say('Ticket reset.', '');
+  });
+
+  $('halt-btn').addEventListener('click', function () {
+    if (S.haltBusy) return;
+    S.haltBusy = true;
+    api().toggle_halt().then(function (r) {
+      S.haltBusy = false;
+      say(r.message, r.ok ? 'ok' : 'bad');
+      poll();
+    }, function () { S.haltBusy = false; });
+  });
+
+  $('win-min').addEventListener('click', function () { api().win_minimize(); });
+  $('win-max').addEventListener('click', function () { api().win_toggle_max(); });
+  $('win-close').addEventListener('click', function () { api().win_close(); });
+
+  $('modal-ok').addEventListener('click', submitModal);
+  $('modal-cancel').addEventListener('click', closeModal);
+  $('modal-backdrop').addEventListener('mousedown', function (ev) {
+    if (ev.target === ev.currentTarget) closeModal();
+  });
+  $('modal').addEventListener('keydown', function (ev) {
+    if (ev.key === 'Enter') submitModal();
+  });
+
+  document.querySelectorAll('.nav-item.disabled').forEach(function (a) {
+    a.addEventListener('click', function (ev) { ev.preventDefault(); });
+  });
+}
+
+function start() {
+  makeChart();
+  wire();
+  poll();
+  pollRates();
+  setInterval(poll, 600);
+  setInterval(pollRates, 1500);
+}
+
+if (window.pywebview) start();
+else window.addEventListener('pywebviewready', start);

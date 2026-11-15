@@ -33,6 +33,9 @@ datas = [
     *collect_data_files("tzdata"),
     # Our own stylesheet, at the path CSS_PATH resolves to inside the bundle.
     ("src/mt5copier/tui/app.tcss", "mt5copier/tui"),
+    # The desktop window's page: html, css, js and the vendored chart library, at the path
+    # mt5copier.desktop resolves next to itself inside the bundle.
+    ("src/mt5copier/desktop/web", "mt5copier/desktop/web"),
 ]
 
 hiddenimports = [
@@ -46,6 +49,11 @@ hiddenimports = [
     "mt5copier.worker",
     "mt5copier.protocol",
     "mt5copier.logging_setup",
+    # --desktop imports pywebview lazily, so the module graph never sees it; its Windows
+    # backend (WebView2 over the pythonnet clr) is loaded dynamically for the same reason.
+    "webview",
+    "webview.platforms.edgechromium",
+    "clr",
 ]
 
 a = Analysis(

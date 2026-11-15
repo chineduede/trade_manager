@@ -48,6 +48,11 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="verify the MetaTrader5 extension can be imported, then exit",
     )
     parser.add_argument(
+        "--desktop",
+        action="store_true",
+        help="open the desktop window (the direct-trading page) instead of the TUI",
+    )
+    parser.add_argument(
         "--profile",
         metavar="NAME",
         default=None,
@@ -152,7 +157,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     try:
-        from .tui import run
+        if args.desktop:
+            from .desktop import run
+        else:
+            from .tui import run
 
         run()
     except KeyboardInterrupt:

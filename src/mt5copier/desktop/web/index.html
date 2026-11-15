@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Copier</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div id="app">
+
+  <header id="titlebar">
+    <span class="wordmark pywebview-drag-region">COPIER</span>
+    <span class="profile-pill pywebview-drag-region">
+      <span class="dot green" aria-hidden="true"></span>
+      <span id="profile-name">…</span>
+    </span>
+    <span class="titlebar-space pywebview-drag-region"></span>
+    <span id="live-pill" class="live-pill">
+      <span class="dot" aria-hidden="true"></span>
+      <span id="live-label">…</span>
+    </span>
+    <button type="button" id="halt-btn" class="halt-btn">Halt all</button>
+    <button type="button" class="win-btn" id="win-min" aria-label="Minimize window"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"></path></svg></button>
+    <button type="button" class="win-btn" id="win-max" aria-label="Maximize window"><svg aria-hidden="true" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="1"></rect></svg></button>
+    <button type="button" class="win-btn win-close" id="win-close" aria-label="Close window"><svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"></path></svg></button>
+  </header>
+
+  <div id="body">
+    <nav aria-label="Pages" id="sidebar">
+      <a href="#" class="nav-item disabled" title="Still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect></svg>Terminals</a>
+      <a href="#" class="nav-item active" aria-current="page"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg>Trading</a>
+      <a href="#" class="nav-item disabled" title="Still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>Guards</a>
+      <a href="#" class="nav-item disabled" title="Still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M16 2v4M8 2v4M3 10h18"></path></svg>News</a>
+      <a href="#" class="nav-item disabled" title="Still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>History</a>
+      <a href="#" class="nav-item disabled" title="Still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg>Setups</a>
+      <a href="#" class="nav-item disabled" title="Still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg>Settings</a>
+      <span class="sidebar-space"></span>
+      <span class="sidebar-note">other pages live in the TUI for now · profiles are separate windows</span>
+    </nav>
+
+    <main id="main">
+      <div class="page-head">
+        <h1>Direct trading</h1>
+        <span id="page-sub" class="muted"></span>
+      </div>
+
+      <div id="split">
+        <section aria-label="Order ticket" id="ticket" class="panel">
+          <div class="panel-head">
+            <h2>New order</h2>
+            <span id="quote-line" class="mono muted"></span>
+          </div>
+
+          <div class="field">
+            <label for="f-symbol" class="flabel">Symbol</label>
+            <div class="symbol-wrap">
+              <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#a39a87" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"></circle><path d="M21 21l-4.3-4.3"></path></svg>
+              <input id="f-symbol" class="accent-blue" placeholder="search any symbol…" autocomplete="off" spellcheck="false">
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="flabel-row">
+              <label for="f-stop" class="flabel">Stop loss</label>
+              <span id="stop-delta" class="mono delta red"></span>
+            </div>
+            <input id="f-stop" class="accent-red" inputmode="decimal" autocomplete="off">
+            <span id="side-note" class="field-note"></span>
+          </div>
+
+          <div class="field">
+            <span class="flabel">Order type</span>
+            <div role="group" aria-label="Order type" class="seg-row" id="type-row">
+              <button type="button" data-type="market" aria-pressed="true">Market</button>
+              <button type="button" data-type="limit" aria-pressed="false">Limit</button>
+              <button type="button" data-type="stop" aria-pressed="false">Stop</button>
+            </div>
+          </div>
+
+          <div id="pending-fields" class="two-col" hidden>
+            <div class="field">
+              <label for="f-entry" class="flabel">Entry price</label>
+              <input id="f-entry" inputmode="decimal" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="f-expiry" class="flabel">Expiry</label>
+              <select id="f-expiry">
+                <option value="">Until cancelled</option>
+                <option value="15">15 minutes</option>
+                <option value="45">45 minutes</option>
+                <option value="240">4 hours</option>
+                <option value="eod">End of day</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="hairline"></div>
+
+          <div class="field">
+            <label for="f-rr" class="flabel">Risk : reward</label>
+            <div class="rr-row">
+              <input id="f-rr" inputmode="decimal" autocomplete="off">
+              <select id="f-rr-pick" aria-label="Fixed risk to reward">
+                <option value="">fixed…</option>
+                <option value="1">1 : 1</option>
+                <option value="1.5">1 : 1.5</option>
+                <option value="2">1 : 2</option>
+                <option value="3">1 : 3</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field">
+            <div class="flabel-row">
+              <label for="f-tp" class="flabel">Take profit</label>
+              <span id="target-delta" class="mono delta green"></span>
+            </div>
+            <input id="f-tp" class="accent-green" inputmode="decimal" autocomplete="off">
+            <span class="field-note muted">whichever of these you touched last keeps its meaning</span>
+          </div>
+
+          <div class="hairline"></div>
+
+          <div id="sizing-line" aria-live="polite" class="field-note muted"></div>
+
+          <div class="actions-row">
+            <button type="button" id="place-btn" disabled>Set the levels first</button>
+            <button type="button" id="reset-btn">Reset</button>
+          </div>
+
+          <div id="notice" aria-live="polite" class="notice"></div>
+        </section>
+
+        <section aria-label="Chart" id="chart-panel" class="panel">
+          <div class="panel-head">
+            <h2 id="chart-title">— <span class="muted chart-tf">· M5</span></h2>
+            <div role="group" aria-label="Timeframe" class="tf-row" id="tf-row">
+              <button type="button" data-tf="M1" aria-pressed="false">M1</button>
+              <button type="button" data-tf="M5" aria-pressed="true">M5</button>
+              <button type="button" data-tf="M15" aria-pressed="false">M15</button>
+              <button type="button" data-tf="M30" aria-pressed="false">M30</button>
+              <button type="button" data-tf="H1" aria-pressed="false">H1</button>
+            </div>
+          </div>
+          <div id="chart-wrap">
+            <div id="chart"></div>
+            <div id="chart-msg" class="muted"></div>
+          </div>
+          <span class="field-note muted">drag the SL / TP lines · click the chart to set a missing stop</span>
+        </section>
+      </div>
+
+      <section aria-label="Positions and orders" class="panel" id="book-panel">
+        <div class="panel-head">
+          <h2>Positions &amp; orders</h2>
+          <span id="book-summary" class="muted small"></span>
+        </div>
+        <div class="table-scroll">
+          <table id="book-table">
+            <thead>
+              <tr><th>Status</th><th>Ticket</th><th>Symbol</th><th>Side</th><th>Lots</th><th>Entry</th><th>Stop</th><th>Target</th><th>Now</th><th class="actions-col">Actions</th></tr>
+            </thead>
+            <tbody id="book-body"></tbody>
+          </table>
+        </div>
+        <div id="book-empty" class="muted" hidden>Nothing open or resting — the ticket places straight into the book.</div>
+      </section>
+    </main>
+  </div>
+
+  <footer id="statusbar">
+    <span class="status-item"><span id="dot-worker" class="dot" aria-hidden="true"></span><span id="status-worker">workers</span></span>
+    <span class="status-item"><span id="dot-feed" class="dot" aria-hidden="true"></span><span id="status-feed">feed</span></span>
+    <span id="status-copying"></span>
+    <span class="status-space"></span>
+    <span id="status-dry" class="yellow" hidden>DRY RUN — nothing is sent</span>
+  </footer>
+
+  <div id="modal-backdrop" hidden>
+    <div role="dialog" aria-modal="true" aria-labelledby="modal-title" id="modal">
+      <h3 id="modal-title">Modify</h3>
+      <div class="field" id="modal-entry-field" hidden>
+        <label for="m-entry" class="flabel">Entry price</label>
+        <input id="m-entry" inputmode="decimal" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="m-sl" class="flabel">Stop loss</label>
+        <input id="m-sl" class="accent-red" inputmode="decimal" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="m-tp" class="flabel">Take profit <span class="muted">(blank for none)</span></label>
+        <input id="m-tp" class="accent-green" inputmode="decimal" autocomplete="off">
+      </div>
+      <div class="actions-row">
+        <button type="button" id="modal-ok">Apply</button>
+        <button type="button" id="modal-cancel">Cancel</button>
+      </div>
+      <div id="modal-notice" class="notice"></div>
+    </div>
+  </div>
+
+</div>
+<script src="vendor/lightweight-charts.standalone.production.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
