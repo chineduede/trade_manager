@@ -169,16 +169,30 @@ function setLine(which, price, opts) {
 
 function showCandles(data) {
   var key = S.symbol + '|' + S.tf;
-  var fresh = key !== S.candlesKey || data.length !== S.candles.length ||
+  var moved = key !== S.candlesKey;
+  var fresh = moved || data.length !== S.candles.length ||
     (data.length && S.candles.length && data[data.length - 1].time !== S.candles[S.candles.length - 1].time);
   S.candles = data;
+  if (!data.length) {
+    // The key stays unset, so the first real bars count as a move and reset the scales.
+    S.candlesKey = '';
+    series.setData([]);
+    return;
+  }
   S.candlesKey = key;
-  if (!data.length) { series.setData([]); return; }
   var d = 0;
   for (var i = Math.max(0, data.length - 20); i < data.length; i++) d = Math.max(d, decimalsOf(data[i].close));
   S.digits = Math.max(d, 1);
   if (fresh) series.setData(data);
   else series.update(data[data.length - 1]);
+  if (moved) {
+    // A new symbol or timeframe is a new chart, and whatever zoom or axis drag was done
+    // on the old one must not carry over. Dragging the price axis turns autoscale off
+    // FOR GOOD in lightweight-charts -- that is how ETH's bars ended up invisible under
+    // BTC's left-over 61k-69k range -- so it is switched back on here explicitly.
+    chart.priceScale('right').applyOptions({ autoScale: true });
+    chart.timeScale().fitContent();
+  }
 }
 
 // --- modify mode: the panel and the chart belong to one trade ------------------------------
