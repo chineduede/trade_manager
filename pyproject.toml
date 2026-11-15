@@ -66,6 +66,12 @@ strict_equality = true
 module = "MetaTrader5"
 ignore_missing_imports = true
 
+# pythonnet's .NET namespaces (System, System.Drawing, ...) exist only at runtime, once
+# pywebview has loaded the CLR; mypy cannot see them.
+[[tool.mypy.overrides]]
+module = ["System", "System.*"]
+ignore_missing_imports = true
+
 # The generated messages are typed only loosely: every field is read through Any.
 [[tool.mypy.overrides]]
 module = ["mt5copier.ctrader.proto.*", "google.protobuf.*"]

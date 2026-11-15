@@ -104,8 +104,41 @@ class DesktopApi:
         if self._maximized:
             self._window.restore()
         else:
+            self._fit_maximized_bounds()
             self._window.maximize()
         self._maximized = not self._maximized
+
+    def _fit_maximized_bounds(self) -> None:
+        """Make maximize behave like a titled window's, taskbar and all.
+
+        pywebview's Windows backend is a borderless WinForms form, and a borderless form
+        maximizes over the whole screen rather than the working area. The shell then treats
+        it as a fullscreen app and suppresses the taskbar -- even an auto-hidden one stops
+        revealing on hover. Capping ``MaximizedBounds`` at the monitor's working area
+        restores the normal behaviour; with an auto-hidden taskbar the working area IS the
+        whole screen, so a two-pixel seam is left at the bottom to keep the shell from
+        calling it fullscreen. Recomputed on every maximize, because the window may have
+        been dragged to another monitor since the last one.
+        """
+        try:
+            from System import Action  # pythonnet namespaces, importable once webview is up
+            from System.Drawing import Rectangle
+            from System.Windows.Forms import Screen
+
+            form = self._window.native if self._window is not None else None
+            if form is None:
+                return
+
+            def apply() -> None:
+                screen = Screen.FromControl(form)
+                area = screen.WorkingArea
+                if area == screen.Bounds:
+                    area = Rectangle(area.X, area.Y, area.Width, area.Height - 2)
+                form.MaximizedBounds = area
+
+            form.Invoke(Action(apply))
+        except Exception as exc:
+            log.debug("could not fit the maximized bounds: %r", exc)
 
     def win_close(self) -> None:
         if self._window is not None:
