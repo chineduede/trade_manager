@@ -13,6 +13,10 @@ browser storage, matching the engine-level claim locks.
 
 from __future__ import annotations
 
+import threading
+import zlib
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .. import config as config_mod
@@ -34,6 +38,44 @@ from ..paths import (
 log = get_logger(__name__)
 
 _WEB = Path(__file__).resolve().parent / "web"
+
+
+class _WebHandler(SimpleHTTPRequestHandler):
+    """Serves the window's files so WebView2 can never run them stale.
+
+    pywebview's built-in server reuses one port (42001), and with the profile's
+    persistent WebView2 storage that stable origin let the browser's disk cache serve
+    old app.js and app.css across restarts -- the window ran superseded code while the
+    files on disk were current (seen live: transferSize 0 on both). ``no-cache`` makes
+    every load revalidate against disk, a localhost 304 when nothing changed.
+    """
+
+    def end_headers(self) -> None:
+        self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+        log.debug("web: " + format, *args)
+
+
+def _serve_web(profile: str) -> str:
+    """Start the window's own file server; returns the URL the window opens.
+
+    The port is stable per profile: the origin keys localStorage, so it must survive
+    restarts -- and differ between profiles, whose windows run side by side.
+    """
+    handler = partial(_WebHandler, directory=str(_WEB))
+    base = 42101 + zlib.crc32(profile.encode("utf-8")) % 800
+    last: OSError | None = None
+    for port in range(base, base + 20):
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", port), handler)
+        except OSError as exc:
+            last = exc
+            continue
+        threading.Thread(target=server.serve_forever, name="web", daemon=True).start()
+        return f"http://127.0.0.1:{port}/index.html"
+    raise RuntimeError(f"no free port for the window's files near {base}: {last}")
 
 
 def run() -> None:
@@ -62,7 +104,7 @@ def run() -> None:
     title = "Copier" if profile == DEFAULT_PROFILE else f"Copier — {profile}"
     window = webview.create_window(
         title,
-        url=str(_WEB / "index.html"),
+        url=_serve_web(profile),
         js_api=api,
         width=1500,
         height=980,
