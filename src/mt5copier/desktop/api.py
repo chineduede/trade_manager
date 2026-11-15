@@ -813,23 +813,41 @@ class DesktopApi:
         tid = str(tid or "")
         chips: list[dict[str, Any]] = []
         chosen: TerminalView | None = None
-        for view in engine.views():
-            if view.cfg.role is not Role.SLAVE:
-                continue
-            report = engine.guard_report(view.cfg.terminal_id)
-            worst = report.worst
-            chips.append(
-                {
-                    "tid": view.cfg.terminal_id,
-                    "name": cfg.display_name(view.cfg.terminal_id),
-                    "login": view.cfg.last_login,
-                    "rules": len(report.rules),
-                    "holding": bool(report.holding_back),
-                    "worst": str(worst.level) if worst is not None else "",
-                }
-            )
-            if view.cfg.terminal_id == tid:
-                chosen = view
+        # Any account the copier knows can be guarded, not only a slave's: rules belong to
+        # the account, and setting them before the terminal is assigned protects it from its
+        # first copied trade. Slaves first -- they are the enforced ones -- and one chip per
+        # account, under the slave's name where an account is open in two terminals.
+        views = engine.views()
+        seen_keys: set[str] = set()
+        for want_slave in (True, False):
+            for view in views:
+                if (view.cfg.role is Role.SLAVE) is not want_slave:
+                    continue
+                key = self._account_of_view(view)
+                if key is None:
+                    # A slave with no known account still gets its chip, so the page can say
+                    # "connect it once"; an unknown non-slave has nothing to key rules to.
+                    if not want_slave:
+                        continue
+                elif key in seen_keys:
+                    continue
+                else:
+                    seen_keys.add(key)
+                report = engine.guard_report(view.cfg.terminal_id)
+                worst = report.worst
+                chips.append(
+                    {
+                        "tid": view.cfg.terminal_id,
+                        "name": cfg.display_name(view.cfg.terminal_id),
+                        "login": view.cfg.last_login,
+                        "slave": want_slave,
+                        "rules": len(report.rules),
+                        "holding": bool(report.holding_back),
+                        "worst": str(worst.level) if worst is not None else "",
+                    }
+                )
+                if view.cfg.terminal_id == tid:
+                    chosen = view
         if chosen is None and chips:
             tid = chips[0]["tid"]
             chosen = self._guarded_view(tid)
@@ -861,14 +879,14 @@ class DesktopApi:
             for a in actions[:30]
         ]
         others = []
+        offered: set[str] = set()
         for view in engine.views():
             vkey = account_key(view.cfg.last_login, view.cfg.last_server)
-            if view.cfg.terminal_id == tid or vkey is None or vkey == key:
-                continue
-            if view.cfg.role is not Role.SLAVE:
+            if view.cfg.terminal_id == tid or vkey is None or vkey == key or vkey in offered:
                 continue
             held = self._guards_doc.for_account(vkey).rules
             if held:
+                offered.add(vkey)
                 others.append(
                     {
                         "key": vkey,
@@ -880,6 +898,7 @@ class DesktopApi:
             "accounts": chips,
             "selected": tid,
             "hasAccount": key is not None,
+            "isSlave": chosen.cfg.role is Role.SLAVE,
             "currency": report.currency,
             "enabled": report.enabled,
             "initialBalance": guards.initial_balance,

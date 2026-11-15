@@ -1444,6 +1444,7 @@ function renderGuards() {
     b.textContent = a.name + (a.login ? ' · ' + a.login : '');
     if (a.holding) b.appendChild(cardLine('chip-flag red', 'HELD'));
     else if (a.worst === 'near') b.appendChild(cardLine('chip-flag yellow', '!'));
+    if (!a.slave) b.appendChild(cardLine('chip-flag quiet', 'not a slave'));
     b.addEventListener('click', function () {
       G.tid = a.tid;
       G.selected = null;
@@ -1460,9 +1461,17 @@ function renderGuards() {
   }
   initial.disabled = !live.hasAccount;
   $('g-all').checked = !!live.enabled;
-  $('guard-note').textContent = live.hasAccount
-    ? (live.enabled ? '' : 'ALL OFF — every rule is ignored until All on is ticked again')
-    : "this terminal's account is not known yet: connect it once, then its rules can be set";
+  var notes = [];
+  if (!live.hasAccount) {
+    notes.push("this terminal's account is not known yet: connect it once, then its rules can be set");
+  } else {
+    if (!live.enabled) notes.push('ALL OFF — every rule is ignored until All on is ticked again');
+    if (!live.isSlave) {
+      notes.push('not copying as a slave yet — the rules stay with the account and act from '
+        + 'its first copied trade');
+    }
+  }
+  $('guard-note').textContent = notes.join(' · ');
 
   // The rules, each row selectable; the footer buttons act on the selection.
   if (G.selected && !live.rules.some(function (r) { return r.id === G.selected; })) G.selected = null;
