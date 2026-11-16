@@ -35,10 +35,20 @@ from ..guards import model as guards_model
 from ..guards.base import money
 from ..guards.params import ZONE_HINT, ParamKind, ParamValue
 from ..history import NOTE
+from ..log_entries import (
+    LogEntry,
+    event_entries,
+    file_entries,
+    merge,
+    search,
+    search_words,
+    select,
+    terminal_names,
+)
 from ..logging_setup import get_logger
 from ..news import HIGH, MEDIUM, symbol_currencies
 from ..paths import active_profile, guards_path, log_dir, setups_path
-from ..presentation import row_info, slave_badge
+from ..presentation import read_log_tail, row_info, slave_badge
 from ..protocol import (
     ACCOUNT_TRADE_MODE_DEMO,
     CHART_TIMEFRAMES,
@@ -82,6 +92,12 @@ _ORDER_TYPES: dict[tuple[str, str], OrderType] = {
     ("sell", "limit"): OrderType.SELL_LIMIT,
     ("sell", "stop"): OrderType.SELL_STOP,
 }
+
+_LOG_LINES = 500
+"""How much of ``copier.log`` the log dock reads: the TUI log page's own depth."""
+
+_LOG_SHOWN = 300
+"""The most recent entries a poll answers with; the dock says when it held more back."""
 
 _NOMINAL_LOTS = 1.0
 """What the virtual master's book records per ticket. The ticket has no lots field --
@@ -155,6 +171,8 @@ class DesktopApi:
         self._logging_in: set[str] = set()
         """Terminals an account login is running for, each blocking its own bridge thread;
         asking for a second login on one is refused while the first still runs."""
+        self._log_cache: tuple[object, list[LogEntry]] = (None, [])
+        """``copier.log`` as entries, with what the file looked like when it was read."""
         self._busy_lock = threading.Lock()
 
     def attach(self, window: webview.Window) -> None:
@@ -1562,6 +1580,80 @@ class DesktopApi:
         if here[:3] == today[:3]:
             return time.strftime("%H:%M:%S", here)
         return time.strftime("%d %b %H:%M", here)
+
+    # --- the log dock --------------------------------------------------------------------------
+    # The TUI log page's read, served to a dock that sits under every page: copier.log and
+    # the day book merged (mt5copier/log_entries.py owns the parsing, the attribution and
+    # the merge), narrowed in the bridge the way the history page narrows.
+
+    def _log_entries(self) -> list[LogEntry]:
+        """``copier.log`` and the day book, merged. The file is parsed again only when it
+        has changed; the day book is cheap to read every time."""
+        cfg = self._cfg
+        path = log_dir() / "copier.log"
+        try:
+            stat = path.stat()
+            seen: object = (stat.st_size, stat.st_mtime)
+        except OSError:
+            seen = None
+        since = self._engine.day_book_since
+        stamp = (seen, since, tuple((tid, t.label) for tid, t in cfg.terminals.items()))
+        if stamp != self._log_cache[0]:
+            names = terminal_names(
+                {tid: (t.label, cfg.display_name(tid)) for tid, t in cfg.terminals.items()}
+            )
+            text = read_log_tail(path, max_lines=_LOG_LINES)
+            self._log_cache = (stamp, file_entries(text, names, covered_from=since))
+        master = cfg.master
+        events = event_entries(self._engine.day_book(), master.terminal_id if master else None)
+        return merge(self._log_cache[1], events)
+
+    def _log_who(self, entry: LogEntry, numbers: dict[str, str]) -> str:
+        """The Who column, as the day book names them: "Master (name)", "Slave 2 (name)"."""
+        if entry.terminal_id is None:
+            return "copier"
+        number = numbers.get(entry.terminal_id)
+        if number == "A":
+            role = "Master"
+        elif number:
+            role = f"Slave {number}"
+        else:
+            role = "Terminal"
+        return f"{role} ({self._cfg.display_name(entry.terminal_id)[:24]})"
+
+    def log_state(self, tid: str, problems: bool, query: str) -> dict[str, Any]:
+        """Everything the log dock redraws from. Narrowing is in the bridge, as the history
+        page's is: the search reaches what a line shows -- its level and terminal as well as
+        its text -- and the problems count stays honest under the problems-only tick."""
+        cfg = self._cfg
+        tid, query = str(tid), str(query)
+        numbers = {t.terminal_id: str(n) for n, t in enumerate(cfg.slaves, start=1)}
+        master = cfg.master
+        if master is not None:
+            numbers[master.terminal_id] = "A"
+
+        def who(entry: LogEntry) -> str:
+            return self._log_who(entry, numbers)
+
+        scoped = select(self._log_entries(), problems_only=False, terminal_id=tid or None)
+        scoped = search(scoped, search_words(query), who)
+        shown = select(scoped, problems_only=bool(problems), terminal_id=None)
+        now = time.time()
+        return {
+            "rows": [
+                {
+                    "when": self._step_when(e.ts, now),
+                    "who": who(e),
+                    "tid": e.terminal_id,
+                    "text": e.text,
+                    "tone": e.tone.value,
+                }
+                for e in shown[-_LOG_SHOWN:]
+            ],
+            "problems": sum(1 for e in scoped if e.level.problem),
+            "matched": len(shown),
+            "terminals": [{"tid": t, "name": cfg.display_name(t)} for t in cfg.terminals],
+        }
 
     # --- the setups page ---------------------------------------------------------------------
     # A setup is who copies from whom: the master, its slaves, the account each is logged

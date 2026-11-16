@@ -925,3 +925,46 @@ tr.row-new td { animation: row-flash 1.6s ease-out; }
   to { background: transparent; }
 }
 
+/* --- the log dock --------------------------------------------------------------------------
+   copier.log and the day book merged, under every page: the TUI log page as a dock. */
+#logdock {
+  flex: 0 0 auto; height: 260px; min-height: 0;
+  display: flex; flex-direction: column;
+  background: var(--bg-deep); border-top: 1px solid var(--hairline);
+}
+#logdock-bar {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 12px;
+  padding: 7px 16px; border-bottom: 1px solid var(--hairline-soft);
+}
+#logdock-bar h2 { margin: 0; font-size: 13px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
+#log-problems-label { font-size: 13px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+#log-find {
+  height: 32px; width: 220px; padding: 0 12px;
+  border-radius: 8px; border: 1px solid var(--border);
+  background: var(--panel-raise); color: var(--fg);
+  font-family: var(--mono); font-size: 13px;
+}
+.logdock-space { flex: 1 1 auto; }
+#log-rows { flex: 1 1 auto; overflow-y: auto; padding: 6px 16px 10px; font-size: 12.5px; line-height: 1.55; }
+#log-empty { padding: 14px 16px; }
+.log-row { display: grid; grid-template-columns: 76px 190px 1fr; gap: 0 14px; padding: 1px 0; }
+.lg-when { color: var(--faint); white-space: nowrap; }
+.lg-who { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lg-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-row.lg-master .lg-text { color: var(--blue); }
+.log-row.lg-done .lg-text { color: var(--green); }
+.log-row.lg-quiet .lg-text { color: var(--faint); }
+.log-row.lg-warn .lg-text { color: var(--yellow); }
+.log-row.lg-error .lg-text { color: var(--red); }
+#log-btn { color: var(--muted); }
+#log-btn.active, #log-btn:hover { color: var(--blue); }
+/* The dock sits at the window's foot, so its terminal menu opens upward — downward it
+   would fall below the window, which never scrolls — and long lists scroll inside it. */
+#logdock .dd-menu {
+  top: auto; bottom: calc(100% + 6px); left: 0; right: auto;
+  max-height: 50vh; overflow-y: auto;
+}
+@media (max-width: 1280px) {
+  .log-row { grid-template-columns: 76px 120px 1fr; }
+  #logdock { height: 220px; }
+}

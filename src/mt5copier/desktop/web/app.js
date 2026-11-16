@@ -2695,6 +2695,111 @@ function histStep(s) {
   return row;
 }
 
+// --- the log dock --------------------------------------------------------------------------
+// copier.log and the day book merged, docked under whatever page is up: the TUI log page's
+// read and filters. The bridge narrows (terminal, problems only, word search) and the dock
+// only draws, following the tail while the reader stays at the bottom.
+var LG = {
+  open: false,
+  tid: '',          // '' = all terminals
+  problems: false,
+  find: '',
+  live: null,
+  drawn: '',
+  dd: null,
+  ddKey: '',
+  everDrawn: false  // first render pins the view to the newest line
+};
+try {
+  LG.open = localStorage.getItem('dt-log-open') === '1';
+  LG.problems = localStorage.getItem('dt-log-problems') === '1';
+} catch (e) { /* fine */ }
+
+var logAsked = 0;
+var logAnswered = 0;
+function pollLog(fresh) {
+  if (!window.pywebview || !LG.open) return;
+  if (!fresh && logAnswered < logAsked) return; // one in flight is enough for a poll
+  var stamp = ++logAsked;
+  api().log_state(LG.tid, LG.problems, LG.find).then(function (live) {
+    if (stamp <= logAnswered) return;
+    logAnswered = stamp;
+    LG.live = live;
+    renderLog();
+  }, function () { if (stamp > logAnswered) logAnswered = stamp; });
+}
+
+function logFilterChanged() {
+  LG.drawn = '';
+  pollLog(true);
+}
+
+function setLogOpen(open) {
+  LG.open = open;
+  $('logdock').hidden = !open;
+  var btn = $('log-btn');
+  btn.classList.toggle('active', open);
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  try { localStorage.setItem('dt-log-open', open ? '1' : ''); } catch (e) { /* fine */ }
+  if (open) {
+    LG.drawn = '';
+    LG.everDrawn = false;
+    pollLog(true);
+  }
+}
+
+function renderLog() {
+  var live = LG.live;
+  if (!live || !LG.open) return;
+  var key = JSON.stringify(live) + '|' + LG.problems;
+  if (key === LG.drawn) return;
+  LG.drawn = key;
+
+  // The terminal dropdown, rebuilt only when the choices change under it.
+  var ddKey = live.terminals.map(function (t) { return t.tid + '|' + t.name; }).join(',');
+  if (!LG.dd || LG.ddKey !== ddKey) {
+    LG.ddKey = ddKey;
+    var choices = [['', 'All terminals']];
+    live.terminals.forEach(function (t) { choices.push([t.tid, t.name]); });
+    if (!choices.some(function (c) { return c[0] === LG.tid; })) {
+      // The picked terminal is gone: widen to everything and ask again at once, so the
+      // rows never sit filtered by a terminal the dropdown no longer says.
+      LG.tid = '';
+      logFilterChanged();
+    }
+    var dd = makeChoiceDropdown({ value: LG.tid, choices: choices }, function () {
+      LG.tid = dd.value();
+      logFilterChanged();
+    });
+    LG.dd = dd;
+    var root = $('log-from');
+    root.textContent = '';
+    root.appendChild(dd.el);
+  }
+
+  $('log-problems').checked = LG.problems;
+  $('log-problems-label').textContent = 'problems only · ' + live.problems;
+  $('log-count').textContent = live.matched > live.rows.length
+    ? 'last ' + live.rows.length + ' of ' + live.matched
+    : (live.matched ? live.matched + ' lines' : '');
+
+  var rows = $('log-rows');
+  var following = !LG.everDrawn
+    || rows.scrollTop + rows.clientHeight >= rows.scrollHeight - 8;
+  rows.textContent = '';
+  live.rows.forEach(function (r) {
+    var row = document.createElement('div');
+    row.className = 'log-row lg-' + r.tone;
+    row.appendChild(cardLine('lg-when', r.when));
+    row.appendChild(cardLine('lg-who', r.who));
+    row.appendChild(cardLine('lg-text', r.text));
+    rows.appendChild(row);
+  });
+  $('log-empty').hidden = live.rows.length > 0;
+  if (following) rows.scrollTop = rows.scrollHeight;
+  LG.everDrawn = true;
+}
+
 // --- the setups page -------------------------------------------------------------------
 // Who copies from whom — the master, its slaves, the account each is logged into, every
 // one's settings, copying on or off and the mode — saved to put back later: the TUI w
@@ -3982,6 +4087,25 @@ function wire() {
     }, 250);
   });
 
+  // --- the log dock ---
+  $('log-btn').addEventListener('click', function () { setLogOpen(!LG.open); });
+  $('log-close').addEventListener('click', function () { setLogOpen(false); });
+  $('log-problems').addEventListener('change', function () {
+    LG.problems = $('log-problems').checked;
+    try { localStorage.setItem('dt-log-problems', LG.problems ? '1' : ''); } catch (e) { /* fine */ }
+    logFilterChanged();
+  });
+  var logFindTimer = null;
+  $('log-find').addEventListener('input', function () {
+    clearTimeout(logFindTimer);
+    logFindTimer = setTimeout(function () {
+      var now = $('log-find').value.trim();
+      if (now === LG.find) return;
+      LG.find = now;
+      logFilterChanged();
+    }, 250);
+  });
+
   // --- setups page ---
   $('st-save').addEventListener('click', saveSetupFlow);
   $('st-load').addEventListener('click', function () {
@@ -4120,6 +4244,10 @@ function start() {
   setInterval(pollSetups, 1000);
   setInterval(pollSettings, 1000);
   setInterval(pollTdetail, 1000);
+  // The log dock sits under every page, so its poll follows being open, not the page;
+  // two seconds is the TUI log page's own pace.
+  if (LG.open) setLogOpen(true);
+  setInterval(pollLog, 2000);
 }
 
 if (window.pywebview) start();
