@@ -1822,16 +1822,18 @@ are the design, not a limitation waiting to be lifted.
   - Turning `allow_live_trading` off while a slave holds copies on an account not known to be a
     demo warns that the copier will refuse to close or move them (nothing is given up).
   - Copies given up get a final ORPHANED step in their history (`46b8796`).
-- **Not handled: an account switched by hand in MT5 while the terminal has a role — noted
-  2026-10-05, nothing built.** If a slave is switched to another account inside MT5 while
-  the copier is connected, nothing notices: its copies are filed by terminal, not account, so
-  the copier goes on believing in tickets the new account does not hold — what it then does
-  with them (treat them as gone, try to close or re-copy) has not been traced. A master switched
-  the same way would look to the slaves like every master trade closing and new ones opening.
-  Guards are unaffected (they follow the account the snapshot reports). The fix, if it is ever
-  wanted: when a terminal's snapshot reports a login other than the one its copies were made
-  on, hold it and say so, as an untracked-position hold does. Until then: switch accounts with
-  `i`, on an unassigned terminal.
+- **An account switched by hand in MT5 while the terminal has a role — noted 2026-10-05,
+  built 2026-11-16 (`dd7019a` + `bb3cb8e` on `desktop`), user-checked the same day.** The
+  drain loop records every worker's reported login/server into the config (so names and
+  cards follow the account), and a *switch* — a change between the current worker's own
+  successive reports, never a snapshot-vs-config disagreement, which a stale-`common.ini`
+  rescan can cause — is answered: a switched slave gives up its copies as an unassign does,
+  loses its role and its worker (the MT5 window stays open); a switched master turns copying
+  off before that snapshot can reach the reconciler and read as "the master went flat"; any
+  switch withdraws `allow_live_trading`, which was typed for the old account. Unassigned
+  terminals, which have no worker to notice for them, are covered by a periodic disk rescan
+  (`rescan_interval_s`, default 120s, general settings in both UIs) that is passive, defers
+  to live workers and saves only on change.
 
 ---
 
@@ -1840,3 +1842,40 @@ are the design, not a limitation waiting to be lifted.
 Master position polling wants to be faster than the current 250ms account-snapshot interval —
 around 100ms. Each terminal has its own process, so slave polling costs nothing extra; the
 master's loop is the only latency-critical one. Measure before tuning.
+
+---
+
+## Priority backlog — desktop parity, 2026-11-16
+
+The desktop port's seven nav pages, terminal detail, account login and the log dock are
+built (see the `desktop` branch). Walking the TUI page by page against the app surfaced
+what never crossed over. The user's call, 2026-11-16: these are the priority, to be built
+next, ahead of the CDP testing phase and the merge to master.
+
+- **Terminal detail Overview tab.** The TUI's `enter` page shows what the desktop detail
+  page (settings forms only) does not: the three ruled columns — the ACCOUNT (kind, ping,
+  connection), the RULE it is copied by (on the master: the slaves it feeds), and how
+  COPYING has gone this session (latency last/median/max, slippage last/mean/worst,
+  answered and skipped counts) — then the open positions and resting orders tables, the
+  margin gauge, exposure and the equity sparkline. The groundwork already exists and is
+  UI-free: the engine keeps the `StatsBook` (`copy_stats.py`) and `terminal_detail.py`
+  holds the row/gauge/exposure helpers the TUI reads. The work is one bridge state call
+  plus a tab row on `#page-tdetail` (the title row was left ready to grow tabs). The card
+  hover popover keeps covering the at-a-glance account facts; this tab is the sit-down view.
+- **cTrader login in the desktop.** The TUI `t` OAuth flow is still the only way to connect
+  a cTrader account; the desktop card menu points at the TUI in a note. Port the flow
+  (browser handoff, the token landing, the resulting card) so the app stands alone.
+- **Profile management in the desktop.** The TUI picker lists, creates, renames, deletes
+  and opens profiles; the desktop is one window per profile with no picker. Wanted: the
+  same management in the app, where "open" launches the profile's own window.
+- **The smaller deferred items, same priority bundle:** partial close and flatten buttons
+  in the direct-trading window; a symbol search dropdown on the ticket; surfacing
+  non-guard per-slave send failures in the window (guard declines toast since `4826a97`,
+  but a plain refusal — an IC Markets minimum-lot sizing refusal was the live case — only
+  reaches the log); and a frozen-build (PyInstaller) check of `--desktop`.
+
+Still open alongside, unordered: the per-asset-class lot cap guard rule (its design
+question — how a broker symbol is classified into an asset class — is unsettled), and the
+demo-check backlog collected at https://claude.ai/artifact/GxK66c2XJMQdSfABFx2jqJ
+(management modes, guard enforcement and close actions, cTrader crosses/history/DPAPI,
+direct-trading TP padding).
