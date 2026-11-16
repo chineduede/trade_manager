@@ -328,6 +328,63 @@ def test_a_snapshot_for_a_terminal_with_no_worker_is_dropped(engine: Engine) -> 
     assert TID_A not in engine._snapshots
 
 
+def test_drain_records_an_account_switch_made_in_the_terminal_itself(
+    engine: Engine, cfg: AppConfig
+) -> None:
+    """Logging into another account from MT5's own UI, under a running worker, shows up only
+    in the snapshots. The config must follow, or the account's given name, the rename and the
+    guards would all stay filed under the account the terminal left -- and it is saved at
+    once, so a crash cannot resurrect the stale account."""
+    cfg.account_names["222@Axi-US51-Live"] = "Axi second"
+    run_drain(
+        engine,
+        [
+            Snapshot(
+                terminal_id=TID_B,
+                state=WorkerState.CONNECTED,
+                seq=1,
+                login=111,
+                server="Axi-US52-Live",
+            ),
+            Snapshot(
+                terminal_id=TID_B,
+                state=WorkerState.CONNECTED,
+                seq=2,
+                login=222,
+                server="Axi-US51-Live",
+            ),
+        ],
+    )
+    tcfg = cfg.terminals[TID_B]
+    assert (tcfg.last_login, tcfg.last_server) == (222, "Axi-US51-Live")
+    assert cfg.display_name(TID_B) == "Axi second", "the new account's name shows at once"
+
+    from mt5copier import config as config_mod
+
+    saved = config_mod.load()
+    assert saved.terminals[TID_B].last_login == 222, "recorded on disk, not only in memory"
+
+
+def test_recording_the_account_never_churns_while_it_is_unchanged(
+    engine: Engine, cfg: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One save when the account is first learned; none for every later snapshot, and a
+    snapshot whose worker did not read the server keeps the server on record."""
+    saves: list[AppConfig] = []
+    monkeypatch.setattr("mt5copier.engine.save_config", saves.append)
+    run_drain(
+        engine,
+        [
+            Snapshot(terminal_id=TID_B, state=WorkerState.CONNECTED, seq=1, login=111, server="S"),
+            Snapshot(terminal_id=TID_B, state=WorkerState.CONNECTED, seq=2, login=111, server="S"),
+            Snapshot(terminal_id=TID_B, state=WorkerState.CONNECTED, seq=3, login=111),
+        ],
+    )
+    tcfg = cfg.terminals[TID_B]
+    assert (tcfg.last_login, tcfg.last_server) == (111, "S")
+    assert len(saves) == 1
+
+
 def test_drain_keeps_last_error_after_recovery(engine: Engine) -> None:
     """A transient failure should leave a visible trace rather than vanishing on reconnect."""
     run_drain(

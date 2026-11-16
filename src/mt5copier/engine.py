@@ -45,6 +45,9 @@ from .config import (
     TerminalConfig,
     account_key,
 )
+from .config import (
+    save as save_config,
+)
 from .copy_stats import StatsBook, TerminalStats
 from .ctrader.worker import run_ctrader_worker
 from .day_book import DayBook, MasterEvent, Outcome, SlaveOutcome
@@ -684,6 +687,7 @@ class Engine:
                 self._snapshots[snap.terminal_id] = snap
                 self._received_at[snap.terminal_id] = time.monotonic()
                 self._stats.on_state(snap.terminal_id, snap.state, now=time.monotonic())
+                self._record_account(snap)
                 self._guards.observe(account_key(snap.login, snap.server), snap, time.time())
                 self._judge(snap)
                 self._reconcile(snap)
@@ -702,6 +706,43 @@ class Engine:
             return True
         worker = self._workers.get(snap.terminal_id)
         return worker is not None and getattr(worker.process, "pid", None) == snap.worker_pid
+
+    def _record_account(self, snap: Snapshot) -> None:
+        """Keep ``last_login``/``last_server`` tracking the account the worker actually sees.
+
+        A person can log a connected terminal into another account from MT5 itself, under a
+        running worker, and the snapshot is the first and only place that shows. Left
+        unrecorded, everything keyed by the *config's* account -- the given name on the card,
+        what a rename names, the guards and claims picked at the next spawn -- stays filed
+        under the account the terminal left. Discovery corrects the config too, but only on a
+        rescan and only off ``common.ini``; a live worker should not need either. Saved at
+        once: rare, and a crash before an incidental save would resurrect the stale account.
+        Caller must hold the lock. cTrader snapshots echo the config's own server back, so for
+        them this never fires.
+        """
+        if snap.login is None:
+            return
+        tcfg = self._cfg.terminals.get(snap.terminal_id)
+        if tcfg is None:
+            return
+        # A worker that did not read the server keeps the one on record rather than erasing it.
+        server = snap.server or tcfg.last_server
+        if (tcfg.last_login, tcfg.last_server) == (snap.login, server):
+            return
+        was = account_key(tcfg.last_login, tcfg.last_server)
+        self._cfg.replace_terminal(
+            tcfg.model_copy(update={"last_login": snap.login, "last_server": server})
+        )
+        log.info(
+            "%s is logged in to %s, not %s as the config said; recorded",
+            self._cfg.display_name(snap.terminal_id),
+            account_key(snap.login, server),
+            was or "any account yet",
+        )
+        try:
+            save_config(self._cfg)
+        except OSError:
+            log.exception("could not save the recorded account; it holds for this run")
 
     # --- direct trading: the virtual master ---------------------------------------------------
 
