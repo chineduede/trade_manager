@@ -512,6 +512,23 @@ class HistoryStore:
                 return []
         return [_guard_action(r) for r in rows]
 
+    def recent_problems(self, *, since: float, limit: int = 50) -> list[Step]:
+        """Steps that went wrong on any slave since ``since`` with no guard behind them,
+        newest first: a broker refusal, a link failure, a copy never answered. The poll's
+        cross-account feed for plain failures, the twin of :meth:`recent_guard_actions`,
+        so one surfaces wherever the person is looking instead of only in the log."""
+        with self._lock:
+            try:
+                rows = self._db.execute(
+                    "SELECT * FROM steps WHERE ts >= ? AND problem = 1 AND guard = '' "
+                    "ORDER BY ts DESC, id DESC LIMIT ?",
+                    (since, limit),
+                ).fetchall()
+            except sqlite3.Error:
+                log.exception("could not read the recent problems")
+                return []
+        return [_step(r) for r in rows]
+
     def recent_guard_actions(self, *, since: float, limit: int = 50) -> list[GuardAction]:
         """What the guards did on any account since ``since``, newest first: the poll's
         cross-account feed, so an action can surface wherever the person is looking."""
@@ -542,26 +559,28 @@ def _guard_action(r: sqlite3.Row) -> GuardAction:
     )
 
 
+def _step(r: sqlite3.Row) -> Step:
+    return Step(
+        ts=r["ts"],
+        terminal_id=r["terminal_id"],
+        master_ticket=r["master_ticket"],
+        symbol=r["symbol"],
+        label=r["label"],
+        kind=r["kind"],
+        outcome=r["outcome"],
+        problem=bool(r["problem"]),
+        master=r["master"],
+        slave=r["slave"],
+        lots=r["lots"],
+        action=r["action"],
+        guard=r["guard"],
+    )
+
+
 def _group(rows: Iterable[sqlite3.Row], order: list[int]) -> list[Trade]:
     steps: dict[int, list[Step]] = {}
     for r in rows:
-        steps.setdefault(r["master_ticket"], []).append(
-            Step(
-                ts=r["ts"],
-                terminal_id=r["terminal_id"],
-                master_ticket=r["master_ticket"],
-                symbol=r["symbol"],
-                label=r["label"],
-                kind=r["kind"],
-                outcome=r["outcome"],
-                problem=bool(r["problem"]),
-                master=r["master"],
-                slave=r["slave"],
-                lots=r["lots"],
-                action=r["action"],
-                guard=r["guard"],
-            )
-        )
+        steps.setdefault(r["master_ticket"], []).append(_step(r))
     out: list[Trade] = []
     for ticket in order:
         got = steps.get(ticket)

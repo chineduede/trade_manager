@@ -733,6 +733,12 @@ class Snapshot:
     connected, or when a watched symbol cannot be resolved or quoted -- a missing quote is
     "unknown", and the virtual master refuses to fill against unknown rather than guessing."""
 
+    symbols: tuple[str, ...] | None = None
+    """This broker's whole symbol catalog, pushed once per connection -- on the first good
+    snapshot after a (re)connect -- and ``None`` on every other snapshot, so the list rides
+    an existing message instead of needing a command and a reply (the design ROADMAP.md
+    records for the dropped mapping tester). The UI's symbol search reads the cached copy."""
+
     error: str | None = None
     """Human-readable last error, kept for display even after a later success."""
 

@@ -97,6 +97,9 @@ class _Session:
         self._quote_names: dict[str, str | None] = {}
         """Clean name -> this broker's name, or None for one that cannot be resolved (said
         once, at resolution, rather than every poll)."""
+        self._symbols_pushed = False
+        """Whether this connection's symbol catalog has ridden a snapshot yet; reset on
+        connect, so every (re)connect pushes the broker's current list exactly once."""
 
     def connect(self) -> tuple[bool, str | None]:
         """Call ``initialize(path=...)``. Returns (ok, error message).
@@ -120,9 +123,10 @@ class _Session:
         self._deals = self._deals_since = self._deals_balance = None
         self._deals_read_at = 0.0
         # The broker's symbol list may differ across a reconnect, so watched names are
-        # resolved against it afresh.
+        # resolved against it afresh, and the catalog is pushed to the supervisor again.
         self._watch_resolved = None
         self._quote_names = {}
+        self._symbols_pushed = False
         self._launched_pid = None if already_running else find_terminal_pid(self._exe_path)
         return True, None
 
@@ -571,6 +575,13 @@ class _Session:
         # rather than as a hard failure, because the process is healthy and will recover.
         broker_up = bool(getattr(terminal, "connected", True))
 
+        symbols_once: tuple[str, ...] | None = None
+        if broker_up and not self._symbols_pushed:
+            names = self.symbol_names()
+            if names:
+                symbols_once = tuple(names)
+                self._symbols_pushed = True
+
         return Snapshot(
             terminal_id=terminal_id,
             state=WorkerState.CONNECTED if broker_up else WorkerState.DISCONNECTED,
@@ -599,6 +610,7 @@ class _Session:
             deals=self._deals,
             deals_since=self._deals_since,
             quotes=self._read_quotes(time.time()),
+            symbols=symbols_once,
             error=None if broker_up else "terminal not connected to broker",
             connect_attempts=attempts,
         )

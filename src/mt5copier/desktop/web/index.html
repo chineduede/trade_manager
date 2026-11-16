@@ -59,7 +59,8 @@
             <label for="f-symbol" class="flabel">Symbol</label>
             <div class="symbol-wrap">
               <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#a39a87" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"></circle><path d="M21 21l-4.3-4.3"></path></svg>
-              <input id="f-symbol" class="accent-blue" placeholder="search any symbol…" autocomplete="off" spellcheck="false">
+              <input id="f-symbol" class="accent-blue" placeholder="search any symbol…" autocomplete="off" spellcheck="false" role="combobox" aria-expanded="false" aria-controls="symbol-drop">
+              <div id="symbol-drop" role="listbox" aria-label="Matching symbols" hidden></div>
             </div>
           </div>
 
@@ -213,6 +214,7 @@
         <div class="panel-head">
           <h2>Positions &amp; orders</h2>
           <span id="book-summary" class="muted small"></span>
+          <button type="button" id="flatten-btn" hidden>Close everything</button>
         </div>
         <div class="table-scroll">
           <table id="book-table">

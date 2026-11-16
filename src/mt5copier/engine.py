@@ -55,7 +55,7 @@ from .day_book import DayBook, MasterEvent, Outcome, SlaveOutcome
 from .discovery import discover_terminals
 from .guards import NO_VERDICT, GuardBook, GuardReport, GuardsDoc, Verdict
 from .guards.book import CloseAct, NewsAct
-from .history import ORPHANED, GuardAction, HistoryStore, Trade, step_for
+from .history import ORPHANED, GuardAction, HistoryStore, Step, Trade, step_for
 from .logging_setup import get_logger
 from .news import NewsCalendar
 from .paths import (
@@ -266,6 +266,9 @@ class Engine:
         """Monotonic time before which :meth:`_retry_refused_claims` stays quiet."""
         self._snapshots: dict[str, Snapshot] = {}
         self._received_at: dict[str, float] = {}
+        self._symbol_lists: dict[str, tuple[str, ...]] = {}
+        """Each terminal's broker symbol catalog, as its worker last pushed it (once per
+        connection; later snapshots carry None, so the cache outlives them). UI search only."""
         self._lock = threading.RLock()
         self._drain_thread: threading.Thread | None = None
         self._stop_drain = threading.Event()
@@ -710,6 +713,8 @@ class Engine:
                         snap = replace(snap, error=current.error)
                 self._snapshots[snap.terminal_id] = snap
                 self._received_at[snap.terminal_id] = time.monotonic()
+                if snap.symbols is not None:
+                    self._symbol_lists[snap.terminal_id] = snap.symbols
                 self._stats.on_state(snap.terminal_id, snap.state, now=time.monotonic())
                 if not self._record_account(snap):
                     # A slave switched under its role was just unassigned and its worker
@@ -1086,6 +1091,14 @@ class Engine:
         """The terminal currently feeding quotes, or None while there is none."""
         with self._lock:
             return self._feed_tid
+
+    def feed_symbols(self) -> tuple[str, ...]:
+        """The feed broker's symbol catalog, as its worker pushed it; empty while unknown."""
+        with self._lock:
+            tid = self._feed_tid
+            if tid is None:
+                return ()
+            return self._symbol_lists.get(tid, ())
 
     _RATES_REFRESH_S = 5.0
     """How often the minichart's bars are re-read. Between refreshes the last candle moves
@@ -2356,6 +2369,11 @@ class Engine:
     def recent_guard_actions(self, since: float) -> list[GuardAction]:
         """What the guards did on any account since ``since``, newest first."""
         return self._history.recent_guard_actions(since=since)
+
+    def recent_problems(self, since: float) -> list[Step]:
+        """Copies that went wrong on any slave since ``since`` with no guard behind them,
+        newest first: refusals, link failures, copies never answered."""
+        return self._history.recent_problems(since=since)
 
     def news_calendar(self) -> NewsCalendar:
         """The calendar the news rules read; the News page reads the same one."""

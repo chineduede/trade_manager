@@ -88,6 +88,34 @@ def test_steps_older_than_the_days_kept_are_deleted(tmp_path: Path) -> None:
     assert [t.master_ticket for t in store.trades(TID_S1)] == [2]
 
 
+def test_recent_problems_are_the_plain_failures_only(tmp_path: Path) -> None:
+    """The cross-account failure feed: problems with no guard behind them, newest first.
+    A fine step is no problem, and a guard-caused one already toasts as a guard action."""
+    store = HistoryStore(tmp_path / "h.db")
+    store.record(step(1.0, ticket=11), now=1.0)
+    store.record(
+        step(
+            2.0,
+            ticket=12,
+            outcome=Outcome.REFUSED,
+            problem=True,
+            slave="computed size is under the symbol's minimum volume",
+        ),
+        now=2.0,
+    )
+    store.record(
+        replace(
+            step(3.0, ticket=13, outcome=Outcome.SKIPPED, problem=True),
+            guard="Max lots declined it",
+        ),
+        now=3.0,
+    )
+    got = store.recent_problems(since=0.0)
+    assert [s.master_ticket for s in got] == [12]
+    assert "minimum volume" in got[0].slave
+    assert store.recent_problems(since=2.5) == []
+
+
 def test_a_note_does_not_name_the_trade(tmp_path: Path) -> None:
     store = HistoryStore(tmp_path / "h.db")
     store.note(TID_S1, 11, "BTCUSD.r", "buy", "breakeven", "reached at 85010", now=50.0)

@@ -252,6 +252,28 @@ def test_poll_returns_full_account_snapshot() -> None:
     assert snap.error is None
 
 
+def test_the_symbol_catalog_rides_the_first_snapshot_of_each_connection() -> None:
+    class WithCatalog(FakeMT5):
+        def symbols_get(self) -> tuple[FakeSymbolInfo, ...]:
+            return (FakeSymbolInfo(name="EURUSD.r"), FakeSymbolInfo(name="XAUUSD.r"))
+
+    session = _Session(WithCatalog(), Path("x.exe"))
+    session.connect()
+    assert session.poll("TID", seq=1, attempts=0).symbols == ("EURUSD.r", "XAUUSD.r")
+    # Once per connection, not per poll: the list is big and does not change mid-session.
+    assert session.poll("TID", seq=2, attempts=0).symbols is None
+    # A reconnect pushes afresh -- the broker's list may differ across it.
+    session.connect()
+    assert session.poll("TID", seq=3, attempts=0).symbols == ("EURUSD.r", "XAUUSD.r")
+
+
+def test_a_broker_that_answers_no_catalog_is_asked_again_next_poll() -> None:
+    session = _Session(FakeMT5(), Path("x.exe"))  # FakeMT5 has no symbols_get at all
+    session.connect()
+    assert session.poll("TID", seq=1, attempts=0).symbols is None
+    assert session.poll("TID", seq=2, attempts=0).symbols is None
+
+
 def test_poll_converts_open_positions_for_the_diff_engine() -> None:
     session = _Session(
         FakeMT5(positions=(FakePosition(ticket=77, type=1, volume=0.25),)), Path("x")

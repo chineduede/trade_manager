@@ -87,7 +87,7 @@ from ..settings_edit import (
 )
 from ..settings_example import MasterTrade, PriceValue, pick, work
 from ..setups import Setup, SetupsDoc
-from ..symbols import undecorate
+from ..symbols import base_name, undecorate
 from ..terminal_detail import (
     PositionRow,
     breakeven_rule,
@@ -356,6 +356,7 @@ class DesktopApi:
             "book": rows,
             "sizing": self._sizing(),
             "guardEvents": self._guard_events(now),
+            "problemEvents": self._problem_events(now),
             "workersLive": health["live"],
             "workersTotal": health["supervised"],
         }
@@ -376,6 +377,24 @@ class DesktopApi:
                     if a.master_ticket is not None
                     else "",
                     "detail": a.detail,
+                }
+            )
+        return out
+
+    def _problem_events(self, now: float) -> list[dict[str, Any]]:
+        """The last couple of minutes of plain per-slave failures -- a broker refusal, a
+        link failure, a copy never answered -- with no guard behind them, so each one
+        toasts where the person is instead of only reaching the log. (A minimum-lot
+        sizing refusal was the live case that only the log saw.)"""
+        out: list[dict[str, Any]] = []
+        for s in self._engine.recent_problems(now - 120.0):
+            out.append(
+                {
+                    "key": f"{s.ts:.3f}|{s.terminal_id}|{s.master_ticket}|{s.action}|{s.outcome}",
+                    "slave": self._cfg.display_name(s.terminal_id),
+                    "did": s.action,
+                    "trade": f"#{s.master_ticket} {s.symbol} {s.label}".strip(),
+                    "detail": s.slave,
                 }
             )
         return out
@@ -460,11 +479,46 @@ class DesktopApi:
         what = "Opened" if kind == "market" else "Resting"
         return {"ok": True, "message": f"{what} {symbol}; copies follow on the next tick."}
 
+    def symbol_search(self, query: str) -> dict[str, Any]:
+        """Symbols matching what is typed, from the feed broker's own catalog (pushed once
+        per connection by its worker), as clean base names: what every slave resolves from.
+        Prefix matches first, then anywhere-in-the-name; a dozen at most."""
+        q = str(query).strip().upper()
+        names: list[str] = []
+        for raw in self._engine.feed_symbols():
+            clean = base_name(raw).upper()
+            if clean not in names:
+                names.append(clean)
+        if not q:
+            return {"symbols": names[:12], "known": len(names)}
+        starts = [n for n in names if n.startswith(q)]
+        contains = [n for n in names if q in n and not n.startswith(q)]
+        return {"symbols": (starts + contains)[:12], "known": len(names)}
+
     def close(self, ticket: int) -> dict[str, Any]:
         return self._did(self._engine.close_direct(int(ticket)), f"Closed #{ticket}")
 
     def cancel(self, ticket: int) -> dict[str, Any]:
         return self._did(self._engine.cancel_direct(int(ticket)), f"Cancelled #{ticket}")
+
+    def partial_close(self, ticket: int, percent: Any) -> dict[str, Any]:
+        try:
+            pct = float(percent)
+        except (TypeError, ValueError):
+            return {"ok": False, "message": "give the percent to close, such as 50"}
+        why = self._engine.partial_close_direct(int(ticket), pct)
+        return self._did(why, f"Closed {pct:g}% of #{ticket}")
+
+    def flatten(self) -> dict[str, Any]:
+        """Close every position and cancel every resting order; the page confirms first."""
+        count = self._engine.flatten_direct()
+        if count == 0:
+            return {"ok": False, "message": "nothing was open or resting"}
+        return {
+            "ok": True,
+            "message": f"closed everything: {count} position(s) and order(s); "
+            "copies follow on the next tick.",
+        }
 
     def modify_position(self, ticket: int, sl: float, tp: float) -> dict[str, Any]:
         why = self._engine.modify_direct(int(ticket), float(sl), float(tp or 0.0))

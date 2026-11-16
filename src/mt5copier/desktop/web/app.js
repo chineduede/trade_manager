@@ -26,6 +26,7 @@ var S = {
   placedUntil: 0,      // while now < this, the place button says "✓ Placed" and stays dead
   haltBusy: false,
   guardSeen: null,     // guard-event keys already toasted; null until the first poll primes it
+  problemSeen: null,   // plain-failure keys already toasted, primed the same way
   page: 'trading'      // which page owns #main: 'trading' or 'terminals'
 };
 
@@ -611,6 +612,7 @@ function renderBook() {
   var open = rows.filter(function (r) { return r.open; }).length;
   $('book-summary').textContent = open + ' open · ' + (rows.length - open) + ' resting';
   $('book-empty').hidden = rows.length > 0;
+  $('flatten-btn').hidden = rows.length === 0;
 
   var key = JSON.stringify(rows);
   if (key === bookDrawn) return;
@@ -661,6 +663,13 @@ function renderBook() {
         act(api().modify_position(r.ticket, r.entry, r.tp || 0));
       });
       actions.appendChild(be);
+      var part = document.createElement('button');
+      part.type = 'button';
+      part.className = 'row-btn';
+      part.textContent = 'Partial';
+      part.title = 'Close a percent of it; every copy mirrors the same fraction';
+      part.addEventListener('click', function () { partialCloseFlow(r); });
+      actions.appendChild(part);
     }
     var modify = document.createElement('button');
     modify.type = 'button';
@@ -722,6 +731,76 @@ function noteGuardEvents(events) {
     var tone = actionTone(e.action) === 'red' ? 'bad' : '';
     // These carry the reason a trade did not go through; give them time to be read.
     toast(head + (e.detail ? ' — ' + e.detail : ''), tone, 9000);
+  });
+}
+
+// The plain failures beside them: a broker refusal, a link failure, a copy never answered —
+// no guard behind it, so no rule to name. These only reached the log before; a minimum-lot
+// sizing refusal on one slave was the case that showed it.
+function noteProblemEvents(events) {
+  var seen = S.problemSeen;
+  S.problemSeen = {};
+  events.forEach(function (e) { S.problemSeen[e.key] = true; });
+  if (seen === null) return;
+  events.forEach(function (e) {
+    if (seen[e.key]) return;
+    var head = (e.did || 'copy failed')
+      + (e.trade ? ' ' + e.trade : '')
+      + (e.slave ? ' on ' + e.slave : '');
+    toast(head + (e.detail ? ' — ' + e.detail : ''), 'bad', 9000);
+  });
+}
+
+function partialCloseFlow(r) {
+  // The TUI's x key as a dialog: a percent, 50 to begin with; the slice closes and every
+  // copy mirrors the same fraction. The engine has the last word on the number.
+  var body = document.createElement('div');
+  var p = document.createElement('p');
+  p.textContent = '#' + r.ticket + ' ' + r.symbol + ' ' + r.side + ' ' + r.lots
+    + ' lots. The rest stays open with the same stop and target.';
+  body.appendChild(p);
+  var field = document.createElement('div');
+  field.className = 'field';
+  var label = document.createElement('label');
+  label.className = 'flabel';
+  label.setAttribute('for', 'partial-pct');
+  label.textContent = 'Percent to close';
+  var input = document.createElement('input');
+  input.id = 'partial-pct';
+  input.autocomplete = 'off';
+  input.inputMode = 'decimal';
+  input.value = '50';
+  field.appendChild(label);
+  field.appendChild(input);
+  body.appendChild(field);
+  showModal({
+    title: 'Partial close #' + r.ticket,
+    body: body,
+    confirm: 'Close that part',
+    onConfirm: function () {
+      act(api().partial_close(r.ticket, input.value.trim()));
+    }
+  });
+  input.focus();
+  input.select();
+}
+
+function flattenFlow() {
+  var rows = (S.live && S.live.book) || [];
+  if (!rows.length) return;
+  var open = rows.filter(function (r) { return r.open; }).length;
+  var body = document.createElement('div');
+  var p = document.createElement('p');
+  p.textContent = 'Close ' + open + ' open position' + (open === 1 ? '' : 's')
+    + ' and cancel ' + (rows.length - open) + ' resting order'
+    + (rows.length - open === 1 ? '' : 's') + '? Every copy follows on the next tick.';
+  body.appendChild(p);
+  showModal({
+    title: 'Close everything?',
+    body: body,
+    confirm: 'Close everything',
+    danger: true,
+    onConfirm: function () { act(api().flatten()); }
   });
 }
 
@@ -820,6 +899,7 @@ function poll() {
     polling = false;
     S.live = live;
     noteGuardEvents(live.guardEvents || []);
+    noteProblemEvents(live.problemEvents || []);
     renderShell();
     renderBook();
     if (S.mode === 'modify' && S.modRow) {
@@ -4486,6 +4566,74 @@ function onLevelTyped(which) {
   renderTicket();
 }
 
+// --- the symbol search dropdown ------------------------------------------------------------
+// The ticket's symbol field searches the feed broker's own catalog, which its worker pushes
+// once per connection. Matches come back as clean base names — what every slave resolves
+// from — prefix matches first. No catalog yet (feed still connecting) means no dropdown,
+// and the field stays the free-text input it always was.
+var SD = { gen: 0, sel: -1, items: [] };
+
+function symbolSuggest() {
+  var gen = ++SD.gen;
+  var typed = $('f-symbol').value.trim();
+  api().symbol_search(typed).then(function (r) {
+    if (gen !== SD.gen) return; // a later keystroke already asked
+    var items = r.symbols || [];
+    // The one exact match is already chosen; a dropdown repeating it only blinks.
+    if (!items.length || (items.length === 1 && items[0] === typed.toUpperCase())) {
+      symbolDropHide();
+      return;
+    }
+    SD.items = items;
+    SD.sel = -1;
+    var drop = $('symbol-drop');
+    drop.textContent = '';
+    items.forEach(function (name, i) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.setAttribute('role', 'option');
+      b.textContent = name;
+      b.addEventListener('click', function () { symbolPick(name); });
+      drop.appendChild(b);
+    });
+    drop.hidden = false;
+    $('f-symbol').setAttribute('aria-expanded', 'true');
+  }, function () { /* the engine will answer the next keystroke */ });
+}
+
+function symbolDropHide() {
+  SD.sel = -1;
+  SD.items = [];
+  $('symbol-drop').hidden = true;
+  $('f-symbol').setAttribute('aria-expanded', 'false');
+}
+
+function symbolPick(name) {
+  var input = $('f-symbol');
+  input.value = name;
+  symbolDropHide();
+  input.dispatchEvent(new Event('input')); // the one handler does the rest
+  SD.gen++; // and its re-suggest is discarded: a picked name needs no list
+  symbolDropHide();
+}
+
+function symbolDropKey(ev) {
+  if ($('symbol-drop').hidden) return;
+  if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+    ev.preventDefault();
+    var step = ev.key === 'ArrowDown' ? 1 : -1;
+    SD.sel = (SD.sel + step + SD.items.length) % SD.items.length;
+    var kids = $('symbol-drop').children;
+    for (var i = 0; i < kids.length; i++) kids[i].classList.toggle('sel', i === SD.sel);
+    if (kids[SD.sel]) kids[SD.sel].scrollIntoView({ block: 'nearest' });
+  } else if (ev.key === 'Enter' && SD.sel >= 0) {
+    ev.preventDefault();
+    symbolPick(SD.items[SD.sel]);
+  } else if (ev.key === 'Escape') {
+    symbolDropHide();
+  }
+}
+
 function wire() {
   $('f-symbol').value = S.symbol;
   if (defaultRr) $('f-rr').value = defaultRr; // last used rr, back as the default
@@ -4504,7 +4652,15 @@ function wire() {
     renderTicket();
     poll();
     pollRates();
+    symbolSuggest();
   });
+  $('f-symbol').addEventListener('focus', symbolSuggest);
+  $('f-symbol').addEventListener('blur', function () {
+    // After the click on an option lands; mousedown on the drop keeps it from closing early.
+    setTimeout(symbolDropHide, 150);
+  });
+  $('f-symbol').addEventListener('keydown', symbolDropKey);
+  $('symbol-drop').addEventListener('mousedown', function (ev) { ev.preventDefault(); });
   $('chart-title').firstChild.textContent = (S.symbol || '—') + ' ';
 
   ['f-stop', 'f-entry'].forEach(function (id) {
@@ -4610,6 +4766,7 @@ function wire() {
   });
 
   $('profile-btn').addEventListener('click', profilesFlow);
+  $('flatten-btn').addEventListener('click', flattenFlow);
   $('win-min').addEventListener('click', function () { api().win_minimize(); });
   $('win-max').addEventListener('click', function () { api().win_toggle_max(); });
   $('win-close').addEventListener('click', function () { api().win_close(); });
