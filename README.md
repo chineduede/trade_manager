@@ -38,6 +38,15 @@ uv run pyinstaller copier.spec --noconfirm
 dist/mt5copier.exe
 ```
 
+Or the installer (needs Inno Setup: `winget install -e --id JRSoftware.InnoSetup`), which
+builds the exe first if it is missing, installs per-user with no UAC prompt, and whose
+uninstaller never touches `%APPDATA%\MT5Copier` — profiles and trade bookkeeping survive:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1
+dist\mt5copier-setup-<version>.exe
+```
+
 ### Non-interactive flags
 
 | Flag | Purpose |
