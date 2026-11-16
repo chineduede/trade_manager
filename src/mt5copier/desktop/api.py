@@ -796,8 +796,8 @@ class DesktopApi:
         name = self._cfg.display_name(tid)
         if tcfg.role is not Role.UNASSIGNED:
             return (
-                f"unassign {name} first: its copies were made on the account it is logged "
-                "into, and unassigning asks about them"
+                f"unassign {name} first, then change the account: its settings and copies "
+                "belong to the account it is logged into, and unassigning asks about them"
             )
         if tcfg.is_ctrader:
             return f"{name} is a cTrader account: log it in from the TUI"
@@ -806,6 +806,15 @@ class DesktopApi:
         with self._busy_lock:
             if tid in self._logging_in:
                 return f"{name} is already logging in"
+        return None
+
+    def _account_used_by(self, tid: str, key: str) -> str | None:
+        """The name of another terminal now on this account, or None. One account is used
+        on one terminal at a time: logged into two, each terminal's worker would see the
+        same positions and the copier would act on them twice."""
+        for other_tid, other in self._cfg.terminals.items():
+            if other_tid != tid and account_key(other.last_login, other.last_server) == key:
+                return self._cfg.display_name(other_tid)
         return None
 
     def account_login_ask(self, tid: str) -> dict[str, Any]:
@@ -830,7 +839,12 @@ class DesktopApi:
             key = account_key(acct.login, acct.server) or ""
             called = cfg.account_names.get(key)
             rows.append(
-                {"key": key, "words": f"{called} · {key}" if called else key, "now": key == now}
+                {
+                    "key": key,
+                    "words": f"{called} · {key}" if called else key,
+                    "now": key == now,
+                    "usedBy": self._account_used_by(tid, key),
+                }
             )
         return {"ok": True, "name": name, "accounts": rows}
 
@@ -859,6 +873,13 @@ class DesktopApi:
             return {
                 "ok": False,
                 "message": f"{name} is already logged in to {self._account_called(key)}",
+            }
+        used_by = self._account_used_by(tid, key)
+        if used_by is not None:
+            return {
+                "ok": False,
+                "message": f"{self._account_called(key)} is in use by {used_by}: an account "
+                "is used on one terminal at a time",
             }
         with self._busy_lock:
             if tid in self._logging_in:

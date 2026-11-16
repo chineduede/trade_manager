@@ -561,6 +561,7 @@
       </div>
 
       <div id="td-other" class="muted" hidden>This terminal has no role yet, so there is nothing to set on it. Drag its card into the MASTER or SLAVES zone on Terminals; its settings live here once it has one.</div>
+      <button type="button" id="td-login-btn" class="plain-btn" hidden>Log in to an account…</button>
 
       <div id="td-slave" class="td-grid" hidden>
         <section aria-label="Sizing" class="panel cfg-card">
@@ -846,14 +847,17 @@
   <!-- The log dock: copier.log and the day book merged, under whatever page is up.
        The TUI log page's filters — one terminal, problems only, a word search. -->
   <section aria-label="Log" id="logdock" hidden>
+    <div id="logdock-grip" title="drag to resize" aria-hidden="true"></div>
     <div id="logdock-bar">
       <h2>Log</h2>
       <div id="log-from" class="logdock-dd"></div>
-      <input id="log-problems" type="checkbox">
-      <label for="log-problems" id="log-problems-label">problems only</label>
+      <label class="log-tick" for="log-problems">
+        <input id="log-problems" type="checkbox">
+        <span id="log-problems-label">problems only</span>
+      </label>
       <input id="log-find" placeholder="words a line must hold" spellcheck="false" autocomplete="off">
-      <span class="muted small" id="log-count"></span>
       <span class="logdock-space"></span>
+      <span class="muted" id="log-count"></span>
       <button type="button" id="log-close" class="linklike">close</button>
     </div>
     <div id="log-rows" class="mono" aria-live="polite"></div>
@@ -866,7 +870,7 @@
     <span id="status-copying"></span>
     <span class="status-space"></span>
     <span id="status-dry" class="yellow" hidden>DRY RUN — nothing is sent</span>
-    <button type="button" id="log-btn" class="linklike" aria-expanded="false">Log</button>
+    <button type="button" id="log-btn" aria-expanded="false">Log <span id="log-btn-chev" aria-hidden="true">▴</span></button>
   </footer>
 
   <div id="toasts" aria-live="polite"></div>

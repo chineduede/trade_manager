@@ -1101,6 +1101,17 @@ function terminalCard(c, live) {
       if (c.isCtrader) said += ' · can copy, cannot feed';
     }
     el.appendChild(cardLine('tcard-info', said));
+    if (!c.isCtrader && c.hasExe && !c.loggingIn) {
+      // The menu alone hid this: the card itself says an account can be picked.
+      var login = document.createElement('button');
+      login.type = 'button';
+      login.className = 'linklike tcard-login';
+      login.textContent = 'log in to an account…';
+      login.addEventListener('click', function () { accountLoginFlow(c); });
+      el.appendChild(login);
+    } else if (c.loggingIn) {
+      el.appendChild(cardLine('tcard-login yellow', 'logging in…'));
+    }
     wireCard(el, c);
     return el;
   }
@@ -1694,11 +1705,22 @@ function accountLoginFlow(c) {
   api().account_login_ask(c.tid).then(function (a) {
     if (!a.ok) { toast(a.why, 'bad'); return; }
     pickModal('Log ' + a.name + ' in to', a.accounts.map(function (acct) {
+      // One account on one terminal at a time: a row another terminal holds is kept
+      // visible — so the list is the whole truth — but greyed and refused with the why.
+      var sub = acct.now ? 'logged in now'
+        : acct.usedBy ? 'in use by ' + acct.usedBy : '';
       return {
-        label: acct.words + (acct.now ? '  — logged in now' : ''),
+        label: acct.words,
+        sub: sub || undefined,
+        cls: (acct.now || acct.usedBy) ? 'pick-off' : '',
         fn: function () {
           if (acct.now) {
             toast(a.name + ' is already logged in to ' + acct.words, '');
+            return;
+          }
+          if (acct.usedBy) {
+            toast(acct.words + ' is in use by ' + acct.usedBy
+              + ': an account is used on one terminal at a time', 'bad');
             return;
           }
           toast(a.name + ': logging in to ' + acct.words + '…', '');
@@ -2019,7 +2041,7 @@ function pickModal(title, options) {
     }
     var b = document.createElement('button');
     b.type = 'button';
-    b.className = 'pick-item';
+    b.className = 'pick-item' + (o.cls ? ' ' + o.cls : '');
     b.appendChild(cardLine('pick-label', o.label));
     if (o.sub) b.appendChild(cardLine('pick-sub muted', o.sub));
     b.addEventListener('click', function () {
@@ -2704,6 +2726,7 @@ var LG = {
   tid: '',          // '' = all terminals
   problems: false,
   find: '',
+  h: 260,           // the dock's height; its top edge drags, and the choice is kept
   live: null,
   drawn: '',
   dd: null,
@@ -2713,7 +2736,14 @@ var LG = {
 try {
   LG.open = localStorage.getItem('dt-log-open') === '1';
   LG.problems = localStorage.getItem('dt-log-problems') === '1';
+  var lgH = parseInt(localStorage.getItem('dt-log-h'), 10);
+  if (isFinite(lgH)) LG.h = lgH;
 } catch (e) { /* fine */ }
+
+function logClampH(h) {
+  // Never shorter than a few lines, never most of the window.
+  return Math.max(120, Math.min(h, Math.round(window.innerHeight * 0.7)));
+}
 
 var logAsked = 0;
 var logAnswered = 0;
@@ -2740,8 +2770,10 @@ function setLogOpen(open) {
   var btn = $('log-btn');
   btn.classList.toggle('active', open);
   btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  $('log-btn-chev').textContent = open ? '▾' : '▴';
   try { localStorage.setItem('dt-log-open', open ? '1' : ''); } catch (e) { /* fine */ }
   if (open) {
+    $('logdock').style.height = logClampH(LG.h) + 'px';
     LG.drawn = '';
     LG.everDrawn = false;
     pollLog(true);
@@ -3618,7 +3650,9 @@ function renderTdetail() {
     gl.className = 'linklike small ' + (guard.tone || '');
   }
 
-  $('td-other').hidden = live.role === 'slave' || live.role === 'master';
+  var tdNoRole = live.role !== 'slave' && live.role !== 'master';
+  $('td-other').hidden = !tdNoRole;
+  $('td-login-btn').hidden = !(tdNoRole && live.card && !live.card.isCtrader && live.card.hasExe);
   $('td-slave').hidden = live.role !== 'slave';
   $('td-master').hidden = live.role !== 'master';
   $('td-copyfrom').hidden = !(live.role === 'slave' && (live.copyFrom || []).length);
@@ -4090,6 +4124,28 @@ function wire() {
   // --- the log dock ---
   $('log-btn').addEventListener('click', function () { setLogOpen(!LG.open); });
   $('log-close').addEventListener('click', function () { setLogOpen(false); });
+  var grip = $('logdock-grip');
+  grip.addEventListener('pointerdown', function (ev) {
+    if (ev.button !== 0) return;
+    ev.preventDefault();
+    grip.classList.add('held');
+    grip.setPointerCapture(ev.pointerId);
+    var startY = ev.clientY, startH = $('logdock').offsetHeight;
+    function move(e) {
+      LG.h = logClampH(startH + (startY - e.clientY));
+      $('logdock').style.height = LG.h + 'px';
+    }
+    function up() {
+      grip.classList.remove('held');
+      grip.removeEventListener('pointermove', move);
+      grip.removeEventListener('pointerup', up);
+      grip.removeEventListener('pointercancel', up);
+      try { localStorage.setItem('dt-log-h', String(LG.h)); } catch (e2) { /* fine */ }
+    }
+    grip.addEventListener('pointermove', move);
+    grip.addEventListener('pointerup', up);
+    grip.addEventListener('pointercancel', up);
+  });
   $('log-problems').addEventListener('change', function () {
     LG.problems = $('log-problems').checked;
     try { localStorage.setItem('dt-log-problems', LG.problems ? '1' : ''); } catch (e) { /* fine */ }
@@ -4133,6 +4189,9 @@ function wire() {
 
   // --- terminal detail page ---
   $('td-back').addEventListener('click', function () { showPage('terminals'); });
+  $('td-login-btn').addEventListener('click', function () {
+    if (D.tid) accountLoginFlow({ tid: D.tid });
+  });
   TD_INPUTS.forEach(function (n) {
     $('td-f-' + n).addEventListener('input', function () {
       if (TD_SLIDERS.indexOf(n) >= 0) tdSlider('td-', n);

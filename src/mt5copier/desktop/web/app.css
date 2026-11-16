@@ -926,25 +926,48 @@ tr.row-new td { animation: row-flash 1.6s ease-out; }
 }
 
 /* --- the log dock --------------------------------------------------------------------------
-   copier.log and the day book merged, under every page: the TUI log page as a dock. */
+   copier.log and the day book merged, under every page: the TUI log page as a dock.
+   One quiet toolbar row, every control the bar's own 28px height; the top edge drags. */
 #logdock {
+  position: relative;
   flex: 0 0 auto; height: 260px; min-height: 0;
   display: flex; flex-direction: column;
   background: var(--bg-deep); border-top: 1px solid var(--hairline);
 }
+#logdock-grip {
+  position: absolute; top: -4px; left: 0; right: 0; height: 9px;
+  cursor: ns-resize; z-index: 5;
+}
+#logdock-grip:hover, #logdock-grip.held { background: rgba(126, 166, 224, 0.25); }
 #logdock-bar {
-  flex: 0 0 auto; display: flex; align-items: center; gap: 12px;
-  padding: 7px 16px; border-bottom: 1px solid var(--hairline-soft);
+  flex: 0 0 auto; display: flex; align-items: center; gap: 14px;
+  padding: 6px 16px; border-bottom: 1px solid var(--hairline-soft);
 }
-#logdock-bar h2 { margin: 0; font-size: 13px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted); }
-#log-problems-label { font-size: 13px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+#logdock-bar h2 {
+  margin: 0; font-size: 12px; letter-spacing: 0.08em;
+  text-transform: uppercase; color: var(--muted);
+}
+#logdock .dd-btn {
+  width: auto; min-width: 150px; height: 28px; padding: 0 10px;
+  border-radius: 6px; background: transparent; font-size: 12.5px; color: var(--muted);
+}
+#logdock .dd-btn:hover { color: var(--fg); }
+.log-tick { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+/* The page-wide input rule would blow the checkbox up into a 44px panel box. */
+#logdock input[type="checkbox"] {
+  width: 14px; height: 14px; padding: 0; margin: 0; flex: 0 0 auto;
+  border: 0; background: transparent;
+}
+#log-problems-label { font-size: 12.5px; color: var(--muted); white-space: nowrap; }
 #log-find {
-  height: 32px; width: 220px; padding: 0 12px;
-  border-radius: 8px; border: 1px solid var(--border);
-  background: var(--panel-raise); color: var(--fg);
-  font-family: var(--mono); font-size: 13px;
+  height: 28px; width: 200px; padding: 0 10px;
+  border-radius: 6px; border: 1px solid var(--hairline);
+  background: transparent; color: var(--fg);
+  font-family: var(--mono); font-size: 12.5px;
 }
+#log-find:focus { border-color: var(--border); background: var(--panel-raise); }
 .logdock-space { flex: 1 1 auto; }
+#log-count { white-space: nowrap; font-size: 12px; }
 #log-rows { flex: 1 1 auto; overflow-y: auto; padding: 6px 16px 10px; font-size: 12.5px; line-height: 1.55; }
 #log-empty { padding: 14px 16px; }
 .log-row { display: grid; grid-template-columns: 76px 190px 1fr; gap: 0 14px; padding: 1px 0; }
@@ -956,8 +979,20 @@ tr.row-new td { animation: row-flash 1.6s ease-out; }
 .log-row.lg-quiet .lg-text { color: var(--faint); }
 .log-row.lg-warn .lg-text { color: var(--yellow); }
 .log-row.lg-error .lg-text { color: var(--red); }
-#log-btn { color: var(--muted); }
-#log-btn.active, #log-btn:hover { color: var(--blue); }
+/* The statusbar's toggle reads as a control, not a word: bordered, with a chevron
+   pointing at where the dock appears. */
+#log-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 24px; padding: 0 10px;
+  border: 1px solid var(--border); border-radius: 6px; background: transparent;
+  color: var(--muted); font-size: 12px; font-weight: 600;
+}
+#log-btn:hover { color: var(--fg); border-color: var(--muted); }
+#log-btn.active { color: var(--blue); border-color: var(--blue); }
+/* A row another terminal holds, or the account already logged in: visible, not pickable. */
+.pick-item.pick-off .pick-label { color: var(--faint); font-weight: 500; }
+.pick-item.pick-off:hover { background: transparent; }
+.tcard-login { align-self: flex-start; font-size: 12.5px; }
 /* The dock sits at the window's foot, so its terminal menu opens upward — downward it
    would fall below the window, which never scrolls — and long lists scroll inside it. */
 #logdock .dd-menu {
@@ -966,5 +1001,4 @@ tr.row-new td { animation: row-flash 1.6s ease-out; }
 }
 @media (max-width: 1280px) {
   .log-row { grid-template-columns: 76px 120px 1fr; }
-  #logdock { height: 220px; }
 }

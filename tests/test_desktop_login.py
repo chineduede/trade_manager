@@ -61,7 +61,7 @@ def _cfg(tmp_path: Path) -> AppConfig:
     )
 
 
-_KNOWN = [Account(51234, "FTMO-Demo"), Account(20481, "E8-Demo")]
+_KNOWN = [Account(51234, "FTMO-Demo"), Account(20481, "E8-Demo"), Account(60001, "FTMO-Demo")]
 
 
 def _api(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[DesktopApi, _Engine]:
@@ -79,8 +79,15 @@ def test_the_ask_lists_the_saved_accounts_and_marks_the_current_one(
     assert out["ok"] is True
     assert out["name"] == "Spare"
     assert out["accounts"] == [
-        {"key": "51234@FTMO-Demo", "words": "ftmo eval · 51234@FTMO-Demo", "now": False},
-        {"key": "20481@E8-Demo", "words": "20481@E8-Demo", "now": True},
+        # The slave's own account is listed but named as held: one terminal per account.
+        {
+            "key": "51234@FTMO-Demo",
+            "words": "ftmo eval · 51234@FTMO-Demo",
+            "now": False,
+            "usedBy": "ftmo eval",
+        },
+        {"key": "20481@E8-Demo", "words": "20481@E8-Demo", "now": True, "usedBy": None},
+        {"key": "60001@FTMO-Demo", "words": "60001@FTMO-Demo", "now": False, "usedBy": None},
     ]
 
 
@@ -108,13 +115,31 @@ def test_a_login_records_the_account_the_terminal_landed_on(
         return LoginResult(True, "logged in", acct.login, acct.server)
 
     monkeypatch.setattr(account_switch, "log_in", fake_log_in)
-    out = api.account_login(T_FREE, "51234@FTMO-Demo")
+    out = api.account_login(T_FREE, "60001@FTMO-Demo")
     assert out["ok"] is True
-    assert out["message"] == "Spare is logged in to ftmo eval (51234@FTMO-Demo)"
-    assert seen == [(api._cfg.terminals[T_FREE].exe_path, Account(51234, "FTMO-Demo"))]
+    assert out["message"] == "Spare is logged in to 60001@FTMO-Demo"
+    assert seen == [(api._cfg.terminals[T_FREE].exe_path, Account(60001, "FTMO-Demo"))]
     tcfg = api._cfg.terminals[T_FREE]
-    assert (tcfg.last_login, tcfg.last_server) == (51234, "FTMO-Demo")
+    assert (tcfg.last_login, tcfg.last_server) == (60001, "FTMO-Demo")
     assert "sync" in engine.calls
+
+
+def test_an_account_another_terminal_holds_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, engine = _api(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        account_switch,
+        "log_in",
+        lambda exe, acct, log_file: (_ for _ in ()).throw(AssertionError("must not log in")),
+    )
+    out = api.account_login(T_FREE, "51234@FTMO-Demo")
+    assert out["ok"] is False
+    assert out["message"] == (
+        "ftmo eval (51234@FTMO-Demo) is in use by ftmo eval: "
+        "an account is used on one terminal at a time"
+    )
+    assert engine.calls == []
 
 
 def test_a_failed_login_changes_nothing_and_says_why(
@@ -126,9 +151,9 @@ def test_a_failed_login_changes_nothing_and_says_why(
         "log_in",
         lambda exe, acct, log_file: LoginResult(False, "is its password saved in the terminal?"),
     )
-    out = api.account_login(T_FREE, "51234@FTMO-Demo")
+    out = api.account_login(T_FREE, "60001@FTMO-Demo")
     assert out["ok"] is False
-    assert "Spare was not logged in to ftmo eval (51234@FTMO-Demo)" in out["message"]
+    assert "Spare was not logged in to 60001@FTMO-Demo" in out["message"]
     tcfg = api._cfg.terminals[T_FREE]
     assert (tcfg.last_login, tcfg.last_server) == (20481, "E8-Demo")
     assert engine.calls == []
