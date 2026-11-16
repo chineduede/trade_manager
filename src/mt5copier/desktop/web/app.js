@@ -1689,7 +1689,8 @@ var G = {
   drawn: '',
   tid: '',          // the chip picked; '' lets the bridge pick the first slave
   selected: null,   // the selected rule's id
-  form: null        // { tid, type, ruleId, fields } while the rule form is open
+  form: null,       // { tid, type, ruleId, fields } while the rule form is open
+  from: null        // { tid, name } when a terminal page's guard line led here: the way back
 };
 
 var guardsBusy = false;
@@ -1716,6 +1717,11 @@ function gact(promise) {
 function renderGuards() {
   var live = G.live;
   if (!live) return;
+  // The way back, when a terminal page's guard line led here. Outside the drawn-key
+  // gate: it changes with navigation, not with the state the key watches.
+  var back = $('guard-back');
+  back.hidden = !G.from;
+  if (G.from) back.textContent = '← ' + (G.from.name || 'its terminal') + ' — its page';
   var key = JSON.stringify(live) + '|' + G.selected;
   if (key === G.drawn) return;
   G.drawn = key;
@@ -3711,6 +3717,12 @@ function wire() {
       if (!$('modal-back').hidden) { closeModal(); return; }
       if (!$('ctx-menu').hidden) { closeMenu(); return; }
       if (S.page === 'tdetail') { showPage('terminals'); return; }
+      if (S.page === 'guards' && G.from) {
+        var from = G.from;
+        G.from = null;
+        openTerminalDetail(from.tid);
+        return;
+      }
       if (S.mode === 'modify') exitModify();
     }
   });
@@ -3795,6 +3807,9 @@ function wire() {
     a.addEventListener('click', function (ev) {
       ev.preventDefault();
       if (a.classList.contains('disabled')) return;
+      // Arriving at Guards by the sidebar is arriving fresh: the way back to a
+      // terminal's page belongs only to the visit its guard line started.
+      if (a.dataset.page === 'guards') G.from = null;
       showPage(a.dataset.page);
     });
   });
@@ -3994,8 +4009,14 @@ function wire() {
   $('td-guard-link').addEventListener('click', function () {
     if (!D.tid) return;
     G.tid = D.tid;
+    G.from = { tid: D.tid, name: D.live ? D.live.name : '' };
     G.drawn = '';
     showPage('guards');
+  });
+  $('guard-back').addEventListener('click', function () {
+    var from = G.from;
+    G.from = null;
+    if (from) openTerminalDetail(from.tid);
   });
   $('td-live-btn').addEventListener('click', function () {
     var live = D.live;
