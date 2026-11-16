@@ -94,11 +94,12 @@ from ..settings_edit import (
     advisories,
     copies_word,
     describe_changes,
+    rename,
 )
 from . import cards
 from .ctrader import CTraderDialog
 from .detail import DetailScreen
-from .dialogs import GoLiveDialog, LiveDialog, OrphanDialog
+from .dialogs import GoLiveDialog, LiveDialog, NameAccountDialog, OrphanDialog
 from .general import GeneralForm
 from .guards import GuardConfirm, GuardPick, GuardsScreen
 from .history import HistoryScreen
@@ -917,6 +918,37 @@ class CopierApp(App[None]):
     def _account_name(self, key: str) -> str:
         called = self._cfg.account_names.get(key)
         return f"{called} ({key})" if called else key
+
+    def action_name_account(self) -> None:
+        """Give the selected terminal's account a name of the person's own -- the one
+        :meth:`AppConfig.display_name` then shows everywhere. Kept on the *account*, so it
+        follows a login to another terminal; see :func:`mt5copier.config.account_key`."""
+        tid = self._selected_id()
+        if tid is None:
+            return
+        tcfg = self._cfg.terminals[tid]
+        key = account_key(tcfg.last_login, tcfg.last_server)
+        if key is None:
+            self.notify(
+                "no account is known for this terminal yet; nothing to name", severity="warning"
+            )
+            return
+
+        def named(name: str | None) -> None:
+            if name is None:
+                return
+            refusal = rename(self._cfg, tid, name)
+            if refusal is not None:
+                self.notify(refusal, severity="error")
+                return
+            self._persist_and_sync()
+            stripped = name.strip()
+            if stripped:
+                self.notify(f"{key} is now called {stripped}")
+            else:
+                self.notify(f"the name for {key} is cleared; it shows as its login again")
+
+        self.push_screen(NameAccountDialog(key, self._cfg.account_names.get(key, "")), named)
 
     @work(thread=True)
     def _log_in_worker(self, tid: str, acct: account_mod.Account) -> None:

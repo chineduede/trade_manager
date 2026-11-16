@@ -518,3 +518,61 @@ class GoLiveDialog(ModalScreen[str | None]):
     def action_panic(self) -> None:
         self._halt()
         self.dismiss(None)
+
+
+# --- naming an account ----------------------------------------------------------------------
+
+
+class NameAccountDialog(ModalScreen[str | None]):
+    """One line of text: what to call an account. Dismisses with what was typed -- blank means
+    clear the name -- or None when the person backs out.
+
+    No typed confirmation and no copy warnings: a name is cosmetic, read by nothing that
+    trades (:func:`mt5copier.settings_edit.rename` says why it skips the orphan step too).
+    """
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    def __init__(self, account: str, current: str) -> None:
+        super().__init__()
+        self._account = account
+        """The account being named, as ``login@server`` -- the key the name is filed under."""
+        self._current = current
+
+    def compose(self) -> ComposeResult:
+        with VerticalScroll(id="dialog", classes="dialog", can_focus=False):
+            yield Static(Text("NAME THIS ACCOUNT", style="bold"), classes="dialog-title")
+            yield Static(
+                f"The name is for account {self._account} and follows it wherever it is "
+                "logged in, on any terminal. It is shown everywhere the terminal is named."
+            )
+            yield Static(
+                Text("Leave it blank to clear the name.", style=MUTED)
+                if self._current
+                else Text("Something you will recognise: FTMO 100k, E8 eval...", style=MUTED)
+            )
+            with Horizontal(id="typed-box"):
+                yield Input(
+                    value=self._current, placeholder=self._account, id="typed", compact=True
+                )
+            with ButtonRow(id="buttons"):
+                yield Button("Cancel  esc", id="cancel", classes="keep")
+                yield Button("Save the name  enter", id="go", classes="keep")
+
+    def on_mount(self) -> None:
+        self.query_one("#typed", Input).focus()
+
+    @on(Input.Submitted, "#typed")
+    def _on_submit(self) -> None:
+        self.dismiss(self.query_one("#typed", Input).value)
+
+    @on(Button.Pressed, "#go")
+    def _on_go(self) -> None:
+        self.dismiss(self.query_one("#typed", Input).value)
+
+    @on(Button.Pressed, "#cancel")
+    def _on_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)

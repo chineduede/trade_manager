@@ -1586,10 +1586,18 @@ function menuItems(c, live) {
         function () { accountLoginFlow(c); }
       );
     }
+    if (c.login) {
+      does(c.accountName ? 'Rename this account…' : 'Name this account…',
+        function () { accountNameFlow(c); });
+    }
     return items;
   }
 
   does('Settings — its own page', function () { openTerminalDetail(c.tid); });
+  if (c.login) {
+    does(c.accountName ? 'Rename this account…' : 'Name this account…',
+      function () { accountNameFlow(c); });
+  }
   if (c.role === 'slave') {
     if (c.orphans) {
       does('Acknowledge orphans: sign off its untracked positions', function () {
@@ -1635,6 +1643,40 @@ function showModal(opts) {
 function closeModal() {
   $('modal-back').hidden = true;
   modalOnConfirm = null;
+}
+
+function accountNameFlow(c) {
+  // Names the *account* (login@server), not the terminal: the engine files it under the
+  // account key, so the name follows a login to another terminal. Blank clears it.
+  var account = c.login + (c.server ? '@' + c.server : '');
+  var body = document.createElement('div');
+  var note = document.createElement('p');
+  note.className = 'muted';
+  note.textContent = 'The name is for account ' + account + ' and follows it wherever it is '
+    + 'logged in, on any terminal. Leave it blank to clear the name.';
+  body.appendChild(note);
+  var field = document.createElement('div');
+  field.className = 'field';
+  var label = document.createElement('label');
+  label.className = 'flabel';
+  label.setAttribute('for', 'an-name');
+  label.textContent = 'Account name';
+  var input = document.createElement('input');
+  input.id = 'an-name';
+  input.autocomplete = 'off';
+  input.placeholder = account;
+  input.value = c.accountName || '';
+  field.appendChild(label);
+  field.appendChild(input);
+  body.appendChild(field);
+  showModal({
+    title: c.accountName ? 'Rename ' + c.accountName : 'Name this account',
+    body: body,
+    confirm: 'Save the name',
+    onConfirm: function () { tact(api().rename_account(c.tid, input.value)); }
+  });
+  input.focus();
+  input.select();
 }
 
 function unassignFlow(c) {
@@ -3897,7 +3939,8 @@ function wire() {
     if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') {
       if (S.mode === 'new' && ev.target.id.indexOf('f-') === 0) placeOrder();
       else if (S.mode === 'modify' && ev.target.id.indexOf('m-') === 0) applyModify();
-      else if (ev.target.id === 'st-name' || ev.target.id === 'st-live-word') {
+      else if (ev.target.id === 'st-name' || ev.target.id === 'st-live-word'
+               || ev.target.id === 'an-name') {
         var ok = $('modal-confirm');
         if (!ok.hidden && !ok.disabled) ok.click();
       }

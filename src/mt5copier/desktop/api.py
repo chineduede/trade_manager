@@ -66,6 +66,7 @@ from ..settings_edit import (
     describe_changes,
     initial_text,
     initial_values,
+    rename,
 )
 from ..settings_example import MasterTrade, PriceValue, pick, work
 from ..setups import Setup, SetupsDoc
@@ -534,9 +535,11 @@ class DesktopApi:
                 risk = f"risk {mark}{tcfg.risk_cash:,g}" + ("" if mark else f" {info.currency}")
             else:
                 risk = f"risk {tcfg.risk_percent:g}%"
+        key = account_key(tcfg.last_login, tcfg.last_server)
         return {
             "tid": tid,
             "name": info.label,
+            "accountName": cfg.account_names.get(key) if key is not None else None,
             "role": str(tcfg.role),
             "statusText": info.status_text,
             # The full sentence rides separately: the card's state word stays short and the
@@ -685,6 +688,30 @@ class DesktopApi:
             total = sum(len(t) for t in orphan.values())
             message += f" {total} cop{'y' if total == 1 else 'ies'} orphaned: they stay open and are no longer managed."
         return {"ok": True, "message": message}
+
+    def rename_account(self, tid: str, name: str) -> dict[str, Any]:
+        """Name (or, given blank, unname) the account this terminal is last known to be logged
+        into. Cosmetic and immediate -- no copies are at stake, as
+        :func:`mt5copier.settings_edit.rename` itself explains -- and kept by account, not
+        terminal, so the name follows a login to another terminal."""
+        tid = str(tid)
+        if tid not in self._cfg.terminals:
+            return {"ok": False, "message": "that terminal is gone; rescan"}
+        tcfg = self._cfg.terminals[tid]
+        key = account_key(tcfg.last_login, tcfg.last_server)
+        refusal = rename(self._cfg, tid, str(name or ""))
+        if refusal is not None:
+            return {"ok": False, "message": refusal}
+        why = self._persist()
+        if why is not None:
+            return {"ok": False, "message": why}
+        stripped = str(name or "").strip()
+        if stripped:
+            return {"ok": True, "message": f"{key} is now called {stripped}."}
+        return {
+            "ok": True,
+            "message": f"The name for {key} is cleared; it shows as its login again.",
+        }
 
     def set_pause(self, tid: str, paused: bool) -> dict[str, Any]:
         tid = str(tid)

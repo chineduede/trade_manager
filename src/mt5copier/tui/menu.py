@@ -68,6 +68,8 @@ def terminal_actions(
             items.append(MenuItem("i", "log in to another account", "switch_account"))
         items.append(MenuItem("enter", "details", "open_terminal"))
         items.append(MenuItem("e", "settings", "edit_settings"))
+        if cfg.last_login is not None:
+            items.append(MenuItem("n", "name this account", "name_account"))
         return items
 
     items.append(MenuItem("enter", "details", "open_terminal"))
@@ -82,6 +84,8 @@ def terminal_actions(
         items.append(MenuItem("h", "history: every step with each trade", "history"))
     else:
         items.append(MenuItem("e", "settings: its broker's symbol prefix/suffix", "edit_settings"))
+    if cfg.last_login is not None:
+        items.append(MenuItem("n", "name this account", "name_account"))
     # The demo-only guard stops orders, so it only ever holds back a slave on a real account.
     # Where it has been lifted, the way to put it back is offered on any terminal.
     if cfg.allow_live_trading:
