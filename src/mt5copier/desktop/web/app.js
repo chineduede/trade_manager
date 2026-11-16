@@ -1636,6 +1636,7 @@ function showModal(opts) {
   ok.textContent = opts.confirm || '';
   ok.className = opts.danger ? 'danger' : '';
   ok.disabled = false; // a flow may disable it again until something is typed
+  $('modal-cancel').textContent = opts.cancel || 'Cancel';
   modalOnConfirm = opts.onConfirm || null;
   $('modal-back').hidden = false;
   if (opts.confirm) ok.focus();
@@ -1880,6 +1881,160 @@ function ctraderLoginFlow() {
     (s.clientId ? redirectInput : idInput).focus();
   }, function () {
     toast('The engine did not answer; try again.', 'bad');
+  });
+}
+
+// --- the profiles dialog ---------------------------------------------------------------
+// The TUI picker, behind the titlebar's profile pill. Every profile is its own window, so
+// Open launches a new copier process on that profile; the single-instance lock in that
+// process still has the last word. Rename and delete follow the model's own refusals
+// (the default keeps its name and cannot be deleted; anything running, this window
+// included, must close first).
+
+function profilesFlow() {
+  api().profiles_state().then(function (s) {
+    var body = document.createElement('div');
+    body.className = 'prof-list';
+    s.profiles.forEach(function (p) {
+      var row = document.createElement('div');
+      row.className = 'prof-row';
+      var left = document.createElement('div');
+      left.className = 'prof-words';
+      var name = document.createElement('div');
+      name.className = 'prof-name';
+      var nm = document.createElement('span');
+      nm.textContent = p.name;
+      name.appendChild(nm);
+      if (p.current) name.appendChild(cardLine('pill blue', 'THIS WINDOW'));
+      else if (p.running) name.appendChild(cardLine('pill yellow', 'RUNNING'));
+      left.appendChild(name);
+      var facts = [];
+      facts.push(p.trading ? 'direct trading' : (p.master ? 'master ' + p.master : 'no master'));
+      facts.push(p.slaves + ' slave' + (p.slaves === 1 ? '' : 's'));
+      facts.push(p.lastOpened);
+      if (p.running && !p.current) facts.push('pid ' + p.pid);
+      left.appendChild(cardLine('prof-facts muted small', facts.join(' · ')));
+      row.appendChild(left);
+
+      var btns = document.createElement('div');
+      btns.className = 'prof-btns';
+      function btn(label, fn, danger) {
+        var b = document.createElement('button');
+        b.type = 'button';
+        b.className = danger ? 'danger' : '';
+        b.textContent = label;
+        b.addEventListener('click', fn);
+        btns.appendChild(b);
+      }
+      if (!p.current && !p.running) {
+        btn('Open', function () {
+          closeModal();
+          api().profile_open(p.name).then(function (r) {
+            toast(r.message, r.ok ? 'ok' : 'bad');
+          }, function () {
+            toast('The engine did not answer; try again.', 'bad');
+          });
+        });
+      }
+      if (!p.isDefault && !p.current && !p.running) {
+        btn('Rename', function () { closeModal(); profileRenameFlow(p.name); });
+        btn('Delete', function () { closeModal(); profileDeleteFlow(p.name); }, true);
+      }
+      row.appendChild(btns);
+      body.appendChild(row);
+    });
+
+    var make = document.createElement('div');
+    make.className = 'prof-new';
+    var input = document.createElement('input');
+    input.placeholder = 'new profile name';
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    var go = document.createElement('button');
+    go.type = 'button';
+    go.textContent = 'Make it';
+    function createIt() {
+      var name = input.value.trim();
+      if (!name) return;
+      api().profile_create(name).then(function (r) {
+        toast(r.message, r.ok ? 'ok' : 'bad');
+        if (r.ok) { closeModal(); profilesFlow(); }
+      }, function () {
+        toast('The engine did not answer; try again.', 'bad');
+      });
+    }
+    go.addEventListener('click', createIt);
+    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') createIt(); });
+    make.appendChild(input);
+    make.appendChild(go);
+    body.appendChild(make);
+
+    var note = document.createElement('p');
+    note.className = 'muted small';
+    note.textContent = 'Each profile is a whole copier of its own — config, accounts, '
+      + 'guards, setups and history — in its own window. Names are letters, digits, '
+      + '- or _ (up to 32).';
+    body.appendChild(note);
+
+    showModal({ title: 'Profiles', body: body, cancel: 'Close' });
+  }, function () {
+    toast('The engine did not answer; try again.', 'bad');
+  });
+}
+
+function profileRenameFlow(name) {
+  var body = document.createElement('div');
+  var field = document.createElement('div');
+  field.className = 'field';
+  var label = document.createElement('label');
+  label.className = 'flabel';
+  label.setAttribute('for', 'prof-rename');
+  label.textContent = 'New name';
+  var input = document.createElement('input');
+  input.id = 'prof-rename';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.value = name;
+  field.appendChild(label);
+  field.appendChild(input);
+  body.appendChild(field);
+  showModal({
+    title: 'Rename ' + name,
+    body: body,
+    confirm: 'Rename',
+    onConfirm: function () {
+      api().profile_rename(name, input.value).then(function (r) {
+        toast(r.message, r.ok ? 'ok' : 'bad');
+        profilesFlow();
+      }, function () {
+        toast('The engine did not answer; try again.', 'bad');
+      });
+    }
+  });
+  input.focus();
+  input.select();
+}
+
+function profileDeleteFlow(name) {
+  var body = document.createElement('div');
+  var p = document.createElement('p');
+  p.textContent = 'Everything ' + name + ' keeps goes with it: its config, accounts list, '
+    + 'guards, setups, history and logs. Broker accounts and their positions are '
+    + 'untouched, but any copies it still tracked are orphaned.';
+  body.appendChild(p);
+  showModal({
+    title: 'Delete ' + name + '?',
+    body: body,
+    confirm: 'Delete ' + name,
+    danger: true,
+    onConfirm: function () {
+      api().profile_delete(name).then(function (r) {
+        toast(r.message, r.ok ? 'ok' : 'bad');
+        profilesFlow();
+      }, function () {
+        toast('The engine did not answer; try again.', 'bad');
+      });
+    }
   });
 }
 
@@ -4454,6 +4609,7 @@ function wire() {
     }, function () { S.haltBusy = false; });
   });
 
+  $('profile-btn').addEventListener('click', profilesFlow);
   $('win-min').addEventListener('click', function () { api().win_minimize(); });
   $('win-max').addEventListener('click', function () { api().win_toggle_max(); });
   $('win-close').addEventListener('click', function () { api().win_close(); });

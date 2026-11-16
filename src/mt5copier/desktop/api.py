@@ -11,6 +11,8 @@ the same contract the TUI's timer thread already exercises.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -18,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 from .. import account_switch, role_actions
 from .. import config as config_mod
+from .. import profiles as profiles_mod
 from .. import setups as setups_mod
 from ..config import (
     AppMode,
@@ -59,7 +62,7 @@ from ..log_entries import (
 )
 from ..logging_setup import get_logger
 from ..news import HIGH, MEDIUM, symbol_currencies
-from ..paths import active_profile, guards_path, log_dir, setups_path
+from ..paths import active_profile, guards_path, is_frozen, log_dir, setups_path
 from ..presentation import read_log_tail, row_info, slave_badge
 from ..protocol import (
     ACCOUNT_TRADE_MODE_DEMO,
@@ -1052,6 +1055,91 @@ class DesktopApi:
         if why is not None:
             msg += f" — {why}"
         return {"ok": True, "message": msg}
+
+    # --- profiles -----------------------------------------------------------------------------
+
+    def profiles_state(self) -> dict[str, Any]:
+        """The TUI picker's rows. profiles.list_profiles never reads a config through the
+        app's own validation, so a profile this build would refuse still shows."""
+        me = active_profile()
+        return {
+            "current": me,
+            "profiles": [
+                {
+                    "name": p.name,
+                    "isDefault": p.is_default,
+                    "current": p.name == me,
+                    "running": p.running,
+                    "pid": p.pid,
+                    "master": p.master,
+                    "trading": p.trading,
+                    "slaves": p.slaves,
+                    "lastOpened": _profile_age(p.last_opened),
+                }
+                for p in profiles_mod.list_profiles()
+            ],
+        }
+
+    def profile_open(self, name: str) -> dict[str, Any]:
+        """Open a profile in its own window: a new copier process, detached so it outlives
+        this one. The single-instance lock in that process still has the last word."""
+        name = str(name).strip()
+        info = next((p for p in profiles_mod.list_profiles() if p.name == name), None)
+        if info is None:
+            return {"ok": False, "message": f"no profile called {name!r}"}
+        if name == active_profile():
+            return {"ok": False, "message": f"{name!r} is this window"}
+        if info.running:
+            return {"ok": False, "message": f"{name!r} is already running (pid {info.pid})"}
+        if is_frozen():
+            cmd = [sys.executable, "--desktop", "--profile", name]
+        else:
+            cmd = [sys.executable, "-m", "mt5copier", "--desktop", "--profile", name]
+        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+            subprocess, "CREATE_NEW_PROCESS_GROUP", 0
+        )
+        try:
+            subprocess.Popen(  # noqa: S603 -- our own executable, a vetted profile name
+                cmd,
+                creationflags=flags,
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError as exc:
+            return {"ok": False, "message": f"could not open {name!r}: {exc}"}
+        log.info("profile %r opened in its own window", name)
+        return {"ok": True, "message": f"{name!r} is opening in its own window…"}
+
+    def profile_create(self, name: str) -> dict[str, Any]:
+        name = str(name).strip()
+        try:
+            profiles_mod.create(name)
+        except profiles_mod.ProfileError as exc:
+            return {"ok": False, "message": str(exc)}
+        log.info("profile %r created", name)
+        return {"ok": True, "message": f"{name!r} made — open it to set it up"}
+
+    def profile_rename(self, old: str, new: str) -> dict[str, Any]:
+        old, new = str(old).strip(), str(new).strip()
+        try:
+            profiles_mod.rename(old, new)
+        except profiles_mod.ProfileError as exc:
+            return {"ok": False, "message": str(exc)}
+        log.info("profile %r renamed to %r", old, new)
+        return {"ok": True, "message": f"{old!r} is now {new!r}"}
+
+    def profile_delete(self, name: str) -> dict[str, Any]:
+        """Delete a profile and every record it keeps. The page confirms first; the model
+        refuses the default and anything running, this window included."""
+        name = str(name).strip()
+        try:
+            profiles_mod.delete(name)
+        except profiles_mod.ProfileError as exc:
+            return {"ok": False, "message": str(exc)}
+        log.info("profile %r deleted", name)
+        return {"ok": True, "message": f"deleted {name!r} and every record it kept"}
 
     # --- the guards page --------------------------------------------------------------------
 
@@ -2775,6 +2863,18 @@ def _news_said(p: dict[str, ParamValue], e: NewsEvent) -> str:
     end = clock(e.when + float(p["after"]) * 60)
     which = f"{e.currency} " if scoped else ""
     return f"no new {which}trades {start}–{end}"
+
+
+def _profile_age(ts: float | None) -> str:
+    """When a profile last ran, the TUI picker's own words."""
+    if ts is None:
+        return "never opened"
+    days = max(0, int((time.time() - ts) // 86400))
+    if days == 0:
+        return time.strftime("today %H:%M", time.localtime(ts))
+    if days == 1:
+        return "yesterday"
+    return time.strftime("%Y-%m-%d", time.localtime(ts))
 
 
 # --- the detail page's Overview tab -----------------------------------------------------------
