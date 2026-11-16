@@ -3290,9 +3290,19 @@ function tdDirty() {
 
 function tdSlider(prefix, name) {
   // The slider is the coarse hand on the text box's value; the box stays the truth.
+  // A value typed past the slider's usual range stretches the range to hold it, so the
+  // thumb always sits at the real value and sliding back starts from there — never a
+  // jump from what was typed down to a pegged maximum. Back inside, the range snaps back.
   var slider = $(prefix + 'sl-' + name);
   var v = parseFloat($(prefix + (prefix === 'td-m-' ? '' : 'f-') + name).value);
-  if (isFinite(v)) slider.value = String(v);
+  if (!isFinite(v)) return;
+  if (!slider.dataset.max) {
+    slider.dataset.max = slider.max;
+    slider.dataset.min = slider.min;
+  }
+  slider.max = String(Math.max(parseFloat(slider.dataset.max), v));
+  slider.min = String(Math.min(parseFloat(slider.dataset.min), Math.max(v, 0)));
+  slider.value = String(v);
 }
 
 function tdFillSlave(live) {
