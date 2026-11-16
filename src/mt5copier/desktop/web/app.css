@@ -398,6 +398,10 @@ body.dragging-terminals .zone-cue { display: inline-block; }
   display: flex; flex-direction: column; gap: 8px;
   cursor: grab;
   user-select: none;
+  /* Without this a grid item never shrinks below its longest nowrap line, so the rows'
+     ellipses up there count for nothing: one claim sentence widened the whole card past
+     its zone (seen live: the master card sliding under the slaves zone). */
+  min-width: 0;
 }
 .tcard-still { cursor: default; }
 /* The TUI card's state-coloured frame, softened for pixels: green while copying,
