@@ -1852,6 +1852,15 @@ built (see the `desktop` branch). Walking the TUI page by page against the app s
 what never crossed over. The user's call, 2026-11-16: these are the priority, to be built
 next, ahead of the CDP testing phase and the merge to master.
 
+**All four built, 2026-11-16** — Overview tab `f3cb948`, cTrader login `35667c4`, profiles
+`e75279e`, the smalls bundle `cc3d1f2` (partial close + Close everything, the symbol
+search over the feed's catalog pushed once per connection on the Snapshot, plain-failure
+toasts via the history's `recent_problems`, and the frozen-build check: `pyinstaller
+copier.spec` built clean, `--check`/`--paths` answered, and `--desktop --profile default`
+against an isolated `%APPDATA%` brought the window up — native frame adopted, WebView2
+storage written, an error-free log — before being killed). Hands-on checks pending.
+Next: the CDP testing phase, then the merge to master.
+
 - **Terminal detail Overview tab.** The TUI's `enter` page shows what the desktop detail
   page (settings forms only) does not: the three ruled columns — the ACCOUNT (kind, ping,
   connection), the RULE it is copied by (on the master: the slaves it feeds), and how
