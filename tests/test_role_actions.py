@@ -1,5 +1,5 @@
-"""The role-change rules behind the TUI's keys and role buttons (``tui/app.py``) -- see
-``role_actions.py``'s own docstring for why this is one module instead of two copies."""
+"""The role-change rules behind the UI's role buttons -- see ``role_actions.py``'s own
+docstring for why this is one module instead of a copy per view."""
 
 from __future__ import annotations
 

@@ -7,7 +7,6 @@ dependencies = [
     "metatrader5>=5.0.6180; sys_platform == 'win32'",
     "pydantic>=2.9",
     "psutil>=7.0",
-    "textual>=1.0",
     "tzdata>=2026.5",
     "protobuf>=7.35.1",
     "pywebview>=5.3; sys_platform == 'win32'",

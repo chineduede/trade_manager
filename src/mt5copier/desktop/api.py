@@ -188,8 +188,8 @@ class DesktopApi:
     ) -> None:
         self._cfg = cfg
         self._engine = engine
-        # The same document the engine enforces from (see tui.run and desktop.run): edits
-        # here are one assignment into it, and the file is written after, as the TUI does.
+        # The same document the engine enforces from (see desktop.run): edits here are one
+        # assignment into it, and the file is written after.
         self._guards_doc = guards if guards is not None else GuardsDoc()
         self._setups = setups if setups is not None else SetupsDoc()
         self._window: webview.Window | None = None
@@ -1856,7 +1856,7 @@ class DesktopApi:
 
     # --- the history page ------------------------------------------------------------------
     # What became of each copied trade on each slave, read back from the on-disk history.
-    # The store keeps the facts and tui/history.py set the wording; the bridge only narrows
+    # The store keeps the facts and the retired TUI history page set the wording; the bridge only narrows
     # to what the filter asks and hands the page ready-worded rows.
 
     def history_state(self, tid: str, symbol: str, failed: bool, query: str) -> dict[str, Any]:
@@ -2004,7 +2004,7 @@ class DesktopApi:
     # A setup is who copies from whom: the master, its slaves, the account each is logged
     # into, every one's settings, and whether copying was on and live. What one holds is
     # mt5copier/setups.py's and loading one is the engine's; the bridge words the page
-    # (tui/setups.py's own sentences) and runs the logins a load needs.
+    # (the retired TUI setups page's own sentences) and runs the logins a load needs.
 
     def _save_setups(self) -> str | None:
         try:
@@ -2580,7 +2580,7 @@ class DesktopApi:
 
     @staticmethod
     def _symbol_example(symbols: list[str], prefix: str, suffix: str) -> list[dict[str, str]]:
-        """What the slaves will be given for a few of the master's names -- tui/master.py's
+        """What the slaves will be given for a few of the master's names -- the retired TUI master form's
         example, as rows the page draws."""
         prefix, suffix = prefix.strip(), suffix.strip()
         if not symbols:
@@ -2900,7 +2900,7 @@ def _detail_trades(
     master_positions: list[MasterTrade], events_: list[MasterEvent]
 ) -> list[MasterTrade]:
     """The master's trades for the worked example, newest first, each once: what it holds,
-    then what the day book saw -- tui/settings.py's _trades."""
+    then what the day book saw -- the retired TUI settings form's _trades."""
     seen: set[int] = set()
     out: list[MasterTrade] = []
     for t in master_positions:
@@ -2920,7 +2920,7 @@ def _detail_trades(
 
 
 def _step_tone(step: Step) -> str:
-    """The colour tui/history.py's step_color gives the step, named for the page to style
+    """The colour the retired TUI history page's step_color gave the step, named for the page to style
     by: a note blue, a problem red, a skip yellow, a dry run or a followed fill dim."""
     if step.kind == NOTE:
         return "note"
@@ -2975,9 +2975,9 @@ def _profile_age(ts: float | None) -> str:
 
 
 # --- the detail page's Overview tab -----------------------------------------------------------
-# The TUI enter page's three ruled columns and its tables, as JSON. The wording is ported from
-# tui/detail.py, which stays the reference; every number comes from mt5copier/terminal_detail.py
-# and copy_stats.py, the same UI-free helpers the TUI reads. Tones are the app's palette words.
+# The TUI enter page's three ruled columns and its tables, as JSON. The wording was ported
+# from the TUI's detail screen (now retired); every number comes from mt5copier/terminal_detail.py
+# and copy_stats.py, the same UI-free helpers the TUI read. Tones are the app's palette words.
 
 _TIER_TONE = {
     "good": "",

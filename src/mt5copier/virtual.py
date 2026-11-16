@@ -1,6 +1,6 @@
 """The virtual master: the book a direct-trading profile trades against.
 
-In trading mode there is no master terminal. The person places trades from the TUI and they
+In trading mode there is no master terminal. The person places trades from the UI and they
 land here, in a persistent synthetic book of open positions and resting orders; the engine
 reads this book exactly where it reads a real master's snapshot, so sizing, guards, the news
 rule, breakeven, the day book and the history all run unchanged downstream.

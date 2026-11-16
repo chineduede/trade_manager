@@ -6,30 +6,14 @@ import json
 from pathlib import Path
 
 import pytest
+from support import TID_BROKEN, TID_MASTER, TID_SLAVE, make_cfg
 from test_reconcile import TID_SLAVE2, held_by, live_engine, seed_live_store, stale_row
-from textual.widgets import Button, DataTable
-from tui_support import (
-    TID_BROKEN,
-    TID_MASTER,
-    TID_SLAVE,
-    copy_of,
-    hold,
-    make_app,
-    make_cfg,
-    plain,
-    toasted,
-    toasts,
-)
 
 from mt5copier import account_switch as account_mod
 from mt5copier import setups as setups_mod
-from mt5copier.account_switch import Account, LoginResult
+from mt5copier.account_switch import Account
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.setups import Setup, SetupsDoc
-from mt5copier.tui.dialogs import OrphanDialog
-from mt5copier.tui.guards import GuardConfirm
-from mt5copier.tui.setups import SetupsScreen
-from mt5copier.tui.widgets import TopBar
 
 TID_THIRD = "D" * 32
 
@@ -260,178 +244,6 @@ def test_a_slave_kept_under_the_same_master_keeps_its_copies(
     assert held_by(eng) == [11], "still managed"
 
 
-# --- the page ----------------------------------------------------------------------------------
-
-
-async def test_w_opens_the_page_and_a_saves_the_roles_in_place_now(
-    cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app = make_app(cfg, tmp_path, monkeypatch)
-    async with app.run_test(size=(140, 50)) as pilot:
-        await pilot.press("w")
-        await pilot.pause()
-        screen = app.screen
-        assert isinstance(screen, SetupsScreen)
-        await pilot.press("a", *"prop week", "enter")
-        await pilot.pause()
-
-        assert set(app._setups.setups) == {"prop week"}
-        assert setups_mod.load(tmp_path / "setups.json") == app._setups, "written to the file"
-        table = screen.query_one("#st-table", DataTable)
-        assert table.row_count == 1
-        assert "● prop week" in plain(table.get_row_at(0)[0])
-        assert "Setup prop week" in plain(screen.query_one("#topbar", TopBar).content)
-
-        await pilot.press("a", *"prop week", "enter")
-        await pilot.pause()
-        assert "already saved" in plain(screen.query_one("#st-ask-error").render())
-
-
-async def test_loading_a_setup_asks_then_puts_its_roles_in_place(
-    cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app = make_app(cfg, tmp_path, monkeypatch)
-    app._setups.setups["delta"] = Setup(master=TID_THIRD, slaves=(TID_MASTER,))
-    async with app.run_test(size=(140, 50)) as pilot:
-        await pilot.press("w", "enter")
-        await pilot.pause()
-        question = app.screen
-        assert isinstance(question, GuardConfirm)
-        question.query_one("#go", Button).press()
-        await pilot.pause()
-
-        assert cfg.terminals[TID_THIRD].role is Role.MASTER
-        assert cfg.terminals[TID_MASTER].role is Role.SLAVE
-        assert cfg.terminals[TID_SLAVE].role is Role.UNASSIGNED
-        assert await toasted(pilot, "setup delta loaded"), toasts(app)
-        assert app._engine.sync_calls  # type: ignore[attr-defined]
-
-
-async def test_loading_a_setup_that_strands_copies_shows_them_first(
-    cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app = make_app(cfg, tmp_path, monkeypatch)
-    app._setups.setups["delta"] = Setup(master=TID_THIRD, slaves=(TID_SLAVE,))
-    hold(app, copy_of(100))
-    async with app.run_test(size=(140, 50)) as pilot:
-        await pilot.press("w", "enter")
-        await pilot.pause()
-        question = app.screen
-        assert isinstance(question, OrphanDialog)
-        assert "Load and orphan 1 copy" in str(question.query_one("#go", Button).label)
-
-        await pilot.press("escape")
-        await pilot.pause()
-        assert cfg.terminals[TID_MASTER].role is Role.MASTER, "kept: nothing changed"
-
-        await pilot.press("enter")
-        await pilot.pause()
-        app.screen.query_one("#go", Button).press()
-        await pilot.pause()
-        assert cfg.terminals[TID_THIRD].role is Role.MASTER
-        assert app._engine.given_up == [(TID_SLAVE, [100])]  # type: ignore[attr-defined]
-
-
-async def test_a_setup_that_cannot_load_says_why_and_changes_nothing(
-    cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app = make_app(cfg, tmp_path, monkeypatch)
-    app._setups.setups["broken"] = Setup(master=TID_BROKEN)
-    async with app.run_test(size=(140, 50)) as pilot:
-        await pilot.press("w", "enter")
-        await pilot.pause()
-        assert isinstance(app.screen, SetupsScreen)
-        assert any("no terminal executable" in t for t in toasts(app))
-        assert cfg.terminals[TID_MASTER].role is Role.MASTER
-
-
-async def test_rename_and_delete(
-    cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app = make_app(cfg, tmp_path, monkeypatch)
-    app._setups.setups["old"] = Setup(master=TID_MASTER, slaves=(TID_SLAVE,))
-    async with app.run_test(size=(140, 50)) as pilot:
-        await pilot.press("w", "n", *["backspace"] * 3, *"new", "enter")
-        await pilot.pause()
-        assert set(app._setups.setups) == {"new"}
-
-        await pilot.press("x")
-        await pilot.pause()
-        app.screen.query_one("#go", Button).press()
-        await pilot.pause()
-        assert app._setups.setups == {}
-        assert setups_mod.load(tmp_path / "setups.json") == SetupsDoc()
-        assert cfg.terminals[TID_MASTER].role is Role.MASTER, "the roles in place stay"
-
-
-def fake_logins(
-    monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, int]], *, failing: int | None = None
-) -> None:
-    monkeypatch.setattr(
-        account_mod, "known_accounts", lambda tid: [Account(555, "X-Demo"), Account(666, "X-Demo")]
-    )
-
-    def log_in(exe: Path, acct: Account, log_file: Path) -> LoginResult:
-        calls.append((log_file.stem, acct.login))
-        if acct.login == failing:
-            return LoginResult(False, "login failed")
-        return LoginResult(True, "logged in", acct.login, acct.server)
-
-    monkeypatch.setattr(account_mod, "log_in", log_in)
-
-
-async def test_loading_a_setup_logs_a_terminal_into_its_account_first(
-    cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[tuple[str, int]] = []
-    fake_logins(monkeypatch, calls)
-    app = make_app(cfg, tmp_path, monkeypatch)
-    app._setups.setups["third"] = Setup(
-        master=TID_MASTER,
-        slaves=(TID_SLAVE, TID_THIRD),
-        accounts={TID_MASTER: 111, TID_SLAVE: 222, TID_THIRD: 555},
-    )
-    async with app.run_test(size=(140, 50)) as pilot:
-        await pilot.press("w", "enter")
-        await pilot.pause()
-        question = app.screen
-        assert isinstance(question, GuardConfirm)
-        assert "Delta Broker logs in to 555@X-Demo" in question._said
-        question.query_one("#go", Button).press()
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-
-        assert calls == [(f"login-{TID_THIRD[:8]}", 555)], "only the one on another account"
-        assert cfg.terminals[TID_THIRD].last_login == 555
-        assert cfg.terminals[TID_THIRD].role is Role.SLAVE
-        assert cfg.terminals[TID_SLAVE].role is Role.SLAVE
-        assert app._switching == set()
-        assert await toasted(pilot, "setup third loaded"), toasts(app)
-        assert setups_mod.current_name(app._setups, cfg, app._engine.logins()) == "third"
-
-
-async def test_a_terminal_that_cannot_log_in_is_left_unassigned(
-    cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[tuple[str, int]] = []
-    fake_logins(monkeypatch, calls, failing=555)
-    app = make_app(cfg, tmp_path, monkeypatch)
-    app._setups.setups["third"] = Setup(
-        master=TID_MASTER, slaves=(TID_SLAVE, TID_THIRD), accounts={TID_THIRD: 555}
-    )
-    async with app.run_test(size=(140, 50)) as pilot:
-        await pilot.press("w", "enter")
-        await pilot.pause()
-        app.screen.query_one("#go", Button).press()
-        await app.workers.wait_for_complete()
-        await pilot.pause()
-
-        assert cfg.terminals[TID_THIRD].role is Role.UNASSIGNED
-        assert cfg.terminals[TID_THIRD].last_login == 444, "still on the account it was on"
-        assert cfg.terminals[TID_SLAVE].role is Role.SLAVE, "the rest is loaded"
-        assert await toasted(pilot, "Delta Broker was not logged in"), toasts(app)
-
-
 # --- settings and the mode -------------------------------------------------------------------
 
 
@@ -518,35 +330,3 @@ def test_going_live_takes_live_typed_and_going_dry_does_not(
 
 def replace_dry(setup: Setup) -> Setup:
     return setup.model_copy(update={"dry_run": True})
-
-
-async def test_loading_a_live_setup_from_a_dry_run_asks_for_live_typed(
-    cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from mt5copier.tui.dialogs import GoLiveDialog
-
-    app = make_app(cfg, tmp_path, monkeypatch)
-    cfg.dry_run = True
-    app._setups.setups["live"] = Setup(
-        master=TID_MASTER, slaves=(TID_SLAVE,), copying=True, dry_run=False
-    )
-    async with app.run_test(size=(140, 50)) as pilot:
-        await pilot.press("w", "enter")
-        await pilot.pause()
-        question = app.screen
-        assert isinstance(question, GuardConfirm)
-        question.query_one("#go", Button).press()
-        await pilot.pause()
-        assert isinstance(app.screen, GoLiveDialog)
-        await pilot.press("escape")
-        await pilot.pause()
-        assert cfg.dry_run and not cfg.copying_enabled, "backing out changes nothing"
-
-        await pilot.press("enter")
-        await pilot.pause()
-        app.screen.query_one("#go", Button).press()
-        await pilot.pause()
-        await pilot.press(*"live", "enter")
-        await pilot.pause()
-        assert cfg.dry_run is False and cfg.copying_enabled
-        assert await toasted(pilot, "COPYING LIVE"), toasts(app)

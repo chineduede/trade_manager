@@ -1,7 +1,6 @@
 """Pure view-model logic: status tiers, row derivation, log-tail reading.
 
-No Textual app needed here -- that is the point of keeping ``presentation.py`` separate from
-``tui/app.py`` (see its module docstring).
+No UI needed here -- that is the point of ``presentation.py`` (see its module docstring).
 """
 
 from __future__ import annotations

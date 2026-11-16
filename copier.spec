@@ -22,17 +22,10 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 # The MT5 package is a C extension; take its DLLs as well as the module itself.
 mt5_binaries = collect_dynamic_libs("MetaTrader5")
 
-# Textual ships its widget stylesheets as package data (.tcss); without these the app starts
-# and then fails to render.
-textual_datas = collect_data_files("textual")
-
 datas = [
-    *textual_datas,
     # The IANA time zones a guard's daily reset is set in. Windows has no system zone
     # database, so zoneinfo reads this package's files; without them every zone fails to load.
     *collect_data_files("tzdata"),
-    # Our own stylesheet, at the path CSS_PATH resolves to inside the bundle.
-    ("src/mt5copier/tui/app.tcss", "mt5copier/tui"),
     # The desktop window's page: html, css, js and the vendored chart library, at the path
     # mt5copier.desktop resolves next to itself inside the bundle.
     ("src/mt5copier/desktop/web", "mt5copier/desktop/web"),
@@ -49,8 +42,9 @@ hiddenimports = [
     "mt5copier.worker",
     "mt5copier.protocol",
     "mt5copier.logging_setup",
-    # --desktop imports pywebview lazily, so the module graph never sees it; its Windows
-    # backend (WebView2 over the pythonnet clr) is loaded dynamically for the same reason.
+    # The desktop window imports pywebview lazily, so the module graph never sees it; its
+    # Windows backend (WebView2 over the pythonnet clr) is loaded dynamically for the same
+    # reason.
     "webview",
     "webview.platforms.edgechromium",
     "clr",
@@ -87,9 +81,11 @@ exe = EXE(
     strip=False,
     upx=False,  # UPX-packed exes get flagged by AV more often; the size saving is not worth it
     runtime_tmpdir=None,
-    # Console is required: this IS a terminal UI. A windowed build would have no tty and
-    # Textual would fail to start.
-    console=True,
+    # Windowed: the desktop window is the only UI, and a console flashing up behind it (or
+    # behind every spawned worker) is noise. The diagnostic flags (--list, --paths, --check)
+    # print nothing visible from a windowed exe; run them via `uv run python -m mt5copier`
+    # when the frozen build needs verifying.
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

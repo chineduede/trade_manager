@@ -2,7 +2,7 @@
 
 Everything the page shows is derived here from plain engine data -- a snapshot, the copies the
 store believes in, the orphans, the copy-health stats -- so what a row says can be tested
-without running Textual. The screen in ``tui/terminal_screen.py`` only draws it.
+without a window. The desktop detail page only draws it.
 
 Display only, end to end: nothing here feeds back into what is copied.
 """

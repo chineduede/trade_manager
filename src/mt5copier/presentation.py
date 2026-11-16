@@ -1,7 +1,7 @@
-"""Pure view-model logic for the TUI: status tiers, per-terminal display data, log tails.
+"""Pure view-model logic for the UI: status tiers, per-terminal display data, log tails.
 
-Kept separate from ``tui/app.py`` so the mapping from engine state to a display tier, and the
-log-tail arithmetic, can be unit tested without running Textual -- the same reason ``sizing.py``
+Kept separate from the desktop bridge so the mapping from engine state to a display tier, and
+the log-tail arithmetic, can be unit tested without a window -- the same reason ``sizing.py``
 and ``symbols.py`` stay pure and separate from the I/O-heavy modules.
 
 Status tiers reuse this project's own existing vocabulary (``protocol.WorkerState``,

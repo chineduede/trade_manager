@@ -7,7 +7,7 @@ drops the file's own copying lines for the stretch the day book covers. Before t
 (an earlier run of the app, which the day book does not remember) the file's lines are kept.
 
 Each entry is put down to a terminal where the line names one, so the page can be filtered to
-a single terminal. Pure: no Textual, no engine.
+a single terminal. Pure: no UI, no engine.
 """
 
 from __future__ import annotations

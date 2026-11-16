@@ -50,14 +50,16 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--desktop",
         action="store_true",
-        help="open the desktop window (the direct-trading page) instead of the TUI",
+        # The desktop window is the only UI now. The flag stays accepted because existing
+        # shortcuts pass it, and the profiles pill respawns this exe with it.
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--profile",
         metavar="NAME",
         default=None,
-        help="open this profile directly instead of showing the picker; "
-        "it must already exist (profiles are made in the picker)",
+        help="open this profile instead of the one that ran last; "
+        "it must already exist (profiles are made in the window's titlebar pill)",
     )
     return parser.parse_args(argv)
 
@@ -133,23 +135,13 @@ def main(argv: list[str] | None = None) -> int:
         if not profiles.exists(name):
             known = ", ".join(p.name for p in profiles.list_profiles())
             print(f"no profile called {name!r}. Profiles: {known}")
-            print("new profiles are made in the picker: run mt5copier with no --profile")
+            print("new profiles are made in the window's titlebar pill: run with no --profile")
             return 2
-    elif args.desktop:
-        # No terminal picker for a bare --desktop: the window manages profiles itself
-        # (the titlebar pill), so the launch opens whichever profile ran last -- the
-        # default until any other ever has. list_profiles puts the default first, and
-        # max keeps the first of equals.
-        name = max(profiles.list_profiles(), key=lambda p: p.last_opened or 0.0).name
     else:
-        # The picker runs before logging, the lock, and every path below: a person can sit
-        # on it while other profiles run, and quitting it starts nothing.
-        from .tui.picker import pick_profile
-
-        chosen = pick_profile()
-        if chosen is None:
-            return 0
-        name = chosen
+        # The window manages profiles itself (the titlebar pill), so a bare launch opens
+        # whichever profile ran last -- the default until any other ever has. list_profiles
+        # puts the default first, and max keeps the first of equals.
+        name = max(profiles.list_profiles(), key=lambda p: p.last_opened or 0.0).name
 
     set_active_profile(name)
     ensure_dirs()
@@ -159,23 +151,19 @@ def main(argv: list[str] | None = None) -> int:
     try:
         lock.acquire()
     except AlreadyRunningError as exc:
-        if args.desktop:
-            # A desktop launch of a profile whose window is already open: focus that
-            # window instead. The frozen exe has no console, so without this a second
-            # double-click would simply do nothing visible.
-            from .winfocus import focus_window_of_pid
+        # A launch of a profile whose window is already open: focus that window instead.
+        # The frozen exe has no console, so without this a second double-click would
+        # simply do nothing visible.
+        from .winfocus import focus_window_of_pid
 
-            pid = holder_pid(lock_path())
-            if pid is not None and focus_window_of_pid(pid):
-                return 0
+        pid = holder_pid(lock_path())
+        if pid is not None and focus_window_of_pid(pid):
+            return 0
         print(f"profile {active_profile()!r} is already running: {exc}")
         return 1
 
     try:
-        if args.desktop:
-            from .desktop import run
-        else:
-            from .tui import run
+        from .desktop import run
 
         run()
     except KeyboardInterrupt:

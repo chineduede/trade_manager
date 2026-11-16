@@ -1,6 +1,6 @@
 """Brings another copier instance's window to the front.
 
-Used at exactly one moment: ``--desktop`` is launched for a profile whose window is already
+Used at exactly one moment: the app is launched for a profile whose window is already
 open. The frozen exe has no console, so a printed refusal goes nowhere -- the honest answer
 to a second double-click is the first window, focused. The PID comes from the single-instance
 lock (:func:`mt5copier.single_instance.holder_pid`); this module only turns a PID into a
@@ -23,7 +23,7 @@ _SW_RESTORE = 9
 def focus_window_of_pid(pid: int) -> bool:
     """Focus the first visible, unowned top-level window belonging to ``pid``.
 
-    ``False`` when no such window exists -- the holder may be a TUI run, or mid startup or
+    ``False`` when no such window exists -- the holder may be mid startup or
     shutdown -- and the caller falls back to words. ``SetForegroundWindow`` can be demoted
     by Windows to a taskbar flash when this process lacks foreground rights; either way the
     person sees where the running window is, which is the point.

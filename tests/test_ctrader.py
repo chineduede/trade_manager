@@ -1481,66 +1481,7 @@ async def test_an_error_answer_raises() -> None:
         await api.stop()
 
 
-def test_the_menu_offers_a_ctrader_account_only_the_slave_role() -> None:
-    from mt5copier.tui.menu import terminal_actions
-
-    cfg = AppConfig()
-    config_mod.merge_ctrader_accounts(cfg, [(ACCOUNT, False, 1, "B")])
-    tcfg = cfg.terminals[config_mod.ctrader_terminal_id(ACCOUNT)]
-    without = terminal_actions(tcfg, has_master=False, orphans_waiting=False)
-    assert "m" not in [i.key for i in without]
-    assert any("only be a slave" in i.label for i in without)
-    keys = [i.key for i in terminal_actions(tcfg, has_master=True, orphans_waiting=False)]
-    assert "s" in keys
-    assert "m" not in keys and "i" not in keys
-
-
-# --- the login, through the UI -------------------------------------------------------------------
-
-
-async def test_t_logs_in_and_the_allowed_accounts_appear(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from textual.widgets import Input, Static
-    from tui_support import make_app, make_cfg
-
-    from mt5copier.tui.ctrader import CTraderDialog
-
-    creds_path = tmp_path / "ctrader.json"
-    monkeypatch.setattr(auth, "ctrader_path", lambda: creds_path)
-    used: list[auth.CTraderCredentials] = []
-
-    def fake_log_in(
-        creds: auth.CTraderCredentials, path: object = None, cancel: object = None
-    ) -> list[auth.CTraderAccount]:
-        used.append(creds)
-        return [auth.CTraderAccount(account_id=ACCOUNT, is_live=False, login=9001, broker="B")]
-
-    monkeypatch.setattr(auth, "log_in", fake_log_in)
-    cfg = make_cfg(tmp_path)
-    app = make_app(cfg, tmp_path, monkeypatch)
-    async with app.run_test() as pilot:
-        await pilot.press("t")
-        dialog = app.screen
-        assert isinstance(dialog, CTraderDialog)
-        assert dialog.query_one("#redirect", Input).value == auth.DEFAULT_REDIRECT_URI
-
-        await pilot.press("enter")
-        assert "both needed" in str(dialog.query_one("#error", Static).render())
-
-        dialog.query_one("#client-id", Input).value = "123_app"
-        dialog.query_one("#secret", Input).value = "s3cret"
-        dialog.query_one("#redirect", Input).focus()
-        await pilot.press("enter")
-        for _ in range(50):
-            await pilot.pause(0.02)
-            if config_mod.ctrader_terminal_id(ACCOUNT) in cfg.terminals:
-                break
-        assert used and used[0].client_id == "123_app"
-        assert auth.load(creds_path).client_secret == "s3cret"
-        tcfg = cfg.terminals[config_mod.ctrader_terminal_id(ACCOUNT)]
-        assert tcfg.role is Role.UNASSIGNED
-        assert config_mod.ctrader_terminal_id(ACCOUNT) in app._order
+# --- the browser login flow -------------------------------------------------------------------
 
 
 def test_a_localhost_redirect_is_answered_on_ipv4_and_ipv6() -> None:
@@ -1577,45 +1518,6 @@ def test_a_waiting_login_can_be_given_up() -> None:
     assert not thread.is_alive()
     assert time.monotonic() - began < 2
     assert isinstance(result["exc"], auth.LoginCancelled)
-
-
-async def test_t_while_a_login_waits_gives_it_up_and_asks_again(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from tui_support import make_app, make_cfg
-
-    from mt5copier.tui.ctrader import CTraderDialog
-
-    monkeypatch.setattr(auth, "ctrader_path", lambda: tmp_path / "ctrader.json")
-    auth.save(auth.CTraderCredentials(client_id="i", client_secret="s"), tmp_path / "ctrader.json")
-    given_up: list[bool] = []
-
-    def waits(
-        creds: auth.CTraderCredentials, path: object = None, cancel: Any = None
-    ) -> list[auth.CTraderAccount]:
-        assert cancel is not None
-        cancel.wait(10)
-        given_up.append(cancel.is_set())
-        raise auth.LoginCancelled("given up")
-
-    monkeypatch.setattr(auth, "log_in", waits)
-    app = make_app(make_cfg(tmp_path), tmp_path, monkeypatch)
-    async with app.run_test() as pilot:
-        await pilot.press("t")
-        assert isinstance(app.screen, CTraderDialog)
-        app.screen.query_one("#redirect").focus()
-        await pilot.press("enter")
-        await pilot.pause(0.1)
-        assert app._ctrader_cancel is not None
-
-        await pilot.press("t")
-        assert isinstance(app.screen, CTraderDialog)
-        for _ in range(50):
-            await pilot.pause(0.02)
-            if given_up:
-                break
-        assert given_up == [True]
-        assert app._ctrader_cancel is None
 
 
 # --- the deal history, for the guards ------------------------------------------------------------

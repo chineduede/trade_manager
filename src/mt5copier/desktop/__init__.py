@@ -1,11 +1,10 @@
-"""The pywebview desktop window: ``copier --desktop``.
+"""The pywebview desktop window -- the app's only UI.
 
-The first milestone of the desktop app decided 2026-11-14: one window holding the
-direct-trading page -- the ticket, a real candlestick chart with draggable levels, and the
-book. The TUI stays the default and keeps every other page; this grows page by page only
-if it proves out.
+It began 2026-11-14 as one window holding the direct-trading page -- the ticket, a real
+candlestick chart with draggable levels, and the book -- grew a page per TUI feature, and
+on 2026-11-16 replaced the TUI outright.
 
-Boot mirrors :func:`mt5copier.tui.run` exactly -- same config, same guards, same engine --
+Boot is what the TUI's ``run`` used to do -- same config, same guards, same engine --
 because the window is a view, not a different app. The WebView2 profile lives under this
 profile's own data directory, so side-by-side profiles stay isolated down to their
 browser storage, matching the engine-level claim locks.
@@ -82,7 +81,7 @@ def _serve_web(profile: str) -> str:
 
 def run() -> None:
     """Entry point: load config, fold in a discovery sweep, then hand over to the window."""
-    import webview  # heavy, and absent from TUI-only installs: imported only on --desktop
+    import webview  # heavy: imported only once a window is actually about to open
 
     from .api import DesktopApi
 

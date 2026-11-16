@@ -28,7 +28,8 @@ def configure(
 ) -> None:
     """Attach handlers to the root logger. Idempotent per log file.
 
-    ``to_stderr`` is off by default because the Textual UI owns the terminal; a stray
+    ``to_stderr`` is off by default because the app normally runs windowed, with no useful
+    stderr; a stray
     log line would corrupt the rendered frame.
     """
     key = str(log_file)

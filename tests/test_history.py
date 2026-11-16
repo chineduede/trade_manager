@@ -8,10 +8,8 @@ from pathlib import Path
 
 import pytest
 from test_day_book import TID_S1, TID_S2, action, pos, result
-from textual.widgets import Static
-from tui_support import TID_MASTER, TID_SLAVE, make_app, make_cfg, plain
 
-from mt5copier.config import AppConfig, Role
+from mt5copier.config import AppConfig
 from mt5copier.day_book import DayBook, MasterEvent, Outcome, SlaveOutcome
 from mt5copier.engine import Engine
 from mt5copier.history import (
@@ -25,7 +23,6 @@ from mt5copier.history import (
 )
 from mt5copier.protocol import ActionKind
 from mt5copier.reconcile import Action
-from mt5copier.tui.history import HistoryScreen, card_body, card_title
 
 DAY = 86400.0
 
@@ -218,77 +215,3 @@ def test_the_engine_keeps_what_the_day_book_settles(tmp_path: Path) -> None:
     eng._day.end_tick([], {})
     [trade] = eng.trade_history(TID_S1)
     assert trade.master_ticket == 11 and trade.status == "open"
-
-
-# --- the page --------------------------------------------------------------------------------
-
-
-@pytest.fixture
-def cfg(tmp_path: Path) -> AppConfig:
-    cfg = make_cfg(tmp_path)
-    cfg.set_role(TID_MASTER, Role.MASTER)
-    cfg.set_role(TID_SLAVE, Role.SLAVE)
-    return cfg
-
-
-def _trades() -> list[Trade]:
-    opened = replace(
-        step(1000.0, tid=TID_SLAVE, slave="1.37 lots at 86,019"), lots=1.37, action="opened"
-    )
-    refused = step(
-        2000.0,
-        ActionKind.MODIFY_SLTP,
-        tid=TID_SLAVE,
-        outcome=Outcome.REFUSED,
-        problem=True,
-        slave="invalid stops",
-    )
-    refused = replace(refused, action="stop/target change refused")
-    other = step(500.0, tid=TID_SLAVE, ticket=12, slave="opened 2 lots")
-    return [
-        Trade(TID_SLAVE, 11, "BTCUSD", "buy", (opened, refused)),
-        Trade(TID_SLAVE, 12, "BTCUSD", "buy", (other,)),
-    ]
-
-
-def test_a_card_says_each_step_in_order_once() -> None:
-    trade = _trades()[0]
-    assert card_title(trade) == " BTCUSD buy 1.37 lots · #11 "
-    body = card_body(trade)
-    text = plain(body)
-    assert text.index("OPENED  1.37 lots") < text.index("STOP/TARGET CHANGE REFUSED  invalid stops")
-    bold = [body.plain[sp.start : sp.end] for sp in body.spans if "bold" in str(sp.style)]
-    assert bold == ["OPENED", "STOP/TARGET CHANGE REFUSED"], "the action stands out"
-    assert text.count("BTCUSD") == 0, "the card's title names the trade; its lines do not"
-
-
-async def test_h_on_a_slave_opens_its_history(
-    cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app = make_app(cfg, tmp_path, monkeypatch)
-    app._engine.history[TID_SLAVE] = _trades()  # type: ignore[attr-defined]
-    async with app.run_test(size=(140, 50)) as pilot:
-        await pilot.press("1", "h")
-        await pilot.pause()
-        screen = app.screen
-        assert isinstance(screen, HistoryScreen)
-        cards = list(screen.query(".hs-card").results(Static))
-        assert len(cards) == 2
-        assert "STOP/TARGET CHANGE REFUSED  invalid stops" in plain(cards[0].content)
-        assert cards[0].has_class("-failed")
-
-        await pilot.press("f")
-        await pilot.pause()
-        assert len(screen.query(".hs-card")) == 1, "failed only"
-        await pilot.press("escape")
-        assert not isinstance(app.screen, HistoryScreen)
-
-
-async def test_h_on_the_master_says_history_is_per_slave(
-    cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    app = make_app(cfg, tmp_path, monkeypatch)
-    async with app.run_test(size=(140, 50)) as pilot:
-        await pilot.press("a", "h")
-        await pilot.pause()
-        assert not isinstance(app.screen, HistoryScreen)

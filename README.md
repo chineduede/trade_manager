@@ -22,7 +22,7 @@ done. See [Roadmap](#roadmap) and [Detection](#detection-stage-2a).
 
 ```bash
 uv sync
-uv run python -m mt5copier          # the TUI
+uv run python -m mt5copier          # the desktop window
 uv run python -m mt5copier --list   # passive terminal list, connects to nothing
 ```
 
@@ -265,7 +265,7 @@ partial-close ratios.
 
 JSON at `%APPDATA%\MT5Copier\config.json`, written atomically (temp file + `os.replace`).
 
-JSON rather than YAML is deliberate. The TUI is the primary editor, and round-tripping a
+JSON rather than YAML is deliberate. The app is the primary editor, and round-tripping a
 `model_dump()` through `yaml.dump` destroys every comment in the file — so a commented YAML
 config that the app also writes will quietly eat your notes. JSON has no comments to lose; the
 explanations live in this README instead. The file is indented and perfectly hand-editable.
@@ -343,7 +343,7 @@ src/mt5copier/
   store.py           SQLite ownership: which slave position is whose copy
   engine.py          supervisor: spawn, aggregate, diff, reconcile, dispatch
   presentation.py    view-model for the UI: status tiers, log tail
-  tui/               Textual UI: the map, the log, a page per terminal, dialogs, forms
+  desktop/           the pywebview window: the bridge (api.py) and the page (web/)
 launcher.py          frozen entry point (see note below)
 copier.spec          PyInstaller spec
 ```

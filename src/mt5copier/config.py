@@ -1,7 +1,7 @@
 """Configuration schema and persistence.
 
 Format is JSON, not YAML, and that is a deliberate reversal of the convention in ``zele-mt5``.
-There, config was commented YAML that only humans wrote; here the Textual UI is the primary
+There, config was commented YAML that only humans wrote; here the app itself is the primary
 editor, and round-tripping a ``model_dump()`` through ``yaml.dump`` destroys every comment in
 the file. JSON has no comments to lose, so the machine can own the file outright without
 quietly deleting the user's notes. Anything that needs explaining is explained in the README.
@@ -69,7 +69,7 @@ class AppMode(StrEnum):
     """What this profile is for: copying a real master, or trading directly from the app.
 
     Exclusive per profile, never both at once. In TRADING there is no master terminal at all;
-    the master's place is taken by a *virtual* book the person trades from the TUI, and every
+    the master's place is taken by a *virtual* book the person trades from the app, and every
     enabled slave copies it exactly as it would copy a real master. Switching modes requires
     no open copies, in the same spirit as the orphaning rule: the other mode's master has
     different tickets, so copies carried across would read as closes.

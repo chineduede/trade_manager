@@ -1,9 +1,8 @@
-"""Naming an account from either UI: the menu offer and the desktop bridge.
+"""Naming an account from the desktop bridge.
 
 ``settings_edit.rename`` itself -- stripping, clearing, keying by account -- is pinned in
 ``test_settings_edit.py``, and ``display_name``'s fallback chain in ``test_config.py``. What
-these pin is the wiring on top: when the menus offer a name at all, and what the desktop's
-``rename_account`` says and saves.
+these pin is the wiring on top: what the desktop's ``rename_account`` says and saves.
 """
 
 from __future__ import annotations
@@ -12,7 +11,6 @@ from pathlib import Path
 
 from mt5copier.config import AppConfig, Role, TerminalConfig, account_key
 from mt5copier.desktop.api import DesktopApi
-from mt5copier.tui.menu import terminal_actions
 
 TID = "A" * 32
 
@@ -34,20 +32,6 @@ def _terminal(role: Role = Role.UNASSIGNED, known: bool = True) -> TerminalConfi
         last_login=51234 if known else None,
         last_server="FTMO-Demo" if known else None,
     )
-
-
-# --- the menus offer a name only when there is an account to pin it to ----------------------
-
-
-def test_the_menu_offers_naming_only_when_an_account_is_known() -> None:
-    def keys(cfg: TerminalConfig) -> list[str]:
-        return [i.key for i in terminal_actions(cfg, has_master=True, orphans_waiting=False)]
-
-    assert "n" in keys(_terminal(Role.UNASSIGNED))
-    assert "n" in keys(_terminal(Role.SLAVE))
-    assert "n" in keys(_terminal(Role.MASTER))
-    assert "n" not in keys(_terminal(Role.UNASSIGNED, known=False))
-    assert "n" not in keys(_terminal(Role.SLAVE, known=False))
 
 
 # --- the desktop bridge ----------------------------------------------------------------------
