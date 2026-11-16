@@ -26,7 +26,7 @@ from .paths import (
     set_active_profile,
     user_data_dir,
 )
-from .single_instance import AlreadyRunningError, SingleInstanceLock
+from .single_instance import AlreadyRunningError, SingleInstanceLock, holder_pid
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -135,6 +135,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"no profile called {name!r}. Profiles: {known}")
             print("new profiles are made in the picker: run mt5copier with no --profile")
             return 2
+    elif args.desktop:
+        # No terminal picker for a bare --desktop: the window manages profiles itself
+        # (the titlebar pill), so the launch opens whichever profile ran last -- the
+        # default until any other ever has. list_profiles puts the default first, and
+        # max keeps the first of equals.
+        name = max(profiles.list_profiles(), key=lambda p: p.last_opened or 0.0).name
     else:
         # The picker runs before logging, the lock, and every path below: a person can sit
         # on it while other profiles run, and quitting it starts nothing.
@@ -153,6 +159,15 @@ def main(argv: list[str] | None = None) -> int:
     try:
         lock.acquire()
     except AlreadyRunningError as exc:
+        if args.desktop:
+            # A desktop launch of a profile whose window is already open: focus that
+            # window instead. The frozen exe has no console, so without this a second
+            # double-click would simply do nothing visible.
+            from .winfocus import focus_window_of_pid
+
+            pid = holder_pid(lock_path())
+            if pid is not None and focus_window_of_pid(pid):
+                return 0
         print(f"profile {active_profile()!r} is already running: {exc}")
         return 1
 
