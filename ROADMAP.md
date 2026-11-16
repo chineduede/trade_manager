@@ -1866,6 +1866,14 @@ picker — it opens the last-opened profile (the default until any other has run
 relaunch of a profile whose window is already open focuses that window and exits clean
 (`winfocus.py`; the frozen exe has no console for the old "already running" line).
 
+Also from the round: a Help page for the first-time user — a nav item at the sidebar's
+foot (and F1 from anywhere) opens a static page that says how copying works, walks the
+first run in order, gives one line per page and per always-on-screen piece (pill, Halt
+all, status bar, log dock), and defines the app's words (dry run, claimed, given up,
+breakeven, buffer, setup vs profile). With it, the one misleading empty state: a fresh
+profile's empty DETECTED zone used to say "every terminal found is assigned" — it now
+says none were found yet and points at Rescan and the cTrader login.
+
 - **Terminal detail Overview tab.** The TUI's `enter` page shows what the desktop detail
   page (settings forms only) does not: the three ruled columns — the ACCOUNT (kind, ping,
   connection), the RULE it is copied by (on the master: the slaves it feeds), and how
