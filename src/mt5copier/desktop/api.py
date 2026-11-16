@@ -18,7 +18,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
-from .. import account_switch, role_actions, shared_data
+from .. import __version__, account_switch, role_actions, shared_data
 from .. import config as config_mod
 from .. import profiles as profiles_mod
 from .. import setups as setups_mod
@@ -1150,6 +1150,12 @@ class DesktopApi:
         return {"ok": True, "message": msg}
 
     # --- profiles -----------------------------------------------------------------------------
+
+    def app_version(self) -> dict[str, Any]:
+        """The running build, for the Help page: the version from the one source, and
+        whether this is a source run (working against the dev data root, not the
+        installed app's)."""
+        return {"version": __version__, "dev": not is_frozen()}
 
     def profiles_state(self) -> dict[str, Any]:
         """The TUI picker's rows. profiles.list_profiles never reads a config through the

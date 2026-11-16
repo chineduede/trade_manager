@@ -5198,6 +5198,12 @@ function wire() {
 }
 
 function start() {
+  // Once, not polled: the build cannot change under a running window. A source run says
+  // so, because it works against the dev data root, not the installed app's.
+  api().app_version().then((v) => {
+    const el = document.getElementById('help-sub');
+    if (el && v && v.version) el.append(` · v${v.version}${v.dev ? ' · running from source (dev data)' : ''}`);
+  }).catch(() => {});
   makeChart();
   wire();
   showPage(S.page);
