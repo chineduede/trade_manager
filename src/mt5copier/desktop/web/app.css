@@ -675,6 +675,49 @@ body.dragging-terminals .zone-cue { display: inline-block; }
 .nc-event { font-weight: 600; }
 .nc-guard { font-size: 13px; }
 
+/* --- the history page --------------------------------------------------------------------
+   A card per copied trade, its steps a timeline under it; the colours are the TUI history
+   page's: a note blue, a problem red, a skip yellow, a dry run dim. */
+#hist-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 14px; }
+#hist-slave { flex: 0 0 220px; }
+#hist-symbol { flex: 0 0 170px; }
+#hist-find {
+  height: 36px; width: 200px; padding: 0 12px;
+  border-radius: 8px; border: 1px solid var(--border);
+  background: var(--panel-raise); color: var(--fg);
+  font-family: var(--mono); font-size: 13px;
+}
+#hist-cards { display: flex; flex-direction: column; gap: 14px; }
+#hist-cards:empty { display: none; }
+.hcard {
+  background: var(--panel); border: 1px solid var(--hairline); border-radius: 12px;
+  padding: 16px 20px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.hcard.failed { border-color: rgba(229, 100, 90, 0.45); }
+.hcard-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 14px; }
+.hcard-title { font-weight: 700; font-size: 16px; }
+.hcard-route { font-size: 12.5px; color: var(--muted); }
+.hsteps {
+  display: flex; flex-direction: column; gap: 6px;
+  border-left: 2px solid var(--hairline); padding-left: 14px;
+}
+.hstep { display: flex; flex-direction: column; gap: 2px; }
+.hstep-line { display: flex; align-items: baseline; gap: 10px; font-size: 13px; }
+.hstep-when { flex: 0 0 auto; min-width: 92px; text-align: right; color: var(--muted); }
+.hstep-body { min-width: 0; white-space: pre-wrap; }
+.hstep-act { font-weight: 700; }
+.hstep.tone-bad .hstep-act, .hstep.tone-bad .hstep-text { color: var(--red); }
+.hstep.tone-note .hstep-act, .hstep.tone-note .hstep-text { color: var(--blue); }
+.hstep.tone-warn .hstep-act { color: var(--yellow); }
+.hstep.tone-dim .hstep-act { color: var(--muted); }
+/* Under its step, pushed past the clock column: what the slave's guards did to it. */
+.hstep-guard {
+  font-size: 13px; color: var(--yellow);
+  padding-left: 102px; white-space: pre-wrap;
+}
+.pill.green { color: var(--green); }
+
 /* Picking lists and the rule form, inside the modal. */
 .pick-list { display: flex; flex-direction: column; gap: 2px; }
 .pick-head {

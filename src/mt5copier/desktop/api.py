@@ -18,11 +18,13 @@ from typing import TYPE_CHECKING, Any
 from .. import config as config_mod
 from .. import role_actions
 from ..config import AppMode, Role, SizingMode, TerminalConfig, account_key
+from ..day_book import Outcome
 from ..discovery import discover_terminals
 from ..guards import REGISTRY, GuardRule, GuardsDoc, Level
 from ..guards import model as guards_model
 from ..guards.base import money
 from ..guards.params import ZONE_HINT, ParamKind, ParamValue
+from ..history import NOTE
 from ..logging_setup import get_logger
 from ..news import HIGH, MEDIUM, symbol_currencies
 from ..paths import active_profile, guards_path
@@ -37,7 +39,7 @@ if TYPE_CHECKING:
     from ..config import AppConfig
     from ..engine import Engine, TerminalView
     from ..guards import RuleStatus
-    from ..history import GuardAction
+    from ..history import GuardAction, Step, Trade
     from ..news import NewsEvent
 
 log = get_logger(__name__)
@@ -1340,6 +1342,96 @@ class DesktopApi:
         if s < 86400:
             return f"in {s // 3600} h {(s % 3600) // 60} min"
         return f"in {s // 86400} d {(s % 86400) // 3600} h"
+
+    # --- the history page ------------------------------------------------------------------
+    # What became of each copied trade on each slave, read back from the on-disk history.
+    # The store keeps the facts and tui/history.py set the wording; the bridge only narrows
+    # to what the filter asks and hands the page ready-worded rows.
+
+    def history_state(self, tid: str, symbol: str, failed: bool, query: str) -> dict[str, Any]:
+        """Everything the History page redraws from: the copied trades that pass the
+        filter, the most recently copied first, each with every step taken with it --
+        and the filter's own choices (the slaves, the symbols seen), read from everything
+        kept so narrowing never hides where a choice would lead."""
+        cfg = self._cfg
+        now = time.time()
+        slaves = [
+            {"tid": t.terminal_id, "name": cfg.display_name(t.terminal_id)} for t in cfg.slaves
+        ]
+        tid = str(tid)
+        wanted = [str(s["tid"]) for s in slaves] if tid in ("", "all") else [tid]
+        kept: list[tuple[Trade, str]] = []
+        for one in wanted:
+            name = cfg.display_name(one)
+            kept.extend((trade, name) for trade in self._engine.trade_history(one))
+        kept.sort(key=lambda it: it[0].first, reverse=True)
+        symbols = sorted({t.symbol for t, _ in kept})
+        q = str(query).strip().lower()
+        matched = [
+            (t, name)
+            for t, name in kept
+            if (symbol in ("", "all") or t.symbol == symbol)
+            and (not failed or t.problems)
+            and (not q or q in f"#{t.master_ticket} {t.symbol} {t.label} {name}".lower())
+        ]
+        return {
+            "days": cfg.history_days,
+            "slaves": slaves,
+            "symbols": symbols,
+            "total": len(kept),
+            "matched": len(matched),
+            "trades": [self._trade_card(t, name, now) for t, name in matched[:_HISTORY_SHOWN]],
+        }
+
+    def _trade_card(self, trade: Trade, slave: str, now: float) -> dict[str, Any]:
+        entry = trade.entry
+        return {
+            "key": f"{trade.terminal_id}|{trade.master_ticket}",
+            "slave": slave,
+            "ticket": trade.master_ticket,
+            "symbol": trade.symbol,
+            "label": trade.label,
+            "lots": entry.lots if entry is not None else None,
+            "status": trade.status,
+            "problems": trade.problems,
+            "steps": [self._step_row(s, now) for s in trade.steps],
+        }
+
+    def _step_row(self, step: Step, now: float) -> dict[str, Any]:
+        return {
+            "when": self._step_when(step.ts, now),
+            "action": step.action,
+            "detail": step.slave,
+            "master": step.master,
+            "guard": step.guard,
+            "tone": _step_tone(step),
+        }
+
+    @staticmethod
+    def _step_when(ts: float, now: float) -> str:
+        """``23:08:15`` today, ``04 Oct 23:08`` before it -- the TUI history page's clock."""
+        here, today = time.localtime(ts), time.localtime(now)
+        if here[:3] == today[:3]:
+            return time.strftime("%H:%M:%S", here)
+        return time.strftime("%d %b %H:%M", here)
+
+
+_HISTORY_SHOWN = 100
+"""Cards sent to the page at most per answer; the counts say what the filter left out."""
+
+
+def _step_tone(step: Step) -> str:
+    """The colour tui/history.py's step_color gives the step, named for the page to style
+    by: a note blue, a problem red, a skip yellow, a dry run or a followed fill dim."""
+    if step.kind == NOTE:
+        return "note"
+    if step.problem:
+        return "bad"
+    if step.outcome in (Outcome.SKIPPED.value, Outcome.NOT_COPIED.value):
+        return "warn"
+    if step.outcome in (Outcome.DRY_RUN.value, Outcome.FOLLOWS.value):
+        return "dim"
+    return ""
 
 
 def _news_counts(p: dict[str, ParamValue], e: NewsEvent) -> bool:

@@ -33,7 +33,7 @@
       <a href="#" class="nav-item active" aria-current="page" data-page="trading" title="Trading"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg><span class="nav-label">Trading</span></a>
       <a href="#" class="nav-item" data-page="guards" title="Guards"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg><span class="nav-label">Guards</span></a>
       <a href="#" class="nav-item" data-page="news" title="News"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M16 2v4M8 2v4M3 10h18"></path></svg><span class="nav-label">News</span></a>
-      <a href="#" class="nav-item disabled" title="History — still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg><span class="nav-label">History</span></a>
+      <a href="#" class="nav-item" data-page="history" title="History"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg><span class="nav-label">History</span></a>
       <a href="#" class="nav-item disabled" title="Setups — still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg><span class="nav-label">Setups</span></a>
       <a href="#" class="nav-item disabled" title="Settings — still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg><span class="nav-label">Settings</span></a>
       <span class="sidebar-space"></span>
@@ -367,6 +367,32 @@
         <span class="muted">The guard acts only <span class="news-em">before</span> a release, never after a late start, and a copy it closed is never reopened by the master.</span>
         <span class="muted">If the calendar is unreadable, each rule decides whether new trades are held until the next successful scan — a rule parameter, per account on the Guards page.</span>
       </section>
+    </div>
+
+    <div class="page" id="page-history" hidden>
+      <div class="page-head">
+        <h1>Trade history</h1>
+        <span class="muted" id="hist-sub">One card per copied trade, its steps under it</span>
+      </div>
+
+      <div id="hist-filters" hidden>
+        <label class="flabel" id="hist-slave-label">Slave</label>
+        <div id="hist-slave" aria-labelledby="hist-slave-label"></div>
+        <label class="flabel" id="hist-symbol-label">Symbol</label>
+        <div id="hist-symbol" aria-labelledby="hist-symbol-label"></div>
+        <span class="tick-wrap">
+          <input id="hist-failed" type="checkbox">
+          <label for="hist-failed" class="flabel">With a failed step only</label>
+        </span>
+        <label class="flabel" for="hist-find">Find</label>
+        <input id="hist-find" placeholder="ticket, symbol…" spellcheck="false" autocomplete="off">
+        <span class="toolbar-space"></span>
+        <span class="muted small" id="hist-count"></span>
+      </div>
+
+      <div id="hist-cards"></div>
+      <div id="hist-empty" class="muted" hidden></div>
+      <div id="hist-more" class="muted small" hidden></div>
     </div>
     </main>
   </div>

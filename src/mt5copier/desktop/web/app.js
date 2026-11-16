@@ -881,7 +881,7 @@ var T = {
 };
 var modalOnConfirm = null;
 
-var PAGES = ['trading', 'terminals', 'guards', 'news'];
+var PAGES = ['trading', 'terminals', 'guards', 'news', 'history'];
 
 function showPage(name) {
   if (PAGES.indexOf(name) < 0) name = 'trading';
@@ -897,6 +897,7 @@ function showPage(name) {
   if (name === 'terminals') pollTerminals();
   if (name === 'guards') pollGuards();
   if (name === 'news') pollNews();
+  if (name === 'history') pollHistory();
 }
 
 var terminalsBusy = false;
@@ -2455,6 +2456,193 @@ function newsRow(e) {
   return row;
 }
 
+// --- the history page ----------------------------------------------------------------------
+// What became of each copied trade on each slave, read back from the on-disk history: a card
+// per copied trade, every step taken with it under it. The bridge narrows to the filter and
+// words every row; this page only asks and draws.
+var H = {
+  live: null,
+  drawn: '',
+  tid: 'all',       // 'all' or one slave's terminal id
+  symbol: 'all',    // 'all' or one symbol
+  failed: false,    // only trades with a failed step
+  find: '',         // substring of ticket / symbol / label / slave name
+  slaveDd: null, slaveKey: '',
+  symbolDd: null, symbolKey: ''
+};
+
+var histAsked = 0;   // stamps each ask, so a slow answer can never cover a newer one
+var histAnswered = 0;
+function pollHistory(fresh) {
+  if (!window.pywebview || S.page !== 'history') return;
+  if (!fresh && histAnswered < histAsked) return; // one in flight is enough for a poll
+  var stamp = ++histAsked;
+  api().history_state(H.tid, H.symbol, H.failed, H.find).then(function (live) {
+    if (stamp <= histAnswered) return;
+    histAnswered = stamp;
+    H.live = live;
+    renderHistory();
+  }, function () { if (stamp > histAnswered) histAnswered = stamp; });
+}
+
+function histFilterChanged() {
+  // The narrowing happens in the bridge, so a changed filter asks afresh at once.
+  H.drawn = '';
+  pollHistory(true);
+}
+
+var HIST_STATUS_TONE = {
+  open: 'blue', resting: 'blue', closed: 'green',
+  cancelled: 'muted', orphaned: 'yellow', 'not copied': 'red', seen: 'muted'
+};
+
+function renderHistory() {
+  var live = H.live;
+  if (!live) return;
+  var key = JSON.stringify(live);
+  if (key === H.drawn) return;
+  H.drawn = key;
+
+  $('hist-sub').textContent =
+    'One card per copied trade, its steps under it · kept ' + live.days + ' days';
+  $('hist-filters').hidden = !live.total && !live.slaves.length;
+
+  // The dropdowns, rebuilt only when their choices change under them.
+  var slaveKey = live.slaves.map(function (s) { return s.tid + '|' + s.name; }).join(',');
+  if (!H.slaveDd || H.slaveKey !== slaveKey) {
+    H.slaveKey = slaveKey;
+    var sChoices = [['all', 'All slaves']];
+    live.slaves.forEach(function (s) { sChoices.push([s.tid, s.name]); });
+    if (!sChoices.some(function (c) { return c[0] === H.tid; })) H.tid = 'all';
+    var sdd = makeChoiceDropdown({ value: H.tid, choices: sChoices }, function () {
+      H.tid = sdd.value();
+      histFilterChanged();
+    });
+    H.slaveDd = sdd;
+    var sRoot = $('hist-slave');
+    sRoot.textContent = '';
+    sRoot.appendChild(sdd.el);
+  }
+  var symbolKey = live.symbols.join(',');
+  if (!H.symbolDd || H.symbolKey !== symbolKey) {
+    H.symbolKey = symbolKey;
+    var yChoices = [['all', 'All symbols']];
+    live.symbols.forEach(function (s) { yChoices.push([s, s]); });
+    if (!yChoices.some(function (c) { return c[0] === H.symbol; })) H.symbol = 'all';
+    var ydd = makeChoiceDropdown({ value: H.symbol, choices: yChoices }, function () {
+      H.symbol = ydd.value();
+      histFilterChanged();
+    });
+    H.symbolDd = ydd;
+    var yRoot = $('hist-symbol');
+    yRoot.textContent = '';
+    yRoot.appendChild(ydd.el);
+  }
+
+  $('hist-count').textContent = live.matched === live.total
+    ? live.total + (live.total === 1 ? ' trade' : ' trades')
+    : live.matched + ' of ' + live.total;
+
+  var cards = $('hist-cards');
+  cards.textContent = '';
+  live.trades.forEach(function (t) { cards.appendChild(histCard(t)); });
+
+  var empty = $('hist-empty');
+  if (!live.total) {
+    empty.textContent = live.slaves.length
+      ? 'No trade copied yet: each one appears here when it is copied, with every step '
+        + 'taken with it after.'
+      : 'No slave yet — trades appear here as they are copied.';
+    empty.hidden = false;
+  } else if (!live.matched) {
+    empty.textContent = 'Nothing matches the filter.';
+    empty.hidden = false;
+  } else {
+    empty.hidden = true;
+  }
+
+  var more = $('hist-more');
+  more.hidden = live.matched <= live.trades.length;
+  if (!more.hidden) {
+    more.textContent = 'Showing the ' + live.trades.length
+      + ' most recently copied — narrow the filter to reach the older ones.';
+  }
+}
+
+function histCard(t) {
+  var card = document.createElement('article');
+  card.className = 'hcard' + (t.problems ? ' failed' : '');
+  card.setAttribute('aria-label', t.symbol + ' ' + t.label + ' on ' + t.slave);
+
+  var head = document.createElement('div');
+  head.className = 'hcard-head';
+  var title = document.createElement('span');
+  title.className = 'hcard-title';
+  title.appendChild(document.createTextNode(t.symbol + ' '));
+  var side = document.createElement('span');
+  side.className = t.label.indexOf('sell') === 0 ? 'red' : 'blue';
+  side.textContent = t.label + (t.lots === null || t.lots === undefined ? '' : ' ' + t.lots);
+  title.appendChild(side);
+  head.appendChild(title);
+  var route = document.createElement('span');
+  route.className = 'mono hcard-route';
+  route.textContent = 'master #' + t.ticket + ' → ' + t.slave;
+  head.appendChild(route);
+  head.appendChild(pill(t.status.toUpperCase(), HIST_STATUS_TONE[t.status] || 'muted'));
+  if (t.problems) head.appendChild(pill(t.problems + ' FAILED', 'red'));
+  card.appendChild(head);
+
+  var steps = document.createElement('div');
+  steps.className = 'hsteps';
+  t.steps.forEach(function (s) { steps.appendChild(histStep(s)); });
+  card.appendChild(steps);
+  return card;
+}
+
+function histStep(s) {
+  var row = document.createElement('div');
+  row.className = 'hstep' + (s.tone ? ' tone-' + s.tone : '');
+  var line = document.createElement('div');
+  line.className = 'hstep-line mono';
+  var when = document.createElement('span');
+  when.className = 'hstep-when';
+  when.textContent = s.when;
+  line.appendChild(when);
+  var body = document.createElement('span');
+  body.className = 'hstep-body';
+  if (s.action) {
+    var act = document.createElement('span');
+    act.className = 'hstep-act';
+    act.textContent = s.action.toUpperCase();
+    body.appendChild(act);
+    body.appendChild(document.createTextNode('  '));
+  }
+  var detail = document.createElement('span');
+  detail.className = 'hstep-text';
+  detail.textContent = s.detail;
+  body.appendChild(detail);
+  if (s.master) {
+    var m = document.createElement('span');
+    m.className = 'muted';
+    m.textContent = ' · ' + s.master;
+    body.appendChild(m);
+  }
+  line.appendChild(body);
+  row.appendChild(line);
+  if (s.guard) {
+    // Under its step, so a trade a guard resized never reads as sized that way.
+    var g = document.createElement('div');
+    g.className = 'hstep-guard mono';
+    var gw = document.createElement('span');
+    gw.className = 'hstep-act';
+    gw.textContent = 'GUARD';
+    g.appendChild(gw);
+    g.appendChild(document.createTextNode('  ' + s.guard));
+    row.appendChild(g);
+  }
+  return row;
+}
+
 // --- events --------------------------------------------------------------------------------
 function closeDropdowns() {
   document.querySelectorAll('.dd-menu').forEach(function (m) { m.hidden = true; });
@@ -2766,6 +2954,22 @@ function wire() {
       toast('The engine did not answer; try again.', 'bad');
     });
   });
+  // --- history page ---
+  $('hist-failed').addEventListener('change', function () {
+    H.failed = $('hist-failed').checked;
+    histFilterChanged();
+  });
+  var histFindTimer = null;
+  $('hist-find').addEventListener('input', function () {
+    clearTimeout(histFindTimer);
+    histFindTimer = setTimeout(function () {
+      var now = $('hist-find').value.trim();
+      if (now === H.find) return;
+      H.find = now;
+      histFilterChanged();
+    }, 250);
+  });
+
   function commitInitial() {
     var live = G.live;
     if (!live || !live.hasAccount) return;
@@ -2791,6 +2995,9 @@ function start() {
   setInterval(pollTerminals, 1000);
   setInterval(pollGuards, 1000);
   setInterval(pollNews, 1000);
+  // The history is an after-the-fact read of everything kept; two seconds is the TUI's
+  // own pace for it, and the answer is the heaviest poll the bridge serves.
+  setInterval(pollHistory, 2000);
 }
 
 if (window.pywebview) start();
