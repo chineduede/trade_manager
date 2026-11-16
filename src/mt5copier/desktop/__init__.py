@@ -32,6 +32,7 @@ from ..paths import (
     claims_dir,
     config_path,
     guards_path,
+    is_frozen,
     user_data_dir,
 )
 from ..setups import load as load_setups
@@ -104,6 +105,10 @@ def run() -> None:
     engine = Engine(cfg, guards=guards, claims=ClaimBook(claims_dir(), profile))
     api = DesktopApi(cfg, engine, guards, load_setups())
     title = "Copier" if profile == DEFAULT_PROFILE else f"Copier — {profile}"
+    if not is_frozen():
+        # A source run works against MT5Copier-Dev data (see paths.base_data_dir); say so in
+        # the taskbar so a dev window is never mistaken for the installed app.
+        title += " [dev]"
     window = webview.create_window(
         title,
         url=_serve_web(profile),

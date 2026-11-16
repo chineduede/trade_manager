@@ -3,7 +3,8 @@
 #   powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1 [-Rebuild]
 #
 # -Rebuild forces a fresh PyInstaller build even when dist\mt5copier.exe exists.
-# The version is read from pyproject.toml so the installer never drifts from the package.
+# The version is read from src\mt5copier\__init__.py (the single source; pyproject.toml
+# reads the same attribute) so the installer never drifts from the package.
 
 param([switch]$Rebuild)
 
@@ -11,10 +12,9 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-# The version is the single source of truth in pyproject.toml.
-$pyproject = Get-Content "pyproject.toml" -Raw
-if ($pyproject -notmatch '(?m)^version\s*=\s*"([^"]+)"') {
-    throw "could not read version from pyproject.toml"
+$initPy = Get-Content "src\mt5copier\__init__.py" -Raw
+if ($initPy -notmatch '(?m)^__version__\s*=\s*"([^"]+)"') {
+    throw "could not read __version__ from src\mt5copier\__init__.py"
 }
 $version = $Matches[1]
 
@@ -24,6 +24,11 @@ if ($Rebuild -or -not (Test-Path "dist\mt5copier.exe")) {
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
     Write-Host "REMINDER: read build\copier\warn-copier.txt before trusting the result."
 }
+
+# Sandbox the freshly built exe: with this marker beside it, a smoke-test run from dist\
+# writes to dist\data\ instead of the installed app's %APPDATA%\MT5Copier. The installer
+# packages the exe alone, so the marker never reaches an end user's machine.
+Set-Content -Path "dist\portable.txt" -Encoding ascii -Value "dev sandbox marker - a run from dist\ must not touch the installed app's data (see paths.base_data_dir)"
 
 # The WebView2 Evergreen bootstrapper (~2MB) rides inside the installer so a machine
 # without the runtime (pre-updated Windows 10, fresh images) gets it silently. Fetched at

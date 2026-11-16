@@ -52,6 +52,38 @@ powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1
 dist\mt5copier-setup-<version>.exe
 ```
 
+### Dev data vs. the installed app's data
+
+Development can never spoil the data of the installed app. `paths.base_data_dir()` keeps
+the worlds apart by how the process is running:
+
+| Run | Data root |
+|---|---|
+| Installed app | `%APPDATA%\MT5Copier` |
+| From source (`uv run ...`) | `%APPDATA%\MT5Copier-Dev` — window titled `[dev]` |
+| Fresh `dist\mt5copier.exe` | `dist\data\` (the build script plants `dist\portable.txt`; the installer ships the exe alone, so the marker never reaches a user) |
+| `MT5COPIER_DATA_DIR` set | exactly that directory, overriding all of the above |
+
+One caveat: the claim locks that stop two instances grabbing the same terminal live inside
+each data root, so a dev instance and the installed app cannot see each other's claims —
+don't aim both at the same terminals at once.
+
+### Releasing
+
+One version, in `src/mt5copier/__init__.py` (`__version__`); `pyproject.toml` and the build
+scripts all read it from there. To ship:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\release.ps1            # patch bump
+powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Bump minor
+powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 1.2.0
+```
+
+It refuses a dirty tree or a branch other than master, runs ruff + mypy + the test suite,
+bumps the version, commits and tags `vX.Y.Z`, rebuilds the exe and installer from scratch,
+and copies the result to `releases\mt5copier-setup-X.Y.Z.exe` — the shelf rebuilds never
+clean. What an end user receives is always a file from `releases\`.
+
 ### Non-interactive flags
 
 | Flag | Purpose |

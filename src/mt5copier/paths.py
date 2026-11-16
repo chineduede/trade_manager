@@ -20,6 +20,12 @@ Named rather than special-cased everywhere so the picker, the ``--profile`` flag
 files all call it one thing. Its data deliberately stays where it has always been -- a person
 who never touches profiles sees no migration and no new folder."""
 
+_DATA_DIR_ENV = "MT5COPIER_DATA_DIR"
+"""Hard override of :func:`base_data_dir`, for the rare run that must use a specific root --
+pointing a source checkout at the installed app's real data on purpose, or keeping a scratch
+root for an experiment. Highest priority: when set, portable markers and the dev split below
+are both ignored."""
+
 _PROFILE_ENV = "MT5COPIER_PROFILE"
 """How the chosen profile travels: an environment variable, not a module global.
 
@@ -44,14 +50,28 @@ def exe_dir() -> Path:
 def base_data_dir() -> Path:
     r"""The app's one writable root, shared by every profile.
 
-    Uses ``%APPDATA%\MT5Copier``. A ``portable.txt`` marker next to the exe switches to an
-    exe-adjacent ``data/`` folder instead, so the app can live on a USB stick.
+    The installed app uses ``%APPDATA%\MT5Copier``. Everything else is kept away from it,
+    so development can never spoil the data of the app a person actually uses:
+
+    - ``MT5COPIER_DATA_DIR`` set -> exactly that directory, no questions asked.
+    - A ``portable.txt`` marker next to the exe -> an exe-adjacent ``data/`` folder (USB
+      stick use, and what the build script plants in ``dist/`` so a freshly built exe
+      smoke-tests against its own sandbox -- the installer ships the exe alone, never the
+      marker, so an installed copy is unaffected).
+    - Running from source (not frozen) -> ``%APPDATA%\MT5Copier-Dev``.
+
+    One consequence to know: the cross-profile claim locks live under this root, so a dev
+    instance and the installed app cannot see each other's claims. Do not point both at the
+    same terminals at once.
     """
+    override = os.environ.get(_DATA_DIR_ENV, "").strip()
+    if override:
+        return Path(override)
     if (exe_dir() / "portable.txt").exists():
         return exe_dir() / "data"
     appdata = os.environ.get("APPDATA")
     base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
-    return base / APP_NAME
+    return base / (APP_NAME if is_frozen() else f"{APP_NAME}-Dev")
 
 
 def active_profile() -> str:

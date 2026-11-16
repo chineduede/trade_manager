@@ -1,6 +1,8 @@
 [project]
 name = "mt5copier"
-version = "0.1.0"
+# The one version lives in src/mt5copier/__init__.py (__version__); setuptools reads it from
+# there, and so do the build and release scripts. Nothing else states a version.
+dynamic = ["version"]
 description = "MT5 multi-terminal trade copier (Stage 1: discovery & designation)"
 requires-python = ">=3.13"
 dependencies = [
@@ -32,6 +34,9 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = { attr = "mt5copier.__version__" }
 
 [tool.ruff]
 line-length = 100

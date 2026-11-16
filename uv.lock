@@ -355,7 +355,6 @@ wheels = [
 
 [[package]]
 name = "mt5copier"
-version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "metatrader5", marker = "sys_platform == 'win32'" },

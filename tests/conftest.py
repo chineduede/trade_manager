@@ -25,3 +25,6 @@ def _isolated_user_data(
     # And no inherited profile: a developer running the suite from a shell that launched a
     # profile would otherwise aim every test at that profile's layout.
     monkeypatch.delenv("MT5COPIER_PROFILE", raising=False)
+    # Nor an inherited data-dir override: it outranks APPDATA, so a shell that set it would
+    # aim every test at that real directory.
+    monkeypatch.delenv("MT5COPIER_DATA_DIR", raising=False)
