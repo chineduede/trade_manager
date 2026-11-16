@@ -40,7 +40,12 @@ dist/mt5copier.exe
 
 Or the installer (needs Inno Setup: `winget install -e --id JRSoftware.InnoSetup`), which
 builds the exe first if it is missing, installs per-user with no UAC prompt, and whose
-uninstaller never touches `%APPDATA%\MT5Copier` — profiles and trade bookkeeping survive:
+uninstaller never touches `%APPDATA%\MT5Copier` — profiles and trade bookkeeping survive.
+It carries Microsoft's WebView2 bootstrapper and runs it only on a machine missing the
+runtime (that one install is per-machine, so it shows the single UAC prompt this installer
+can ever cause). The exe is unsigned, so a downloaded copy gets a SmartScreen warning
+(*More info → Run anyway*) until a code-signing certificate is bought. And the machine
+still needs MT5 terminals installed and logged in — the copier never handles passwords:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts\build_installer.ps1

@@ -22,7 +22,17 @@ if ($Rebuild -or -not (Test-Path "dist\mt5copier.exe")) {
     Write-Host "building dist\mt5copier.exe (PyInstaller)..."
     uv run pyinstaller copier.spec --noconfirm
     if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed" }
-    Write-Host "REMINDER: read build\mt5copier\warn-mt5copier.txt before trusting the result."
+    Write-Host "REMINDER: read build\copier\warn-copier.txt before trusting the result."
+}
+
+# The WebView2 Evergreen bootstrapper (~2MB) rides inside the installer so a machine
+# without the runtime (pre-updated Windows 10, fresh images) gets it silently. Fetched at
+# build time rather than committed; the fwlink is Microsoft's stable alias for it.
+$bootstrapper = "build\MicrosoftEdgeWebView2Setup.exe"
+if (-not (Test-Path $bootstrapper)) {
+    Write-Host "downloading WebView2 bootstrapper..."
+    New-Item -ItemType Directory -Force "build" | Out-Null
+    Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile $bootstrapper
 }
 
 # Find ISCC: PATH first, then the default install locations (per-user and per-machine).
