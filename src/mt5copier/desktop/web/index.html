@@ -34,7 +34,7 @@
       <a href="#" class="nav-item" data-page="guards" title="Guards"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg><span class="nav-label">Guards</span></a>
       <a href="#" class="nav-item" data-page="news" title="News"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M16 2v4M8 2v4M3 10h18"></path></svg><span class="nav-label">News</span></a>
       <a href="#" class="nav-item" data-page="history" title="History"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg><span class="nav-label">History</span></a>
-      <a href="#" class="nav-item disabled" title="Setups — still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg><span class="nav-label">Setups</span></a>
+      <a href="#" class="nav-item" data-page="setups" title="Setups"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg><span class="nav-label">Setups</span></a>
       <a href="#" class="nav-item disabled" title="Settings — still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg><span class="nav-label">Settings</span></a>
       <span class="sidebar-space"></span>
       <span class="sidebar-note">other pages live in the TUI for now · profiles are separate windows</span>
@@ -393,6 +393,52 @@
       <div id="hist-cards"></div>
       <div id="hist-empty" class="muted" hidden></div>
       <div id="hist-more" class="muted small" hidden></div>
+    </div>
+
+    <div class="page" id="page-setups" hidden>
+      <div class="page-head">
+        <h1>Setups</h1>
+        <span class="muted">who copies from whom, each terminal's account and settings — saved, to put back later</span>
+      </div>
+
+      <section aria-label="The roles in place now" class="panel" id="setups-now-panel">
+        <div id="setups-now-row">
+          <span class="now-k">NOW</span>
+          <span id="setups-now-roles"></span>
+          <span id="setups-now-state" class="small"></span>
+          <span class="toolbar-space"></span>
+          <button type="button" id="st-save" class="primary-btn">Save current as…</button>
+        </div>
+        <div id="setups-now-note" class="yellow small" hidden></div>
+      </section>
+
+      <section aria-label="Saved setups" class="panel" id="setups-panel">
+        <div class="panel-head">
+          <h2>Saved setups</h2>
+          <span class="muted small" id="setups-count"></span>
+        </div>
+        <div class="table-scroll">
+          <div role="table" aria-label="Saved setups" id="setups-table">
+            <div role="row" class="strow-head">
+              <span role="columnheader">SETUP</span>
+              <span role="columnheader">MASTER</span>
+              <span role="columnheader">SLAVES</span>
+              <span role="columnheader">COPYING</span>
+              <span role="columnheader">SAVED</span>
+            </div>
+            <div id="setups-rows"></div>
+          </div>
+        </div>
+        <div id="setups-empty" class="muted" hidden>No setups saved yet — Save current as… keeps the roles in place now, to put back later.</div>
+        <div id="setups-foot">
+          <span class="muted small">loading puts the saved state back, logging terminals into their accounts — live trading is never turned on by a setup, and going from a dry run to live asks for LIVE typed</span>
+          <span class="toolbar-space"></span>
+          <button type="button" id="st-load" class="primary-btn" disabled>Load</button>
+          <button type="button" id="st-update" class="plain-btn" disabled>Update with current</button>
+          <button type="button" id="st-rename" class="plain-btn" disabled>Rename</button>
+          <button type="button" id="st-delete" class="danger-btn" disabled>Delete</button>
+        </div>
+      </section>
     </div>
     </main>
   </div>

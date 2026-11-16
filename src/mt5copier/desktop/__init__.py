@@ -34,6 +34,7 @@ from ..paths import (
     guards_path,
     user_data_dir,
 )
+from ..setups import load as load_setups
 
 log = get_logger(__name__)
 
@@ -100,7 +101,7 @@ def run() -> None:
     log.info("config at %s (profile %s, desktop)", config_path(), profile)
 
     engine = Engine(cfg, guards=guards, claims=ClaimBook(claims_dir(), profile))
-    api = DesktopApi(cfg, engine, guards)
+    api = DesktopApi(cfg, engine, guards, load_setups())
     title = "Copier" if profile == DEFAULT_PROFILE else f"Copier — {profile}"
     window = webview.create_window(
         title,

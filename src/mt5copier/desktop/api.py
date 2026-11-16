@@ -11,12 +11,14 @@ the same contract the TUI's timer thread already exercises.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from .. import account_switch, role_actions
 from .. import config as config_mod
-from .. import role_actions
+from .. import setups as setups_mod
 from ..config import AppMode, Role, SizingMode, TerminalConfig, account_key
 from ..day_book import Outcome
 from ..discovery import discover_terminals
@@ -27,9 +29,10 @@ from ..guards.params import ZONE_HINT, ParamKind, ParamValue
 from ..history import NOTE
 from ..logging_setup import get_logger
 from ..news import HIGH, MEDIUM, symbol_currencies
-from ..paths import active_profile, guards_path
+from ..paths import active_profile, guards_path, log_dir, setups_path
 from ..presentation import row_info, slave_badge
 from ..protocol import CHART_TIMEFRAMES, OrderType, PendingOrder, Position, PositionType
+from ..setups import Setup, SetupsDoc
 from ..terminal_detail import margin_gauge
 from . import winframe
 
@@ -104,14 +107,25 @@ def _order_row(o: PendingOrder, now: float) -> dict[str, Any]:
 class DesktopApi:
     """One instance per window, handed to ``webview.create_window(js_api=...)``."""
 
-    def __init__(self, cfg: AppConfig, engine: Engine, guards: GuardsDoc | None = None) -> None:
+    def __init__(
+        self,
+        cfg: AppConfig,
+        engine: Engine,
+        guards: GuardsDoc | None = None,
+        setups: SetupsDoc | None = None,
+    ) -> None:
         self._cfg = cfg
         self._engine = engine
         # The same document the engine enforces from (see tui.run and desktop.run): edits
         # here are one assignment into it, and the file is written after, as the TUI does.
         self._guards_doc = guards if guards is not None else GuardsDoc()
+        self._setups = setups if setups is not None else SetupsDoc()
         self._window: webview.Window | None = None
         self._maximized = False
+        self._setup_busy = False
+        """Whether a setup is being loaded right now; its logins block that bridge thread
+        for a while, and a second load started under it would race the first."""
+        self._busy_lock = threading.Lock()
 
     def attach(self, window: webview.Window) -> None:
         self._window = window
@@ -1414,6 +1428,386 @@ class DesktopApi:
         if here[:3] == today[:3]:
             return time.strftime("%H:%M:%S", here)
         return time.strftime("%d %b %H:%M", here)
+
+    # --- the setups page ---------------------------------------------------------------------
+    # A setup is who copies from whom: the master, its slaves, the account each is logged
+    # into, every one's settings, and whether copying was on and live. What one holds is
+    # mt5copier/setups.py's and loading one is the engine's; the bridge words the page
+    # (tui/setups.py's own sentences) and runs the logins a load needs.
+
+    def _save_setups(self) -> str | None:
+        try:
+            setups_mod.save(self._setups, setups_path())
+        except OSError as exc:
+            log.exception("setups save failed")
+            return f"could not save the setups: {exc}; the change holds until the copier closes"
+        return None
+
+    def _setup_on_account(self, setup: Setup, tid: str) -> str:
+        """A terminal's name, and the account the setup has it on if it keeps one."""
+        login = setup.accounts.get(tid)
+        return setups_mod.name_of(self._cfg, tid) + (f" · {login}" if login is not None else "")
+
+    def _setup_slaves_text(self, setup: Setup) -> str:
+        if not setup.slaves:
+            return "none"
+        return ", ".join(self._setup_on_account(setup, tid) for tid in setup.slaves)
+
+    def _setup_describe(self, setup: Setup) -> str:
+        """The roles a setup puts in place, as the change a confirmation names."""
+        n = len(setup.slaves)
+        said = f"master {self._setup_on_account(setup, setup.master)}, "
+        said += f"{n} slave{'' if n == 1 else 's'}"
+        said += f" ({self._setup_slaves_text(setup)})" if n else ""
+        said += ", copying " + ("on" if setup.copying else "off")
+        if setup.dry_run is not None:
+            said += " (dry run)" if setup.dry_run else " (LIVE)"
+        if setup.settings:
+            said += ", settings as saved"
+        return said
+
+    @staticmethod
+    def _saved_when(ts: float, now: float) -> str:
+        """``today 13:35``, or the full date once it is not -- the TUI setups page's clock."""
+        here, today = time.localtime(ts), time.localtime(now)
+        if here[:3] == today[:3]:
+            return time.strftime("today %H:%M", here)
+        return time.strftime("%d %b %Y %H:%M", here)
+
+    def _account_called(self, key: str) -> str:
+        called = self._cfg.account_names.get(key)
+        return f"{called} ({key})" if called else key
+
+    def setups_state(self) -> dict[str, Any]:
+        """Everything the Setups page redraws from: the roles in place now against the
+        saved setups, and each setup's row with anything stopping it loading here."""
+        cfg = self._cfg
+        doc = self._setups
+        now = time.time()
+        logins = self._engine.logins()
+        live = setups_mod.capture(cfg, logins)
+        current = setups_mod.current_name(doc, cfg, logins)
+        changed: list[str] = []
+        if current is not None:
+            changed = [
+                setups_mod.name_of(cfg, t)
+                for t in setups_mod.changed_settings(doc.setups[current], cfg)
+            ]
+        rows = [
+            {
+                "name": name,
+                "master": self._setup_on_account(s, s.master),
+                "slaves": self._setup_slaves_text(s),
+                "copying": s.copying,
+                "dryRun": s.dry_run,
+                "saved": self._saved_when(s.saved_at, now),
+                "current": name == current,
+                "problems": setups_mod.problems(s, cfg, logins),
+            }
+            for name, s in sorted(doc.setups.items())
+        ]
+        return {
+            "direct": cfg.mode is AppMode.TRADING,
+            "now": self._setup_describe(live) if live is not None else None,
+            "current": current,
+            "changed": changed,
+            "loading": self._setup_busy,
+            "setups": rows,
+        }
+
+    def _captured_or_why(self) -> Setup | str:
+        """The roles in place now as a setup to save, or why there is nothing to save."""
+        if self._cfg.mode is AppMode.TRADING:
+            return "this profile trades directly; setups are a copy-mode thing"
+        live = setups_mod.capture(self._cfg, self._engine.logins())
+        if live is None:
+            return "no master is assigned: drag one into the MASTER zone before saving a setup"
+        return live
+
+    def setup_save(self, name: str) -> dict[str, Any]:
+        name = str(name or "").strip()
+        if not name:
+            return {"ok": False, "message": "give the setup a name"}
+        if name in self._setups.setups:
+            return {
+                "ok": False,
+                "message": f"{name} is already saved: pick it and press Update with current",
+            }
+        live = self._captured_or_why()
+        if isinstance(live, str):
+            return {"ok": False, "message": live}
+        self._setups.setups[name] = live
+        why = self._save_setups()
+        if why is not None:
+            return {"ok": False, "message": why}
+        return {"ok": True, "message": f"setup {name} saved"}
+
+    def setup_update(self, name: str) -> dict[str, Any]:
+        """Save an existing setup again as the roles in place now. The page asks first."""
+        name = str(name)
+        if name not in self._setups.setups:
+            return {"ok": False, "message": "that setup is gone"}
+        live = self._captured_or_why()
+        if isinstance(live, str):
+            return {"ok": False, "message": live}
+        self._setups.setups[name] = live
+        why = self._save_setups()
+        if why is not None:
+            return {"ok": False, "message": why}
+        return {"ok": True, "message": f"setup {name} updated"}
+
+    def setup_rename(self, old: str, new: str) -> dict[str, Any]:
+        old, new = str(old), str(new or "").strip()
+        setups = self._setups.setups
+        if old not in setups:
+            return {"ok": False, "message": "that setup is gone"}
+        if not new:
+            return {"ok": False, "message": "give the setup a name"}
+        if new == old:
+            return {"ok": True, "message": f"setup {old} keeps its name"}
+        if new in setups:
+            return {"ok": False, "message": f"a setup called {new} is already saved"}
+        setups[new] = setups.pop(old)
+        why = self._save_setups()
+        if why is not None:
+            return {"ok": False, "message": why}
+        return {"ok": True, "message": f"setup {old} renamed {new}"}
+
+    def setup_delete(self, name: str) -> dict[str, Any]:
+        """Forget a saved setup. The page asks first; the roles in place do not change."""
+        name = str(name)
+        if self._setups.setups.pop(name, None) is None:
+            return {"ok": False, "message": "that setup is already gone"}
+        why = self._save_setups()
+        if why is not None:
+            return {"ok": False, "message": why}
+        return {"ok": True, "message": f"setup {name} deleted"}
+
+    def setup_load_ask(self, name: str) -> dict[str, Any]:
+        """What loading this setup would do, for the page to ask with: the change as one
+        sentence, the copies it strands, and whether it turns the dry run live. Nothing
+        happens here; :meth:`setup_load` commits, and the engine re-checks everything."""
+        name = str(name)
+        setup = self._setups.setups.get(name)
+        if setup is None:
+            return {"ok": False, "message": "that setup is gone"}
+        if self._setup_busy:
+            return {"ok": False, "message": "a setup is already loading; wait for it to finish"}
+        cfg = self._cfg
+        if cfg.mode is AppMode.TRADING:
+            # problems() says this too, but with the TUI's key in the sentence.
+            return {
+                "ok": False,
+                "message": "this profile trades directly; setups are a copy-mode thing",
+            }
+        logins = self._engine.logins()
+        found = setups_mod.problems(setup, cfg, logins)
+        if found:
+            return {"ok": False, "message": f"setup {name} cannot be loaded: {'; '.join(found)}"}
+        if setups_mod.in_place(setup, cfg, logins):
+            return {"ok": False, "already": True, "message": f"setup {name} is already in place"}
+        # Unreadable reads as nothing to ask about; the engine reads again and refuses.
+        stake = self._engine.setup_stake(setup) or {}
+        changes = self._setup_describe(setup)
+        held = setups_mod.held_back(setup, cfg)
+        if held:
+            changes += (
+                "; live trading stays off on "
+                + ", ".join(cfg.display_name(t) for t in held)
+                + " (a setup never turns it on)"
+            )
+        switching: list[str] = []
+        logs_in: list[str] = []
+        for tid, login in setups_mod.switches(setup, logins).items():
+            account = setups_mod.find_account(cfg, tid, login)
+            if isinstance(account, str):  # problems() has checked; a race reads as a refusal
+                return {"ok": False, "message": f"setup {name} cannot be loaded: {account}"}
+            key = account_key(account.login, account.server) or ""
+            switching.append(cfg.display_name(tid))
+            logs_in.append(f"{cfg.display_name(tid)} logs in to {self._account_called(key)}")
+        if logs_in:
+            changes += "; " + ", ".join(logs_in)
+        dry_after = cfg.dry_run if setup.dry_run is None else setup.dry_run
+        return {
+            "ok": True,
+            "changes": changes,
+            "stake": [
+                {
+                    "tid": slave_tid,
+                    "name": cfg.display_name(slave_tid),
+                    "copies": [
+                        {
+                            "masterTicket": c.master_ticket,
+                            "slaveTicket": c.slave_ticket,
+                            "symbol": c.symbol,
+                            "volume": c.volume,
+                            "resting": c.resting,
+                        }
+                        for c in held_copies
+                    ],
+                }
+                for slave_tid, held_copies in stake.items()
+            ],
+            "goesLive": setups_mod.goes_live(setup, cfg),
+            "copying": setup.copying,
+            "live": setup.copying and not dry_after,
+            "slaves": [cfg.display_name(t) for t in setup.slaves if t in cfg.terminals],
+            "switching": switching,
+        }
+
+    def setup_load(
+        self, name: str, agreed: dict[str, list[int]] | None, go_live: bool
+    ) -> dict[str, Any]:
+        """Commit the load the page asked about: roles, settings, copying and the mode --
+        and first, any terminal the setup has on another account is logged into its saved
+        one, one at a time, blocking this bridge thread; the page's promise narrates while
+        it runs and the other polls keep arriving on their own threads.
+
+        ``agreed`` is what the person was shown and said yes to, per slave the master
+        tickets, exactly as the engine re-checks it. ``go_live`` only once LIVE has been
+        typed; without it the engine refuses a setup that turns the dry run live."""
+        with self._busy_lock:
+            if self._setup_busy:
+                return {
+                    "ok": False,
+                    "messages": [
+                        {"text": "a setup is already loading; wait for it to finish", "tone": "bad"}
+                    ],
+                }
+            self._setup_busy = True
+        try:
+            return self._setup_load(str(name), agreed, bool(go_live))
+        finally:
+            self._setup_busy = False
+
+    def _setup_load(
+        self, name: str, agreed: dict[str, list[int]] | None, go_live: bool
+    ) -> dict[str, Any]:
+        cfg = self._cfg
+
+        def refused(text: str) -> dict[str, Any]:
+            return {"ok": False, "messages": [{"text": text, "tone": "bad"}]}
+
+        setup = self._setups.setups.get(name)
+        if setup is None:
+            return refused("that setup is gone")
+        if cfg.mode is AppMode.TRADING:
+            return refused("this profile trades directly; setups are a copy-mode thing")
+        logins = self._engine.logins()
+        found = setups_mod.problems(setup, cfg, logins)
+        if found:
+            return refused(f"setup {name} was not loaded: {'; '.join(found)}")
+        accounts: dict[str, account_switch.Account] = {}
+        for tid, login in setups_mod.switches(setup, logins).items():
+            account = setups_mod.find_account(cfg, tid, login)
+            if isinstance(account, str):
+                return refused(f"setup {name} was not loaded: {account}")
+            accounts[tid] = account
+        orphan = (
+            {str(t): [int(n) for n in tickets] for t, tickets in agreed.items()} if agreed else None
+        )
+        held = setups_mod.held_back(setup, cfg)
+        refusal = self._engine.load_setup(
+            setup, orphan=orphan, leave_out=list(accounts), go_live=go_live
+        )
+        if refusal is not None:
+            return refused(f"setup {name} was not loaded: {refusal}")
+        messages: list[dict[str, str]] = []
+        why = self._persist()
+        if why is not None:
+            messages.append({"text": why, "tone": "bad"})
+        if held:
+            messages.append(
+                {
+                    "text": "live trading was allowed on "
+                    + ", ".join(cfg.display_name(t) for t in held)
+                    + " when the setup was saved; it stays off until you allow it from the"
+                    " terminal's own menu",
+                    "tone": "warn",
+                }
+            )
+        failed: list[str] = []
+        for tid, acct in accounts.items():
+            result = self._log_in(tid, acct)
+            key = account_key(acct.login, acct.server) or ""
+            if result.ok:
+                # Keep the account the login left the terminal on, as the one it was last on.
+                tcfg = cfg.terminals[tid]
+                cfg.replace_terminal(
+                    tcfg.model_copy(
+                        update={
+                            "last_login": result.login,
+                            "last_server": result.server or acct.server,
+                        }
+                    )
+                )
+                continue
+            failed.append(tid)
+            messages.append(
+                {
+                    "text": f"{cfg.display_name(tid)} was not logged in to "
+                    f"{self._account_called(key)}: {result.said}. It is left unassigned",
+                    "tone": "bad",
+                }
+            )
+        if accounts:
+            refusal = self._engine.load_setup(setup, leave_out=failed)
+            why = self._persist()
+            if why is not None:
+                messages.append({"text": why, "tone": "bad"})
+            if refusal is not None:
+                messages.append(
+                    {"text": f"setup {name} was not loaded in full: {refusal}", "tone": "bad"}
+                )
+                return {"ok": False, "messages": messages}
+            if setup.master in failed:
+                messages.append(
+                    {
+                        "text": f"setup {name} was not loaded: its master could not log in",
+                        "tone": "bad",
+                    }
+                )
+                return {"ok": False, "messages": messages}
+        said = f"{name} (all but what could not log in)" if failed else name
+        if not setup.copying:
+            messages.append({"text": f"setup {said} loaded; copying is off", "tone": "ok"})
+        elif cfg.dry_run:
+            messages.append(
+                {
+                    "text": f"setup {said} loaded; detection on: dry run, nothing will be sent",
+                    "tone": "ok",
+                }
+            )
+        else:
+            messages.append(
+                {
+                    "text": f"setup {said} loaded. COPYING LIVE: orders will be sent to every"
+                    " connected slave",
+                    "tone": "warn",
+                }
+            )
+        orphaned = sum(len(t) for t in (orphan or {}).values())
+        if orphaned:
+            messages.append(
+                {
+                    "text": f"{orphaned} cop{'y' if orphaned == 1 else 'ies'} orphaned: they stay"
+                    " open on their slaves and are no longer managed",
+                    "tone": "warn",
+                }
+            )
+        return {"ok": True, "messages": messages}
+
+    def _log_in(self, tid: str, acct: account_switch.Account) -> account_switch.LoginResult:
+        """Log one terminal in, blocking this bridge thread: each login starts its
+        terminal, and one at a time they need not compete."""
+        exe = self._cfg.terminals[tid].exe_path
+        if exe is None:  # problems() has checked usable; a race reads as a failed login
+            return account_switch.LoginResult(False, "it has no terminal executable")
+        try:
+            return account_switch.log_in(exe, acct, log_dir() / f"login-{tid[:8]}.log")
+        except Exception as exc:
+            log.exception("logging %s in to %s@%s failed", tid[:8], acct.login, acct.server)
+            return account_switch.LoginResult(False, f"the login process failed: {exc!r}")
 
 
 _HISTORY_SHOWN = 100

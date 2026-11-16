@@ -35,7 +35,7 @@ try {
   S.tf = localStorage.getItem('dt-tf') || 'M5';
   defaultRr = localStorage.getItem('dt-rr') || '';
   var savedPage = localStorage.getItem('dt-page');
-  if (savedPage === 'terminals' || savedPage === 'guards' || savedPage === 'news') S.page = savedPage;
+  if (['terminals', 'guards', 'news', 'history', 'setups'].indexOf(savedPage) >= 0) S.page = savedPage;
 } catch (e) { /* storage may be unavailable; defaults are fine */ }
 
 function rememberRr(text) {
@@ -881,7 +881,7 @@ var T = {
 };
 var modalOnConfirm = null;
 
-var PAGES = ['trading', 'terminals', 'guards', 'news', 'history'];
+var PAGES = ['trading', 'terminals', 'guards', 'news', 'history', 'setups'];
 
 function showPage(name) {
   if (PAGES.indexOf(name) < 0) name = 'trading';
@@ -898,6 +898,7 @@ function showPage(name) {
   if (name === 'guards') pollGuards();
   if (name === 'news') pollNews();
   if (name === 'history') pollHistory();
+  if (name === 'setups') pollSetups();
 }
 
 var terminalsBusy = false;
@@ -1592,6 +1593,7 @@ function showModal(opts) {
   ok.hidden = !opts.confirm;
   ok.textContent = opts.confirm || '';
   ok.className = opts.danger ? 'danger' : '';
+  ok.disabled = false; // a flow may disable it again until something is typed
   modalOnConfirm = opts.onConfirm || null;
   $('modal-back').hidden = false;
   if (opts.confirm) ok.focus();
@@ -2643,6 +2645,355 @@ function histStep(s) {
   return row;
 }
 
+// --- the setups page -------------------------------------------------------------------
+// Who copies from whom — the master, its slaves, the account each is logged into, every
+// one's settings, copying on or off and the mode — saved to put back later: the TUI w
+// page as a desktop table. What a setup holds and what loading one does are the
+// engine's; this page asks and draws, and every load is agreed to first.
+var W = {
+  live: null,
+  drawn: '',
+  selected: '',   // the selected setup's name
+  loading: ''     // the setup being loaded, while the bridge logs terminals in and applies it
+};
+
+var setupsBusy = false;
+function pollSetups() {
+  if (setupsBusy || !window.pywebview || S.page !== 'setups') return;
+  setupsBusy = true;
+  api().setups_state().then(function (live) {
+    setupsBusy = false;
+    W.live = live;
+    renderSetups();
+  }, function () { setupsBusy = false; });
+}
+
+function wact(promise) {
+  promise.then(function (r) {
+    toast(r.message, r.ok ? 'ok' : 'bad');
+    W.drawn = '';
+    pollSetups();
+  }, function () {
+    toast('The engine did not answer; try again.', 'bad');
+  });
+}
+
+function selSetup() {
+  var live = W.live;
+  if (!live) return null;
+  return live.setups.filter(function (s) { return s.name === W.selected; })[0] || null;
+}
+
+function renderSetups() {
+  var live = W.live;
+  if (!live) return;
+  var key = JSON.stringify(live) + '|' + W.selected + '|' + W.loading;
+  if (key === W.drawn) return;
+  W.drawn = key;
+
+  // The NOW strip: the roles in place, and whether they are a saved setup.
+  var roles = $('setups-now-roles');
+  var state = $('setups-now-state');
+  state.textContent = '';
+  if (live.direct) {
+    roles.textContent = 'this profile trades directly — setups are a copy-mode thing, saved and loaded while it copies';
+    roles.className = 'muted';
+  } else if (live.now === null) {
+    roles.textContent = 'no master assigned — drag one into the MASTER zone on Terminals';
+    roles.className = 'yellow';
+  } else {
+    roles.textContent = live.now;
+    roles.className = '';
+    if (live.current) {
+      var dot = document.createElement('span');
+      dot.className = 'strow-dot';
+      dot.textContent = '●';
+      state.appendChild(dot);
+      state.appendChild(document.createTextNode('setup ' + live.current));
+      state.className = 'small green';
+    } else {
+      state.textContent = 'not saved as a setup';
+      state.className = 'small yellow';
+    }
+  }
+  var note = $('setups-now-note');
+  note.hidden = !live.changed.length;
+  if (live.changed.length) {
+    note.textContent = 'settings changed since saved on ' + live.changed.join(', ')
+      + ' — Update with current keeps the change, loading puts the saved ones back';
+  }
+  $('st-save').disabled = live.direct || live.now === null || !!W.loading || !!live.loading;
+
+  $('setups-count').textContent = live.setups.length
+    ? live.setups.length + ' saved' : '';
+
+  if (!live.setups.some(function (s) { return s.name === W.selected; })) W.selected = '';
+  var rows = $('setups-rows');
+  rows.textContent = '';
+  live.setups.forEach(function (s) { rows.appendChild(setupRow(s)); });
+  $('setups-empty').hidden = !!live.setups.length;
+
+  var picked = selSetup();
+  var busy = !!W.loading || !!live.loading; // ours, or a load the bridge is still running
+  $('st-load').textContent = busy ? 'Loading…' : 'Load';
+  $('st-load').disabled = !picked || busy || !!(picked && picked.problems.length);
+  $('st-update').disabled = !picked || busy || live.direct || live.now === null;
+  $('st-rename').disabled = !picked || busy;
+  $('st-delete').disabled = !picked || busy;
+}
+
+function setupRow(s) {
+  var row = document.createElement('div');
+  row.className = 'strow' + (s.name === W.selected ? ' selected' : '');
+  row.setAttribute('role', 'row');
+
+  function cell(build) {
+    var el = document.createElement('span');
+    el.setAttribute('role', 'cell');
+    build(el);
+    row.appendChild(el);
+  }
+
+  cell(function (el) {
+    el.className = 'strow-name';
+    if (s.current) {
+      var dot = document.createElement('span');
+      dot.className = 'strow-dot';
+      dot.textContent = '● ';
+      dot.title = 'the roles in place now';
+      el.appendChild(dot);
+    }
+    el.appendChild(document.createTextNode(s.name));
+  });
+  cell(function (el) { el.textContent = s.master; el.title = s.master; });
+  cell(function (el) { el.textContent = s.slaves; el.title = s.slaves; });
+  cell(function (el) {
+    var on = document.createElement('span');
+    on.className = s.copying ? 'green' : 'muted';
+    on.textContent = s.copying ? 'on' : 'off';
+    el.appendChild(on);
+    // Which mode the setup puts back deserves a glance, not a dialog's small print.
+    if (s.dryRun === false) {
+      var hot = document.createElement('span');
+      hot.className = 'red';
+      hot.textContent = ' · LIVE';
+      el.appendChild(hot);
+    } else if (s.dryRun === true) {
+      var dry = document.createElement('span');
+      dry.className = 'muted';
+      dry.textContent = ' · dry run';
+      el.appendChild(dry);
+    }
+  });
+  cell(function (el) { el.className = 'muted'; el.textContent = s.saved; });
+
+  if (s.problems.length) {
+    var why = document.createElement('div');
+    why.className = 'strow-note';
+    why.textContent = 'cannot load: ' + s.problems.join('; ');
+    row.appendChild(why);
+  }
+
+  row.addEventListener('click', function () {
+    W.selected = s.name;
+    W.drawn = '';
+    renderSetups();
+  });
+  row.addEventListener('dblclick', function () {
+    if (!s.problems.length) loadSetupFlow(s.name);
+  });
+  return row;
+}
+
+function setupNameModal(title, confirmWord, initial, fn) {
+  var body = document.createElement('div');
+  var field = document.createElement('div');
+  field.className = 'field';
+  var label = document.createElement('label');
+  label.className = 'flabel';
+  label.setAttribute('for', 'st-name');
+  label.textContent = 'Setup name';
+  var input = document.createElement('input');
+  input.id = 'st-name';
+  input.autocomplete = 'off';
+  input.value = initial || '';
+  field.appendChild(label);
+  field.appendChild(input);
+  body.appendChild(field);
+  showModal({
+    title: title,
+    body: body,
+    confirm: confirmWord,
+    onConfirm: function () { fn(input.value); }
+  });
+  input.focus();
+  input.select();
+}
+
+function saveSetupFlow() {
+  var live = W.live;
+  if (!live || live.direct || live.now === null || W.loading) return;
+  setupNameModal('Save the roles in place now as', 'Save it', '', function (name) {
+    wact(api().setup_save(name));
+  });
+}
+
+function updateSetupFlow() {
+  var s = selSetup();
+  var live = W.live;
+  if (!s || !live || live.now === null || W.loading) return;
+  confirmModal(
+    'Update ' + s.name + '?',
+    s.name + ' is saved again as the roles in place now: ' + live.now + '.',
+    'Update it', false,
+    function () { wact(api().setup_update(s.name)); }
+  );
+}
+
+function renameSetupFlow() {
+  var s = selSetup();
+  if (!s || W.loading) return;
+  setupNameModal('Rename ' + s.name + ' to', 'Rename it', s.name, function (name) {
+    wact(api().setup_rename(s.name, name));
+  });
+}
+
+function deleteSetupFlow() {
+  var s = selSetup();
+  if (!s || W.loading) return;
+  confirmModal(
+    'Delete ' + s.name + '?',
+    'The saved setup is forgotten. The roles in place now do not change.',
+    'Delete it', true,
+    function () { wact(api().setup_delete(s.name)); }
+  );
+}
+
+function loadSetupFlow(name) {
+  if (W.loading) return;
+  api().setup_load_ask(name).then(function (a) {
+    if (!a.ok) { toast(a.message, a.already ? '' : 'bad'); return; }
+
+    var body = document.createElement('div');
+    var p = document.createElement('p');
+    p.textContent = 'The roles become: ' + a.changes + '.';
+    body.appendChild(p);
+
+    var stake = a.stake || [];
+    var agreed = null;
+    var total = 0;
+    if (stake.length) {
+      agreed = {};
+      var warn = document.createElement('p');
+      warn.textContent = 'These copies stay open and stop being managed — nothing will close '
+        + 'them with the master, move their stops, or mirror partials. They become yours to '
+        + 'close by hand.';
+      body.appendChild(warn);
+      stake.forEach(function (s) {
+        agreed[s.tid] = s.copies.map(function (cp) { return cp.masterTicket; });
+        total += s.copies.length;
+        var h = document.createElement('div');
+        h.className = 'modal-sub';
+        h.textContent = s.name;
+        body.appendChild(h);
+        s.copies.forEach(function (cp) {
+          var line = document.createElement('div');
+          line.className = 'modal-line mono';
+          line.textContent = (cp.resting ? 'resting · ' : '') + cp.symbol
+            + (cp.volume ? ' · ' + cp.volume + ' lots' : '')
+            + (cp.slaveTicket ? ' · #' + cp.slaveTicket : '');
+          body.appendChild(line);
+        });
+      });
+    }
+    if (a.live && !a.goesLive) {
+      var hot = document.createElement('p');
+      hot.className = 'red';
+      hot.textContent = 'Copying starts LIVE: orders will be sent to the slaves.';
+      body.appendChild(hot);
+    }
+    showModal({
+      title: 'Load setup ' + name + '?',
+      body: body,
+      confirm: total
+        ? 'Load — orphan ' + total + (total === 1 ? ' copy' : ' copies')
+        : 'Load it',
+      danger: !!total || a.live,
+      onConfirm: function () {
+        if (a.goesLive) goLiveModal(name, a, agreed);
+        else commitSetupLoad(name, a, agreed, false);
+      }
+    });
+  }, function () { toast('The engine did not answer; try again.', 'bad'); });
+}
+
+function goLiveModal(name, a, agreed) {
+  // The copier's own gate, as the TUI's GoLiveDialog: a dry run turns into live copying
+  // only with LIVE typed; the engine refuses the load without it.
+  var body = document.createElement('div');
+  var p1 = document.createElement('p');
+  p1.textContent = 'Setup ' + name + ' was saved copying live'
+    + (a.copying
+      ? ', with copying on: it starts as soon as the setup is loaded.'
+      : ', with copying off: nothing is sent until copying is resumed.');
+  body.appendChild(p1);
+  if (a.slaves.length) {
+    var p2 = document.createElement('p');
+    p2.className = 'red';
+    p2.textContent = 'Real orders will be sent to: ' + a.slaves.join(', ') + '.';
+    body.appendChild(p2);
+  }
+  var field = document.createElement('div');
+  field.className = 'field';
+  var label = document.createElement('label');
+  label.className = 'flabel';
+  label.setAttribute('for', 'st-live-word');
+  label.textContent = 'Type LIVE to load it live';
+  var input = document.createElement('input');
+  input.id = 'st-live-word';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  field.appendChild(label);
+  field.appendChild(input);
+  body.appendChild(field);
+  showModal({
+    title: 'Go live?',
+    body: body,
+    confirm: 'Load it LIVE',
+    danger: true,
+    onConfirm: function () { commitSetupLoad(name, a, agreed, true); }
+  });
+  var ok = $('modal-confirm');
+  ok.disabled = true;
+  input.addEventListener('input', function () {
+    ok.disabled = input.value.trim() !== 'LIVE';
+  });
+  input.focus();
+}
+
+function commitSetupLoad(name, a, agreed, goLive) {
+  W.loading = name;
+  W.drawn = '';
+  renderSetups();
+  if (a.switching.length) {
+    toast('Logging ' + a.switching.join(', ') + ' in first — this can take a minute…', '', 12000);
+  }
+  function back() {
+    W.loading = '';
+    W.drawn = '';
+    pollSetups();
+  }
+  api().setup_load(name, agreed, goLive).then(function (r) {
+    back();
+    (r.messages || []).forEach(function (m) {
+      toast(m.text, m.tone, m.tone === 'ok' ? 4500 : 9000);
+    });
+  }, function () {
+    back();
+    toast('The engine did not answer; try again.', 'bad');
+  });
+}
+
 // --- events --------------------------------------------------------------------------------
 function closeDropdowns() {
   document.querySelectorAll('.dd-menu').forEach(function (m) { m.hidden = true; });
@@ -2752,6 +3103,10 @@ function wire() {
     if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') {
       if (S.mode === 'new' && ev.target.id.indexOf('f-') === 0) placeOrder();
       else if (S.mode === 'modify' && ev.target.id.indexOf('m-') === 0) applyModify();
+      else if (ev.target.id === 'st-name' || ev.target.id === 'st-live-word') {
+        var ok = $('modal-confirm');
+        if (!ok.hidden && !ok.disabled) ok.click();
+      }
     }
     if (ev.key === 'Escape') {
       closeDropdowns();
@@ -2970,6 +3325,16 @@ function wire() {
     }, 250);
   });
 
+  // --- setups page ---
+  $('st-save').addEventListener('click', saveSetupFlow);
+  $('st-load').addEventListener('click', function () {
+    var s = selSetup();
+    if (s) loadSetupFlow(s.name);
+  });
+  $('st-update').addEventListener('click', updateSetupFlow);
+  $('st-rename').addEventListener('click', renameSetupFlow);
+  $('st-delete').addEventListener('click', deleteSetupFlow);
+
   function commitInitial() {
     var live = G.live;
     if (!live || !live.hasAccount) return;
@@ -2998,6 +3363,7 @@ function start() {
   // The history is an after-the-fact read of everything kept; two seconds is the TUI's
   // own pace for it, and the answer is the heaviest poll the bridge serves.
   setInterval(pollHistory, 2000);
+  setInterval(pollSetups, 1000);
 }
 
 if (window.pywebview) start();
