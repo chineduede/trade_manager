@@ -392,7 +392,7 @@ function compute() {
   var halted = S.live && !S.live.copying;
   var problem = '';
   if (!S.live) problem = 'Starting…';
-  else if (!S.live.direct) problem = 'This profile copies a master — switch it to direct trading in the TUI first.';
+  else if (!S.live.direct) problem = 'This profile copies a master — switch it to direct trading on the Settings page first.';
   else if (halted) problem = 'Copying is halted. Resume to place orders.';
   else if (!S.symbol) problem = 'Name the symbol to trade.';
   else if (!q) problem = S.live.feed ? 'Waiting for ' + S.live.feed + ' to quote ' + S.symbol + '…'
@@ -1577,7 +1577,7 @@ function menuItems(c, live) {
       does('Make it the master', function () { tact(api().assign_master(c.tid)); });
     }
     if (c.isCtrader) {
-      says('a cTrader account logs in from the TUI');
+      does('Log in to cTrader…', ctraderLoginFlow);
     } else if (c.loggingIn) {
       says('logging in — the card says when it is done');
     } else if (c.canSwitch) {
@@ -1778,6 +1778,106 @@ function accountLoginFlow(c) {
         }
       };
     }));
+  }, function () {
+    toast('The engine did not answer; try again.', 'bad');
+  });
+}
+
+function ctraderLoginFlow() {
+  // The TUI's t flow: the Open API app's details, then the browser does the login and the
+  // allowed accounts land under DETECTED. The bridge call blocks for as long as the person
+  // takes in the browser, so the start and the outcome each get a toast; asking again
+  // while one waits gives the waiting login up first (the bridge's own rule).
+  api().ctrader_login_state().then(function (s) {
+    var body = document.createElement('div');
+    var p = document.createElement('p');
+    p.textContent = 'Your browser opens on cTrader’s login. Tick the accounts the '
+      + 'copier may use; they appear under DETECTED, and only ever as slaves.';
+    body.appendChild(p);
+    if (s.loggedIn) {
+      var now = document.createElement('p');
+      now.className = 'muted';
+      now.textContent = 'Logged in now, with ' + s.accounts + ' account'
+        + (s.accounts === 1 ? '' : 's') + '. Logging in again picks them afresh.';
+      body.appendChild(now);
+    }
+    if (s.waiting) {
+      var waiting = document.createElement('p');
+      waiting.className = 'yellow';
+      waiting.textContent = 'A login is already waiting in the browser. Logging in again '
+        + 'gives it up.';
+      body.appendChild(waiting);
+    }
+    var sub = document.createElement('p');
+    sub.className = 'modal-sub';
+    sub.textContent = 'The Open API app (openapi.ctrader.com):';
+    body.appendChild(sub);
+
+    function field(labelText, id, value, placeholder, password) {
+      var wrap = document.createElement('div');
+      wrap.className = 'field';
+      var label = document.createElement('label');
+      label.className = 'flabel';
+      label.setAttribute('for', id);
+      label.textContent = labelText;
+      var input = document.createElement('input');
+      input.id = id;
+      input.className = 'mono';
+      input.autocomplete = 'off';
+      input.spellcheck = false;
+      if (password) input.type = 'password';
+      input.value = value || '';
+      if (placeholder) input.placeholder = placeholder;
+      wrap.appendChild(label);
+      wrap.appendChild(input);
+      body.appendChild(wrap);
+      return input;
+    }
+    var idInput = field('Client id', 'ct-client-id', s.clientId);
+    var secretInput = field('Secret', 'ct-secret', '',
+      s.hasSecret ? 'unchanged — the saved secret is used' : '', true);
+    var redirectInput = field('Redirect URI', 'ct-redirect', s.redirectUri);
+
+    var note = document.createElement('p');
+    note.className = 'muted small';
+    note.textContent = 'The redirect URI must be exactly as registered with the app, on '
+      + '127.0.0.1 or localhost. The id and secret are kept encrypted in ctrader.json, '
+      + 'not in the config.';
+    body.appendChild(note);
+    var err = document.createElement('p');
+    err.className = 'red small';
+    body.appendChild(err);
+
+    function go() {
+      var clientId = idInput.value.trim();
+      var secret = secretInput.value.trim();
+      var redirect = redirectInput.value.trim();
+      var problem = null;
+      if (!clientId || !(secret || s.hasSecret)) {
+        problem = 'The client id and the secret are both needed.';
+      } else if (redirect.indexOf('http://127.0.0.1:') !== 0
+        && redirect.indexOf('http://localhost:') !== 0) {
+        problem = 'The redirect URI must be http://127.0.0.1:<port>/… or localhost.';
+      }
+      if (problem) {
+        // The confirm closed the modal; the same body, values intact, comes back with
+        // the problem under the fields.
+        err.textContent = problem;
+        showModal({ title: 'Log in to cTrader', body: body, confirm: 'Log in', onConfirm: go });
+        return;
+      }
+      toast('Log in to cTrader in your browser…', '', 10000);
+      api().ctrader_login(clientId, secret, redirect).then(function (r) {
+        toast(r.message, r.ok ? 'ok' : 'bad', 9000);
+        T.drawn = '';
+        pollTerminals();
+      }, function () {
+        toast('The engine did not answer; try again.', 'bad');
+      });
+    }
+
+    showModal({ title: 'Log in to cTrader', body: body, confirm: 'Log in', onConfirm: go });
+    (s.clientId ? redirectInput : idInput).focus();
   }, function () {
     toast('The engine did not answer; try again.', 'bad');
   });
@@ -4415,6 +4515,7 @@ function wire() {
   });
 
   // --- terminals page ---
+  $('ctrader-btn').addEventListener('click', ctraderLoginFlow);
   $('rescan-btn').addEventListener('click', function () {
     if (T.rescanning) return;
     T.rescanning = true;

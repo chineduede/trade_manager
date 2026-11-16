@@ -31,6 +31,7 @@ from ..config import (
     record_login,
 )
 from ..copy_stats import TerminalStats
+from ..ctrader import auth as ctrader_auth
 from ..day_book import MasterEvent, Outcome
 from ..discovery import discover_terminals
 from ..general_edit import (
@@ -196,6 +197,9 @@ class DesktopApi:
         self._logging_in: set[str] = set()
         """Terminals an account login is running for, each blocking its own bridge thread;
         asking for a second login on one is refused while the first still runs."""
+        self._ctrader_cancel: threading.Event | None = None
+        """Set while a cTrader login waits for the browser, blocking its bridge thread.
+        Logging in again gives that one up first, the TUI t key's own behaviour."""
         self._log_cache: tuple[object, list[LogEntry]] = (None, [])
         """``copier.log`` as entries, with what the file looked like when it was read."""
         self._switchable: dict[str, tuple[float, bool]] = {}
@@ -872,7 +876,7 @@ class DesktopApi:
                 "belong to the account it is logged into, and unassigning asks about them"
             )
         if tcfg.is_ctrader:
-            return f"{name} is a cTrader account: log it in from the TUI"
+            return f"{name} is a cTrader account: its login is the cTrader login on Terminals"
         if tcfg.exe_path is None:
             return f"{name} has no terminal executable"
         with self._busy_lock:
@@ -975,6 +979,79 @@ class DesktopApi:
         if why is not None:
             message += f" — {why}"
         return {"ok": True, "message": message}
+
+    # --- the cTrader login --------------------------------------------------------------------
+
+    def ctrader_login_state(self) -> dict[str, Any]:
+        """What the login dialog fills from. The saved secret never reaches the page:
+        ``hasSecret`` says one exists, and a blank secret on login keeps using it."""
+        creds = ctrader_auth.load()
+        return {
+            "clientId": creds.client_id,
+            "redirectUri": creds.redirect_uri,
+            "hasSecret": bool(creds.client_secret),
+            "loggedIn": creds.logged_in,
+            "accounts": len(creds.accounts),
+            "waiting": self._ctrader_cancel is not None,
+        }
+
+    def ctrader_login(self, client_id: str, secret: str, redirect: str) -> dict[str, Any]:
+        """The TUI t flow, whole, on this bridge thread: save the app's details, open the
+        browser on cTrader's login, wait for the redirect, exchange the code, list the
+        allowed accounts and fold them into the terminals. Blocks for as long as the person
+        takes in the browser; asked again meanwhile, the waiting login is given up first."""
+        client_id = str(client_id).strip()
+        secret = str(secret).strip()
+        redirect = str(redirect).strip()
+        creds = ctrader_auth.load()
+        if not secret:
+            secret = creds.client_secret
+        if not client_id or not secret:
+            return {"ok": False, "message": "The client id and the secret are both needed."}
+        if not redirect.startswith(("http://127.0.0.1:", "http://localhost:")):
+            return {
+                "ok": False,
+                "message": "The redirect URI must be http://127.0.0.1:<port>/... or localhost.",
+            }
+        creds = creds.model_copy(
+            update={"client_id": client_id, "client_secret": secret, "redirect_uri": redirect}
+        )
+        ctrader_auth.save(creds)
+        with self._busy_lock:
+            waiting = self._ctrader_cancel
+            if waiting is not None:
+                waiting.set()
+            cancel = threading.Event()
+            self._ctrader_cancel = cancel
+        try:
+            accounts = ctrader_auth.log_in(creds, cancel=cancel)
+        except ctrader_auth.LoginCancelled:
+            return {"ok": False, "message": "the waiting cTrader login was given up"}
+        except ctrader_auth.LoginError as exc:
+            return {"ok": False, "message": str(exc)}
+        except Exception as exc:
+            log.exception("cTrader login failed")
+            return {"ok": False, "message": f"the login failed: {exc!r}"}
+        finally:
+            with self._busy_lock:
+                if self._ctrader_cancel is cancel:
+                    self._ctrader_cancel = None
+        added = config_mod.merge_ctrader_accounts(
+            self._cfg, [(a.account_id, a.is_live, a.login, a.broker) for a in accounts]
+        )
+        why = self._persist()
+        # A worker reads the token when it connects; one already running has the old one.
+        for tcfg in self._cfg.assigned():
+            if tcfg.is_ctrader:
+                self._engine.reconnect(tcfg.terminal_id)
+        if not accounts:
+            return {"ok": False, "message": "cTrader login done, but no account was ticked"}
+        msg = f"cTrader: {len(accounts)} account{'s' if len(accounts) != 1 else ''} allowed"
+        if added:
+            msg += f", {len(added)} new under DETECTED: drag one into SLAVES"
+        if why is not None:
+            msg += f" — {why}"
+        return {"ok": True, "message": msg}
 
     # --- the guards page --------------------------------------------------------------------
 
