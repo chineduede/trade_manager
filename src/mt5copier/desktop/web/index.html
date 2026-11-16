@@ -38,6 +38,7 @@
       <a href="#" class="nav-item" data-page="setups" title="Setups"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg><span class="nav-label">Setups</span></a>
       <a href="#" class="nav-item" data-page="settings" title="Settings"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg><span class="nav-label">Settings</span></a>
       <span class="sidebar-space"></span>
+      <a href="#" class="nav-item" data-page="help" title="Help — F1"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01"></path></svg><span class="nav-label">Help</span></a>
       <span class="sidebar-note">profiles are separate windows</span>
     </nav>
 
@@ -912,6 +913,65 @@
         </section>
       </div>
       </div>
+    </div>
+
+    <div class="page" id="page-help" hidden>
+      <div class="page-head">
+        <h1>Help</h1>
+        <span class="muted">how the copier hangs together · F1 opens this page from anywhere</span>
+      </div>
+
+      <section aria-label="How copying works" class="panel">
+        <div class="panel-head"><h2>How copying works</h2></div>
+        <p class="help-p">One account leads and the rest follow. Every trade the <strong>master</strong> makes — each open, change and close — is copied to every enabled <strong>slave</strong>, sized by that slave's own settings. A profile can instead trade directly: then there is no master terminal — the Trading page's order ticket leads, and what it places goes to the slaves the same way.</p>
+        <p class="help-p">Everything starts as a <strong>dry run</strong>: the copier works out every copy and logs it, but sends nothing. Orders only become real when the profile goes live, on Settings — and going live asks you to type LIVE.</p>
+      </section>
+
+      <section aria-label="Starting from nothing" class="panel">
+        <div class="panel-head"><h2>Starting from nothing</h2></div>
+        <ol class="help-steps">
+          <li><strong>Find your terminals.</strong> On Terminals, Rescan lists every MT5 terminal running on this machine; a cTrader account joins through cTrader login…. Drag a card up into MASTER or SLAVES to give it a role.</li>
+          <li><strong>Put accounts on them.</strong> A card's log in link signs a terminal into a saved account; a terminal already logged in inside MT5 is picked up as it is. One account runs on one terminal at a time.</li>
+          <li><strong>Tune each terminal on its own page.</strong> Click a card: risk sizing, breakeven, symbol decoration and the rest live there — each terminal keeps its own.</li>
+          <li><strong>Check the copier's switches on Settings.</strong> What the profile is, dry run or live, timings. Stay in the dry run until the Log and History show the copies you expect.</li>
+          <li><strong>Then go live — and keep the arrangement.</strong> Save it on Setups under a name, so this exact wiring can be put back later with one click.</li>
+        </ol>
+      </section>
+
+      <section aria-label="The pages" class="panel">
+        <div class="panel-head"><h2>The pages</h2></div>
+        <dl class="help-dl">
+          <dt>Terminals</dt><dd>every terminal as a card in three zones — the master, the slaves, and the detected ones not yet used. Drag to assign, right-click for actions, click a card for its own page.</dd>
+          <dt>Trading</dt><dd>the direct-trading ticket: place, modify, partly close or flatten — and every enabled slave copies it. Greyed out unless the profile trades directly.</dd>
+          <dt>Guards</dt><dd>rules that watch an account — daily loss, drawdown, lot caps and the rest — and decline, shrink or stop trades before a limit is reached. Rules belong to the account, and follow it to any terminal.</dd>
+          <dt>News</dt><dd>the week's Forex Factory releases, and what the news rule will do about each one — close or breakeven copies minutes before the release, if the rule is on.</dd>
+          <dt>History</dt><dd>one card per copied trade with every step under it: placed, filled, changed, closed, and anything a guard did along the way. Money stays in the terminal — no P/L here, on purpose.</dd>
+          <dt>Setups</dt><dd>saved arrangements: who copies from whom, each terminal's account and settings. Loading puts one back; it never turns live trading on by itself.</dd>
+          <dt>Settings</dt><dd>the copier's own switches, for every terminal: what the profile is, dry run or live, connection timings. A save lands whole or not at all.</dd>
+        </dl>
+      </section>
+
+      <section aria-label="Always on screen" class="panel">
+        <div class="panel-head"><h2>Always on screen</h2></div>
+        <dl class="help-dl">
+          <dt>Profile pill</dt><dd>profiles are separate copiers — each its own window, terminals, settings and guards. The pill (top left) opens another, or makes, renames and deletes them.</dd>
+          <dt>Halt all</dt><dd>stops this profile's copying at once; nothing more is sent until the same button resumes it.</dd>
+          <dt>Status bar</dt><dd>worker and feed health, what is being copied, and a DRY RUN badge whenever nothing real is sent.</dd>
+          <dt>Log</dt><dd>the Log button raises a dock under every page — the copier's log and day book merged, narrowed to one terminal, problems only, or a word.</dd>
+        </dl>
+      </section>
+
+      <section aria-label="Words the app uses" class="panel">
+        <div class="panel-head"><h2>Words the app uses</h2></div>
+        <dl class="help-dl">
+          <dt>dry run</dt><dd>the copier does everything but send: each would-be copy is worked out and logged, so the wiring can be judged safely.</dd>
+          <dt>claimed</dt><dd>a terminal in use by one profile window is claimed, so a second window cannot drive it too. “In use elsewhere” on a card means exactly that; a stale claim clears itself within seconds.</dd>
+          <dt>given up</dt><dd>a copy left open but no longer managed — nothing will close or change it. Only unassigning or disabling a slave gives copies up; editing settings never does.</dd>
+          <dt>breakeven</dt><dd>the stop moved to the entry plus costs once a trade is far enough ahead, so it can no longer lose.</dd>
+          <dt>buffer</dt><dd>a guard acts at its buffer, deliberately short of the firm's hard limit — the tick mark on each rule's bar.</dd>
+          <dt>setup vs profile</dt><dd>a setup is a saved arrangement inside this profile; a profile is a whole separate copier with a window of its own.</dd>
+        </dl>
+      </section>
     </div>
     </main>
   </div>

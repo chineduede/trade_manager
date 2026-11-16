@@ -961,7 +961,7 @@ var T = {
 };
 var modalOnConfirm = null;
 
-var PAGES = ['trading', 'terminals', 'guards', 'news', 'history', 'setups', 'settings', 'tdetail'];
+var PAGES = ['trading', 'terminals', 'guards', 'news', 'history', 'setups', 'settings', 'help', 'tdetail'];
 
 function showPage(name) {
   if (PAGES.indexOf(name) < 0) name = 'trading';
@@ -1046,6 +1046,13 @@ function renderTerminals() {
   var dc = $('detected-cards');
   dc.textContent = '';
   live.detected.forEach(function (c) { dc.appendChild(terminalCard(c, live)); });
+  // An empty zone means two different things: on a working profile every terminal is in
+  // use, but on a fresh one nothing has been found at all — say which, or the first
+  // thing a new user reads is "every terminal is assigned" over an empty app.
+  $('detected-note').textContent =
+    (live.detected.length || live.master || live.virtual || live.slaves.length)
+      ? 'every terminal found is assigned · Rescan looks again'
+      : 'none found yet — start your MT5 terminals and Rescan; a cTrader account joins through cTrader login…';
   $('detected-note').hidden = live.detected.length > 0;
 
   // A rebuild replaced the card the open popover was anchored to; hand it the new
@@ -1479,6 +1486,7 @@ function wirePop(el, c) {
 
 document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape') hidePop();
+  if (e.key === 'F1') { e.preventDefault(); showPage('help'); }
 });
 window.addEventListener('scroll', function () {
   if (P.tid) hidePop();
