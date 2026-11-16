@@ -49,6 +49,7 @@ from ..config import (
     Role,
     TerminalConfig,
     account_key,
+    record_login,
 )
 from ..ctrader import auth as ctrader_auth
 from ..day_book import (
@@ -967,13 +968,10 @@ class CopierApp(App[None]):
     def _record_login(
         self, tid: str, acct: account_mod.Account, result: account_mod.LoginResult
     ) -> None:
-        """Keep the account a login left the terminal on, as the one it was last on."""
+        """Keep the account a login left the terminal on, as the one it was last on.
+        ``record_login`` also withdraws the live override when a known account was left."""
         tcfg = self._cfg.terminals[tid]
-        self._cfg.replace_terminal(
-            tcfg.model_copy(
-                update={"last_login": result.login, "last_server": result.server or acct.server}
-            )
-        )
+        self._cfg.replace_terminal(record_login(tcfg, result.login, result.server or acct.server))
 
     def _logged_in(
         self, tid: str, acct: account_mod.Account, result: account_mod.LoginResult

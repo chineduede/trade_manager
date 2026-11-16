@@ -439,6 +439,23 @@ def account_key(login: int | None, server: str | None) -> str | None:
     return f"{login}@{server or ''}"
 
 
+def record_login(tcfg: TerminalConfig, login: int | None, server: str | None) -> TerminalConfig:
+    """The terminal's config as it should read after a login landed it on this account.
+
+    ``last_login``/``last_server`` follow, and the live-trading override is withdrawn when a
+    *known* account was left for a different one: the override was typed and confirmed while
+    the terminal was on that account, and the one it moved to never got that confirmation.
+    Landing on an account where none was known is learning, not a switch, so the override is
+    kept -- a portable install whose account discovery cannot read would otherwise lose a
+    deliberate override on its first connection.
+    """
+    update: dict[str, object] = {"last_login": login, "last_server": server}
+    was = account_key(tcfg.last_login, tcfg.last_server)
+    if tcfg.allow_live_trading and was is not None and was != account_key(login, server):
+        update["allow_live_trading"] = False
+    return tcfg.model_copy(update=update)
+
+
 class AppConfig(BaseModel):
     """Root config document."""
 
@@ -462,6 +479,12 @@ class AppConfig(BaseModel):
     heartbeat_timeout_s: float = Field(default=15.0, gt=0)
     """A worker whose newest snapshot is older than this is shown as stale, not merely
     disconnected -- it distinguishes "terminal lost its broker" from "our process wedged"."""
+
+    rescan_interval_s: float = Field(default=120.0, ge=10, le=3600)
+    """How often terminals are re-discovered from disk, so an *unassigned* terminal's card
+    follows a login made in MT5 itself without the rescan button. Connected terminals do not
+    need it -- their workers report the account live -- and the sweep is passive directory
+    reading, so the floor only guards against hammering a slow disk."""
 
     reconnect_backoff_s: list[float] = Field(default_factory=lambda: [1.0, 2.0, 5.0, 10.0, 30.0])
     """Backoff schedule for reconnect attempts; the last value repeats indefinitely."""

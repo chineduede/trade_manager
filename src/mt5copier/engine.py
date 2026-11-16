@@ -44,6 +44,7 @@ from .config import (
     TerminalClosing,
     TerminalConfig,
     account_key,
+    merge_discovery,
 )
 from .config import (
     save as save_config,
@@ -51,6 +52,7 @@ from .config import (
 from .copy_stats import StatsBook, TerminalStats
 from .ctrader.worker import run_ctrader_worker
 from .day_book import DayBook, MasterEvent, Outcome, SlaveOutcome
+from .discovery import discover_terminals
 from .guards import NO_VERDICT, GuardBook, GuardReport, GuardsDoc, Verdict
 from .guards.book import CloseAct, NewsAct
 from .history import ORPHANED, GuardAction, HistoryStore, Trade, step_for
@@ -283,6 +285,11 @@ class Engine:
         a *new* orphan appearing later re-arms the hold instead of inheriting the old consent."""
         self._hold_reason: dict[str, str] = {}
         self._warned_dry_missing: set[str] = set()
+        self._seen_account: dict[str, str] = {}
+        """Per terminal: the account key its *current worker* last reported. A switch is a
+        change between a worker's own snapshots, never a disagreement with the config -- a
+        rescan can regress the config off a stale ``common.ini``, and that must read as
+        bookkeeping to quietly correct, not as an account switch to react to."""
 
         # --- dispatch ------------------------------------------------------------------------
         self._command_ids = itertools.count(1)
@@ -358,6 +365,8 @@ class Engine:
         self._virtual_seq = 0
         self._virtual_thread: threading.Thread | None = None
         self._stop_virtual = threading.Event()
+        self._rescan_thread: threading.Thread | None = None
+        self._stop_rescan = threading.Event()
         self._feed_tid: str | None = None
         """The terminal whose quotes feed the book, as last picked: the pinned one when it is
         connected, else any connected MT5 slave. Remembered only to announce changes."""
@@ -388,6 +397,12 @@ class Engine:
                 target=self._virtual_loop, name="engine-virtual", daemon=True
             )
             self._virtual_thread.start()
+        if self._rescan_thread is None:
+            self._stop_rescan.clear()
+            self._rescan_thread = threading.Thread(
+                target=self._rescan_loop, name="engine-rescan", daemon=True
+            )
+            self._rescan_thread.start()
         self._calendar.start()
         self.sync()
 
@@ -403,6 +418,7 @@ class Engine:
             self._stop_worker(tid, close_terminal=True)
         self._stop_drain.set()
         self._stop_virtual.set()
+        self._stop_rescan.set()
         self._calendar.stop()
         thread = self._drain_thread
         if thread is not None:
@@ -412,6 +428,10 @@ class Engine:
         if vthread is not None:
             vthread.join(timeout=2.0)
             self._virtual_thread = None
+        rthread = self._rescan_thread
+        if rthread is not None:
+            rthread.join(timeout=2.0)
+            self._rescan_thread = None
         self._history.close()
         if self._claims is not None:
             self._claims.release_all()
@@ -626,6 +646,10 @@ class Engine:
             self._claims.release(list(self._claimed.pop(terminal_id, ())))
         self._snapshots.pop(terminal_id, None)
         self._received_at.pop(terminal_id, None)
+        # The next worker's first report is learning, not a switch: whatever happened in the
+        # terminal while no worker watched it was not watched, the same rule join_grace
+        # applies to trades (startup reconciliation owns that gap).
+        self._seen_account.pop(terminal_id, None)
         self._stats.on_worker_gone(terminal_id)
         # A worker that died or restarted may have missed closes, so its slave has to be
         # matched against the store again before anything is derived for it.
@@ -687,7 +711,10 @@ class Engine:
                 self._snapshots[snap.terminal_id] = snap
                 self._received_at[snap.terminal_id] = time.monotonic()
                 self._stats.on_state(snap.terminal_id, snap.state, now=time.monotonic())
-                self._record_account(snap)
+                if not self._record_account(snap):
+                    # A slave switched under its role was just unassigned and its worker
+                    # stopped: nothing further is filed for it this tick.
+                    continue
                 self._guards.observe(account_key(snap.login, snap.server), snap, time.time())
                 self._judge(snap)
                 self._reconcile(snap)
@@ -707,8 +734,9 @@ class Engine:
         worker = self._workers.get(snap.terminal_id)
         return worker is not None and getattr(worker.process, "pid", None) == snap.worker_pid
 
-    def _record_account(self, snap: Snapshot) -> None:
-        """Keep ``last_login``/``last_server`` tracking the account the worker actually sees.
+    def _record_account(self, snap: Snapshot) -> bool:
+        """Keep ``last_login``/``last_server`` tracking the account the worker actually sees,
+        and react when what it sees is a *switch* made under a role.
 
         A person can log a connected terminal into another account from MT5 itself, under a
         running worker, and the snapshot is the first and only place that shows. Left
@@ -717,18 +745,42 @@ class Engine:
         under the account the terminal left. Discovery corrects the config too, but only on a
         rescan and only off ``common.ini``; a live worker should not need either. Saved at
         once: rare, and a crash before an incidental save would resurrect the stale account.
-        Caller must hold the lock. cTrader snapshots echo the config's own server back, so for
-        them this never fires.
+
+        A *switch* is a change between the current worker's own reports (``_seen_account``),
+        never a disagreement with the config: the first account a worker reports is learning,
+        and a config corrected elsewhere -- a rescan off a stale ``common.ini`` -- is
+        bookkeeping to quietly re-record, not an event. A real switch under a role is
+        something the app never allows from inside it, and :meth:`_on_switched_under_a_role`
+        makes the state honest; it also takes the live-trading override with it
+        (:meth:`_withdraw_live_override`).
+
+        Returns False when the terminal was unassigned here and its worker stopped, so the
+        drain loop files nothing further from this snapshot. Caller must hold the lock.
+        cTrader snapshots echo the config's own server back, so for them this never fires.
         """
         if snap.login is None:
-            return
+            return True
         tcfg = self._cfg.terminals.get(snap.terminal_id)
         if tcfg is None:
-            return
+            return True
         # A worker that did not read the server keeps the one on record rather than erasing it.
         server = snap.server or tcfg.last_server
+        now_key = account_key(snap.login, server)
+        assert now_key is not None  # login was checked above
+        seen = self._seen_account.get(snap.terminal_id)
+        self._seen_account[snap.terminal_id] = now_key
+        switched = seen is not None and seen != now_key
         if (tcfg.last_login, tcfg.last_server) == (snap.login, server):
-            return
+            # The config already agrees; all that could remain is the switch reaction (the
+            # config may have been corrected before the worker's own report moved).
+            if switched:
+                keep = not self._on_switched_under_a_role(
+                    snap.terminal_id, tcfg.role, seen, now_key
+                )
+                self._withdraw_live_override(snap.terminal_id, seen, now_key)
+                self._save_recorded()
+                return keep
+            return True
         was = account_key(tcfg.last_login, tcfg.last_server)
         self._cfg.replace_terminal(
             tcfg.model_copy(update={"last_login": snap.login, "last_server": server})
@@ -736,13 +788,129 @@ class Engine:
         log.info(
             "%s is logged in to %s, not %s as the config said; recorded",
             self._cfg.display_name(snap.terminal_id),
-            account_key(snap.login, server),
+            now_key,
             was or "any account yet",
         )
+        keep = True
+        if switched:
+            keep = not self._on_switched_under_a_role(snap.terminal_id, tcfg.role, seen, now_key)
+            self._withdraw_live_override(snap.terminal_id, seen, now_key)
+        self._save_recorded()
+        return keep
+
+    def _withdraw_live_override(self, tid: str, was: str | None, now_key: str | None) -> None:
+        """Take ``allow_live_trading`` back off after an account switch: it was typed and
+        confirmed for the account the terminal was on, and the account it moved to never got
+        that confirmation. Off, the demo-only guard holds a real account back until it is
+        deliberately allowed again. Caller must hold the lock and saves afterwards."""
+        tcfg = self._cfg.terminals.get(tid)
+        if tcfg is None or not tcfg.allow_live_trading:
+            return
+        self._cfg.replace_terminal(tcfg.model_copy(update={"allow_live_trading": False}))
+        log.warning(
+            "%s: live trading is no longer allowed; it was allowed while it was on %s, "
+            "and %s was never confirmed",
+            self._cfg.display_name(tid),
+            was,
+            now_key,
+        )
+
+    def _save_recorded(self) -> None:
         try:
             save_config(self._cfg)
         except OSError:
             log.exception("could not save the recorded account; it holds for this run")
+
+    def _on_switched_under_a_role(
+        self, tid: str, role: Role, was: str | None, now_key: str | None
+    ) -> bool:
+        """React to an account switch made in the terminal itself. Returns True when the
+        terminal was unassigned and its worker stopped.
+
+        The app's own rule is that only an unassigned terminal is ever switched (see
+        :mod:`mt5copier.account_switch` for why): a slave's copy records name tickets that
+        live on the account it left, so the first master close would fire commands at tickets
+        the new account has never heard of, while the real positions sat on the old account
+        with nothing managing them -- and every new master trade would be copied onto an
+        account nobody set up as a slave. The switch already happened, so there is nothing
+        left to refuse; instead the state is made what the rule would have required. The
+        copies are given up exactly as an unassign gives them up (open on the old account,
+        excluded from re-copying; a command already in flight finds no row and is logged,
+        which is the lesser harm), the role is removed, and the worker is stopped -- but the
+        terminal window is left alone: the person is working in it.
+
+        A switched master is worse: its old positions leaving the snapshot would read as
+        "the master went flat", closing every copy on every slave, and the new account's
+        positions would read as fresh trades to copy. Copying stops instead -- recorded here,
+        before this same snapshot reaches :meth:`_reconcile`, which checks
+        ``copying_enabled`` first, so that tick can never run. Nothing is closed or opened;
+        what the new account means is the person's decision. Caller must hold the lock.
+        """
+        name = self._cfg.display_name(tid)
+        if role is Role.SLAVE:
+            self._give_up_copies(tid)
+            role_actions.unassign(self._cfg, tid)
+            self._stop_worker(tid)
+            log.error(
+                "%s was logged in to %s from the terminal itself; it was a slave on %s, and "
+                "only an unassigned terminal is switched, so it is unassigned: its copies "
+                "stay open on %s unmanaged, and nothing is copied to %s unless it is "
+                "assigned again",
+                name,
+                now_key,
+                was,
+                was,
+                now_key,
+            )
+            return True
+        if role is Role.MASTER:
+            self._cfg.copying_enabled = False
+            log.error(
+                "the master %s was logged in to %s from the terminal itself; copying was set "
+                "up from %s, so it is stopped before anything is closed or copied -- review "
+                "the roles, then turn copying back on",
+                name,
+                now_key,
+                was,
+            )
+        return False
+
+    def _rescan_loop(self) -> None:
+        """Re-discover terminals from disk on the configured cadence
+        (``rescan_interval_s``), so an unassigned terminal's card follows a login made in
+        MT5 itself without anyone pressing rescan.
+
+        Passive, exactly as the rescan button is: directories and ``common.ini`` are read,
+        nothing is launched and nothing connects. A *connected* terminal's worker is the
+        fresher truth -- MT5 may not have flushed its ``common.ini`` yet -- so after the
+        merge, whatever a live snapshot reports wins back; a stale file can therefore never
+        regress a connected terminal's account (and could not trigger the switch reaction
+        anyway, which reads only the worker's own reports). Saved only when the sweep
+        changed something, so the config file is not rewritten every cycle.
+        """
+        while not self._stop_rescan.wait(max(self._cfg.rescan_interval_s, 10.0)):
+            try:
+                self._rescan_once()
+            except Exception:
+                log.exception("periodic discovery failed; trying again on schedule")
+
+    def _rescan_once(self) -> None:
+        """One sweep of :meth:`_rescan_loop`, factored out so it can be driven directly."""
+        found = discover_terminals()
+        with self._lock:
+            before = self._cfg.model_dump(mode="json")
+            merge_discovery(self._cfg, found)
+            for tid, snap in self._snapshots.items():
+                tcfg = self._cfg.terminals.get(tid)
+                if tcfg is None or snap.login is None:
+                    continue
+                server = snap.server or tcfg.last_server
+                if (tcfg.last_login, tcfg.last_server) != (snap.login, server):
+                    self._cfg.replace_terminal(
+                        tcfg.model_copy(update={"last_login": snap.login, "last_server": server})
+                    )
+            if self._cfg.model_dump(mode="json") != before:
+                self._save_recorded()
 
     # --- direct trading: the virtual master ---------------------------------------------------
 

@@ -33,6 +33,7 @@ GENERAL: tuple[str, ...] = (
     "poll_interval_ms",
     "heartbeat_timeout_s",
     "reconnect_backoff_s",
+    "rescan_interval_s",
     "join_grace_seconds",
     "close_terminals",
     "history_days",
@@ -64,6 +65,12 @@ HELP: dict[str, tuple[str, str]] = {
         "Retry schedule",
         "Seconds to wait before each attempt to reconnect a lost terminal, separated by commas. "
         "The last one repeats for as long as it takes.",
+    ),
+    "rescan_interval_s": (
+        "Rescan every",
+        "Seconds between sweeps for terminals on disk, so a login made in MT5 itself shows "
+        "on an unassigned terminal's card without pressing rescan. Passive reading only; "
+        "a connected terminal's worker already reports its account live. 10 to 3600.",
     ),
     "close_terminals": (
         "Closing terminals",
@@ -111,6 +118,7 @@ def initial_general(cfg: AppConfig) -> dict[str, str | bool]:
         "poll_interval_ms": str(cfg.poll_interval_ms),
         "heartbeat_timeout_s": _number(cfg.heartbeat_timeout_s),
         "reconnect_backoff_s": ", ".join(_number(s) for s in cfg.reconnect_backoff_s),
+        "rescan_interval_s": _number(cfg.rescan_interval_s),
         "join_grace_seconds": _number(cfg.join_grace_seconds),
         "close_terminals": cfg.close_terminals.value,
         "history_days": str(cfg.history_days),

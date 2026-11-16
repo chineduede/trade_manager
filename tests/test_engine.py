@@ -17,7 +17,7 @@ import pytest
 
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.engine import Engine, TerminalView
-from mt5copier.protocol import ActionKind, OrderResult, Snapshot, WorkerState
+from mt5copier.protocol import ActionKind, OrderResult, PositionType, Snapshot, WorkerState
 
 TID_A = "A" * 32
 TID_B = "B" * 32
@@ -363,13 +363,149 @@ def test_drain_records_an_account_switch_made_in_the_terminal_itself(
 
     saved = config_mod.load()
     assert saved.terminals[TID_B].last_login == 222, "recorded on disk, not only in memory"
+    assert saved.terminals[TID_B].role is Role.UNASSIGNED, "the unassign is on disk too"
+
+
+def test_a_slave_switched_in_the_terminal_is_unassigned_with_its_copies_given_up(
+    engine: Engine, cfg: AppConfig
+) -> None:
+    """The app's own rule is that only an unassigned terminal is switched. A switch made in
+    MT5 itself cannot be refused after the fact, so the state is made what the rule required:
+    copies given up (open on the old account, excluded from re-copying), role removed, live
+    override withdrawn -- it was confirmed for the account the terminal left."""
+    cfg.replace_terminal(
+        cfg.terminals[TID_B].model_copy(
+            update={"last_login": 111, "last_server": "Old-Live", "allow_live_trading": True}
+        )
+    )
+    engine._ledger._store.remember_position(
+        terminal_id=TID_B,
+        master_ticket=11,
+        slave_symbol="EURUSD",
+        direction=PositionType.BUY,
+        master_volume=1.0,
+        slave_ticket=900,
+    )
+    run_drain(
+        engine,
+        [
+            Snapshot(
+                terminal_id=TID_B, state=WorkerState.CONNECTED, seq=1, login=111, server="Old-Live"
+            ),
+            Snapshot(
+                terminal_id=TID_B, state=WorkerState.CONNECTED, seq=2, login=222, server="New"
+            ),
+        ],
+    )
+    tcfg = cfg.terminals[TID_B]
+    assert tcfg.role is Role.UNASSIGNED
+    assert tcfg.allow_live_trading is False
+    assert (tcfg.last_login, tcfg.last_server) == (222, "New")
+    assert engine._ledger.open_copies(TID_B) == [], "the old account's copies are let go"
+    assert 11 in engine._ledger._excluded.get(TID_B, set()), "and never re-copied"
+
+
+def test_a_switched_master_stops_copying_before_the_tick_can_close_anything(
+    engine: Engine, cfg: AppConfig
+) -> None:
+    """A switched master's old positions leaving the snapshot would read as 'the master went
+    flat' and close every copy; the new account's positions would read as fresh trades. The
+    switch lands before that same snapshot reaches _reconcile, which checks copying_enabled
+    first, so the tick never runs. The role is kept: what the new account means is the
+    person's call."""
+    cfg.replace_terminal(
+        cfg.terminals[TID_A].model_copy(update={"last_login": 111, "last_server": "Old-Live"})
+    )
+    cfg.copying_enabled = True
+    run_drain(
+        engine,
+        [
+            Snapshot(
+                terminal_id=TID_A, state=WorkerState.CONNECTED, seq=1, login=111, server="Old-Live"
+            ),
+            Snapshot(
+                terminal_id=TID_A, state=WorkerState.CONNECTED, seq=2, login=222, server="New"
+            ),
+        ],
+    )
+    assert cfg.copying_enabled is False
+    assert cfg.terminals[TID_A].role is Role.MASTER
+    assert cfg.terminals[TID_B].role is Role.SLAVE, "no slave is swept; nothing is closed"
+
+
+def test_a_config_regression_is_re_recorded_without_reading_as_a_switch(
+    engine: Engine, cfg: AppConfig
+) -> None:
+    """A rescan can write a stale common.ini login over a connected slave's config. The
+    worker still reports the same account it always did, so that is bookkeeping to correct
+    quietly -- unassigning the slave over it would be reacting to our own stale read."""
+    run_drain(
+        engine,
+        [Snapshot(terminal_id=TID_B, state=WorkerState.CONNECTED, seq=1, login=111, server="S")],
+    )
+    cfg.replace_terminal(
+        cfg.terminals[TID_B].model_copy(update={"last_login": 999, "last_server": "Stale"})
+    )
+    run_drain(
+        engine,
+        [Snapshot(terminal_id=TID_B, state=WorkerState.CONNECTED, seq=2, login=111, server="S")],
+    )
+    tcfg = cfg.terminals[TID_B]
+    assert (tcfg.last_login, tcfg.last_server) == (111, "S"), "corrected back off the worker"
+    assert tcfg.role is Role.SLAVE, "and never treated as an account switch"
+
+
+def test_the_periodic_rescan_defers_to_a_live_workers_account(
+    engine: Engine, cfg: AppConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sweep merges what discovery read off disk, but a connected terminal's worker is
+    the fresher truth: a stale common.ini must not regress its account between snapshots."""
+    from mt5copier.discovery import DiscoveredTerminal
+
+    run_drain(
+        engine,
+        [Snapshot(terminal_id=TID_B, state=WorkerState.CONNECTED, seq=1, login=111, server="S")],
+    )
+    saves: list[AppConfig] = []
+    monkeypatch.setattr("mt5copier.engine.save_config", saves.append)
+    monkeypatch.setattr(
+        "mt5copier.engine.discover_terminals",
+        lambda: [
+            # TID_B's ini is stale (the account it left); TID_A's is news worth keeping.
+            DiscoveredTerminal(
+                terminal_id=TID_B,
+                data_path=None,
+                install_path=None,
+                exe_path=None,
+                label="Beta",
+                login=999,
+                server="Stale",
+            ),
+            DiscoveredTerminal(
+                terminal_id=TID_A,
+                data_path=None,
+                install_path=None,
+                exe_path=None,
+                label="Alpha",
+                login=777,
+                server="Fresh",
+            ),
+        ],
+    )
+    engine._rescan_once()
+    assert cfg.terminals[TID_B].last_login == 111, "the live worker's account stands"
+    assert cfg.terminals[TID_A].last_login == 777, "no worker, so the disk sweep lands"
+    assert len(saves) == 1
+    engine._rescan_once()
+    assert len(saves) == 1, "an unchanged sweep does not rewrite the config"
 
 
 def test_recording_the_account_never_churns_while_it_is_unchanged(
     engine: Engine, cfg: AppConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """One save when the account is first learned; none for every later snapshot, and a
-    snapshot whose worker did not read the server keeps the server on record."""
+    snapshot whose worker did not read the server keeps the server on record. First sight of
+    an account is learning, not a switch: the slave keeps its role and its override."""
     saves: list[AppConfig] = []
     monkeypatch.setattr("mt5copier.engine.save_config", saves.append)
     run_drain(
@@ -382,6 +518,7 @@ def test_recording_the_account_never_churns_while_it_is_unchanged(
     )
     tcfg = cfg.terminals[TID_B]
     assert (tcfg.last_login, tcfg.last_server) == (111, "S")
+    assert tcfg.role is Role.SLAVE, "learning the first account is not a switch"
     assert len(saves) == 1
 
 

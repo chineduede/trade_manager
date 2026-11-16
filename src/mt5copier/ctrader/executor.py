@@ -622,7 +622,9 @@ class CTraderExecutor:
         reward = abs(cmd.tp - cmd.entry)
         if dist <= 0 or reward <= 0:
             return cmd
-        loss = cv.loss_per_lot(symbol, self._account.deposit_asset_id, cmd.entry, cmd.sl, conversion)
+        loss = cv.loss_per_lot(
+            symbol, self._account.deposit_asset_id, cmd.entry, cmd.sl, conversion
+        )
         if not loss:
             log.warning(
                 "#%s on %s: a move cannot be priced, so the target stays at the ticket's %g",

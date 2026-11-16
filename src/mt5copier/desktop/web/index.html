@@ -502,6 +502,12 @@
             <span class="field-note red cfg-err" id="cfg-err-reconnect_backoff_s"></span>
           </div>
           <div class="field">
+            <label for="cfg-rescan" class="flabel">Rescan terminals on disk every</label>
+            <input id="cfg-rescan" class="mono" data-name="rescan_interval_s" inputmode="decimal" autocomplete="off">
+            <span class="field-note muted">seconds, so a login made in MT5 itself shows on an unassigned card without pressing rescan · 10 to 3600</span>
+            <span class="field-note red cfg-err" id="cfg-err-rescan_interval_s"></span>
+          </div>
+          <div class="field">
             <label for="cfg-grace" class="flabel">Treat a gap of up to</label>
             <input id="cfg-grace" class="mono" data-name="join_grace_seconds" inputmode="decimal" autocomplete="off">
             <span class="field-note muted">seconds in watching the master as unbroken · after a longer gap, trades it already holds are never copied late · 0 to 5</span>

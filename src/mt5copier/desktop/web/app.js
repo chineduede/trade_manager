@@ -3240,9 +3240,10 @@ var C = {
   saving: false
 };
 
-var CFG_INPUTS = ['cfg-poll', 'cfg-stale', 'cfg-retry', 'cfg-grace', 'cfg-hist'];
+var CFG_INPUTS = ['cfg-poll', 'cfg-stale', 'cfg-retry', 'cfg-rescan', 'cfg-grace', 'cfg-hist'];
 var CFG_NAMES = ['profile_mode', 'dry_run', 'poll_interval_ms', 'heartbeat_timeout_s',
-  'reconnect_backoff_s', 'join_grace_seconds', 'close_terminals', 'history_days'];
+  'reconnect_backoff_s', 'rescan_interval_s', 'join_grace_seconds', 'close_terminals',
+  'history_days'];
 
 function segValue(id) {
   var btn = document.querySelector('#' + id + ' button[aria-pressed="true"]');

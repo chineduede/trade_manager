@@ -19,7 +19,15 @@ from typing import TYPE_CHECKING, Any
 from .. import account_switch, role_actions
 from .. import config as config_mod
 from .. import setups as setups_mod
-from ..config import AppMode, Management, Role, SizingMode, TerminalConfig, account_key
+from ..config import (
+    AppMode,
+    Management,
+    Role,
+    SizingMode,
+    TerminalConfig,
+    account_key,
+    record_login,
+)
 from ..day_book import MasterEvent, Outcome
 from ..discovery import discover_terminals
 from ..general_edit import (
@@ -941,13 +949,10 @@ class DesktopApi:
         called = self._account_called(key)
         if not result.ok:
             return {"ok": False, "message": f"{name} was not logged in to {called}: {result.said}"}
-        # Keep the account the login left the terminal on, as the one it was last on.
+        # Keep the account the login left the terminal on, as the one it was last on --
+        # record_login also withdraws the live override when a known account was left.
         tcfg = cfg.terminals[tid]
-        cfg.replace_terminal(
-            tcfg.model_copy(
-                update={"last_login": result.login, "last_server": result.server or acct.server}
-            )
-        )
+        cfg.replace_terminal(record_login(tcfg, result.login, result.server or acct.server))
         self._switchable.pop(tid, None)  # the account it is on changed; re-answer fresh
         why = self._persist()
         message = f"{name} is logged in to {called}"
@@ -2029,14 +2034,7 @@ class DesktopApi:
             if result.ok:
                 # Keep the account the login left the terminal on, as the one it was last on.
                 tcfg = cfg.terminals[tid]
-                cfg.replace_terminal(
-                    tcfg.model_copy(
-                        update={
-                            "last_login": result.login,
-                            "last_server": result.server or acct.server,
-                        }
-                    )
-                )
+                cfg.replace_terminal(record_login(tcfg, result.login, result.server or acct.server))
                 continue
             failed.append(tid)
             messages.append(

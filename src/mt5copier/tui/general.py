@@ -139,7 +139,17 @@ class GeneralForm(ModalScreen[bool]):
                     self._input("reconnect_backoff_s", v["reconnect_backoff_s"], "grow"),
                     words("seconds, the last repeating."),
                 ),
-                *self._errors("poll_interval_ms", "heartbeat_timeout_s", "reconnect_backoff_s"),
+                rows(
+                    lead("Rescan terminals on disk every"),
+                    self._input("rescan_interval_s", v["rescan_interval_s"], "n6"),
+                    words("seconds."),
+                ),
+                *self._errors(
+                    "poll_interval_ms",
+                    "heartbeat_timeout_s",
+                    "reconnect_backoff_s",
+                    "rescan_interval_s",
+                ),
             )
             yield section(
                 "joining",
