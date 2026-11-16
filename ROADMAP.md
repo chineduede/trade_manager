@@ -1861,6 +1861,11 @@ against an isolated `%APPDATA%` brought the window up — native frame adopted, 
 storage written, an error-free log — before being killed). Hands-on checks pending.
 Next: the CDP testing phase, then the merge to master.
 
+From the hands-on round, `177710f`: a bare `--desktop` no longer routes through the TUI
+picker — it opens the last-opened profile (the default until any other has run), and a
+relaunch of a profile whose window is already open focuses that window and exits clean
+(`winfocus.py`; the frozen exe has no console for the old "already running" line).
+
 - **Terminal detail Overview tab.** The TUI's `enter` page shows what the desktop detail
   page (settings forms only) does not: the three ruled columns — the ACCOUNT (kind, ping,
   connection), the RULE it is copied by (on the master: the slaves it feeds), and how
