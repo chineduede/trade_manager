@@ -130,10 +130,15 @@ def run() -> None:
             # ``native`` is the WinForms form; pywebview types it as None until shown.
             form = window.native
             hwnd = int(form.Handle.ToInt64())  # type: ignore[attr-defined]
+
             # comctl32's subclassing helpers refuse to work across threads, and pywebview
             # fires ``shown`` off the UI thread -- marshal onto the thread that owns the
             # window, or SetWindowSubclass fails and the frame stays borderless.
-            form.Invoke(Action(lambda: winframe.adopt(hwnd)))  # type: ignore[attr-defined]
+            def _dress_window() -> None:
+                winframe.adopt(hwnd)
+                winframe.set_icon(hwnd, _WEB / "icon.ico")
+
+            form.Invoke(Action(_dress_window))  # type: ignore[attr-defined]
         except Exception:
             log.exception("could not adopt native frame behaviours; the window still runs")
 

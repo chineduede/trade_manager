@@ -107,6 +107,26 @@ def adopt(hwnd: int) -> None:
     log.info("window adopted native frame behaviours (Snap, native drag and resize)")
 
 
+_WM_SETICON = 0x0080
+_ICON_SMALL = 0
+_ICON_BIG = 1
+_IMAGE_ICON = 1
+_LR_LOADFROMFILE = 0x0010
+
+
+def set_icon(hwnd: int, path: object) -> None:
+    """Give the window its icon (title bar and taskbar) from a .ico on disk.
+
+    The frozen exe already carries the icon as a resource, but in a dev run the window
+    would show the Python icon without this. LoadImageW picks the nearest size from the
+    .ico for each of the two slots.
+    """
+    for which, size in ((_ICON_SMALL, 16), (_ICON_BIG, 32)):
+        hicon = _user32.LoadImageW(None, str(path), _IMAGE_ICON, size, size, _LR_LOADFROMFILE)
+        if hicon:
+            _user32.SendMessageW(hwnd, _WM_SETICON, which, hicon)
+
+
 def _cursor_lparam() -> int:
     """The cursor in screen coordinates, packed the way mouse messages carry it."""
     pt = wintypes.POINT()

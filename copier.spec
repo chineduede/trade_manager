@@ -76,6 +76,7 @@ exe = EXE(
     a.datas,
     [],
     name="mt5copier",
+    icon="src/mt5copier/desktop/web/icon.ico",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

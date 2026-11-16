@@ -31,6 +31,7 @@ OutputBaseFilename=mt5copier-setup-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=src\mt5copier\desktop\web\icon.ico
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayIcon={app}\mt5copier.exe
