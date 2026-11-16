@@ -104,6 +104,30 @@ def test_only_an_unassigned_mt5_terminal_with_an_exe_may_switch(
     assert "no accounts found for Spare" in api.account_login_ask(T_FREE)["why"]
 
 
+def test_the_card_offers_a_login_only_when_there_is_a_pick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, _ = _api(tmp_path, monkeypatch)
+    cfg = api._cfg
+    assert api._can_switch_account(cfg.terminals[T_FREE]) is True
+    assert api._can_switch_account(cfg.terminals[T_SLAVE]) is False, "assigned"
+    assert api._can_switch_account(cfg.terminals[T_CT]) is False, "cTrader"
+
+    # One saved account, the one it is on: nothing to pick, so no option.
+    api._switchable.clear()
+    monkeypatch.setattr(
+        account_switch, "known_accounts", lambda tid, root=None: [Account(20481, "E8-Demo")]
+    )
+    assert api._can_switch_account(cfg.terminals[T_FREE]) is False
+
+    # One saved account but the terminal is not on it: logging in is the pick.
+    api._switchable.clear()
+    cfg.replace_terminal(
+        cfg.terminals[T_FREE].model_copy(update={"last_login": None, "last_server": None})
+    )
+    assert api._can_switch_account(cfg.terminals[T_FREE]) is True
+
+
 def test_a_login_records_the_account_the_terminal_landed_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

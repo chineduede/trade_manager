@@ -173,6 +173,10 @@ class DesktopApi:
         asking for a second login on one is refused while the first still runs."""
         self._log_cache: tuple[object, list[LogEntry]] = (None, [])
         """``copier.log`` as entries, with what the file looked like when it was read."""
+        self._switchable: dict[str, tuple[float, bool]] = {}
+        """Per terminal, (when it was checked, whether another saved account exists).
+        Reading the account list walks the terminal's data folder; the cards poll every
+        second, so the walk is paced here and dropped after a login changes the answer."""
         self._busy_lock = threading.Lock()
 
     def attach(self, window: webview.Window) -> None:
@@ -554,6 +558,7 @@ class DesktopApi:
             "isCtrader": tcfg.is_ctrader,
             "hasExe": tcfg.exe_path is not None,
             "loggingIn": tid in self._logging_in,
+            "canSwitch": self._can_switch_account(tcfg),
             "usable": tcfg.usable,
             "enabled": tcfg.enabled,
             "allowLive": tcfg.allow_live_trading,
@@ -788,6 +793,22 @@ class DesktopApi:
     # a terminal with a role holds copies made on the account it is on, and unassigning
     # first is what asks about those (see mt5copier.account_switch).
 
+    def _can_switch_account(self, tcfg: TerminalConfig) -> bool:
+        """Whether the card offers a login at all: only an unassigned MT5 terminal, and
+        only when a saved account other than the one it is on exists -- with a single
+        account there is nothing to pick, so the option would only puzzle."""
+        if tcfg.role is not Role.UNASSIGNED or tcfg.is_ctrader or tcfg.exe_path is None:
+            return False
+        tid = tcfg.terminal_id
+        now = time.time()
+        hit = self._switchable.get(tid)
+        if hit is not None and now - hit[0] < 15.0:
+            return hit[1]
+        on = account_key(tcfg.last_login, tcfg.last_server)
+        can = any(account_key(a.login, a.server) != on for a in account_switch.known_accounts(tid))
+        self._switchable[tid] = (now, can)
+        return can
+
     def _account_login_refused(self, tid: str) -> str | None:
         """Why this terminal cannot be logged into another account right now, or None."""
         tcfg = self._cfg.terminals.get(tid)
@@ -900,6 +921,7 @@ class DesktopApi:
                 update={"last_login": result.login, "last_server": result.server or acct.server}
             )
         )
+        self._switchable.pop(tid, None)  # the account it is on changed; re-answer fresh
         why = self._persist()
         message = f"{name} is logged in to {called}"
         if why is not None:

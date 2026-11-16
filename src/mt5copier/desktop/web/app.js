@@ -1101,16 +1101,17 @@ function terminalCard(c, live) {
       if (c.isCtrader) said += ' · can copy, cannot feed';
     }
     el.appendChild(cardLine('tcard-info', said));
-    if (!c.isCtrader && c.hasExe && !c.loggingIn) {
-      // The menu alone hid this: the card itself says an account can be picked.
+    if (c.loggingIn) {
+      el.appendChild(cardLine('tcard-login yellow', 'logging in…'));
+    } else if (c.canSwitch) {
+      // The menu alone hid this: the card itself says an account can be picked. Only
+      // when there is a pick — a terminal with one saved account has nowhere to go.
       var login = document.createElement('button');
       login.type = 'button';
       login.className = 'linklike tcard-login';
-      login.textContent = 'log in to an account…';
+      login.textContent = c.login ? 'log in to a different account…' : 'log in to an account…';
       login.addEventListener('click', function () { accountLoginFlow(c); });
       el.appendChild(login);
-    } else if (c.loggingIn) {
-      el.appendChild(cardLine('tcard-login yellow', 'logging in…'));
     }
     wireCard(el, c);
     return el;
@@ -1577,9 +1578,13 @@ function menuItems(c, live) {
     }
     if (c.isCtrader) {
       says('a cTrader account logs in from the TUI');
-    } else if (c.hasExe) {
-      if (c.loggingIn) says('logging in — the card says when it is done');
-      else does('Log in to an account…', function () { accountLoginFlow(c); });
+    } else if (c.loggingIn) {
+      says('logging in — the card says when it is done');
+    } else if (c.canSwitch) {
+      does(
+        c.login ? 'Log in to a different account…' : 'Log in to an account…',
+        function () { accountLoginFlow(c); }
+      );
     }
     return items;
   }
@@ -3652,7 +3657,12 @@ function renderTdetail() {
 
   var tdNoRole = live.role !== 'slave' && live.role !== 'master';
   $('td-other').hidden = !tdNoRole;
-  $('td-login-btn').hidden = !(tdNoRole && live.card && !live.card.isCtrader && live.card.hasExe);
+  var tdLogin = $('td-login-btn');
+  tdLogin.hidden = !(tdNoRole && live.card && live.card.canSwitch && !live.card.loggingIn);
+  if (!tdLogin.hidden) {
+    tdLogin.textContent = live.card.login
+      ? 'Log in to a different account…' : 'Log in to an account…';
+  }
   $('td-slave').hidden = live.role !== 'slave';
   $('td-master').hidden = live.role !== 'master';
   $('td-copyfrom').hidden = !(live.role === 'slave' && (live.copyFrom || []).length);
