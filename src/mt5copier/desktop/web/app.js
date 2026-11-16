@@ -881,15 +881,20 @@ var T = {
 };
 var modalOnConfirm = null;
 
-var PAGES = ['trading', 'terminals', 'guards', 'news', 'history', 'setups', 'settings'];
+var PAGES = ['trading', 'terminals', 'guards', 'news', 'history', 'setups', 'settings', 'tdetail'];
 
 function showPage(name) {
   if (PAGES.indexOf(name) < 0) name = 'trading';
   S.page = name;
-  try { localStorage.setItem('dt-page', name); } catch (e) { /* fine */ }
+  // A restored 'tdetail' would land with no terminal under it, so it remembers as the
+  // Terminals page it came from — which its sidebar highlight already says it is.
+  try {
+    localStorage.setItem('dt-page', name === 'tdetail' ? 'terminals' : name);
+  } catch (e) { /* fine */ }
   PAGES.forEach(function (p) { $('page-' + p).hidden = p !== name; });
+  var navName = name === 'tdetail' ? 'terminals' : name;
   document.querySelectorAll('#sidebar .nav-item[data-page]').forEach(function (a) {
-    var active = a.dataset.page === name;
+    var active = a.dataset.page === navName;
     a.classList.toggle('active', active);
     if (active) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
@@ -900,6 +905,7 @@ function showPage(name) {
   if (name === 'history') pollHistory();
   if (name === 'setups') pollSetups();
   if (name === 'settings') pollSettings();
+  if (name === 'tdetail') pollTdetail();
 }
 
 var terminalsBusy = false;
@@ -1417,7 +1423,10 @@ function wireCard(el, c) {
     }
     function up(e) {
       letGo();
-      if (started) endDrag(e);
+      if (started) { endDrag(e); return; }
+      // A plain click — the pointer never left the 6px threshold — opens the
+      // terminal's own page: its settings, or what it needs before it has any.
+      openTerminalDetail(c.tid);
     }
     function cancel() {
       letGo();
@@ -1554,10 +1563,11 @@ function menuItems(c, live) {
     } else {
       does('Make it the master', function () { tact(api().assign_master(c.tid)); });
     }
-    says('account login and per-terminal settings live in the TUI for now');
+    says('account login lives in the TUI for now');
     return items;
   }
 
+  does('Settings — its own page', function () { openTerminalDetail(c.tid); });
   if (c.role === 'slave') {
     if (c.orphans) {
       does('Acknowledge orphans: sign off its untracked positions', function () {
@@ -3207,6 +3217,379 @@ function revertSettingsFlow() {
   toast('Put back as saved.', '');
 }
 
+// --- the terminal detail page ----------------------------------------------------------
+// One terminal's own page, opened by clicking its card on Terminals: the TUI s form for a
+// slave, the m form for the master. What a value means and that an edit keeps open copies
+// are the bridge's; this fills fields, asks as they change (the worked example comes back
+// with each check), and refills from the engine only while the form holds no edits.
+var D = {
+  tid: '',
+  live: null,
+  base: null,      // what the fields were last filled from, as a key; null forces a refill
+  serverKey: '',
+  gen: 0,          // bumped when a save lands, so a stale in-flight poll answer is re-asked
+  saving: false
+};
+
+var TD_INPUTS = ['risk_percent', 'risk_cash', 'commission_per_lot_round_turn',
+  'slippage_buffer_points', 'max_lot', 'max_deviation_points', 'no_stop_lot_multiple',
+  'breakeven_trigger_r', 'breakeven_book_percent', 'symbol_prefix', 'symbol_suffix',
+  'symbol_map', 'symbol_whitelist', 'symbol_blacklist'];
+var TD_TICKS = ['master_manages', 'copy_pending', 'pending_fallback'];
+var TD_SLIDERS = ['risk_percent', 'breakeven_trigger_r', 'breakeven_book_percent'];
+var TD_ERRS = TD_INPUTS.concat(TD_TICKS,
+  ['sizing_mode', 'invert', 'no_stop_policy', 'breakeven_mode']);
+var TD_M_INPUTS = ['breakeven_trigger_r', 'breakeven_book_percent',
+  'symbol_prefix', 'symbol_suffix'];
+var TD_M_SLIDERS = ['breakeven_trigger_r', 'breakeven_book_percent'];
+var TD_M_ERRS = TD_M_INPUTS.concat(['management', 'breakeven_mode']);
+
+function openTerminalDetail(tid) {
+  D.tid = tid;
+  D.live = null;
+  D.base = null;
+  D.serverKey = '';
+  showPage('tdetail');
+}
+
+function tdIsSlave() { return D.live && D.live.role === 'slave'; }
+
+function tdCollect() {
+  var raw = {};
+  TD_INPUTS.forEach(function (n) { raw[n] = $('td-f-' + n).value; });
+  TD_TICKS.forEach(function (n) { raw[n] = $('td-f-' + n).checked; });
+  raw.sizing_mode = segValue('td-f-sizing_mode');
+  raw.no_stop_policy = segValue('td-f-no_stop_policy');
+  raw.breakeven_mode = segValue('td-f-breakeven_mode');
+  raw.invert = segValue('td-f-invert') === 'opposite';
+  return raw;
+}
+
+function tdmCollect() {
+  var raw = {};
+  TD_M_INPUTS.forEach(function (n) { raw[n] = $('td-m-' + n).value; });
+  raw.management = segValue('td-m-management');
+  raw.breakeven_mode = segValue('td-m-breakeven_mode');
+  return raw;
+}
+
+function tdKeyNow() {
+  if (!D.live) return '';
+  return JSON.stringify(tdIsSlave() ? tdCollect() : tdmCollect());
+}
+
+function tdDirty() {
+  return D.base !== null && tdKeyNow() !== D.base;
+}
+
+function tdSlider(prefix, name) {
+  // The slider is the coarse hand on the text box's value; the box stays the truth.
+  var slider = $(prefix + 'sl-' + name);
+  var v = parseFloat($(prefix + (prefix === 'td-m-' ? '' : 'f-') + name).value);
+  if (isFinite(v)) slider.value = String(v);
+}
+
+function tdFillSlave(live) {
+  var v = live.values;
+  TD_INPUTS.forEach(function (n) { $('td-f-' + n).value = String(v[n]); });
+  TD_TICKS.forEach(function (n) { $('td-f-' + n).checked = !!v[n]; });
+  setSeg('td-f-sizing_mode', v.sizing_mode);
+  setSeg('td-f-no_stop_policy', v.no_stop_policy);
+  setSeg('td-f-breakeven_mode', v.breakeven_mode);
+  setSeg('td-f-invert', v.invert ? 'opposite' : 'same');
+  TD_SLIDERS.forEach(function (n) { tdSlider('td-', n); });
+}
+
+function tdFillMaster(live) {
+  var v = live.values;
+  TD_M_INPUTS.forEach(function (n) { $('td-m-' + n).value = String(v[n]); });
+  setSeg('td-m-management', v.management);
+  setSeg('td-m-breakeven_mode', v.breakeven_mode);
+  TD_M_SLIDERS.forEach(function (n) { tdSlider('td-m-', n); });
+}
+
+function tdFill(live) {
+  if (live.role === 'slave') tdFillSlave(live);
+  else if (live.role === 'master') tdFillMaster(live);
+  D.base = tdKeyNow();
+  D.serverKey = JSON.stringify(live.values || null);
+  tdShowErrors({});
+  $('td-changes').textContent = '';
+  $('td-m-changes').textContent = '';
+  tdShowParts();
+}
+
+function tdShowErrors(errors) {
+  TD_ERRS.forEach(function (n) {
+    var el = $('td-err-' + n);
+    if (el) el.textContent = errors[n] || '';
+  });
+  TD_M_ERRS.forEach(function (n) {
+    var el = $('td-m-err-' + n);
+    if (el) el.textContent = errors[n] || '';
+  });
+  $('td-err-general').textContent = errors[''] || '';
+  $('td-m-err-general').textContent = errors[''] || '';
+}
+
+function tdShowParts() {
+  var live = D.live;
+  if (!live) return;
+  if (live.role === 'slave') {
+    var percent = segValue('td-f-sizing_mode') === 'percent_of_balance';
+    $('td-risk-field').hidden = !percent;
+    $('td-cash-field').hidden = percent;
+    $('td-multiple-field').hidden = segValue('td-f-no_stop_policy') !== 'lot_multiple';
+    var be = segValue('td-f-breakeven_mode') === 'r';
+    $('td-trigger-field').hidden = !be;
+    $('td-book-field').hidden = !be;
+    // Both gates open — the master set to manage and this slave letting it — grey the
+    // slave's own breakeven and say why, the TUI form's own behaviour.
+    var managed = !!live.masterSays && $('td-f-master_manages').checked;
+    $('td-follow-note').hidden = !!live.masterSays;
+    $('td-be-note').hidden = !managed;
+    ['td-f-breakeven_mode', 'td-trigger-field', 'td-book-field'].forEach(function (id) {
+      $(id).classList.toggle('td-disabled', managed);
+    });
+  } else if (live.role === 'master') {
+    var on = segValue('td-m-breakeven_mode') === 'r';
+    $('td-m-trigger-field').hidden = !on;
+    $('td-m-book-field').hidden = !on;
+    $('td-m-mgmt-says').textContent = segValue('td-m-management') === 'master'
+      ? 'Slaves follow the master’s stop and target moves and partial closes, and their '
+        + 'own breakeven is off. A slave can still keep its own trades, on its settings. '
+        + 'Applies to trades opened from now on.'
+      : 'Slaves copy only opens and closes, then manage the trade themselves with their own '
+        + 'breakeven and booking; the master’s stop moves and partial closes are not '
+        + 'copied. Applies to trades opened from now on.';
+    var says = $('td-m-be-says');
+    says.className = 'field-note muted';
+    if (!on) {
+      says.textContent = 'Off: the master is only read from.';
+    } else {
+      says.textContent = 'The copier will trade the master: once a trade is that far in '
+        + 'profit it moves its stop past entry by the trade’s commission (doubled for '
+        + 'the way out), once and never looser, and closes the share above. Only while '
+        + 'copying is live.';
+      if (live.accountKind !== 'demo' && !(live.card && live.card.allowLive)) {
+        says.className = 'field-note red';
+        says.textContent += ' This master is not known to be a demo account, so its worker '
+          + 'refuses to trade it until live trading is allowed on it.';
+      }
+    }
+  }
+}
+
+function tdRenderExample(ex) {
+  if (!ex) return;
+  $('td-ex-lead').textContent = ex.lead || '';
+  var working = $('td-ex-working');
+  working.textContent = ex.working || '';
+  if (ex.result) {
+    var r = document.createElement('span');
+    r.className = 'ex-result';
+    r.textContent = ' ' + ex.result;
+    working.appendChild(r);
+  }
+  $('td-ex-note').textContent = ex.note || '';
+}
+
+function tdRenderSymex(rows) {
+  if (!rows) return;
+  var out = $('td-m-symex');
+  out.textContent = '';
+  rows.forEach(function (row, i) {
+    if (i) out.appendChild(cardLine('muted', '  ·  '));
+    out.appendChild(cardLine('', row.symbol));
+    if (row.plain !== row.symbol) {
+      out.appendChild(cardLine('muted', ' → '));
+      out.appendChild(cardLine('green', row.plain));
+    } else {
+      out.appendChild(cardLine('muted', ' as it is'));
+    }
+  });
+}
+
+var tdetailBusy = false;
+function pollTdetail() {
+  if (tdetailBusy || !window.pywebview || S.page !== 'tdetail' || !D.tid) return;
+  tdetailBusy = true;
+  var gen = D.gen;
+  api().terminal_detail_state(D.tid).then(function (live) {
+    tdetailBusy = false;
+    if (gen !== D.gen) { pollTdetail(); return; }
+    if (!live.ok) {
+      toast(live.message, 'bad');
+      showPage('terminals');
+      return;
+    }
+    D.live = live;
+    renderTdetail();
+  }, function () { tdetailBusy = false; });
+}
+
+var TD_KIND = {
+  unread: { text: 'account not read yet', cls: 'small muted' },
+  demo: { text: 'demo account', cls: 'small muted' },
+  'live-allowed': { text: 'not a demo: live trading allowed', cls: 'small red' },
+  'live-held': { text: 'not a demo: held back', cls: 'small red' }
+};
+
+function renderTdetail() {
+  var live = D.live;
+  if (!live) return;
+  $('td-name').textContent = live.name;
+
+  var word = live.card
+    ? stateWord(live.card, { copying: S.live ? S.live.copying : false, dryRun: live.dryRun })
+    : { text: 'not connected', cls: 'muted' };
+  $('td-status').textContent = word.text;
+  $('td-status').className = word.cls;
+  var dotTone = word.cls === 'green' || word.cls === 'blue' ? 'green'
+    : word.cls === 'yellow' ? 'yellow' : word.cls === 'muted' ? '' : 'red';
+  $('td-dot').className = 'dot ' + dotTone;
+
+  $('td-pill').textContent = live.dryRun ? 'DRY RUN' : 'LIVE';
+  $('td-pill').className = 'pill ' + (live.dryRun ? 'yellow' : 'red');
+  var kind = TD_KIND[live.accountKind] || TD_KIND.unread;
+  $('td-kind').textContent = kind.text;
+  $('td-kind').className = kind.cls;
+
+  var guard = live.card && live.card.guard;
+  var gl = $('td-guard-link');
+  gl.hidden = !guard;
+  if (guard) {
+    gl.textContent = guard.rules + ' guard rule' + (guard.rules === 1 ? '' : 's')
+      + (guard.text ? ' · ' + guard.text : '') + ' — Guards page →';
+    gl.className = 'linklike small ' + (guard.tone || '');
+  }
+
+  $('td-other').hidden = live.role === 'slave' || live.role === 'master';
+  $('td-slave').hidden = live.role !== 'slave';
+  $('td-master').hidden = live.role !== 'master';
+  $('td-copyfrom').hidden = !(live.role === 'slave' && (live.copyFrom || []).length);
+
+  if (live.role === 'slave') {
+    var stake = $('td-stake');
+    stake.textContent = live.stake ? live.stake.text : '';
+    stake.className = (live.stake && live.stake.tone === 'red' ? 'red' : 'muted') + ' small';
+    tdLiveCard(live);
+  }
+
+  // A refill never lands on typing: first show, after a save or revert, or when the
+  // engine's truth moved while the form holds no edits of its own.
+  var serverKey = JSON.stringify(live.values || null);
+  if (D.base === null || (!tdDirty() && serverKey !== D.serverKey)) {
+    tdFill(live);
+    if (live.role === 'slave') tdRenderExample(live.example);
+    else if (live.role === 'master') tdRenderSymex(live.symbolExample);
+  }
+
+  var save = live.role === 'master' ? $('td-m-save') : $('td-save');
+  save.textContent = D.saving ? 'Saving…' : 'Save';
+  save.disabled = D.saving;
+  (live.role === 'master' ? $('td-m-revert') : $('td-revert')).disabled = D.saving;
+}
+
+function tdLiveCard(live) {
+  var said = $('td-live-said');
+  var btn = $('td-live-btn');
+  var allowed = !!(live.card && live.card.allowLive);
+  btn.hidden = true;
+  if (allowed) {
+    said.textContent = 'Live trading is allowed on this terminal: real orders are sent to '
+      + 'it whenever copying is live, whatever its account is.';
+    said.className = 'small red';
+    btn.hidden = false;
+    btn.textContent = 'Turn the override off';
+    btn.className = 'plain-btn';
+  } else if (live.accountKind === 'live-held') {
+    said.textContent = 'Not a demo account: the demo-only guard holds its orders back.';
+    said.className = 'small yellow';
+    btn.hidden = false;
+    btn.textContent = 'Allow live trading…';
+    btn.className = 'danger-btn';
+  } else if (live.accountKind === 'demo') {
+    said.textContent = 'A demo account: orders go through, nothing real is at risk.';
+    said.className = 'small muted';
+  } else {
+    said.textContent = 'The account has not been read yet, so the demo-only guard holds '
+      + 'orders back for now.';
+    said.className = 'small muted';
+  }
+}
+
+var tdCheckTimer = null;
+function tdChanged() {
+  tdShowParts();
+  clearTimeout(tdCheckTimer);
+  tdCheckTimer = setTimeout(function () {
+    if (S.page !== 'tdetail' || !D.live) return;
+    var slave = tdIsSlave();
+    api().terminal_settings_check(D.tid, slave ? tdCollect() : tdmCollect())
+      .then(function (r) {
+        tdShowErrors(r.errors || {});
+        var line = r.changes ? 'Saves: ' + r.changes : '';
+        $(slave ? 'td-changes' : 'td-m-changes').textContent = line;
+        if (slave) tdRenderExample(r.example);
+        else tdRenderSymex(r.symbolExample);
+      });
+  }, 250);
+}
+
+function saveTdetailFlow() {
+  if (D.saving || !D.live) return;
+  var slave = tdIsSlave();
+  D.saving = true;
+  renderTdetail();
+  api().terminal_settings_save(D.tid, slave ? tdCollect() : tdmCollect()).then(function (r) {
+    D.saving = false;
+    if (!r.ok) {
+      renderTdetail();
+      tdShowErrors(r.errors || {});
+      if (r.message) toast(r.message, 'bad');
+      return;
+    }
+    (r.messages || []).forEach(function (m) {
+      toast(m.text, m.tone, m.tone === 'warn' || m.tone === 'bad' ? 9000 : 4500);
+    });
+    D.gen++;
+    D.base = null; // the next answer refills the form from what was saved
+    pollTdetail();
+  }, function () {
+    D.saving = false;
+    renderTdetail();
+    toast('The engine did not answer; try again.', 'bad');
+  });
+}
+
+function revertTdetailFlow() {
+  if (!D.live || D.saving) return;
+  tdFill(D.live);
+  if (tdIsSlave()) tdRenderExample(D.live.example);
+  else if (D.live.role === 'master') tdRenderSymex(D.live.symbolExample);
+  toast('Put back as saved.', '');
+}
+
+function tdCopyFromPicked(src) {
+  api().terminal_settings_from(src.tid).then(function (r) {
+    if (!r.ok) { toast(r.message, 'bad'); return; }
+    var v = r.values;
+    TD_INPUTS.forEach(function (n) {
+      if (n in v) $('td-f-' + n).value = String(v[n]);
+    });
+    TD_TICKS.forEach(function (n) { if (n in v) $('td-f-' + n).checked = !!v[n]; });
+    setSeg('td-f-sizing_mode', String(v.sizing_mode));
+    setSeg('td-f-no_stop_policy', String(v.no_stop_policy));
+    setSeg('td-f-breakeven_mode', String(v.breakeven_mode));
+    setSeg('td-f-invert', v.invert ? 'opposite' : 'same');
+    TD_SLIDERS.forEach(function (n) { tdSlider('td-', n); });
+    tdChanged();
+    toast('Filled from ' + r.name + '; its symbol prefix, suffix and renames are its '
+      + 'broker’s, so this slave keeps its own. Nothing is saved yet.', '', 7000);
+  }, function () { toast('The engine did not answer; try again.', 'bad'); });
+}
+
 // --- events --------------------------------------------------------------------------------
 function closeDropdowns() {
   document.querySelectorAll('.dd-menu').forEach(function (m) { m.hidden = true; });
@@ -3321,11 +3704,13 @@ function wire() {
         if (!ok.hidden && !ok.disabled) ok.click();
       }
       else if (ev.target.id.indexOf('cfg-') === 0 && $('modal-back').hidden) saveSettingsFlow();
+      else if (ev.target.id.indexOf('td-') === 0 && $('modal-back').hidden) saveTdetailFlow();
     }
     if (ev.key === 'Escape') {
       closeDropdowns();
       if (!$('modal-back').hidden) { closeModal(); return; }
       if (!$('ctx-menu').hidden) { closeMenu(); return; }
+      if (S.page === 'tdetail') { showPage('terminals'); return; }
       if (S.mode === 'modify') exitModify();
     }
   });
@@ -3564,6 +3949,82 @@ function wire() {
   $('cfg-save').addEventListener('click', function () { saveSettingsFlow(); });
   $('cfg-revert').addEventListener('click', revertSettingsFlow);
 
+  // --- terminal detail page ---
+  $('td-back').addEventListener('click', function () { showPage('terminals'); });
+  TD_INPUTS.forEach(function (n) {
+    $('td-f-' + n).addEventListener('input', function () {
+      if (TD_SLIDERS.indexOf(n) >= 0) tdSlider('td-', n);
+      tdChanged();
+    });
+  });
+  TD_M_INPUTS.forEach(function (n) {
+    $('td-m-' + n).addEventListener('input', function () {
+      if (TD_M_SLIDERS.indexOf(n) >= 0) tdSlider('td-m-', n);
+      tdChanged();
+    });
+  });
+  TD_SLIDERS.forEach(function (n) {
+    $('td-sl-' + n).addEventListener('input', function () {
+      $('td-f-' + n).value = $('td-sl-' + n).value;
+      tdChanged();
+    });
+  });
+  TD_M_SLIDERS.forEach(function (n) {
+    $('td-m-sl-' + n).addEventListener('input', function () {
+      $('td-m-' + n).value = $('td-m-sl-' + n).value;
+      tdChanged();
+    });
+  });
+  TD_TICKS.forEach(function (n) {
+    $('td-f-' + n).addEventListener('change', tdChanged);
+  });
+  ['td-f-sizing_mode', 'td-f-no_stop_policy', 'td-f-breakeven_mode', 'td-f-invert',
+    'td-m-management', 'td-m-breakeven_mode'].forEach(function (id) {
+    $(id).addEventListener('click', function (ev) {
+      var btn = ev.target.closest('button[data-value]');
+      if (!btn) return;
+      setSeg(id, btn.dataset.value);
+      tdChanged();
+    });
+  });
+  $('td-save').addEventListener('click', saveTdetailFlow);
+  $('td-revert').addEventListener('click', revertTdetailFlow);
+  $('td-m-save').addEventListener('click', saveTdetailFlow);
+  $('td-m-revert').addEventListener('click', revertTdetailFlow);
+  $('td-guard-link').addEventListener('click', function () {
+    if (!D.tid) return;
+    G.tid = D.tid;
+    G.drawn = '';
+    showPage('guards');
+  });
+  $('td-live-btn').addEventListener('click', function () {
+    var live = D.live;
+    if (!live || !live.card) return;
+    liveOverrideFlow({ tid: D.tid, name: live.name }, !live.card.allowLive);
+  });
+  var cfBtn = document.querySelector('#td-copyfrom .dd-btn');
+  var cfMenu = $('td-copyfrom-menu');
+  cfBtn.addEventListener('click', function (ev) {
+    ev.stopPropagation();
+    var opening = cfMenu.hidden;
+    closeDropdowns();
+    if (!opening) return;
+    cfMenu.textContent = '';
+    ((D.live && D.live.copyFrom) || []).forEach(function (src) {
+      var opt = document.createElement('button');
+      opt.type = 'button';
+      opt.setAttribute('role', 'option');
+      opt.textContent = src.name;
+      opt.addEventListener('click', function (e) {
+        e.stopPropagation();
+        cfMenu.hidden = true;
+        tdCopyFromPicked(src);
+      });
+      cfMenu.appendChild(opt);
+    });
+    cfMenu.hidden = false;
+  });
+
   function commitInitial() {
     var live = G.live;
     if (!live || !live.hasAccount) return;
@@ -3594,6 +4055,7 @@ function start() {
   setInterval(pollHistory, 2000);
   setInterval(pollSetups, 1000);
   setInterval(pollSettings, 1000);
+  setInterval(pollTdetail, 1000);
 }
 
 if (window.pywebview) start();

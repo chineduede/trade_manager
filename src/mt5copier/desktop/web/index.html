@@ -444,7 +444,7 @@
     <div class="page" id="page-settings" hidden>
       <div class="page-head">
         <h1>Copier settings</h1>
-        <span class="muted">the copier's own switches, for every terminal · each slave's own settings stay in the TUI for now</span>
+        <span class="muted">the copier's own switches, for every terminal · each terminal's own settings live on its page — click its card on Terminals</span>
       </div>
 
       <div id="cfg-mode-now" class="small"></div>
@@ -537,6 +537,302 @@
             <span class="toolbar-space"></span>
             <button type="button" id="cfg-revert" class="plain-btn">Revert</button>
             <button type="button" id="cfg-save" class="primary-btn">Save</button>
+          </div>
+        </section>
+      </div>
+    </div>
+
+    <div class="page" id="page-tdetail" hidden>
+      <div id="td-head">
+        <button type="button" id="td-back" class="linklike">← Terminals</button>
+        <h1 id="td-name">…</h1>
+        <span class="td-chip"><span id="td-dot" class="dot" aria-hidden="true"></span><span id="td-status"></span></span>
+        <span id="td-pill" class="pill"></span>
+        <span id="td-kind" class="small"></span>
+        <span class="toolbar-space"></span>
+        <button type="button" id="td-guard-link" class="linklike small" hidden></button>
+        <div class="dd" id="td-copyfrom" hidden>
+          <button type="button" class="dd-btn" aria-haspopup="listbox" aria-expanded="false">Copy settings from…<svg aria-hidden="true" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"></path></svg></button>
+          <div class="dd-menu" role="listbox" id="td-copyfrom-menu" hidden></div>
+        </div>
+      </div>
+
+      <div id="td-other" class="muted" hidden>This terminal has no role yet, so there is nothing to set on it. Drag its card into the MASTER or SLAVES zone on Terminals; its settings live here once it has one.</div>
+
+      <div id="td-slave" class="td-grid" hidden>
+        <section aria-label="Sizing" class="panel cfg-card">
+          <div class="panel-head"><h2>Sizing</h2></div>
+          <div class="field">
+            <span class="flabel">Risk on each trade, over the master's stop distance</span>
+            <div role="group" aria-label="Sizing mode" class="seg-row seg-2" id="td-f-sizing_mode">
+              <button type="button" data-value="percent_of_balance" aria-pressed="false">% of balance</button>
+              <button type="button" data-value="fixed_cash_risk" aria-pressed="false">In cash</button>
+            </div>
+            <span class="field-note red cfg-err" id="td-err-sizing_mode"></span>
+          </div>
+          <div class="field" id="td-risk-field">
+            <label for="td-f-risk_percent" class="flabel">Risk per trade</label>
+            <div class="slider-row">
+              <input type="range" id="td-sl-risk_percent" min="0.05" max="5" step="0.05" aria-label="Risk per trade, percent">
+              <input id="td-f-risk_percent" class="mono" data-name="risk_percent" inputmode="decimal" autocomplete="off">
+            </div>
+            <span class="field-note muted">% of this account's balance</span>
+            <span class="field-note red cfg-err" id="td-err-risk_percent"></span>
+          </div>
+          <div class="field" id="td-cash-field" hidden>
+            <label for="td-f-risk_cash" class="flabel">Risk per trade</label>
+            <input id="td-f-risk_cash" class="mono" data-name="risk_cash" inputmode="decimal" autocomplete="off">
+            <span class="field-note muted">cash, in this account's currency</span>
+            <span class="field-note red cfg-err" id="td-err-risk_cash"></span>
+          </div>
+          <div class="two-col">
+            <div class="field">
+              <label for="td-f-commission_per_lot_round_turn" class="flabel">Commission per lot</label>
+              <input id="td-f-commission_per_lot_round_turn" class="mono" data-name="commission_per_lot_round_turn" inputmode="decimal" autocomplete="off">
+              <span class="field-note muted">in and out, account currency</span>
+              <span class="field-note red cfg-err" id="td-err-commission_per_lot_round_turn"></span>
+            </div>
+            <div class="field">
+              <label for="td-f-slippage_buffer_points" class="flabel">Slippage buffer</label>
+              <input id="td-f-slippage_buffer_points" class="mono" data-name="slippage_buffer_points" inputmode="numeric" autocomplete="off">
+              <span class="field-note muted">points budgeted when sizing</span>
+              <span class="field-note red cfg-err" id="td-err-slippage_buffer_points"></span>
+            </div>
+          </div>
+          <div class="two-col">
+            <div class="field">
+              <label for="td-f-max_lot" class="flabel">Open at most</label>
+              <input id="td-f-max_lot" class="mono" data-name="max_lot" inputmode="decimal" autocomplete="off" placeholder="no ceiling">
+              <span class="field-note muted">lots per copy · blank: no ceiling</span>
+              <span class="field-note red cfg-err" id="td-err-max_lot"></span>
+            </div>
+            <div class="field">
+              <label for="td-f-max_deviation_points" class="flabel">Accept a fill up to</label>
+              <input id="td-f-max_deviation_points" class="mono" data-name="max_deviation_points" inputmode="numeric" autocomplete="off">
+              <span class="field-note muted">points off the quote</span>
+              <span class="field-note red cfg-err" id="td-err-max_deviation_points"></span>
+            </div>
+          </div>
+        </section>
+
+        <section aria-label="Following" class="panel cfg-card">
+          <div class="panel-head"><h2>Following</h2></div>
+          <div class="field">
+            <span class="tick-wrap">
+              <input id="td-f-master_manages" type="checkbox">
+              <label for="td-f-master_manages" class="flabel">let the master manage open trades: its stop and target moves, partial closes</label>
+            </span>
+            <span class="field-note muted" id="td-follow-note" hidden>The master is set to Slaves manage, so this slave manages its own trades whatever this says.</span>
+            <span class="field-note red cfg-err" id="td-err-master_manages"></span>
+          </div>
+          <div class="field">
+            <span class="tick-wrap">
+              <input id="td-f-copy_pending" type="checkbox">
+              <label for="td-f-copy_pending" class="flabel">also copy the master's pending orders</label>
+            </span>
+            <span class="field-note red cfg-err" id="td-err-copy_pending"></span>
+          </div>
+          <div class="field">
+            <span class="tick-wrap">
+              <input id="td-f-pending_fallback" type="checkbox">
+              <label for="td-f-pending_fallback" class="flabel">if a pending's price is refused, retry as the other resting type, then at market</label>
+            </span>
+            <span class="field-note red cfg-err" id="td-err-pending_fallback"></span>
+          </div>
+          <div class="hairline"></div>
+          <div class="field">
+            <span class="flabel">Trade</span>
+            <div role="group" aria-label="Direction" class="seg-row seg-stack" id="td-f-invert">
+              <button type="button" data-value="same" aria-pressed="false">The same way as the master</button>
+              <button type="button" data-value="opposite" aria-pressed="false">The opposite way: buy becomes sell</button>
+            </div>
+            <span class="field-note muted">reversed, stop and target swap places: the copy is sized from the master's take-profit, and a trade with no target copies with no stop</span>
+            <span class="field-note red cfg-err" id="td-err-invert"></span>
+          </div>
+          <div class="hairline"></div>
+          <div class="field">
+            <span class="flabel">When the master's trade has no stop</span>
+            <div role="group" aria-label="No stop" class="seg-row seg-stack" id="td-f-no_stop_policy">
+              <button type="button" data-value="skip" aria-pressed="false">Skip the trade</button>
+              <button type="button" data-value="lot_multiple" aria-pressed="false">Copy it anyway, at a multiple</button>
+            </div>
+            <span class="field-note red cfg-err" id="td-err-no_stop_policy"></span>
+          </div>
+          <div class="field" id="td-multiple-field" hidden>
+            <label for="td-f-no_stop_lot_multiple" class="flabel">At</label>
+            <input id="td-f-no_stop_lot_multiple" class="mono" data-name="no_stop_lot_multiple" inputmode="decimal" autocomplete="off">
+            <span class="field-note muted">× the master's lots, unprotected — the risk setting does not bound these; max lot still does</span>
+            <span class="field-note red cfg-err" id="td-err-no_stop_lot_multiple"></span>
+          </div>
+        </section>
+
+        <section aria-label="Breakeven" class="panel cfg-card" id="td-be-card">
+          <div class="panel-head"><h2>Breakeven</h2></div>
+          <div class="field-note" id="td-be-note" hidden>The master manages this slave's trades, so they follow the master's stop and this breakeven is off. Untick the master managing them, or set the master to Slaves manage, to use it.</div>
+          <div class="field">
+            <span class="flabel">Move the stop past entry</span>
+            <div role="group" aria-label="Breakeven" class="seg-row seg-2" id="td-f-breakeven_mode">
+              <button type="button" data-value="off" aria-pressed="false">Never</button>
+              <button type="button" data-value="r" aria-pressed="false">Once in profit</button>
+            </div>
+            <span class="field-note red cfg-err" id="td-err-breakeven_mode"></span>
+          </div>
+          <div class="field" id="td-trigger-field" hidden>
+            <label for="td-f-breakeven_trigger_r" class="flabel">Once it is</label>
+            <div class="slider-row">
+              <input type="range" id="td-sl-breakeven_trigger_r" min="0.1" max="3" step="0.05" aria-label="Breakeven trigger, R">
+              <input id="td-f-breakeven_trigger_r" class="mono" data-name="breakeven_trigger_r" inputmode="decimal" autocomplete="off">
+            </div>
+            <span class="field-note muted">R in profit — times the copy's opening stop distance, on this slave's own fill</span>
+            <span class="field-note red cfg-err" id="td-err-breakeven_trigger_r"></span>
+          </div>
+          <div class="field" id="td-book-field" hidden>
+            <label for="td-f-breakeven_book_percent" class="flabel">Then close</label>
+            <div class="slider-row">
+              <input type="range" id="td-sl-breakeven_book_percent" min="0" max="100" step="5" aria-label="Booked at breakeven, percent">
+              <input id="td-f-breakeven_book_percent" class="mono" data-name="breakeven_book_percent" inputmode="decimal" autocomplete="off">
+            </div>
+            <span class="field-note muted">% of the copy, to book profit · 0 books nothing</span>
+            <span class="field-note red cfg-err" id="td-err-breakeven_book_percent"></span>
+          </div>
+          <span class="field-note muted">Past entry by the commission each fill was charged, doubled for the way out, plus the slippage points. The commission under Sizing is only a backup here, for a fill that shows none.</span>
+        </section>
+
+        <section aria-label="Symbols" class="panel cfg-card">
+          <div class="panel-head"><h2>Symbols</h2></div>
+          <div class="two-col">
+            <div class="field">
+              <label for="td-f-symbol_prefix" class="flabel">This broker's prefix</label>
+              <input id="td-f-symbol_prefix" class="mono" data-name="symbol_prefix" autocomplete="off" spellcheck="false">
+              <span class="field-note red cfg-err" id="td-err-symbol_prefix"></span>
+            </div>
+            <div class="field">
+              <label for="td-f-symbol_suffix" class="flabel">and suffix</label>
+              <input id="td-f-symbol_suffix" class="mono" data-name="symbol_suffix" autocomplete="off" spellcheck="false">
+              <span class="field-note red cfg-err" id="td-err-symbol_suffix"></span>
+            </div>
+          </div>
+          <div class="field">
+            <label for="td-f-symbol_map" class="flabel">Renamed</label>
+            <input id="td-f-symbol_map" class="mono" data-name="symbol_map" autocomplete="off" spellcheck="false" placeholder="US30=US30.cash">
+            <span class="field-note muted">MASTER=BROKER pairs separated by commas, for names the prefix and suffix cannot express — a name the broker does not list is refused, not guessed at</span>
+            <span class="field-note red cfg-err" id="td-err-symbol_map"></span>
+          </div>
+          <div class="field">
+            <label for="td-f-symbol_whitelist" class="flabel">Only copy</label>
+            <input id="td-f-symbol_whitelist" class="mono" data-name="symbol_whitelist" autocomplete="off" spellcheck="false" placeholder="all symbols">
+            <span class="field-note red cfg-err" id="td-err-symbol_whitelist"></span>
+          </div>
+          <div class="field">
+            <label for="td-f-symbol_blacklist" class="flabel">Never copy</label>
+            <input id="td-f-symbol_blacklist" class="mono" data-name="symbol_blacklist" autocomplete="off" spellcheck="false" placeholder="none">
+            <span class="field-note muted">master names, without the master's own prefix or suffix</span>
+            <span class="field-note red cfg-err" id="td-err-symbol_blacklist"></span>
+          </div>
+        </section>
+
+        <section aria-label="Live trading" class="panel cfg-card">
+          <div class="panel-head"><h2>Live trading</h2></div>
+          <div class="small" id="td-live-said"></div>
+          <button type="button" id="td-live-btn" class="plain-btn" hidden></button>
+          <span class="field-note muted">The demo-only guard stands between every slave and a real-money account. A loaded setup can turn the override off, never on.</span>
+        </section>
+
+        <section aria-label="Example" class="panel cfg-card" id="td-example">
+          <div class="panel-head"><h2>Example</h2></div>
+          <div id="td-ex-lead"></div>
+          <div class="mono small" id="td-ex-working"></div>
+          <div class="field-note muted" id="td-ex-note"></div>
+        </section>
+
+        <section aria-label="Save" class="panel" id="td-foot-panel">
+          <div class="cfg-foot-row">
+            <div class="cfg-foot-said">
+              <span class="small" id="td-changes"></span>
+              <span class="muted small" id="td-stake"></span>
+              <span class="field-note red cfg-err" id="td-err-general"></span>
+            </div>
+            <span class="toolbar-space"></span>
+            <button type="button" id="td-revert" class="plain-btn">Revert</button>
+            <button type="button" id="td-save" class="primary-btn">Save</button>
+          </div>
+        </section>
+      </div>
+
+      <div id="td-master" class="td-grid" hidden>
+        <section aria-label="Open trades" class="panel cfg-card">
+          <div class="panel-head"><h2>Open trades</h2></div>
+          <span class="field-note muted">Its trades are opened and closed on every slave; sizing, renames and what gets copied are set on each slave. The copier only reads the master unless its breakeven is on.</span>
+          <div class="field">
+            <span class="flabel">Once a trade is open</span>
+            <div role="group" aria-label="Who manages" class="seg-row seg-stack" id="td-m-management">
+              <button type="button" data-value="master" aria-pressed="false">Master manages</button>
+              <button type="button" data-value="slaves" aria-pressed="false">Slaves manage</button>
+            </div>
+            <span class="field-note muted" id="td-m-mgmt-says"></span>
+            <span class="field-note red cfg-err" id="td-m-err-management"></span>
+          </div>
+        </section>
+
+        <section aria-label="Master breakeven" class="panel cfg-card">
+          <div class="panel-head"><h2>Breakeven</h2></div>
+          <div class="field">
+            <span class="flabel">Move the master's stop past entry</span>
+            <div role="group" aria-label="Master breakeven" class="seg-row seg-2" id="td-m-breakeven_mode">
+              <button type="button" data-value="off" aria-pressed="false">Never</button>
+              <button type="button" data-value="r" aria-pressed="false">Once in profit</button>
+            </div>
+            <span class="field-note red cfg-err" id="td-m-err-breakeven_mode"></span>
+          </div>
+          <div class="field" id="td-m-trigger-field" hidden>
+            <label for="td-m-breakeven_trigger_r" class="flabel">Once it is</label>
+            <div class="slider-row">
+              <input type="range" id="td-m-sl-breakeven_trigger_r" min="0.1" max="3" step="0.05" aria-label="Breakeven trigger, R">
+              <input id="td-m-breakeven_trigger_r" class="mono" data-name="breakeven_trigger_r" inputmode="decimal" autocomplete="off">
+            </div>
+            <span class="field-note muted">R in profit</span>
+            <span class="field-note red cfg-err" id="td-m-err-breakeven_trigger_r"></span>
+          </div>
+          <div class="field" id="td-m-book-field" hidden>
+            <label for="td-m-breakeven_book_percent" class="flabel">Then close</label>
+            <div class="slider-row">
+              <input type="range" id="td-m-sl-breakeven_book_percent" min="0" max="100" step="5" aria-label="Booked at breakeven, percent">
+              <input id="td-m-breakeven_book_percent" class="mono" data-name="breakeven_book_percent" inputmode="decimal" autocomplete="off">
+            </div>
+            <span class="field-note muted">% of it, to book profit · 0 books nothing</span>
+            <span class="field-note red cfg-err" id="td-m-err-breakeven_book_percent"></span>
+          </div>
+          <span class="field-note" id="td-m-be-says"></span>
+        </section>
+
+        <section aria-label="Master symbols" class="panel cfg-card">
+          <div class="panel-head"><h2>Symbols</h2></div>
+          <div class="two-col">
+            <div class="field">
+              <label for="td-m-symbol_prefix" class="flabel">This broker's prefix</label>
+              <input id="td-m-symbol_prefix" class="mono" data-name="symbol_prefix" autocomplete="off" spellcheck="false">
+              <span class="field-note red cfg-err" id="td-m-err-symbol_prefix"></span>
+            </div>
+            <div class="field">
+              <label for="td-m-symbol_suffix" class="flabel">and suffix</label>
+              <input id="td-m-symbol_suffix" class="mono" data-name="symbol_suffix" autocomplete="off" spellcheck="false">
+              <span class="field-note red cfg-err" id="td-m-err-symbol_suffix"></span>
+            </div>
+          </div>
+          <span class="field-note muted">taken off the master's names before each slave's own renames and decoration apply</span>
+          <div class="mono small" id="td-m-symex"></div>
+        </section>
+
+        <section aria-label="Save" class="panel" id="td-m-foot-panel">
+          <div class="cfg-foot-row">
+            <div class="cfg-foot-said">
+              <span class="small" id="td-m-changes"></span>
+              <span class="muted small">Nothing open is given up: copies stay managed.</span>
+              <span class="field-note red cfg-err" id="td-m-err-general"></span>
+            </div>
+            <span class="toolbar-space"></span>
+            <button type="button" id="td-m-revert" class="plain-btn">Revert</button>
+            <button type="button" id="td-m-save" class="primary-btn">Save</button>
           </div>
         </section>
       </div>

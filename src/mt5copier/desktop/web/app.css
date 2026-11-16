@@ -759,7 +759,7 @@ body.dragging-terminals .zone-cue { display: inline-block; }
    lines up. Three columns or one, never a ragged two with a hole beside the odd card. */
 #cfg-mode-now { min-height: 20px; }
 #cfg-mode-now .mode-word { font-weight: 700; }
-#cfg-cards {
+#cfg-cards, .td-grid {
   display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 20px; align-items: stretch; max-width: 1560px;
 }
@@ -768,17 +768,50 @@ body.dragging-terminals .zone-cue { display: inline-block; }
 .seg-row.seg-stack { grid-template-columns: 1fr; }
 .seg-row.seg-stack button { text-align: left; padding: 0 14px; }
 .cfg-err:empty { display: none; }
-#cfg-foot-panel { grid-column: 1 / -1; }
-#cfg-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; }
-#cfg-foot-said {
+#cfg-foot-panel, #td-foot-panel, #td-m-foot-panel { grid-column: 1 / -1; }
+#cfg-foot, .cfg-foot-row { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; }
+#cfg-foot-said, .cfg-foot-said {
   flex: 999 1 320px; min-width: 0;
   display: flex; flex-direction: column; gap: 4px;
 }
-#cfg-changes { font-size: 13px; }
-#cfg-changes:empty { display: none; }
+#cfg-changes, #td-changes, #td-m-changes { font-size: 13px; }
+#cfg-changes:empty, #td-changes:empty, #td-m-changes:empty { display: none; }
 @media (max-width: 1360px) {
-  #cfg-cards { grid-template-columns: 1fr; max-width: 720px; }
+  #cfg-cards, .td-grid { grid-template-columns: 1fr; max-width: 720px; }
 }
+
+/* --- the terminal detail page ----------------------------------------------------------------
+   One terminal's own page: the TUI s form (a slave) or m form (the master) as cards, opened
+   by clicking its card on Terminals. Sliders pair with their text box; typing stays the
+   truth and the slider is the coarse hand on the same value. */
+#td-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
+#td-head h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -0.01em; }
+.td-chip { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; }
+.td-chip .dot { width: 8px; height: 8px; }
+#td-guard-link { font-size: 13px; }
+.slider-row { display: flex; align-items: center; gap: 12px; }
+.slider-row input[type="range"] { flex: 1 1 auto; min-width: 0; }
+.slider-row input:not([type="range"]) { flex: 0 0 96px; width: 96px; }
+input[type="range"] {
+  -webkit-appearance: none; appearance: none;
+  height: 28px; padding: 0; border: 0; background: transparent; cursor: pointer;
+}
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px; border-radius: 2px; background: var(--border);
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 16px; height: 16px; margin-top: -6px;
+  border-radius: 50%; border: 0; background: var(--fg);
+}
+input[type="range"]:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.td-disabled { opacity: 0.55; pointer-events: none; }
+#td-be-note:not(:empty) { color: var(--yellow); }
+#td-ex-lead { font-size: 14px; }
+#td-ex-working:empty, #td-ex-note:empty, #td-m-symex:empty { display: none; }
+.ex-result { color: var(--blue); font-weight: 700; }
+#td-copyfrom-menu { right: 0; left: auto; min-width: 240px; }
+#td-live-btn { align-self: flex-start; }
 
 /* Picking lists and the rule form, inside the modal. */
 .pick-list { display: flex; flex-direction: column; gap: 2px; }

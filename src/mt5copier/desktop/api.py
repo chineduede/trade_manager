@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING, Any
 from .. import account_switch, role_actions
 from .. import config as config_mod
 from .. import setups as setups_mod
-from ..config import AppMode, Role, SizingMode, TerminalConfig, account_key
-from ..day_book import Outcome
+from ..config import AppMode, Management, Role, SizingMode, TerminalConfig, account_key
+from ..day_book import MasterEvent, Outcome
 from ..discovery import discover_terminals
 from ..general_edit import (
     APPLIES_ON_CONNECT,
@@ -39,9 +39,27 @@ from ..logging_setup import get_logger
 from ..news import HIGH, MEDIUM, symbol_currencies
 from ..paths import active_profile, guards_path, log_dir, setups_path
 from ..presentation import row_info, slave_badge
-from ..protocol import CHART_TIMEFRAMES, OrderType, PendingOrder, Position, PositionType
-from ..settings_edit import describe_changes
+from ..protocol import (
+    ACCOUNT_TRADE_MODE_DEMO,
+    CHART_TIMEFRAMES,
+    ActionKind,
+    OrderType,
+    PendingOrder,
+    Position,
+    PositionType,
+)
+from ..settings_edit import (
+    BY_NAME,
+    advisories,
+    apply_edits,
+    copies_word,
+    describe_changes,
+    initial_text,
+    initial_values,
+)
+from ..settings_example import MasterTrade, PriceValue, pick, work
 from ..setups import Setup, SetupsDoc
+from ..symbols import undecorate
 from ..terminal_detail import margin_gauge
 from . import winframe
 
@@ -1946,9 +1964,282 @@ class DesktopApi:
             messages.append({"text": why, "tone": "bad"})
         return {"ok": True, "messages": messages}
 
+    # --- the terminal detail page -------------------------------------------------------------
+    # One terminal's own page: its header facts and its settings form, the TUI s form for a
+    # slave and the m form for the master. What a value means, its bounds, and that an edit
+    # keeps open copies are settings_edit's and the engine's; this translates, and works the
+    # example with the same gather the TUI form does.
+
+    _MASTER_FIELDS = (
+        "management",
+        "breakeven_mode",
+        "breakeven_trigger_r",
+        "breakeven_book_percent",
+        "symbol_prefix",
+        "symbol_suffix",
+    )
+    _BROKERS_OWN = ("symbol_prefix", "symbol_suffix", "symbol_map")
+    """Names that fit one broker's symbols, so copying another slave's settings leaves them."""
+
+    def _view_of(self, tid: str) -> TerminalView | None:
+        return next((v for v in self._engine.views() if v.cfg.terminal_id == tid), None)
+
+    def _slave_gather(
+        self, tid: str
+    ) -> tuple[float | None, list[MasterTrade], dict[int, PriceValue], dict[int, str]]:
+        """The slave's balance, the master's trades and this slave's price values -- the TUI
+        form's _gather, read fresh on each check: the example is about the settings, worked
+        on whatever is true now."""
+        engine = self._engine
+        cfg = self._cfg
+        views = {v.cfg.terminal_id: v for v in engine.views()}
+        view = views.get(tid)
+        balance = view.snapshot.balance if view is not None and view.snapshot else None
+
+        held: list[MasterTrade] = []
+        master = cfg.master
+        mview = views.get(master.terminal_id) if master is not None else None
+        if master and mview and mview.snapshot and mview.snapshot.open_positions:
+            for p in sorted(mview.snapshot.open_positions, key=lambda p: p.time, reverse=True):
+                name = undecorate(p.symbol, master.symbol_prefix, master.symbol_suffix)
+                held.append(
+                    MasterTrade(
+                        p.ticket, name, p.type is PositionType.BUY, p.price_open, p.sl, p.tp
+                    )
+                )
+        events_ = engine.day_book()
+        trades = _detail_trades(held, events_)
+        symbols = {t.ticket: t.symbol for t in trades}
+        for e in events_:
+            symbols.setdefault(e.master_ticket, e.symbol)
+        fills: dict[int, PriceValue] = {}
+        for c in engine.open_copies(tid) or ():
+            if c.price_value > 0:
+                fills[c.master_ticket] = PriceValue(c.price_value, c.point)
+        for r in reversed(engine.recent_results()):
+            res = r.result
+            if res.terminal_id == tid and res.ok and res.price_value:
+                fills.setdefault(res.master_ticket, PriceValue(res.price_value, res.point or 0.0))
+        return balance, trades, fills, symbols
+
+    def _example_dict(self, tid: str, checked: TerminalConfig | None) -> dict[str, str]:
+        if checked is None:
+            return {
+                "lead": "Correct the settings above to see what this slave would open.",
+                "working": "",
+                "result": "",
+                "note": "",
+            }
+        balance, trades, fills, symbols = self._slave_gather(tid)
+        trade, price = pick(trades, fills, symbols, checked.invert)
+        ex = work(checked, balance, trade, price)
+        return {"lead": ex.lead, "working": ex.working, "result": ex.result, "note": ex.note}
+
+    def _master_symbols(self, tid: str) -> list[str]:
+        """The master's held symbol names, for the decoration example."""
+        view = self._view_of(tid)
+        held = (view.snapshot.open_positions if view is not None and view.snapshot else None) or ()
+        return list(dict.fromkeys(p.symbol for p in held))
+
+    @staticmethod
+    def _symbol_example(symbols: list[str], prefix: str, suffix: str) -> list[dict[str, str]]:
+        """What the slaves will be given for a few of the master's names -- tui/master.py's
+        example, as rows the page draws."""
+        prefix, suffix = prefix.strip(), suffix.strip()
+        if not symbols:
+            symbols = [f"{prefix}EURUSD{suffix}"] if prefix or suffix else ["EURUSD"]
+        return [{"symbol": s, "plain": undecorate(s, prefix, suffix)} for s in symbols[:4]]
+
+    def _stake_line(self, tid: str) -> dict[str, str]:
+        """The TUI form's footing: what a change does to the copies this slave holds."""
+        held = self._engine.open_copies(tid)
+        if held is None:
+            return {
+                "text": "Could not read what is open on this slave: you are asked before a "
+                "change gives anything up.",
+                "tone": "red",
+            }
+        if not held:
+            return {
+                "text": "Nothing is open on this slave, so a change gives nothing up.",
+                "tone": "",
+            }
+        return {
+            "text": f"{copies_word(len(held))} on this slave "
+            f"{'stays' if len(held) == 1 else 'stay'} managed through a change, each as it "
+            "was opened.",
+            "tone": "",
+        }
+
+    def _account_kind(self, tcfg: TerminalConfig) -> str:
+        """The header's account fact, the TUI form's own four states."""
+        view = self._view_of(tcfg.terminal_id)
+        snap = view.snapshot if view is not None else None
+        if snap is None or snap.trade_mode is None:
+            return "unread"
+        if snap.trade_mode == ACCOUNT_TRADE_MODE_DEMO:
+            return "demo"
+        return "live-allowed" if tcfg.allow_live_trading else "live-held"
+
+    def terminal_detail_state(self, tid: str) -> dict[str, Any]:
+        """Everything the detail page redraws from, in one call per poll."""
+        tid = str(tid)
+        cfg = self._cfg
+        tcfg = cfg.terminals.get(tid)
+        if tcfg is None:
+            return {"ok": False, "message": "that terminal is gone; rescan"}
+        view = self._view_of(tid)
+        card = self._card(view, self._engine.holds()) if view is not None else None
+        out: dict[str, Any] = {
+            "ok": True,
+            "tid": tid,
+            "name": cfg.display_name(tid),
+            "role": str(tcfg.role),
+            "card": card,
+            "dryRun": cfg.dry_run,
+            "accountKind": self._account_kind(tcfg),
+        }
+        if tcfg.role is Role.SLAVE:
+            values = initial_values(tcfg)
+            # The one-line input's spelling; apply_edits parses commas and newlines alike.
+            values["symbol_map"] = ", ".join(f"{k}={t}" for k, t in sorted(tcfg.symbol_map.items()))
+            master = cfg.master
+            out["values"] = values
+            out["masterSays"] = master is not None and master.management is Management.MASTER
+            out["stake"] = self._stake_line(tid)
+            out["example"] = self._example_dict(tid, tcfg)
+            out["copyFrom"] = [
+                {"tid": c.terminal_id, "name": cfg.display_name(c.terminal_id)}
+                for c in cfg.slaves
+                if c.terminal_id != tid
+            ]
+        elif tcfg.role is Role.MASTER:
+            out["values"] = {
+                name: initial_text(tcfg, BY_NAME[name]) for name in self._MASTER_FIELDS
+            }
+            out["symbolExample"] = self._symbol_example(
+                self._master_symbols(tid), tcfg.symbol_prefix, tcfg.symbol_suffix
+            )
+        return out
+
+    @staticmethod
+    def _terminal_raw(raw: dict[str, Any]) -> dict[str, str | bool]:
+        """The page's fields as apply_edits reads them. Only known names pass -- an extra key
+        is a page bug, not a reason to refuse a save."""
+        out: dict[str, str | bool] = {}
+        for name, value in raw.items():
+            if name in BY_NAME:
+                out[name] = value if isinstance(value, bool) else str(value)
+        return out
+
+    def terminal_settings_check(self, tid: str, raw: dict[str, Any]) -> dict[str, Any]:
+        """Per-field errors, what a save would change, and the worked example, as the person
+        types. Nothing is saved."""
+        tid = str(tid)
+        tcfg = self._cfg.terminals.get(tid)
+        if tcfg is None:
+            return {"errors": {"": "that terminal is gone; rescan"}, "changes": ""}
+        outcome = apply_edits(tcfg, self._terminal_raw(raw))
+        out: dict[str, Any] = {
+            "errors": outcome.errors,
+            "changes": describe_changes(outcome.changes, limit=160) if outcome.changes else "",
+        }
+        if tcfg.role is Role.SLAVE:
+            out["example"] = self._example_dict(tid, outcome.config)
+        elif tcfg.role is Role.MASTER:
+            out["symbolExample"] = self._symbol_example(
+                self._master_symbols(tid),
+                str(raw.get("symbol_prefix", "")),
+                str(raw.get("symbol_suffix", "")),
+            )
+        return out
+
+    def terminal_settings_save(self, tid: str, raw: dict[str, Any]) -> dict[str, Any]:
+        """Save the form, the TUI's own path: apply_edits rules on it, the engine swaps it in
+        atomically, and open copies stay managed -- only unassigning or disabling orphans."""
+        tid = str(tid)
+        cfg = self._cfg
+        tcfg = cfg.terminals.get(tid)
+        if tcfg is None:
+            return {"ok": False, "message": "that terminal is gone; rescan"}
+        outcome = apply_edits(tcfg, self._terminal_raw(raw))
+        if not outcome.ok:
+            return {
+                "ok": False,
+                "errors": outcome.errors,
+                "message": "Correct the marked values; nothing was changed.",
+            }
+        new = outcome.config
+        assert new is not None
+        if not outcome.changes:
+            return {
+                "ok": True,
+                "messages": [{"text": f"{cfg.display_name(tid)}: no changes.", "tone": ""}],
+            }
+        refusal = self._engine.apply_settings(new)
+        if refusal is not None:
+            return {"ok": False, "errors": {}, "message": refusal}
+        log.info(
+            "settings changed for %s (%s): %s",
+            new.label,
+            tid[:8],
+            describe_changes(outcome.changes),
+        )
+        messages = [
+            {
+                "text": f"{cfg.display_name(tid)}: {describe_changes(outcome.changes, limit=160)}.",
+                "tone": "ok",
+            }
+        ]
+        real = 0 if cfg.dry_run else self._engine.copies_on_real_account(tid)
+        for warning in advisories(outcome, real):
+            messages.append({"text": warning, "tone": "warn"})
+        why = self._persist()
+        if why is not None:
+            messages.append({"text": why, "tone": "bad"})
+        return {"ok": True, "messages": messages}
+
+    def terminal_settings_from(self, source_tid: str) -> dict[str, Any]:
+        """Another slave's settings to fill the form from, for review: its symbol prefix,
+        suffix and renames are its broker's, so they stay out. Nothing is saved here."""
+        src = self._cfg.terminals.get(str(source_tid))
+        if src is None or src.role is not Role.SLAVE:
+            return {"ok": False, "message": "that slave is gone; pick another"}
+        values = initial_values(src)
+        for name in self._BROKERS_OWN:
+            values.pop(name, None)
+        return {
+            "ok": True,
+            "values": values,
+            "name": self._cfg.display_name(src.terminal_id),
+        }
+
 
 _HISTORY_SHOWN = 100
 """Cards sent to the page at most per answer; the counts say what the filter left out."""
+
+
+def _detail_trades(
+    master_positions: list[MasterTrade], events_: list[MasterEvent]
+) -> list[MasterTrade]:
+    """The master's trades for the worked example, newest first, each once: what it holds,
+    then what the day book saw -- tui/settings.py's _trades."""
+    seen: set[int] = set()
+    out: list[MasterTrade] = []
+    for t in master_positions:
+        if t.ticket not in seen:
+            seen.add(t.ticket)
+            out.append(t)
+    for e in reversed(events_):
+        if e.kind not in (ActionKind.OPEN, ActionKind.PLACE) or e.master_ticket in seen:
+            continue
+        if e.entry <= 0:
+            continue
+        seen.add(e.master_ticket)
+        out.append(
+            MasterTrade(e.master_ticket, e.symbol, e.label.startswith("buy"), e.entry, e.sl, e.tp)
+        )
+    return out
 
 
 def _step_tone(step: Step) -> str:
