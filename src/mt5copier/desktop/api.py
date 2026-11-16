@@ -1149,7 +1149,12 @@ class DesktopApi:
             cmd = [sys.executable, "--desktop", "--profile", name]
         else:
             cmd = [sys.executable, "-m", "mt5copier", "--desktop", "--profile", name]
-        flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(
+        # CREATE_NO_WINDOW, not DETACHED_PROCESS: detached means *no console at all*, and
+        # then every console-subsystem child the new copier spawns (each engine worker is
+        # python.exe in a dev run) gets a fresh VISIBLE console from Windows. No-window
+        # gives the child a real but invisible console its workers inherit. Outliving this
+        # process needs no flag either way.
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
             subprocess, "CREATE_NEW_PROCESS_GROUP", 0
         )
         try:
