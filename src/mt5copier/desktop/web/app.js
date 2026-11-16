@@ -990,6 +990,7 @@ function stateWord(c, live) {
   // down outranks the demo guard, which outranks a hold, which outranks a pause.
   // A claim another profile holds would arrive as a whole sentence in statusText —
   // too long for this corner, so the word stays short and the info line explains.
+  if (c.loggingIn) return { text: 'logging in…', cls: 'yellow' };
   if (c.claimRefused) return { text: 'in use elsewhere', cls: 'yellow' };
   var down = c.tier === 'serious' || c.tier === 'critical' || c.tier === 'muted'
     || (c.tier === 'warning' && !c.holdReason);
@@ -1563,7 +1564,12 @@ function menuItems(c, live) {
     } else {
       does('Make it the master', function () { tact(api().assign_master(c.tid)); });
     }
-    says('account login lives in the TUI for now');
+    if (c.isCtrader) {
+      says('a cTrader account logs in from the TUI');
+    } else if (c.hasExe) {
+      if (c.loggingIn) says('logging in — the card says when it is done');
+      else does('Log in to an account…', function () { accountLoginFlow(c); });
+    }
     return items;
   }
 
@@ -1677,6 +1683,33 @@ function liveOverrideFlow(c, allow) {
     confirm: 'Allow live trading',
     danger: true,
     onConfirm: function () { tact(api().live_override(c.tid, true)); }
+  });
+}
+
+function accountLoginFlow(c) {
+  // The TUI's i flow: pick one of the accounts that have connected in this terminal; MT5
+  // logs in with the password the terminal itself saved. The login can take a couple of
+  // minutes (it starts the terminal), so the card narrates — "logging in…" — until the
+  // promise lands in a toast.
+  api().account_login_ask(c.tid).then(function (a) {
+    if (!a.ok) { toast(a.why, 'bad'); return; }
+    pickModal('Log ' + a.name + ' in to', a.accounts.map(function (acct) {
+      return {
+        label: acct.words + (acct.now ? '  — logged in now' : ''),
+        fn: function () {
+          if (acct.now) {
+            toast(a.name + ' is already logged in to ' + acct.words, '');
+            return;
+          }
+          toast(a.name + ': logging in to ' + acct.words + '…', '');
+          T.drawn = '';
+          pollTerminals();
+          tact(api().account_login(c.tid, acct.key));
+        }
+      };
+    }));
+  }, function () {
+    toast('The engine did not answer; try again.', 'bad');
   });
 }
 

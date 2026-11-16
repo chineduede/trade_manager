@@ -152,6 +152,9 @@ class DesktopApi:
         self._setup_busy = False
         """Whether a setup is being loaded right now; its logins block that bridge thread
         for a while, and a second load started under it would race the first."""
+        self._logging_in: set[str] = set()
+        """Terminals an account login is running for, each blocking its own bridge thread;
+        asking for a second login on one is refused while the first still runs."""
         self._busy_lock = threading.Lock()
 
     def attach(self, window: webview.Window) -> None:
@@ -532,6 +535,7 @@ class DesktopApi:
             "badgeTier": badge_tier,
             "isCtrader": tcfg.is_ctrader,
             "hasExe": tcfg.exe_path is not None,
+            "loggingIn": tid in self._logging_in,
             "usable": tcfg.usable,
             "enabled": tcfg.enabled,
             "allowLive": tcfg.allow_live_trading,
@@ -759,6 +763,109 @@ class DesktopApi:
         if new:
             message += f", {len(new)} new"
         return {"ok": True, "message": message + "."}
+
+    # --- account login ------------------------------------------------------------------------
+    # The TUI's i flow: an unassigned MT5 terminal is logged into one of the accounts that
+    # have connected in it, with the password the terminal itself saved. Only unassigned --
+    # a terminal with a role holds copies made on the account it is on, and unassigning
+    # first is what asks about those (see mt5copier.account_switch).
+
+    def _account_login_refused(self, tid: str) -> str | None:
+        """Why this terminal cannot be logged into another account right now, or None."""
+        tcfg = self._cfg.terminals.get(tid)
+        if tcfg is None:
+            return "that terminal is gone; rescan"
+        name = self._cfg.display_name(tid)
+        if tcfg.role is not Role.UNASSIGNED:
+            return (
+                f"unassign {name} first: its copies were made on the account it is logged "
+                "into, and unassigning asks about them"
+            )
+        if tcfg.is_ctrader:
+            return f"{name} is a cTrader account: log it in from the TUI"
+        if tcfg.exe_path is None:
+            return f"{name} has no terminal executable"
+        with self._busy_lock:
+            if tid in self._logging_in:
+                return f"{name} is already logging in"
+        return None
+
+    def account_login_ask(self, tid: str) -> dict[str, Any]:
+        """The accounts this terminal can be logged into: every one that has ever connected
+        in it, read from its own data folder without connecting."""
+        tid = str(tid)
+        why = self._account_login_refused(tid)
+        if why is not None:
+            return {"ok": False, "why": why}
+        cfg = self._cfg
+        name = cfg.display_name(tid)
+        accounts = account_switch.known_accounts(tid)
+        if not accounts:
+            return {
+                "ok": False,
+                "why": f"no accounts found for {name}: log in to one from MT5 first",
+            }
+        tcfg = cfg.terminals[tid]
+        now = account_key(tcfg.last_login, tcfg.last_server)
+        rows: list[dict[str, Any]] = []
+        for acct in accounts:
+            key = account_key(acct.login, acct.server) or ""
+            called = cfg.account_names.get(key)
+            rows.append(
+                {"key": key, "words": f"{called} · {key}" if called else key, "now": key == now}
+            )
+        return {"ok": True, "name": name, "accounts": rows}
+
+    def account_login(self, tid: str, key: str) -> dict[str, Any]:
+        """Log the terminal into the picked account, blocking this bridge thread as a setup
+        load's logins do -- the page's promise narrates while the other polls keep arriving.
+        MT5 uses the password saved in the terminal; none is handled here."""
+        tid, key = str(tid), str(key)
+        cfg = self._cfg
+        why = self._account_login_refused(tid)
+        if why is not None:
+            return {"ok": False, "message": why}
+        name = cfg.display_name(tid)
+        acct = next(
+            (
+                a
+                for a in account_switch.known_accounts(tid)
+                if account_key(a.login, a.server) == key
+            ),
+            None,
+        )
+        if acct is None:
+            return {"ok": False, "message": f"{name} has no saved account {key}; rescan"}
+        tcfg = cfg.terminals[tid]
+        if account_key(tcfg.last_login, tcfg.last_server) == key:
+            return {
+                "ok": False,
+                "message": f"{name} is already logged in to {self._account_called(key)}",
+            }
+        with self._busy_lock:
+            if tid in self._logging_in:
+                return {"ok": False, "message": f"{name} is already logging in"}
+            self._logging_in.add(tid)
+        try:
+            result = self._log_in(tid, acct)
+        finally:
+            with self._busy_lock:
+                self._logging_in.discard(tid)
+        called = self._account_called(key)
+        if not result.ok:
+            return {"ok": False, "message": f"{name} was not logged in to {called}: {result.said}"}
+        # Keep the account the login left the terminal on, as the one it was last on.
+        tcfg = cfg.terminals[tid]
+        cfg.replace_terminal(
+            tcfg.model_copy(
+                update={"last_login": result.login, "last_server": result.server or acct.server}
+            )
+        )
+        why = self._persist()
+        message = f"{name} is logged in to {called}"
+        if why is not None:
+            message += f" — {why}"
+        return {"ok": True, "message": message}
 
     # --- the guards page --------------------------------------------------------------------
 
