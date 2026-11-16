@@ -755,18 +755,30 @@ body.dragging-terminals .zone-cue { display: inline-block; }
 
 /* --- the settings page ----------------------------------------------------------------------
    The copier's own settings, the TUI g form as cards: this profile, connection, terminals
-   and history. Stacked choices read one per line, long labels never squeezed. */
+   and history on one row, the save bar a full-width card of the same grid so every edge
+   lines up. Three columns or one, never a ragged two with a hole beside the odd card. */
 #cfg-mode-now { min-height: 20px; }
 #cfg-mode-now .mode-word { font-weight: 700; }
-#cfg-cards { display: flex; flex-wrap: wrap; gap: 20px; align-items: stretch; }
-.cfg-card { flex: 1 1 380px; max-width: 560px; min-width: 0; box-sizing: border-box; }
+#cfg-cards {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px; align-items: stretch; max-width: 1560px;
+}
+.cfg-card { min-width: 0; box-sizing: border-box; }
 .cfg-card input { font-size: 14px; }
 .seg-row.seg-stack { grid-template-columns: 1fr; }
 .seg-row.seg-stack button { text-align: left; padding: 0 14px; }
 .cfg-err:empty { display: none; }
-#cfg-foot-panel { max-width: 1140px; }
-#cfg-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-#cfg-changes { flex: 0 1 auto; max-width: 680px; }
+#cfg-foot-panel { grid-column: 1 / -1; }
+#cfg-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; }
+#cfg-foot-said {
+  flex: 999 1 320px; min-width: 0;
+  display: flex; flex-direction: column; gap: 4px;
+}
+#cfg-changes { font-size: 13px; }
+#cfg-changes:empty { display: none; }
+@media (max-width: 1360px) {
+  #cfg-cards { grid-template-columns: 1fr; max-width: 720px; }
+}
 
 /* Picking lists and the rule form, inside the modal. */
 .pick-list { display: flex; flex-direction: column; gap: 2px; }
