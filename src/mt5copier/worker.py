@@ -50,6 +50,7 @@ from .protocol import (
     Quote,
     RatesRequest,
     RatesResult,
+    SymbolMeta,
     Snapshot,
     WatchCommand,
     WorkerState,
@@ -499,10 +500,11 @@ class _Session:
         self._quote_names = resolved
         self._watch_resolved = watch
 
-    def read_rates(self, req: RatesRequest) -> tuple[Candle, ...] | str:
-        """The last ``req.count`` bars of one clean symbol, oldest first, or why they will
-        not read. Resolution is the watch's own (:meth:`_resolve_watch`), so the chart shows
-        exactly the instrument the quotes feeding the book are read from."""
+    def read_rates(self, req: RatesRequest) -> tuple[tuple[Candle, ...], SymbolMeta | None] | str:
+        """The last ``req.count`` bars of one clean symbol, oldest first, with the symbol's
+        pricing facts read in the same pass -- or why they will not read. Resolution is the
+        watch's own (:meth:`_resolve_watch`), so the chart shows exactly the instrument the
+        quotes feeding the book are read from."""
         available = self.symbol_names()
         if not available:
             return "the broker's symbol list would not read"
@@ -516,14 +518,32 @@ class _Session:
         )
         if answer.name is None:
             return answer.how
-        self.symbol_facts(answer.name)
+        facts = self.symbol_facts(answer.name)
+        meta: SymbolMeta | None = None
+        if facts is not None:
+            value_per_unit = 0.0
+            try:
+                info = self._mt5.symbol_info(answer.name)
+                tick_size = float(getattr(info, "trade_tick_size", 0.0) or 0.0)
+                # The loss side, as sizing itself wants; plain trade_tick_value is the
+                # fallback for brokers that leave the split fields zeroed.
+                tick_value = float(getattr(info, "trade_tick_value_loss", 0.0) or 0.0) or float(
+                    getattr(info, "trade_tick_value", 0.0) or 0.0
+                )
+                if tick_size > 0 and tick_value > 0:
+                    value_per_unit = tick_value / tick_size
+            except Exception as exc:
+                log.debug("tick values for %r would not read: %r", answer.name, exc)
+            meta = SymbolMeta(
+                digits=facts.digits, point=facts.point, value_per_unit=value_per_unit
+            )
         try:
             rows = self._mt5.copy_rates_from_pos(answer.name, req.timeframe, 0, req.count)
         except Exception as exc:
             return f"the bars would not read: {exc!r}"
         if rows is None:
             return "the terminal answered no bars"
-        return tuple(
+        candles = tuple(
             Candle(
                 ts=int(row["time"]),
                 open=float(row["open"]),
@@ -533,6 +553,7 @@ class _Session:
             )
             for row in rows
         )
+        return candles, meta
 
     def poll(self, terminal_id: str, seq: int, attempts: int) -> Snapshot:
         """Read account and terminal state into a snapshot.
@@ -1017,9 +1038,10 @@ def run_worker(
                         terminal_id=terminal_id,
                         symbol=cmd.symbol,
                         timeframe=cmd.timeframe,
-                        candles=got if not isinstance(got, str) else (),
+                        candles=got[0] if not isinstance(got, str) else (),
                         error=got if isinstance(got, str) else None,
                         ts=time.time(),
+                        meta=got[1] if not isinstance(got, str) else None,
                     )
                     try:
                         # Droppable, like a snapshot: the supervisor asks again soon.

@@ -458,11 +458,19 @@ class DesktopApi:
             return {"candles": [], "error": None, "waiting": True}
         if result.error is not None:
             return {"candles": [], "error": result.error, "waiting": False}
+        meta = result.meta
         return {
             "candles": [
                 {"time": c.ts, "open": c.open, "high": c.high, "low": c.low, "close": c.close}
                 for c in result.candles
             ],
+            "meta": {
+                "digits": meta.digits,
+                "point": meta.point,
+                "valuePerUnit": meta.value_per_unit,
+            }
+            if meta is not None
+            else None,
             "error": None,
             "waiting": False,
         }

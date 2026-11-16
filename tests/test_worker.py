@@ -106,6 +106,8 @@ class FakeSymbolInfo:
     digits: int = 5
     filling_mode: int = 1
     visible: bool = True
+    trade_tick_size: float = 0.00001
+    trade_tick_value_loss: float = 1.0
 
 
 class FakeMT5:
@@ -1082,9 +1084,13 @@ def test_rates_are_read_on_the_resolved_symbol(tmp_path: Path) -> None:
     session, mt5 = rates_session([BAR, {**BAR, "time": 1_700_000_060}])
     got = session.read_rates(RatesRequest(symbol="EURUSD", timeframe=5, count=2, symbol_suffix="m"))
     assert not isinstance(got, str)
+    candles, meta = got
     assert mt5.rates_calls == [("EURUSDm", 5, 0, 2)], "read on the broker's own name"
-    assert [c.ts for c in got] == [1_700_000_000, 1_700_000_060]
-    assert (got[0].open, got[0].high, got[0].low, got[0].close) == (1.08, 1.09, 1.07, 1.085)
+    assert [c.ts for c in candles] == [1_700_000_000, 1_700_000_060]
+    assert (candles[0].open, candles[0].high, candles[0].low, candles[0].close) == (1.08, 1.09, 1.07, 1.085)
+    assert meta is not None
+    assert (meta.digits, meta.point) == (5, 0.0001)
+    assert meta.value_per_unit == pytest.approx(100_000.0), "the loss-side tick value per 1.0"
 
 
 def test_rates_for_a_symbol_the_broker_lacks_answer_why(tmp_path: Path) -> None:
@@ -1137,6 +1143,7 @@ def test_the_worker_loop_answers_a_rates_request(tmp_path: Path) -> None:
     answer = next(item for item in collected if isinstance(item, RatesResult))
     assert answer.error is None and answer.symbol == "EURUSD" and answer.timeframe == 5
     assert [c.close for c in answer.candles] == [1.085]
+    assert answer.meta is not None and answer.meta.digits == 5, "the pricing facts ride along"
 
 
 def test_a_rates_request_while_disconnected_answers_why(tmp_path: Path) -> None:

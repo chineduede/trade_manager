@@ -17,7 +17,10 @@ var S = {
   live: null,          // last state() answer from the engine
   candles: [],         // last rates() answer, oldest first
   candlesKey: '',      // symbol|tf the candles belong to
-  digits: 2,           // decimals seen in the data, for formatting dragged prices
+  digits: 2,           // decimals for formatting prices: the feed's own, or seen in the data
+  meta: null,          // the feed's pricing facts for the charted symbol, from rates()
+  metaSymbol: '',      // the symbol S.meta belongs to; stale meta must never price another
+  priceFmtKey: '',     // the precision|minMove the chart's axis was last told to print
   dragging: null,      // 'sl' | 'tp' | 'entry' while a line is held, whichever mode owns it
   notice: '', noticeTone: '',
   mode: 'new',         // 'new' places orders; 'modify' takes the panel AND the chart for one trade
@@ -57,6 +60,32 @@ function decimalsOf(x) {
   var s = String(x);
   var i = s.indexOf('.');
   return i < 0 ? 0 : Math.min(8, s.length - i - 1);
+}
+
+function symbolMeta() {
+  // The feed's pricing facts, but only while they are the charted symbol's own.
+  return S.meta && S.metaSymbol === S.symbol ? S.meta : null;
+}
+
+function pipSize() {
+  // The quoting convention's pip: the point on most symbols, ten points where the broker
+  // quotes an extra fractional digit (5-digit FX, 3-digit JPY pairs).
+  var m = symbolMeta();
+  if (!m || !(m.point > 0)) return 0;
+  return m.digits === 3 || m.digits === 5 ? m.point * 10 : m.point;
+}
+
+function pips(dist) {
+  var p = pipSize();
+  if (!(p > 0)) return null;
+  var v = dist / p;
+  return (v >= 100 ? Math.round(v) : Math.round(v * 10) / 10) + ' pips';
+}
+
+function distText(dist) {
+  // A distance said the way a trader thinks in: pips when the feed has given the symbol's
+  // point, the formatted price delta until then.
+  return pips(dist) || fmt(dist);
 }
 
 // --- the chart -----------------------------------------------------------------------------
@@ -185,9 +214,27 @@ function showCandles(data) {
     return;
   }
   S.candlesKey = key;
-  var d = 0;
-  for (var i = Math.max(0, data.length - 20); i < data.length; i++) d = Math.max(d, decimalsOf(data[i].close));
-  S.digits = Math.max(d, 1);
+  var m = symbolMeta();
+  if (m && m.digits > 0) {
+    S.digits = m.digits;
+  } else {
+    var d = 0;
+    for (var i = Math.max(0, data.length - 20); i < data.length; i++) d = Math.max(d, decimalsOf(data[i].close));
+    S.digits = Math.max(d, 1);
+  }
+  // The axis must print the symbol's own precision: the series' default is 2 decimals,
+  // which collapsed every EURUSD label to "1.10" while XAUUSD happened to fit.
+  var fmtKey = S.digits + '|' + (m && m.point > 0 ? m.point : 0);
+  if (fmtKey !== S.priceFmtKey) {
+    S.priceFmtKey = fmtKey;
+    series.applyOptions({
+      priceFormat: {
+        type: 'price',
+        precision: S.digits,
+        minMove: m && m.point > 0 ? m.point : Math.pow(10, -S.digits)
+      }
+    });
+  }
   if (fresh) series.setData(data);
   else series.update(data[data.length - 1]);
   if (moved) {
@@ -274,13 +321,13 @@ function renderModify() {
   if (slOk && entryOk) {
     var risk = way * (entry - sl);
     if (risk > 0) {
-      slDelta.textContent = '−' + fmt(risk) + ' from the entry';
+      slDelta.textContent = '−' + distText(risk) + ' from the entry';
       slDelta.className = 'field-note red';
     } else if (risk === 0) {
       slDelta.textContent = 'at the entry — breakeven';
       slDelta.className = 'field-note blue';
     } else {
-      slDelta.textContent = '+' + fmt(-risk) + ' past the entry — profit locked';
+      slDelta.textContent = '+' + distText(-risk) + ' past the entry — profit locked';
       slDelta.className = 'field-note blue';
     }
   } else {
@@ -288,11 +335,11 @@ function renderModify() {
     slDelta.className = 'field-note';
   }
   $('m-tp-delta').textContent = tpIn && entryOk
-    ? (way * (tp - entry) >= 0 ? '+' : '−') + fmt(Math.abs(tp - entry))
+    ? (way * (tp - entry) >= 0 ? '+' : '−') + distText(Math.abs(tp - entry))
     : '';
   if (!row.open && entryOk && q) {
     var away = entry - (row.side === 'buy' ? q.ask : q.bid);
-    $('m-entry-delta').textContent = (away >= 0 ? '+' : '−') + fmt(Math.abs(away)) + ' from price';
+    $('m-entry-delta').textContent = (away >= 0 ? '+' : '−') + distText(Math.abs(away)) + ' from price';
   } else {
     $('m-entry-delta').textContent = '';
   }
@@ -421,7 +468,9 @@ function renderTicket() {
   var t = compute();
   var q = S.live && S.live.quote;
 
-  $('quote-line').textContent = q ? 'bid ' + q.bid + ' · ask ' + q.ask : '';
+  var m = symbolMeta();
+  var qf = function (v) { return m && m.digits > 0 ? v.toFixed(m.digits) : String(v); };
+  $('quote-line').textContent = q ? 'bid ' + qf(q.bid) + ' · ask ' + qf(q.ask) : '';
 
   var note = $('side-note');
   if (t.stopIn && t.side === 'buy') {
@@ -435,8 +484,8 @@ function renderTicket() {
     note.className = 'field-note';
   }
 
-  $('stop-delta').textContent = t.ok ? '−' + fmt(t.dist) : '';
-  $('target-delta').textContent = t.ok ? '+' + fmt(Math.abs(t.tp - t.entry)) : '';
+  $('stop-delta').textContent = t.ok ? '−' + distText(t.dist) : '';
+  $('target-delta').textContent = t.ok ? '+' + distText(Math.abs(t.tp - t.entry)) : '';
 
   // The field not touched last follows the one that was.
   if (S.lastTouched === 'rr') {
@@ -469,12 +518,18 @@ function renderTicket() {
       name.className = 'name';
       name.textContent = s.name;
       var lots = document.createElement('span');
+      var vpu = m ? m.valuePerUnit : 0;
       if (s.budget === null || !t.dist) {
         lots.className = 'lots unknown';
         lots.textContent = s.risk + ' · balance unknown';
+      } else if (!(vpu > 0)) {
+        // Without the feed's tick value, budget / distance is off by the contract size —
+        // the 1,249,718-lots bug. Better no number than that one.
+        lots.className = 'lots unknown';
+        lots.textContent = s.risk + ' · sized at the terminal';
       } else {
         lots.className = 'lots';
-        lots.textContent = '≈' + Math.max(0.01, s.budget / t.dist).toFixed(2) + ' lots';
+        lots.textContent = '≈' + Math.max(0.01, s.budget / (t.dist * vpu)).toFixed(2) + ' lots';
       }
       row.appendChild(name);
       row.appendChild(lots);
@@ -926,6 +981,8 @@ function symbolChanged() {
   // away from the new price and the old candles pin the scale to the wrong range.
   ['f-stop', 'f-entry', 'f-tp'].forEach(function (id) { $(id).value = ''; });
   S.candlesKey = '';
+  S.meta = null;
+  S.metaSymbol = '';
   showCandles([]);
 }
 
@@ -933,8 +990,13 @@ function pollRates() {
   if (ratesBusy || !window.pywebview) return;
   if (!S.symbol) { showCandles([]); setMsg('type a symbol to chart it'); return; }
   ratesBusy = true;
+  var asked = S.symbol;
   api().rates(S.symbol, S.tf).then(function (r) {
     ratesBusy = false;
+    if (r.meta && asked === S.symbol) {
+      S.meta = r.meta;
+      S.metaSymbol = asked;
+    }
     if (r.error) { showCandles([]); setMsg(r.error); return; }
     if (r.waiting || !r.candles.length) {
       var feed = S.live && S.live.feed;

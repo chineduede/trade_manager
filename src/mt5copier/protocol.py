@@ -288,6 +288,20 @@ class RatesRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class SymbolMeta:
+    """How the feed terminal prices one symbol, for the ticket's display arithmetic.
+
+    Display only -- real sizing happens on each slave's own terminal. ``value_per_unit`` is
+    what one lot gains or loses over a 1.0 move of the quote, in the *feed* account's
+    currency (``trade_tick_value_loss / trade_tick_size``), so the page's lot estimate is
+    at least the right order of magnitude; 0.0 when the feed could not price it."""
+
+    digits: int = 0
+    point: float = 0.0
+    value_per_unit: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
 class RatesResult:
     """Feed worker -> supervisor: the bars asked for, oldest first -- or why not.
 
@@ -301,6 +315,8 @@ class RatesResult:
     error: str | None = None
     ts: float = 0.0
     """When the worker read them, in its wall clock. Display only."""
+    meta: SymbolMeta | None = None
+    """The symbol's pricing facts, read in the same pass as the bars; None when unknown."""
 
 
 class WorkerState(StrEnum):
