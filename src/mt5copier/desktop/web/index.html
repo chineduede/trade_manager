@@ -566,6 +566,65 @@
         </div>
       </div>
 
+      <div id="td-tabs" role="tablist" aria-label="Terminal detail">
+        <button type="button" id="td-tab-overview" role="tab" aria-selected="true">Overview</button>
+        <button type="button" id="td-tab-settings" role="tab" aria-selected="false">Settings</button>
+      </div>
+
+      <!-- The Overview tab: the TUI enter page — the account, the rule it is copied by, how
+           copying has gone this session, then the open positions and resting orders. Display
+           only; everything comes from terminal_overview_state in one call per poll. -->
+      <div id="td-overview" hidden>
+        <section aria-label="Account summary" class="panel" id="ov-band">
+          <div id="ov-band-left">
+            <div class="small muted">equity</div>
+            <div id="ov-equity" class="mono">—</div>
+            <div id="ov-floating" class="mono small muted">— floating</div>
+          </div>
+          <div id="ov-band-right">
+            <div id="ov-conn" class="small"></div>
+            <div id="ov-acct" class="mono small muted"></div>
+          </div>
+        </section>
+
+        <div id="ov-cols">
+          <section aria-label="Account" class="panel ov-col">
+            <div class="panel-head"><h2>Account</h2></div>
+            <div id="ov-account" class="ov-rows ov-mono"></div>
+          </section>
+          <section aria-label="Rule" class="panel ov-col">
+            <div class="panel-head">
+              <h2 id="ov-rule-title">Rule</h2>
+              <span class="small muted" id="ov-rule-right"></span>
+              <button type="button" id="ov-rule-edit" class="linklike small" hidden>change → Settings</button>
+            </div>
+            <div id="ov-rule" class="ov-rows"></div>
+          </section>
+          <section aria-label="Copying" class="panel ov-col">
+            <div class="panel-head"><h2 id="ov-copy-title">Copying</h2><span class="small muted" id="ov-copy-right"></span></div>
+            <div id="ov-copying" class="ov-rows ov-mono"></div>
+            <div id="ov-copy-note" class="field-note muted" hidden></div>
+            <div id="ov-spark-wrap" hidden>
+              <svg id="ov-spark" viewBox="0 0 100 36" preserveAspectRatio="none" aria-hidden="true"></svg>
+              <div class="field-note muted">delay of each order, oldest first</div>
+            </div>
+          </section>
+        </div>
+
+        <section aria-label="Positions" class="panel" id="ov-pos-panel">
+          <div class="panel-head"><h2 id="ov-pos-title">Positions</h2><span class="small muted mono" id="ov-exposure"></span></div>
+          <div class="table-scroll" id="ov-pos-scroll"><table class="ov-table" id="ov-pos-table"><thead></thead><tbody></tbody></table></div>
+          <div id="ov-pos-note" class="muted small" hidden></div>
+        </section>
+
+        <section aria-label="Resting orders" class="panel" id="ov-ord-panel" hidden>
+          <div class="panel-head"><h2 id="ov-ord-title">Resting orders</h2></div>
+          <div class="table-scroll" id="ov-ord-scroll"><table class="ov-table" id="ov-ord-table"><thead></thead><tbody></tbody></table></div>
+          <div id="ov-ord-note" class="red small" hidden>The resting orders could not be read.</div>
+        </section>
+      </div>
+
+      <div id="td-settings" hidden>
       <div id="td-other" class="muted" hidden>This terminal has no role yet, so there is nothing to set on it. Drag its card into the MASTER or SLAVES zone on Terminals; its settings live here once it has one.</div>
       <button type="button" id="td-login-btn" class="plain-btn" hidden>Log in to an account…</button>
 
@@ -845,6 +904,7 @@
             <button type="button" id="td-m-save" class="primary-btn">Save</button>
           </div>
         </section>
+      </div>
       </div>
     </div>
     </main>

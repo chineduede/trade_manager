@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
 from .. import account_switch, role_actions
@@ -21,13 +21,16 @@ from .. import config as config_mod
 from .. import setups as setups_mod
 from ..config import (
     AppMode,
+    BreakevenMode,
     Management,
+    NoStopPolicy,
     Role,
     SizingMode,
     TerminalConfig,
     account_key,
     record_login,
 )
+from ..copy_stats import TerminalStats
 from ..day_book import MasterEvent, Outcome
 from ..discovery import discover_terminals
 from ..general_edit import (
@@ -60,11 +63,13 @@ from ..presentation import read_log_tail, row_info, slave_badge
 from ..protocol import (
     ACCOUNT_TRADE_MODE_DEMO,
     CHART_TIMEFRAMES,
+    COPIER_MAGIC,
     ActionKind,
     OrderType,
     PendingOrder,
     Position,
     PositionType,
+    Snapshot,
 )
 from ..settings_edit import (
     BY_NAME,
@@ -79,7 +84,17 @@ from ..settings_edit import (
 from ..settings_example import MasterTrade, PriceValue, pick, work
 from ..setups import Setup, SetupsDoc
 from ..symbols import undecorate
-from ..terminal_detail import margin_gauge
+from ..terminal_detail import (
+    PositionRow,
+    breakeven_rule,
+    exposure,
+    format_duration,
+    format_ping,
+    held_by_counts,
+    margin_gauge,
+    position_rows,
+    price_digits,
+)
 from . import winframe
 
 if TYPE_CHECKING:
@@ -90,6 +105,7 @@ if TYPE_CHECKING:
     from ..guards import RuleStatus
     from ..history import GuardAction, Step, Trade
     from ..news import NewsEvent
+    from ..reconcile import OpenCopy
 
 log = get_logger(__name__)
 
@@ -2389,6 +2405,138 @@ class DesktopApi:
             )
         return out
 
+    def terminal_overview_state(self, tid: str) -> dict[str, Any]:
+        """Everything the detail page's Overview tab redraws from, in one call per poll:
+        the TUI enter page's three ruled columns, then the positions and orders tables.
+        Display only, end to end -- nothing here feeds back into what is copied."""
+        tid = str(tid)
+        cfg = self._cfg
+        tcfg = cfg.terminals.get(tid)
+        if tcfg is None:
+            return {"ok": False, "message": "that terminal is gone; rescan"}
+        engine = self._engine
+        holds = engine.holds()
+        views = engine.views()
+        view = next((v for v in views if v.cfg.terminal_id == tid), None)
+        snap = view.snapshot if view is not None else None
+        stats = engine.terminal_stats(tid)
+        ping = format_ping(snap.ping_last_us if snap is not None else None)
+        out: dict[str, Any] = {
+            "ok": True,
+            "tid": tid,
+            "name": cfg.display_name(tid),
+            "role": str(tcfg.role),
+            "card": self._card(view, holds) if view is not None else None,
+            "dryRun": cfg.dry_run,
+            "accountKind": self._account_kind(tcfg),
+            "connected": format_duration(stats.connected_for_s)
+            if stats.connected_for_s is not None
+            else None,
+            "ping": None if ping == "—" else ping,
+            "leverage": snap.leverage if snap is not None else None,
+            "account": _ov_account(snap),
+        }
+
+        slaves = [v for v in views if v.cfg.role is Role.SLAVE]
+        if tcfg.role is Role.MASTER:
+            out["copiedTo"] = {
+                "who": "master manages"
+                if tcfg.management is Management.MASTER
+                else "slaves manage",
+                "slaves": [
+                    {
+                        "name": cfg.display_name(v.cfg.terminal_id),
+                        "card": self._card(v, holds),
+                    }
+                    for v in slaves
+                ],
+            }
+        else:
+            out["rule"] = _ov_rule_rows(
+                tcfg,
+                snap.currency if snap is not None else None,
+                _ov_example_symbol(views),
+                managed=cfg.manages(tcfg),
+            )
+
+        if tcfg.role is Role.SLAVE:
+            out["copying"] = {
+                "rows": _ov_copying_rows(stats),
+                "latencies": [round(v, 1) for v in stats.latencies_ms],
+            }
+        else:
+            out["connection"] = {
+                "rows": _ov_connection_rows(stats, snap),
+                "note": "The master is only read from, so there is no copying to time here."
+                if tcfg.role is Role.MASTER
+                else "Copying is measured on slaves only.",
+            }
+
+        out["positions"] = None
+        out["orders"] = None
+        if snap is not None:
+            is_slave = tcfg.role is Role.SLAVE
+            copies = engine.open_copies(tid) if is_slave else None
+            if tcfg.role is Role.MASTER:
+                rows = position_rows(
+                    snap,
+                    is_master=True,
+                    held_by=held_by_counts(engine.open_copies(v.cfg.terminal_id) for v in slaves),
+                    slave_count=len(slaves),
+                )
+            else:
+                mview = next((v for v in views if v.cfg.role is Role.MASTER), None)
+                rows = position_rows(
+                    snap,
+                    is_master=False,
+                    copies=copies,
+                    breakeven=breakeven_rule(tcfg),
+                    master_positions=mview.snapshot.open_positions
+                    if mview is not None and mview.snapshot is not None
+                    else None,
+                    orphan_tickets=(o.slave_ticket for o in engine.orphans(tid)),
+                )
+            by_ticket = {
+                c.slave_ticket: c
+                for c in copies or ()
+                if c.slave_ticket is not None and not c.resting
+            }
+            prows = None
+            total = None
+            if rows is not None:
+                prows = [
+                    _ov_position_row(r, by_ticket.get(r.ticket), tcfg, is_slave=is_slave)
+                    for r in rows
+                ]
+                total = sum(r.profit for r in rows if r.profit is not None)
+            out["positions"] = {
+                "unreadable": rows is None,
+                "rows": prows or [],
+                "total": total,
+                "exposure": _ov_exposure(snap.open_positions),
+            }
+            orders = snap.pending_orders
+            if orders is None:
+                if snap.is_live:
+                    out["orders"] = {"unreadable": True, "rows": [], "anyStopLimit": False}
+            else:
+                resting = {
+                    c.slave_ticket: c
+                    for c in copies or ()
+                    if c.resting and c.slave_ticket is not None
+                }
+                ordered = sorted(orders, key=lambda o: (o.symbol, o.ticket))
+                now = time.time()
+                out["orders"] = {
+                    "unreadable": False,
+                    "rows": [
+                        _ov_order_row(o, resting.get(o.ticket), is_slave=is_slave, now=now)
+                        for o in ordered
+                    ],
+                    "anyStopLimit": any(o.type.is_stop_limit for o in ordered),
+                }
+        return out
+
     @staticmethod
     def _terminal_raw(raw: dict[str, Any]) -> dict[str, str | bool]:
         """The page's fields as apply_edits reads them. Only known names pass -- an extra key
@@ -2550,3 +2698,333 @@ def _news_said(p: dict[str, ParamValue], e: NewsEvent) -> str:
     end = clock(e.when + float(p["after"]) * 60)
     which = f"{e.currency} " if scoped else ""
     return f"no new {which}trades {start}–{end}"
+
+
+# --- the detail page's Overview tab -----------------------------------------------------------
+# The TUI enter page's three ruled columns and its tables, as JSON. The wording is ported from
+# tui/detail.py, which stays the reference; every number comes from mt5copier/terminal_detail.py
+# and copy_stats.py, the same UI-free helpers the TUI reads. Tones are the app's palette words.
+
+_TIER_TONE = {
+    "good": "",
+    "warning": "yellow",
+    "serious": "red",
+    "critical": "red",
+    "muted": "muted",
+}
+
+
+def _ov_row(label: str, text: str, tone: str = "") -> dict[str, str]:
+    return {"label": label, "text": text, "tone": tone}
+
+
+def _ov_account(snap: Snapshot | None) -> dict[str, Any] | None:
+    """The ACCOUNT column's numbers; the page formats and draws the gauge."""
+    if snap is None:
+        return None
+    gauge = margin_gauge(snap)
+    pl = (
+        snap.equity - snap.balance if snap.equity is not None and snap.balance is not None else None
+    )
+    return {
+        "balance": snap.balance,
+        "floating": pl,
+        "equity": snap.equity,
+        "margin": snap.margin,
+        "marginFree": gauge.free,
+        "usedFraction": gauge.used_fraction,
+        "levelPct": gauge.level_pct,
+        "levelTier": gauge.level_tier,
+        "noMargin": snap.margin == 0,
+    }
+
+
+def _ov_example_symbol(views: list[TerminalView]) -> str:
+    """A symbol the master holds, to show how its name changes here; EURUSD if none."""
+    master = next((v for v in views if v.cfg.role is Role.MASTER), None)
+    held = master.snapshot.open_positions if master is not None and master.snapshot else None
+    return held[0].symbol if held else "EURUSD"
+
+
+def _ov_risk_text(tcfg: TerminalConfig, currency: str | None) -> str:
+    if tcfg.sizing_mode is SizingMode.FIXED_CASH_RISK:
+        return f"{tcfg.risk_cash:,g} {currency or ''}".rstrip() + " a trade"
+    return f"{tcfg.risk_percent:g}% of balance"
+
+
+def _ov_few(names: Sequence[str]) -> str:
+    shown = ", ".join(names[:3])
+    return shown + (f" +{len(names) - 3}" if len(names) > 3 else "")
+
+
+def _ov_symbol_rows(tcfg: TerminalConfig, example: str) -> list[dict[str, str]]:
+    """Which of the master's symbols it takes, and the name each is traded under here."""
+    if tcfg.symbol_whitelist:
+        which = f"only {_ov_few(tcfg.symbol_whitelist)}"
+    elif tcfg.symbol_blacklist:
+        which = f"all except {_ov_few(tcfg.symbol_blacklist)}"
+    else:
+        which = "all"
+    rows = [_ov_row("Symbols copied", which)]
+    if tcfg.symbol_whitelist and tcfg.symbol_blacklist:
+        rows.append(_ov_row("  never", _ov_few(tcfg.symbol_blacklist)))
+    # A renamed symbol keeps its own name, so the example is one the decoration applies to.
+    example = example.upper()
+    if example in tcfg.symbol_map:
+        example = next((s for s in ("EURUSD", "XAUUSD") if s not in tcfg.symbol_map), example)
+    if tcfg.symbol_prefix or tcfg.symbol_suffix:
+        here = f"{tcfg.symbol_prefix}{example}{tcfg.symbol_suffix}"
+        rows.append(_ov_row("Name on this broker", f"{example} is traded as {here}"))
+    else:
+        rows.append(_ov_row("Name on this broker", "the same as the master's"))
+    renamed = sorted(tcfg.symbol_map.items())
+    for n, (master, here) in enumerate(renamed[:3]):
+        rows.append(_ov_row("Renamed" if n == 0 else "", f"{master} is traded as {here}"))
+    if len(renamed) > 3:
+        rows.append(_ov_row("", f"+{len(renamed) - 3} more (Settings tab)", "muted"))
+    return rows
+
+
+def _ov_rule_rows(
+    tcfg: TerminalConfig, currency: str | None, example: str, *, managed: bool
+) -> list[dict[str, str]]:
+    """How trades are copied to it, in the words of its settings form."""
+    if tcfg.no_stop_policy is NoStopPolicy.SKIP:
+        no_stop = "skip the trade"
+    else:
+        no_stop = f"copy {tcfg.no_stop_lot_multiple:g}x its lots"
+    rule = breakeven_rule(tcfg)
+    if managed:
+        be = "the master's stop moves"
+    else:
+        be = "off" if rule == "off" else f"at {rule}"
+    rows = [_ov_row("Risk per trade", _ov_risk_text(tcfg, currency))]
+    if tcfg.max_lot is not None:
+        rows.append(_ov_row("Largest lot", f"{tcfg.max_lot:g}"))
+    rows += [
+        _ov_row("Master has no stop", no_stop),
+        _ov_row(
+            "Direction",
+            "reversed" if tcfg.invert else "same as master",
+            "yellow" if tcfg.invert else "",
+        ),
+        _ov_row(
+            "Once open",
+            "the master manages it: stop and target moves, partial closes"
+            if managed
+            else "this slave manages it",
+        ),
+        _ov_row("Pending orders", "copied" if tcfg.copy_pending else "not copied"),
+        _ov_row(
+            "Refused pending price",
+            "retried as the other type, then at market" if tcfg.pending_fallback else "not copied",
+        ),
+        _ov_row("Breakeven", be),
+    ]
+    rows += _ov_symbol_rows(tcfg, example)
+    if tcfg.allow_live_trading:
+        rows.append(_ov_row("Live trading", "allowed", "red"))
+    return rows
+
+
+def _ov_ms(value: float | None) -> str:
+    return "—" if value is None else f"{value:,.0f}"
+
+
+def _ov_slippage(value: float | None, *, colour: bool = True) -> tuple[str, str]:
+    """Points from the master's price: ``1,175 pts worse`` in red, or better in blue."""
+    if value is None:
+        return "—", "muted"
+    if round(value) == 0:
+        return "none", ""
+    if value > 0:
+        return f"{value:,.0f} pts worse", "red" if colour else ""
+    return f"{-value:,.0f} pts better", "blue" if colour else ""
+
+
+def _ov_disconnects(stats: TerminalStats) -> tuple[str, str]:
+    n = stats.disconnects
+    return ("none", "muted") if n == 0 else (f"{n:,}", "yellow")
+
+
+def _ov_copying_rows(stats: TerminalStats) -> list[dict[str, str]]:
+    """How copying to a slave has gone since the copier started."""
+    ok = stats.succeeded
+    rows = [_ov_row("Orders copied", f"{ok:,}" if ok else "none", "blue" if ok else "muted")]
+    if stats.skipped_total:
+        rows.append(_ov_row("Skipped", f"{stats.skipped_total:,}"))
+        reason, n = stats.skipped[0]
+        rows.append(_ov_row("  most often", f"{reason} x{n}", "muted"))
+    else:
+        rows.append(_ov_row("Skipped", "none", "muted"))
+    trouble = (stats.refused, stats.retried, stats.dropped_late)
+    if any(trouble):
+        rows.append(
+            _ov_row(
+                "Refused, retried, late",
+                " / ".join(f"{n:,}" for n in trouble),
+                "red" if stats.refused else "",
+            )
+        )
+    else:
+        rows.append(_ov_row("Refused, retried, late", "none", "muted"))
+    lost = (stats.failed_transient, stats.expired)
+    rows.append(
+        _ov_row("Failed, unanswered", " / ".join(f"{n:,}" for n in lost), "yellow")
+        if any(lost)
+        else _ov_row("Failed, unanswered", "none", "muted")
+    )
+    delays = (stats.latency_last, stats.latency_median, stats.latency_max)
+    rows.append(
+        _ov_row("Delay, last / median / max", " / ".join(_ov_ms(d) for d in delays) + " ms")
+        if delays[0] is not None
+        else _ov_row("Delay, last / median / max", "—", "muted")
+    )
+    for label, value, colour in (
+        ("Slippage, last", stats.slippage_last, True),
+        ("Slippage, average", stats.slippage_mean, False),
+        ("Slippage, worst", stats.slippage_worst, True),
+    ):
+        text, tone = _ov_slippage(value, colour=colour)
+        rows.append(_ov_row(label, text, tone))
+    text, tone = _ov_disconnects(stats)
+    rows.append(_ov_row("Disconnects", text, tone))
+    return rows
+
+
+def _ov_connection_rows(stats: TerminalStats, snap: Snapshot | None) -> list[dict[str, str]]:
+    """The master and terminals with no role send nothing, so there is no copying to report:
+    only how their link is holding."""
+    text, tone = _ov_disconnects(stats)
+    ping = format_ping(snap.ping_last_us if snap is not None else None)
+    return [
+        _ov_row("Connected for", format_duration(stats.connected_for_s)),
+        _ov_row("Disconnects", text, tone),
+        _ov_row("Ping", ping, "muted" if ping == "—" else ""),
+    ]
+
+
+def _ov_exposure(positions: tuple[Position, ...] | None) -> str | None:
+    """``BTCUSD long 3.11 lots (gross 4.11), +2 more`` for the positions heading; ``flat``
+    when nothing is open, None when the positions could not be read."""
+    if positions is None:
+        return None
+    exp = exposure(positions)
+    if not exp:
+        return "flat"
+    bits = []
+    for e in exp[:3]:
+        side = "long" if e.net_lots > 0 else ("short" if e.net_lots < 0 else "flat")
+        bit = f"{e.symbol} {side} {abs(e.net_lots):g} lots"
+        if e.gross_lots != abs(e.net_lots):
+            bit += f" (gross {e.gross_lots:g})"
+        bits.append(bit)
+    if len(exp) > 3:
+        bits.append(f"+{len(exp) - 3} more")
+    return ", ".join(bits)
+
+
+def _ov_price(value: float, digits: int) -> str:
+    return f"{value:.{digits}f}" if value else "—"
+
+
+def _ov_r(r: PositionRow, copy: OpenCopy | None) -> tuple[float | None, float | None]:
+    """How far the price is from entry now and where the target is, both in R: a copy's
+    opening stop distance when it is known, else the stop as it stands."""
+    sign = 1.0 if r.side == "BUY" else -1.0
+    if copy is not None and copy.risk_distance > 0:
+        risk = copy.risk_distance
+    elif r.sl:
+        risk = max((r.price_open - r.sl) * sign, 0.0)
+    else:
+        risk = 0.0
+    if risk <= 0 or r.price_current is None:
+        return None, None
+    now = (r.price_current - r.price_open) * sign / risk
+    target = (r.tp - r.price_open) * sign / risk if r.tp else None
+    return round(now, 2), round(target, 2) if target is not None else None
+
+
+def _ov_breakeven(
+    r: PositionRow, copy: OpenCopy | None, tcfg: TerminalConfig
+) -> dict[str, str] | None:
+    """What will move this copy's stop to breakeven, and where; None for a row that is not
+    one of this slave's copies, whose cell stays blank."""
+    if copy is None:
+        return None
+    if copy.breakeven_exempt:
+        return {"text": "exempt", "tone": "muted"}
+    if copy.breakeven_sl:
+        return {"text": f"✓ stop at {_ov_price(copy.breakeven_sl, r.digits)}", "tone": "green"}
+    if copy.breakeven_at:
+        return {"text": f"at {_ov_price(copy.breakeven_at, r.digits)}", "tone": ""}
+    if tcfg.breakeven_mode is BreakevenMode.R:
+        times = f"{tcfg.breakeven_trigger_r:g}R"
+        if copy.risk_distance <= 0:
+            return {"text": f"{times} · opened with no stop", "tone": "muted"}
+        sign = 1.0 if r.side == "BUY" else -1.0
+        at = r.price_open + sign * tcfg.breakeven_trigger_r * copy.risk_distance
+        return {"text": f"{times} at {_ov_price(at, r.digits)}", "tone": ""}
+    return {"text": "off", "tone": "muted"}
+
+
+def _ov_position_row(
+    r: PositionRow, copy: OpenCopy | None, tcfg: TerminalConfig, *, is_slave: bool
+) -> dict[str, Any]:
+    r_now, r_target = _ov_r(r, copy)
+    return {
+        "ticket": r.ticket,
+        "symbol": r.symbol,
+        "side": "buy" if r.side == "BUY" else "sell",
+        "lots": r.volume,
+        "digits": r.digits,
+        "open": r.price_open,
+        "now": r.price_current,
+        "sl": r.sl,
+        "tp": r.tp,
+        "slHit": r.sl_room is not None and r.sl_room <= 0,
+        "tpHit": r.tp_room is not None and r.tp_room <= 0,
+        "rNow": r_now,
+        "rTarget": r_target,
+        "swap": r.swap,
+        "profit": r.profit,
+        # The column is headed "Copy of", so the cell need not say it again.
+        "link": {
+            "text": r.link.removeprefix("copy of "),
+            "tone": _TIER_TONE.get(r.link_tier, ""),
+        },
+        "breakeven": _ov_breakeven(r, copy, tcfg) if is_slave else None,
+    }
+
+
+def _ov_order_row(
+    o: PendingOrder, copy: OpenCopy | None, *, is_slave: bool, now: float
+) -> dict[str, Any]:
+    """One resting order. Its age rather than its time: the broker's clock offset cancels
+    out of a difference, near enough for minutes."""
+    digits = price_digits(o.price_open, o.sl, o.tp, o.price_stoplimit)
+    link = None
+    if is_slave:
+        if copy is not None:
+            link = {"text": f"#{copy.master_ticket}", "tone": ""}
+        elif o.magic == COPIER_MAGIC:
+            link = {"text": "ours, untracked", "tone": "yellow"}
+        else:
+            link = {"text": "not the copier's", "tone": "muted"}
+    placed = None
+    if o.time_setup:
+        placed = format_duration(max(now - o.time_setup, 0.0)) + " ago"
+    return {
+        "ticket": o.ticket,
+        "symbol": o.symbol,
+        "kind": o.type.name.lower().replace("_", " "),
+        "side": "buy" if o.type.direction is PositionType.BUY else "sell",
+        "lots": o.volume,
+        "digits": digits,
+        "price": o.price_open,
+        "stopLimit": o.price_stoplimit,
+        "sl": o.sl,
+        "tp": o.tp,
+        "placed": placed,
+        "link": link,
+    }

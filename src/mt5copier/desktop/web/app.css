@@ -1003,3 +1003,61 @@ tr.row-new td { animation: row-flash 1.6s ease-out; }
 @media (max-width: 1280px) {
   .log-row { grid-template-columns: 96px 120px 1fr; }
 }
+
+/* --- the detail page's Overview tab -----------------------------------------------------
+   The TUI enter page: a band with the equity, three ruled columns, then the positions and
+   resting orders tables. The rules between rows are the TUI's RULED box; the tables share
+   the trading window book's look. */
+#td-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--hairline); }
+#td-tabs [role="tab"] {
+  background: none; border: 0; color: var(--muted);
+  font-size: 14px; font-weight: 600; padding: 8px 14px;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+#td-tabs [role="tab"]:hover { color: var(--fg); }
+#td-tabs [role="tab"][aria-selected="true"] { color: var(--fg); border-bottom-color: var(--fg); }
+
+#td-overview, #td-settings { display: flex; flex-direction: column; gap: 24px; }
+
+#ov-band {
+  flex-direction: row; flex-wrap: wrap; align-items: flex-end;
+  justify-content: space-between; gap: 10px 24px; max-width: 1560px;
+}
+#ov-band-left { display: flex; flex-direction: column; gap: 2px; }
+#ov-equity { font-size: 34px; font-weight: 700; line-height: 1.1; letter-spacing: -0.01em; }
+#ov-band-right { display: flex; flex-direction: column; gap: 4px; text-align: right; }
+
+#ov-cols {
+  display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px; align-items: start; max-width: 1560px;
+}
+.ov-col { min-width: 0; gap: 12px; }
+@media (max-width: 1360px) { #ov-cols { grid-template-columns: 1fr; max-width: 720px; } }
+
+.ov-rows { display: flex; flex-direction: column; }
+.ov-row {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  padding: 7px 0; border-bottom: 1px solid var(--hairline-soft); font-size: 13.5px;
+}
+.ov-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.ov-row .ov-label { color: var(--muted); flex: 0 1 auto; white-space: pre-wrap; }
+.ov-row .ov-value { text-align: right; min-width: 0; overflow-wrap: anywhere; }
+.ov-mono .ov-value { font-family: var(--mono); font-size: 13px; }
+.ov-value.strong { font-weight: 700; }
+
+#ov-spark-wrap { display: flex; flex-direction: column; gap: 4px; }
+#ov-spark { width: 100%; height: 36px; display: block; color: var(--blue); }
+
+#ov-pos-panel, #ov-ord-panel { gap: 12px; max-width: 1560px; }
+.ov-table { border-collapse: collapse; width: 100%; min-width: 1040px; }
+.ov-table th {
+  text-align: left; font-weight: 400;
+  color: var(--muted); font-size: 12.5px;
+  padding: 8px 12px; border-bottom: 1px solid var(--hairline);
+}
+.ov-table td {
+  padding: 6px 12px; border-bottom: 1px solid var(--hairline-soft);
+  font-family: var(--mono); font-size: 13.5px;
+}
+.ov-table th.num, .ov-table td.num { text-align: right; }
+.ov-table tr.ov-total td { border-bottom: 0; border-top: 1px solid var(--hairline); font-weight: 700; }

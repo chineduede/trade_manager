@@ -1593,7 +1593,8 @@ function menuItems(c, live) {
     return items;
   }
 
-  does('Settings — its own page', function () { openTerminalDetail(c.tid); });
+  does('Overview — its own page', function () { openTerminalDetail(c.tid); });
+  does('Settings', function () { openTerminalDetail(c.tid, 'settings'); });
   if (c.login) {
     does(c.accountName ? 'Rename this account…' : 'Name this account…',
       function () { accountNameFlow(c); });
@@ -3448,7 +3449,10 @@ function revertSettingsFlow() {
 // with each check), and refills from the engine only while the form holds no edits.
 var D = {
   tid: '',
+  tab: 'overview', // which tab is up: 'overview' (the TUI enter page) or 'settings'
   live: null,
+  ov: null,        // last terminal_overview_state() answer
+  ovDrawn: '',     // what the overview was last built from, so a quiet poll redraws nothing
   base: null,      // what the fields were last filled from, as a key; null forces a refill
   serverKey: '',
   gen: 0,          // bumped when a save lands, so a stale in-flight poll answer is re-asked
@@ -3468,12 +3472,27 @@ var TD_M_INPUTS = ['breakeven_trigger_r', 'breakeven_book_percent',
 var TD_M_SLIDERS = ['breakeven_trigger_r', 'breakeven_book_percent'];
 var TD_M_ERRS = TD_M_INPUTS.concat(['management', 'breakeven_mode']);
 
-function openTerminalDetail(tid) {
+function openTerminalDetail(tid, tab) {
   D.tid = tid;
   D.live = null;
+  D.ov = null;
+  D.ovDrawn = '';
   D.base = null;
   D.serverKey = '';
+  tdShowTab(tab || 'overview', true);
   showPage('tdetail');
+}
+
+function tdShowTab(name, opening) {
+  D.tab = name;
+  $('td-tab-overview').setAttribute('aria-selected', String(name === 'overview'));
+  $('td-tab-settings').setAttribute('aria-selected', String(name === 'settings'));
+  $('td-overview').hidden = name !== 'overview';
+  $('td-settings').hidden = name !== 'settings';
+  // The copy-settings-from dropdown belongs to the form; renderTdetail brings it back.
+  if (name !== 'settings') $('td-copyfrom').hidden = true;
+  D.ovDrawn = '';
+  if (!opening) pollTdetail();
 }
 
 function tdIsSlave() { return D.live && D.live.role === 'slave'; }
@@ -3644,14 +3663,354 @@ function tdRenderSymex(rows) {
   });
 }
 
+// --- the detail page's Overview tab ---------------------------------------------------
+// The TUI enter page: three ruled columns — the ACCOUNT, the RULE it is copied by (on the
+// master: the slaves it feeds), and how COPYING has gone this session — then the open
+// positions and resting orders. The bridge sends words and tones for anything worded and
+// raw numbers for anything the page formats (money, prices, R). Display only, end to end.
+
+function ovRow(label, value, tone) {
+  var row = document.createElement('div');
+  row.className = 'ov-row';
+  var l = document.createElement('span');
+  l.className = 'ov-label';
+  l.textContent = label;
+  row.appendChild(l);
+  var v = document.createElement('span');
+  v.className = 'ov-value' + (tone ? ' ' + tone : '');
+  if (value && value.nodeType) v.appendChild(value);
+  else v.textContent = value;
+  row.appendChild(v);
+  return row;
+}
+
+function ovThousands(v) {
+  return Math.round(v).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+}
+
+function ovPrice(v, digits) { return v ? v.toFixed(digits) : '—'; }
+
+function ovLots(v) { return String(parseFloat(v.toFixed(8))); }
+
+function ovGauge(a) {
+  var wrap = document.createElement('span');
+  wrap.className = 'pop-gauge';
+  var bar = document.createElement('span');
+  bar.className = 'mbar';
+  var fill = document.createElement('span');
+  var tier = { good: 'blue', warning: 'yellow', serious: 'red', critical: 'red' }[a.levelTier] || 'muted';
+  fill.className = 'mbar-fill ' + tier;
+  fill.style.width = a.usedFraction === null || a.usedFraction === undefined
+    ? '0%' : Math.min(100, Math.round(a.usedFraction * 100)) + '%';
+  bar.appendChild(fill);
+  wrap.appendChild(bar);
+  wrap.appendChild(document.createTextNode(a.usedFraction === null || a.usedFraction === undefined
+    ? '—' : Math.round(a.usedFraction * 100) + '%'));
+  return wrap;
+}
+
+function renderOvBand(live) {
+  var c = live.card || {};
+  $('ov-equity').textContent = c.equity === null || c.equity === undefined ? '—' : money(c.equity);
+  var pl = c.floatingPl;
+  var f = $('ov-floating');
+  f.textContent = (pl === null || pl === undefined ? '—' : (pl >= 0 ? '+' : '') + money(pl))
+    + ' floating';
+  f.className = 'mono small ' + (pl > 0 ? 'green' : pl < 0 ? 'red' : 'muted');
+  var conn = [];
+  if (live.connected) conn.push('connected ' + live.connected);
+  if (live.ping) conn.push('ping ' + live.ping);
+  $('ov-conn').textContent = conn.join(' · ');
+  var acct = $('ov-acct');
+  acct.textContent = '';
+  var bits = [];
+  if (c.login) bits.push({ text: String(c.login) });
+  if (c.server) bits.push({ text: c.server });
+  if (live.accountKind === 'demo') bits.push({ text: 'demo' });
+  else if (live.accountKind === 'live-allowed' || live.accountKind === 'live-held') {
+    bits.push({ text: 'LIVE', cls: 'red' });
+  }
+  if (live.leverage) bits.push({ text: '1:' + live.leverage });
+  if (!bits.length) { acct.textContent = 'account not read yet'; return; }
+  bits.forEach(function (b, i) {
+    if (i) acct.appendChild(document.createTextNode(' · '));
+    acct.appendChild(b.cls ? cardLine(b.cls, b.text) : document.createTextNode(b.text));
+  });
+}
+
+function renderOvAccount(a) {
+  var box = $('ov-account');
+  box.textContent = '';
+  if (!a) {
+    box.appendChild(ovRow('Account', 'not connected yet', 'muted'));
+    return;
+  }
+  box.appendChild(ovRow('Balance', money(a.balance)));
+  box.appendChild(ovRow('Floating', a.floating === null ? '—' : money(a.floating),
+    a.floating !== null && a.floating < 0 ? 'red' : ''));
+  box.appendChild(ovRow('Equity', money(a.equity), 'strong'));
+  box.appendChild(ovRow('Margin in use', money(a.margin)));
+  box.appendChild(ovRow('Margin free', money(a.marginFree)));
+  box.appendChild(ovRow('Margin used', ovGauge(a)));
+  var tier = { good: 'blue', warning: 'yellow', serious: 'red', critical: 'red' }[a.levelTier] || 'muted';
+  if (a.levelPct === null || a.levelPct === undefined) {
+    box.appendChild(ovRow('Margin level', a.noMargin ? 'no margin in use' : '—', 'muted'));
+  } else {
+    box.appendChild(ovRow('Margin level', ovThousands(a.levelPct) + '%', tier));
+  }
+}
+
+function renderOvMiddle(live) {
+  var box = $('ov-rule');
+  box.textContent = '';
+  var edit = $('ov-rule-edit');
+  if (live.copiedTo) {
+    $('ov-rule-title').textContent = 'Copied to';
+    var n = live.copiedTo.slaves.length;
+    $('ov-rule-right').textContent = n + ' slave' + (n === 1 ? '' : 's') + ' · ' + live.copiedTo.who;
+    edit.hidden = true;
+    if (!n) { box.appendChild(ovRow('', 'no slaves yet', 'muted')); return; }
+    live.copiedTo.slaves.forEach(function (s) {
+      var word = s.card
+        ? stateWord(s.card, { copying: S.live ? S.live.copying : false, dryRun: live.dryRun })
+        : { text: 'not connected', cls: 'muted' };
+      box.appendChild(ovRow(s.name, word.text, word.cls));
+    });
+    return;
+  }
+  $('ov-rule-title').textContent = 'Rule';
+  $('ov-rule-right').textContent = '';
+  edit.hidden = live.role !== 'slave';
+  (live.rule || []).forEach(function (r) {
+    box.appendChild(ovRow(r.label, r.text, r.tone));
+  });
+}
+
+function ovSpark(latencies) {
+  var wrap = $('ov-spark-wrap');
+  if (!latencies || latencies.length < 2) { wrap.hidden = true; return; }
+  wrap.hidden = false;
+  var max = Math.max.apply(null, latencies);
+  var pts = latencies.map(function (v, i) {
+    var x = i / (latencies.length - 1) * 100;
+    var y = 34 - (max > 0 ? (v / max) * 30 : 0);
+    return x.toFixed(2) + ',' + y.toFixed(2);
+  }).join(' ');
+  $('ov-spark').innerHTML = '<polyline fill="none" stroke="currentColor" stroke-width="1.5" '
+    + 'vector-effect="non-scaling-stroke" points="' + pts + '"></polyline>';
+}
+
+function renderOvThird(live) {
+  var box = $('ov-copying');
+  box.textContent = '';
+  var note = $('ov-copy-note');
+  if (live.copying) {
+    $('ov-copy-title').textContent = 'Copying';
+    $('ov-copy-right').textContent = 'this session';
+    live.copying.rows.forEach(function (r) { box.appendChild(ovRow(r.label, r.text, r.tone)); });
+    note.hidden = true;
+    ovSpark(live.copying.latencies);
+  } else {
+    $('ov-copy-title').textContent = 'Connection';
+    $('ov-copy-right').textContent = 'this session';
+    ((live.connection && live.connection.rows) || []).forEach(function (r) {
+      box.appendChild(ovRow(r.label, r.text, r.tone));
+    });
+    note.textContent = live.connection ? live.connection.note : '';
+    note.hidden = !live.connection;
+    $('ov-spark-wrap').hidden = true;
+  }
+}
+
+function ovCell(tr, text, cls) {
+  var td = document.createElement('td');
+  if (cls) td.className = cls;
+  td.textContent = text;
+  tr.appendChild(td);
+  return td;
+}
+
+function ovHead(table, cols) {
+  var thead = table.tHead;
+  thead.textContent = '';
+  var tr = document.createElement('tr');
+  cols.forEach(function (c) {
+    var th = document.createElement('th');
+    th.textContent = c.label;
+    if (c.num) th.className = 'num';
+    tr.appendChild(th);
+  });
+  thead.appendChild(tr);
+}
+
+function renderOvPositions(live) {
+  var p = live.positions;
+  var slave = live.role === 'slave';
+  $('ov-pos-title').textContent = 'Positions'
+    + (p ? (p.unreadable ? ' · could not be read' : ' · ' + p.rows.length) : '');
+  $('ov-exposure').textContent = 'net exposure: ' + (p && p.exposure ? p.exposure : '—');
+  var note = $('ov-pos-note');
+  var scroll = $('ov-pos-scroll');
+  if (!p || p.unreadable || !p.rows.length) {
+    scroll.hidden = true;
+    note.hidden = false;
+    note.className = (p && p.unreadable ? 'red' : 'muted') + ' small';
+    note.textContent = !p ? 'Not connected yet.'
+      : p.unreadable ? 'The open positions could not be read.' : 'Nothing open.';
+    return;
+  }
+  scroll.hidden = false;
+  note.hidden = true;
+  var cols = [
+    { key: 'symbol', label: 'Symbol' },
+    { key: 'side', label: 'Side' },
+    { key: 'lots', label: 'Lots', num: true },
+    { key: 'open', label: 'Open', num: true },
+    { key: 'now', label: 'Now', num: true },
+    { key: 'stop', label: 'Stop', num: true },
+    { key: 'target', label: 'Target', num: true },
+    { key: 'r', label: 'R', num: true },
+    { key: 'swap', label: 'Swap', num: true },
+    { key: 'pl', label: 'P/L', num: true }
+  ];
+  if (slave) cols.push({ key: 'be', label: 'Breakeven' });
+  cols.push({ key: 'link', label: live.role === 'master' ? 'On slaves' : 'Copy of' });
+  var table = $('ov-pos-table');
+  ovHead(table, cols);
+  var body = table.tBodies[0];
+  body.textContent = '';
+  p.rows.forEach(function (r) {
+    var tr = document.createElement('tr');
+    ovCell(tr, r.symbol, 'sym');
+    ovCell(tr, r.side, 'side-' + r.side);
+    ovCell(tr, ovLots(r.lots), 'num');
+    ovCell(tr, ovPrice(r.open, r.digits), 'num');
+    ovCell(tr, r.now === null ? '—' : ovPrice(r.now, r.digits), 'num');
+    ovCell(tr, ovPrice(r.sl, r.digits), 'num' + (r.sl ? (r.slHit ? ' red' : '') : ' muted'));
+    ovCell(tr, ovPrice(r.tp, r.digits), 'num' + (r.tp ? (r.tpHit ? ' red' : '') : ' muted'));
+    var rtd = document.createElement('td');
+    rtd.className = 'num';
+    if (r.rNow === null || r.rNow === undefined) {
+      rtd.textContent = '—';
+      rtd.classList.add('muted');
+    } else {
+      var rn = document.createElement('span');
+      rn.className = r.rNow < 0 ? 'red' : r.rNow > 0 ? 'blue' : 'muted';
+      rn.textContent = (r.rNow >= 0 ? '+' : '') + r.rNow.toFixed(2) + 'R';
+      rtd.appendChild(rn);
+      if (r.rTarget !== null && r.rTarget !== undefined) {
+        var rt = document.createElement('span');
+        rt.className = 'muted';
+        rt.textContent = '/' + r.rTarget.toFixed(2) + 'R';
+        rtd.appendChild(rt);
+      }
+    }
+    tr.appendChild(rtd);
+    ovCell(tr, r.swap === null ? '—' : money(r.swap), 'num muted');
+    ovCell(tr, r.profit === null ? '—' : money(r.profit),
+      'num' + (r.profit !== null && r.profit < 0 ? ' red' : ''));
+    if (slave) {
+      var be = r.breakeven;
+      ovCell(tr, be ? be.text : '', be && be.tone ? be.tone : '');
+    }
+    ovCell(tr, r.link.text, r.link.tone || '');
+    body.appendChild(tr);
+  });
+  if (p.total !== null && p.total !== undefined) {
+    var totalRow = document.createElement('tr');
+    totalRow.className = 'ov-total';
+    cols.forEach(function (c) {
+      if (c.key === 'symbol') ovCell(totalRow, 'Total', '');
+      else if (c.key === 'pl') {
+        ovCell(totalRow, money(p.total), 'num' + (p.total < 0 ? ' red' : ''));
+      } else ovCell(totalRow, '', '');
+    });
+    body.appendChild(totalRow);
+  }
+}
+
+function renderOvOrders(live) {
+  var o = live.orders;
+  var panel = $('ov-ord-panel');
+  if (!o || (!o.unreadable && !o.rows.length)) { panel.hidden = true; return; }
+  panel.hidden = false;
+  $('ov-ord-title').textContent = 'Resting orders' + (o.unreadable ? '' : ' · ' + o.rows.length);
+  var note = $('ov-ord-note');
+  var scroll = $('ov-ord-scroll');
+  note.hidden = !o.unreadable;
+  scroll.hidden = o.unreadable;
+  if (o.unreadable) return;
+  var slave = live.role === 'slave';
+  var cols = [
+    { key: 'symbol', label: 'Symbol' },
+    { key: 'type', label: 'Type' },
+    { key: 'lots', label: 'Lots', num: true },
+    { key: 'price', label: 'Price', num: true }
+  ];
+  if (o.anyStopLimit) cols.push({ key: 'limit', label: 'Then limit', num: true });
+  cols.push({ key: 'stop', label: 'Stop', num: true });
+  cols.push({ key: 'target', label: 'Target', num: true });
+  cols.push({ key: 'placed', label: 'Placed', num: true });
+  if (slave) cols.push({ key: 'link', label: 'Copy of' });
+  var table = $('ov-ord-table');
+  ovHead(table, cols);
+  var body = table.tBodies[0];
+  body.textContent = '';
+  o.rows.forEach(function (r) {
+    var tr = document.createElement('tr');
+    ovCell(tr, r.symbol, 'sym');
+    ovCell(tr, r.kind, 'side-' + r.side);
+    ovCell(tr, ovLots(r.lots), 'num');
+    ovCell(tr, ovPrice(r.price, r.digits), 'num');
+    if (o.anyStopLimit) {
+      ovCell(tr, ovPrice(r.stopLimit, r.digits), 'num' + (r.stopLimit ? '' : ' muted'));
+    }
+    ovCell(tr, ovPrice(r.sl, r.digits), 'num' + (r.sl ? '' : ' muted'));
+    ovCell(tr, ovPrice(r.tp, r.digits), 'num' + (r.tp ? '' : ' muted'));
+    ovCell(tr, r.placed || '—', 'num muted');
+    if (slave && r.link) ovCell(tr, r.link.text, r.link.tone || '');
+    body.appendChild(tr);
+  });
+}
+
+function renderTdOverview(live) {
+  // Redraw only when something changed, so a quiet poll leaves the DOM alone.
+  var key = JSON.stringify(live) + '|' + (S.live ? S.live.copying : '');
+  if (key === D.ovDrawn) return;
+  D.ovDrawn = key;
+  renderOvBand(live);
+  renderOvAccount(live.account);
+  renderOvMiddle(live);
+  renderOvThird(live);
+  renderOvPositions(live);
+  renderOvOrders(live);
+}
+
 var tdetailBusy = false;
 function pollTdetail() {
   if (tdetailBusy || !window.pywebview || S.page !== 'tdetail' || !D.tid) return;
   tdetailBusy = true;
+  var tid = D.tid;
+  if (D.tab === 'overview') {
+    api().terminal_overview_state(tid).then(function (live) {
+      tdetailBusy = false;
+      if (S.page !== 'tdetail' || D.tab !== 'overview' || tid !== D.tid) return;
+      if (!live.ok) {
+        toast(live.message, 'bad');
+        showPage('terminals');
+        return;
+      }
+      D.ov = live;
+      renderTdHead(live);
+      renderTdOverview(live);
+    }, function () { tdetailBusy = false; });
+    return;
+  }
   var gen = D.gen;
-  api().terminal_detail_state(D.tid).then(function (live) {
+  api().terminal_detail_state(tid).then(function (live) {
     tdetailBusy = false;
     if (gen !== D.gen) { pollTdetail(); return; }
+    if (tid !== D.tid || D.tab !== 'settings') return;
     if (!live.ok) {
       toast(live.message, 'bad');
       showPage('terminals');
@@ -3669,9 +4028,8 @@ var TD_KIND = {
   'live-held': { text: 'not a demo: held back', cls: 'small red' }
 };
 
-function renderTdetail() {
-  var live = D.live;
-  if (!live) return;
+function renderTdHead(live) {
+  // The page header above the tabs: both tabs' answers carry the same fields.
   $('td-name').textContent = live.name;
 
   var word = live.card
@@ -3697,6 +4055,12 @@ function renderTdetail() {
       + (guard.text ? ' · ' + guard.text : '') + ' — Guards page →';
     gl.className = 'linklike small ' + (guard.tone || '');
   }
+}
+
+function renderTdetail() {
+  var live = D.live;
+  if (!live) return;
+  renderTdHead(live);
 
   var tdNoRole = live.role !== 'slave' && live.role !== 'master';
   $('td-other').hidden = !tdNoRole;
@@ -4243,6 +4607,9 @@ function wire() {
 
   // --- terminal detail page ---
   $('td-back').addEventListener('click', function () { showPage('terminals'); });
+  $('td-tab-overview').addEventListener('click', function () { tdShowTab('overview'); });
+  $('td-tab-settings').addEventListener('click', function () { tdShowTab('settings'); });
+  $('ov-rule-edit').addEventListener('click', function () { tdShowTab('settings'); });
   $('td-login-btn').addEventListener('click', function () {
     if (D.tid) accountLoginFlow({ tid: D.tid });
   });
@@ -4289,14 +4656,14 @@ function wire() {
   $('td-guard-link').addEventListener('click', function () {
     if (!D.tid) return;
     G.tid = D.tid;
-    G.from = { tid: D.tid, name: D.live ? D.live.name : '' };
+    G.from = { tid: D.tid, name: D.live ? D.live.name : '', tab: D.tab };
     G.drawn = '';
     showPage('guards');
   });
   $('guard-back').addEventListener('click', function () {
     var from = G.from;
     G.from = null;
-    if (from) openTerminalDetail(from.tid);
+    if (from) openTerminalDetail(from.tid, from.tab);
   });
   $('td-live-btn').addEventListener('click', function () {
     var live = D.live;
