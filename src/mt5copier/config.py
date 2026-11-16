@@ -805,10 +805,14 @@ def load(path: Path | None = None) -> AppConfig:
     A corrupt file is renamed aside rather than deleted, and defaults are returned, so a bad
     write can never leave the app unable to start.
     """
+    from . import shared_data  # late: shared_data type-hints AppConfig from this module
+
     target = path or config_path()
     if not target.exists():
         log.info("no config at %s, starting from defaults", target)
-        return AppConfig()
+        cfg = AppConfig()
+        shared_data.apply(cfg)
+        return cfg
     try:
         raw = json.loads(target.read_text(encoding="utf-8"))
         cfg = AppConfig.model_validate(_migrate(raw))
@@ -826,6 +830,7 @@ def load(path: Path | None = None) -> AppConfig:
                 save(cfg, target)
             except OSError:
                 log.exception("could not persist the role cleanup; will retry on next save")
+        shared_data.apply(cfg)
         return cfg
     except Exception as exc:
         backup = target.with_suffix(f".bad-{os.getpid()}.json")
@@ -834,7 +839,9 @@ def load(path: Path | None = None) -> AppConfig:
             log.error("config at %s was invalid (%s); moved to %s", target, exc, backup)
         except OSError:
             log.error("config at %s was invalid (%s) and could not be moved aside", target, exc)
-        return AppConfig()
+        cfg = AppConfig()
+        shared_data.apply(cfg)
+        return cfg
 
 
 def save(cfg: AppConfig, path: Path | None = None) -> Path:

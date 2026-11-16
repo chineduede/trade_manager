@@ -609,12 +609,17 @@ def rename(cfg: AppConfig, terminal_id: str, name: str) -> str | None:
     if key is None:
         return "no account is known for this terminal yet; nothing to name"
     stripped = name.strip()
+    if stripped and not ACCOUNT_NAME_RE.match(stripped):
+        return ACCOUNT_NAME_RULE
     if stripped:
-        if not ACCOUNT_NAME_RE.match(stripped):
-            return ACCOUNT_NAME_RULE
         cfg.account_names[key] = stripped
     else:
         cfg.account_names.pop(key, None)
+    # The shared store (``paths.account_names_path``) is the source of truth: written per
+    # edit, read-modify-write, so a rename in another profile's window is kept, not clobbered.
+    from . import shared_data
+
+    shared_data.set_name(key, stripped or None)
     return None
 
 

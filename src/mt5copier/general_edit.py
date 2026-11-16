@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 from pydantic import ValidationError
 
+from . import shared_data
 from .config import AppConfig
 from .settings_edit import Change
 
@@ -248,3 +249,8 @@ def commit_general(cfg: AppConfig, outcome: GeneralOutcome) -> None:
         raise ValueError("nothing to commit: the edit was not checked, or was refused")
     for name, value in outcome.values.items():
         setattr(cfg, name, value)
+    if any(name in shared_data.MACHINE_FIELDS for name in outcome.values):
+        # The timings describe the machine, so every profile shares them: written only when
+        # this edit touched one, so a window open since before another profile changed them
+        # cannot quietly put the old values back by saving something unrelated.
+        shared_data.save_machine(cfg)

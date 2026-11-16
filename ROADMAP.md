@@ -1874,6 +1874,21 @@ breakeven, buffer, setup vs profile). With it, the one misleading empty state: a
 profile's empty DETECTED zone used to say "every terminal found is assigned" — it now
 says none were found yet and points at Rescan and the cTrader login.
 
+What describes the account or the machine is now shared by every profile, under
+`%APPDATA%\MT5Copier\shared\`: account names, guard rules + templates + the guards'
+recorded state, the cTrader login, the news calendar cache, and the four connection
+timings (poll, stale, retry, rescan — `machine.json`, overlaid on every config load).
+A one-time migration (`shared_data.migrate`, marker-guarded) gathers each profile's
+files, later-wins per key by mtime; the profiles' own copies stay put as the rollback.
+Two windows, one file is handled everywhere: names are read-modify-write per edit,
+guards.json saves fold in disk-only accounts/templates (nothing ever deletes either, so
+adoption is safe), guard state saves merge only this process's dirty accounts (claims
+make one profile per account the rule), and a GuardBook adopts an account's state from
+disk on first sighting — a terminal picked up after another profile released it keeps
+its anchors and held breaches. The desktop polls fold in another window's renames and
+rule edits (`_refresh_shared`, one stat per poll). What stays per profile, by design:
+mode, dry/live, copying, roles and every per-terminal setting, setups, history, books.
+
 - **Terminal detail Overview tab.** The TUI's `enter` page shows what the desktop detail
   page (settings forms only) does not: the three ruled columns — the ACCOUNT (kind, ping,
   connection), the RULE it is copied by (on the master: the slaves it feeds), and how

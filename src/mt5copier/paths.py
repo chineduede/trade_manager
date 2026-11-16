@@ -83,6 +83,18 @@ def claims_dir() -> Path:
     return base_data_dir() / "claims"
 
 
+def shared_dir() -> Path:
+    """What every profile reads and writes together -- see :mod:`mt5copier.shared_data`.
+
+    Profiles keep *copying* apart: terminals, roles, settings, books. What describes the
+    account itself (its name, its guard rules and their memory) or the machine (the cTrader
+    login, the news calendar) is true no matter which profile is looking, so it lives here.
+    A folder of its own because the default profile's data dir *is* the base dir -- a shared
+    file at the root would be indistinguishable from one of the default profile's own.
+    """
+    return base_data_dir() / "shared"
+
+
 def user_data_dir() -> Path:
     r"""Writable directory for the active profile's config, logs and state.
 
@@ -127,8 +139,10 @@ def history_db_path() -> Path:
 
 def guards_path() -> Path:
     """Each account's guard rules, and the person's saved templates of them. Apart from
-    ``config.json`` so that a slip editing rules cannot disturb copy settings."""
-    return user_data_dir() / "guards.json"
+    ``config.json`` so that a slip editing rules cannot disturb copy settings. Shared by
+    every profile: a rule belongs to the account, and the account is the same account no
+    matter which profile's terminal is logged into it."""
+    return shared_dir() / "guards.json"
 
 
 def setups_path() -> Path:
@@ -138,20 +152,37 @@ def setups_path() -> Path:
 
 
 def news_path() -> Path:
-    """The last news calendar fetched, kept so a restart without the internet still knows it."""
-    return user_data_dir() / "news.json"
+    """The last news calendar fetched, kept so a restart without the internet still knows it.
+    Shared: the week's releases are the same for every profile, so one fetch serves all."""
+    return shared_dir() / "news.json"
 
 
 def ctrader_path() -> Path:
     """The cTrader Open API app's id and secret, the login's tokens, and the accounts it can
     reach. Apart from ``config.json`` because it holds secrets: config is meant to be safe to
-    copy or show to someone."""
-    return user_data_dir() / "ctrader.json"
+    copy or show to someone. Shared: the login belongs to the person's cTrader ID and is
+    DPAPI-bound to the Windows user, not to a profile -- one OAuth serves every window."""
+    return shared_dir() / "ctrader.json"
 
 
 def guard_state_path() -> Path:
-    """What the guards have recorded from earlier snapshots, such as the equity at a reset."""
-    return user_data_dir() / "guard_state.json"
+    """What the guards have recorded from earlier snapshots, such as the equity at a reset.
+    Shared, as the rules are: a daily-loss anchor or a held breach belongs to the account,
+    and must not restart from zero because the account is watched from another profile."""
+    return shared_dir() / "guard_state.json"
+
+
+def account_names_path() -> Path:
+    """The friendly name per account (``login@server``), shared by every profile: the same
+    account must read as the same name in every window. The source of truth; the copy each
+    profile's ``config.json`` still carries is a cache this overlays on load."""
+    return shared_dir() / "account_names.json"
+
+
+def machine_path() -> Path:
+    """The connection timings -- poll, stale, retry, rescan -- shared by every profile: they
+    describe this machine and its terminals, not a trading policy."""
+    return shared_dir() / "machine.json"
 
 
 def dryrun_store_path() -> Path:
@@ -182,3 +213,4 @@ def mt5_terminal_root() -> Path:
 def ensure_dirs() -> None:
     user_data_dir().mkdir(parents=True, exist_ok=True)
     log_dir().mkdir(parents=True, exist_ok=True)
+    shared_dir().mkdir(parents=True, exist_ok=True)

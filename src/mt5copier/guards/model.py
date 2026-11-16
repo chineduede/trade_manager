@@ -92,8 +92,27 @@ def load(path: Path | None = None) -> GuardsDoc:
 
 
 def save(doc: GuardsDoc, path: Path | None = None) -> Path:
-    """Write atomically: a temp file beside it, then ``os.replace``."""
+    """Write atomically: a temp file beside it, then ``os.replace``.
+
+    The file is shared by every profile, so first fold in what another profile's window may
+    have saved since this one loaded: per account and per template, memory wins and keys only
+    on disk are adopted into ``doc`` -- nothing in the app ever deletes an account or a
+    template, so adopting a disk-only key can never resurrect something just removed. The
+    adoption mutates ``doc`` on purpose: the UI and the engine hold it, and should see an
+    account another profile has started guarding.
+    """
     target = path or guards_path()
+    if target.exists():
+        try:
+            disk = GuardsDoc.model_validate(json.loads(target.read_text(encoding="utf-8")))
+        except Exception:
+            # Unreadable disk copy: write ours whole; load() moves bad files aside anyway.
+            disk = None
+        if disk is not None:
+            for key, guards in disk.accounts.items():
+                doc.accounts.setdefault(key, guards)
+            for name, rules in disk.templates.items():
+                doc.templates.setdefault(name, rules)
     write_json(target, doc.model_dump(mode="json"))
     return target
 

@@ -18,7 +18,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
-from .. import account_switch, role_actions
+from .. import account_switch, role_actions, shared_data
 from .. import config as config_mod
 from .. import profiles as profiles_mod
 from .. import setups as setups_mod
@@ -210,9 +210,29 @@ class DesktopApi:
         Reading the account list walks the terminal's data folder; the cards poll every
         second, so the walk is paced here and dropped after a login changes the answer."""
         self._busy_lock = threading.Lock()
+        self._guards_stamp: float | None = None
+        """``guards.json``'s mtime as last read or written here. The file is shared by every
+        profile, so a poll can tell an edit made in another window from nothing by one stat."""
 
     def attach(self, window: webview.Window) -> None:
         self._window = window
+
+    def _refresh_shared(self) -> None:
+        """Fold in what another profile's window saved since the last poll: account names
+        (into the config) and guard rules (into the live doc, the file winning per key --
+        every local edit saves at once, so memory never holds anything newer than the file).
+        Called from the polls that read them."""
+        shared_data.refresh_names(self._cfg)
+        try:
+            stamp = guards_path().stat().st_mtime
+        except OSError:
+            return
+        if stamp == self._guards_stamp:
+            return
+        self._guards_stamp = stamp
+        fresh = guards_model.load(guards_path())
+        self._guards_doc.accounts.update(fresh.accounts)
+        self._guards_doc.templates.update(fresh.templates)
 
     # --- window chrome ----------------------------------------------------------------------
 
@@ -659,6 +679,7 @@ class DesktopApi:
 
     def terminals_state(self) -> dict[str, Any]:
         """Everything the Terminals page redraws from, in one call per poll."""
+        self._refresh_shared()
         engine = self._engine
         cfg = self._cfg
         holds = engine.holds()
@@ -1316,6 +1337,7 @@ class DesktopApi:
     def guards_state(self, tid: str) -> dict[str, Any]:
         """Everything the Guards page redraws from: the account chips, the chosen account's
         report row by row (the TUI guards table's own cell logic), and the recent actions."""
+        self._refresh_shared()
         engine = self._engine
         cfg = self._cfg
         now = time.time()

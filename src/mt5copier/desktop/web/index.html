@@ -487,7 +487,10 @@
         </section>
 
         <section aria-label="Connection" class="panel cfg-card">
-          <div class="panel-head"><h2>Connection</h2></div>
+          <div class="panel-head">
+            <h2>Connection</h2>
+            <span class="muted small">this machine's facts — shared by every profile</span>
+          </div>
           <div class="two-col">
             <div class="field">
               <label for="cfg-poll" class="flabel">Check each terminal every</label>
@@ -943,18 +946,18 @@
         <dl class="help-dl">
           <dt>Terminals</dt><dd>every terminal as a card in three zones — the master, the slaves, and the detected ones not yet used. Drag to assign, right-click for actions, click a card for its own page.</dd>
           <dt>Trading</dt><dd>the direct-trading ticket: place, modify, partly close or flatten — and every enabled slave copies it. Greyed out unless the profile trades directly.</dd>
-          <dt>Guards</dt><dd>rules that watch an account — daily loss, drawdown, lot caps and the rest — and decline, shrink or stop trades before a limit is reached. Rules belong to the account, and follow it to any terminal.</dd>
+          <dt>Guards</dt><dd>rules that watch an account — daily loss, drawdown, lot caps and the rest — and decline, shrink or stop trades before a limit is reached. Rules belong to the account, and follow it to any terminal, in any profile.</dd>
           <dt>News</dt><dd>the week's Forex Factory releases, and what the news rule will do about each one — close or breakeven copies minutes before the release, if the rule is on.</dd>
           <dt>History</dt><dd>one card per copied trade with every step under it: placed, filled, changed, closed, and anything a guard did along the way. Money stays in the terminal — no P/L here, on purpose.</dd>
           <dt>Setups</dt><dd>saved arrangements: who copies from whom, each terminal's account and settings. Loading puts one back; it never turns live trading on by itself.</dd>
-          <dt>Settings</dt><dd>the copier's own switches, for every terminal: what the profile is, dry run or live, connection timings. A save lands whole or not at all.</dd>
+          <dt>Settings</dt><dd>the copier's own switches, for every terminal: what the profile is, dry run or live, connection timings. A save lands whole or not at all. The timings are the machine's and shared by every profile; the rest is the profile's own.</dd>
         </dl>
       </section>
 
       <section aria-label="Always on screen" class="panel">
         <div class="panel-head"><h2>Always on screen</h2></div>
         <dl class="help-dl">
-          <dt>Profile pill</dt><dd>profiles are separate copiers — each its own window, terminals, settings and guards. The pill (top left) opens another, or makes, renames and deletes them.</dd>
+          <dt>Profile pill</dt><dd>profiles are separate copiers — each its own window, terminals and settings. The pill (top left) opens another, or makes, renames and deletes them. What describes the account or the machine is shared between them: account names, guard rules and their memory, the cTrader login, connection timings.</dd>
           <dt>Halt all</dt><dd>stops this profile's copying at once; nothing more is sent until the same button resumes it.</dd>
           <dt>Status bar</dt><dd>worker and feed health, what is being copied, and a DRY RUN badge whenever nothing real is sent.</dd>
           <dt>Log</dt><dd>the Log button raises a dock under every page — the copier's log and day book merged, narrowed to one terminal, problems only, or a word.</dd>

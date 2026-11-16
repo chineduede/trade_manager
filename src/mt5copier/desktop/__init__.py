@@ -20,6 +20,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from .. import config as config_mod
+from .. import shared_data
 from ..claims import ClaimBook
 from ..ctrader import auth as ctrader_auth
 from ..discovery import discover_terminals
@@ -86,6 +87,7 @@ def run() -> None:
     from .api import DesktopApi
 
     profile = active_profile()
+    shared_data.migrate()  # before anything reads a shared path: it builds the shared folder
     cfg = config_mod.load()
     guards = guards_mod.load(guards_path())
     try:

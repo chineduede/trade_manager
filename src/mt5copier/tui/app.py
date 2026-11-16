@@ -39,7 +39,7 @@ from textual.widgets import ContentSwitcher, DataTable, Input, Static
 
 from .. import account_switch as account_mod
 from .. import config as config_mod
-from .. import role_actions
+from .. import role_actions, shared_data
 from .. import setups as setups_mod
 from ..claims import ClaimBook
 from ..config import (
@@ -2088,6 +2088,7 @@ def _tone(out: SlaveOutcome) -> str:
 def run() -> None:
     """Entry point: load config, fold in a discovery sweep, then hand over to the UI."""
     profile = active_profile()
+    shared_data.migrate()  # before anything reads a shared path: it builds the shared folder
     cfg = config_mod.load()
     guards = guards_mod.load(guards_path())
     saved = setups_mod.load(setups_path())

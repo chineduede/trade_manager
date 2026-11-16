@@ -218,6 +218,11 @@ class GuardBook:
         self._seen: dict[str, float] = {}
         """Per account, when its previous snapshot arrived: what tells a reset that was watched
         from one that happened while the copier was off."""
+        self._dirty: set[str] = set()
+        """The accounts whose state THIS process has changed. The file is shared by every
+        profile, and claims mean no two profiles guard one account at once -- so a save folds
+        only these keys into whatever the file holds, leaving every other account's entries
+        exactly as the profile that owns them wrote them."""
 
     def _load(self) -> dict[str, object]:
         try:
@@ -230,10 +235,40 @@ class GuardBook:
             return {}
 
     def _save(self) -> None:
+        """Read-modify-write, merged per dirty account (see ``_dirty``), so two profiles each
+        guarding their own accounts never erase one another's anchors or held breaches."""
         try:
-            write_json(self._path, {"day_equity": self._day_equity, "latched": self._latched})
+            disk = self._load()
+            merged: dict[str, dict[str, dict[str, dict[str, object]]]] = {
+                "day_equity": _section(disk, "day_equity"),
+                "latched": _section(disk, "latched"),
+            }
+            for key in self._dirty:
+                for name, ours in (("day_equity", self._day_equity), ("latched", self._latched)):
+                    if key in ours:
+                        merged[name][key] = ours[key]
+                    else:
+                        merged[name].pop(key, None)
+            write_json(self._path, merged)
         except OSError:
             log.exception("could not save guard state to %s", self._path)
+
+    def _adopt(self, key: str) -> None:
+        """Take one account's state from disk, the first time this process sees the account.
+
+        The account may have been guarded from another profile until moments ago (a claim
+        released, and this profile picked the terminal up): its anchors and held breaches are
+        on disk, newer than what this book loaded at start. Never over our own changes --
+        a dirty key is ours, and claims say nobody else has written it since."""
+        if key in self._dirty:
+            return
+        disk = self._load()
+        for name, ours in (("day_equity", self._day_equity), ("latched", self._latched)):
+            theirs = _section(disk, name).get(key)
+            if theirs is not None:
+                ours[key] = theirs
+            else:
+                ours.pop(key, None)
 
     # --- recording ------------------------------------------------------------------------
 
@@ -243,6 +278,10 @@ class GuardBook:
             return
         before = self._seen.get(key)
         self._seen[key] = now
+        if before is None:
+            # First snapshot for this account since start: it may have been guarded from
+            # another profile until moments ago, so its state on disk is newer than ours.
+            self._adopt(key)
         if before is None or now - before > _CONTINUITY_S:
             return
         changed = False
@@ -259,6 +298,7 @@ class GuardBook:
                 log.info("recorded equity %.2f at %s's daily reset (%s)", snap.equity, key, day)
                 changed = True
         if changed:
+            self._dirty.add(key)
             self._save()
 
     # --- latches ---------------------------------------------------------------------------
@@ -306,6 +346,7 @@ class GuardBook:
             "until it is cleared on the guards page" if until == "hand" else "until the reset",
             status.detail,
         )
+        self._dirty.add(key)
         self._save()
 
     def title(self, key: str | None, rule_id: str) -> str:
@@ -321,6 +362,7 @@ class GuardBook:
         if self._latched.get(key, {}).pop(rule_id, None) is None:
             return False
         log.warning("guard breach on %s cleared by hand (rule %s)", key, rule_id)
+        self._dirty.add(key)
         self._save()
         return True
 
