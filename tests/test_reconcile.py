@@ -1776,15 +1776,6 @@ def test_a_dry_run_and_a_live_session_do_not_share_beliefs(
     assert eng.believed_copies() == 1, "and the simulated belief is still there"
 
 
-def test_clearing_the_ledger_forgets_every_belief(engine: Engine) -> None:
-    wire_slave(engine)
-    watch(engine)
-    engine._reconcile(snap(open_positions=(pos(ticket=11),)))
-    engine.clear_detection_state()
-    assert engine.believed_copies() == 0
-    assert engine.recent_actions() == []
-
-
 # --- startup reconciliation -----------------------------------------------------------------
 #
 # The store and the terminal can only disagree while the copier is not running, and they

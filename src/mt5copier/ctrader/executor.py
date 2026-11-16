@@ -712,8 +712,11 @@ class CTraderExecutor:
         on record -- see :meth:`mt5copier.executor.Executor._close_or_reduce`."""
         if cmd.slave_ticket is None:
             return self._fail(cmd, error="no slave ticket recorded for this copy")
+        # Bound before _net_rr_target swaps cmd for a padded copy, which widens the type back
+        # to int | None even though the ticket rides along unchanged.
+        slave_ticket = cmd.slave_ticket
         account = self._account
-        raw = (await account.open_positions()).get(cmd.slave_ticket)
+        raw = (await account.open_positions()).get(slave_ticket)
         if raw is None:
             if cmd.op is ActionKind.CLOSE and cmd.slave_ticket in await account.resting_orders():
                 # A flipped pending copy can still be resting when its master's order fills,
@@ -827,8 +830,11 @@ class CTraderExecutor:
         as on MT5."""
         if cmd.slave_ticket is None:
             return self._fail(cmd, error="no slave ticket recorded for this copy")
+        # Bound before _net_rr_target swaps cmd for a padded copy, which widens the type back
+        # to int | None even though the ticket rides along unchanged.
+        slave_ticket = cmd.slave_ticket
         account = self._account
-        raw = (await account.open_positions()).get(cmd.slave_ticket)
+        raw = (await account.open_positions()).get(slave_ticket)
         wanted = f"sl {cmd.sl:g} tp {cmd.tp:g}"
         if raw is None:
             log.warning(
@@ -859,7 +865,7 @@ class CTraderExecutor:
                 slave_symbol=symbol.name,
                 outcome="already matched",
             )
-        refusal = await self._amend(cmd.slave_ticket, cmd.sl, cmd.tp, digits)
+        refusal = await self._amend(slave_ticket, cmd.sl, cmd.tp, digits)
         if refusal is None:
             return self._ok(
                 cmd, slave_ticket=cmd.slave_ticket, slave_symbol=symbol.name, attempts=1

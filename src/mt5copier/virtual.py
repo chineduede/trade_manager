@@ -86,12 +86,6 @@ class VirtualBook:
             o.symbol for o in self._orders.values()
         }
 
-    def get_position(self, ticket: int) -> Position | None:
-        return self._positions.get(ticket)
-
-    def get_order(self, ticket: int) -> PendingOrder | None:
-        return self._orders.get(ticket)
-
     # --- trading ------------------------------------------------------------------------
 
     def open_market(

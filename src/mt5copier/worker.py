@@ -50,8 +50,8 @@ from .protocol import (
     Quote,
     RatesRequest,
     RatesResult,
-    SymbolMeta,
     Snapshot,
+    SymbolMeta,
     WatchCommand,
     WorkerState,
 )
@@ -534,9 +534,7 @@ class _Session:
                     value_per_unit = tick_value / tick_size
             except Exception as exc:
                 log.debug("tick values for %r would not read: %r", answer.name, exc)
-            meta = SymbolMeta(
-                digits=facts.digits, point=facts.point, value_per_unit=value_per_unit
-            )
+            meta = SymbolMeta(digits=facts.digits, point=facts.point, value_per_unit=value_per_unit)
         try:
             rows = self._mt5.copy_rates_from_pos(answer.name, req.timeframe, 0, req.count)
         except Exception as exc:

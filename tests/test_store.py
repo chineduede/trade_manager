@@ -115,15 +115,6 @@ def test_forgetting_removes_only_that_copy() -> None:
     assert store.get(TID_A, 2) is not None
 
 
-def test_forgetting_a_terminal_leaves_the_others() -> None:
-    store = MappingStore()
-    store.record(position_copy(terminal_id=TID_A))
-    store.record(position_copy(terminal_id=TID_B, slave_ticket=88))
-    store.forget_terminal(TID_A)
-    assert store.for_terminal(TID_A) == []
-    assert len(store.for_terminal(TID_B)) == 1
-
-
 # --- the views the diff engine wants ----------------------------------------------------------
 
 
@@ -264,13 +255,6 @@ def test_writes_are_committed_immediately_not_at_close(tmp_path: Path) -> None:
     assert other.get(TID_A, 1) is not None
     store.close()
     other.close()
-
-
-def test_clearing_empties_the_table() -> None:
-    store = MappingStore()
-    store.record(position_copy())
-    store.clear()
-    assert store.all() == []
 
 
 # --- who manages a copy ---------------------------------------------------------------------

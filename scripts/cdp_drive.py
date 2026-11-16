@@ -56,7 +56,7 @@ def _connect(port: int):
     return ws
 
 
-def _rpc(ws, method: str, params: dict | None = None, _id: list[int] = [0]) -> dict:
+def _rpc(ws, method: str, params: dict | None = None, _id: list[int] = [0]) -> dict:  # noqa: B006 -- shared call-id counter, on purpose
     _id[0] += 1
     ws.send(json.dumps({"id": _id[0], "method": method, "params": params or {}}))
     while True:

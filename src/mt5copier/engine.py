@@ -21,7 +21,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Collection, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from . import role_actions
@@ -196,7 +196,6 @@ class _Worker:
     terminal_id: str
     process: mp.process.BaseProcess
     cmd_q: mp.Queue
-    started_at: float = field(default_factory=time.monotonic)
 
 
 _MASTER_BE_RETRY_S = 15.0
@@ -3095,30 +3094,6 @@ class Engine:
                     Orphan(terminal_id, copy.slave_ticket, copy.symbol, copy.volume or 0.0)
                 )
                 acknowledged.add(copy.slave_ticket)
-
-    def clear_detection_state(self) -> None:
-        """Forget every believed copy and the action history.
-
-        Safe in a dry run, where beliefs are simulated. **In live mode this abandons real
-        positions** -- they stay open with nothing tracking them -- so it warns, and the caller
-        is expected to have asked first.
-        """
-        with self._lock:
-            store = self._ensure_store()
-            if not self._cfg.dry_run:
-                log.warning(
-                    "clearing %d LIVE copy records; those positions stay open and will appear "
-                    "as orphans on the next startup reconciliation",
-                    len(self._ledger.believed()),
-                )
-            store.clear()
-            self._ledger.reset_session_state()
-            self._actions.clear()
-            self._day.clear(ts=time.time())
-            # Every position that was ours is now unrecorded, which is the definition of an
-            # orphan. Re-reconcile rather than carry forward a clean bill of health.
-            for tid in list(self._cfg.terminals):
-                self._forget_reconciliation(tid)
 
     def _ensure_store(self) -> MappingStore:
         """The belief store for the current mode, opening or swapping it as needed.

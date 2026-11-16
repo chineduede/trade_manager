@@ -46,52 +46,6 @@ APPLIES_ON_CONNECT = ("poll_interval_ms", "reconnect_backoff_s")
 """Handed to each terminal's worker when it starts, so a change reaches a terminal the next
 time its connection starts, not at once."""
 
-HELP: dict[str, tuple[str, str]] = {
-    DRY_RUN: (
-        "Mode",
-        "A dry run works out every copy and logs it, and sends nothing. Live sends real orders "
-        "to every connected slave the demo-only guard lets through.",
-    ),
-    "poll_interval_ms": (
-        "Check interval",
-        "How often each terminal's account, positions and orders are read, in milliseconds. "
-        "Lower notices the master sooner and works the terminals harder. 50 to 10000.",
-    ),
-    "heartbeat_timeout_s": (
-        "Stale after",
-        "A terminal that has sent nothing for this long is shown as stale: the copier's own "
-        "link to it has stuck, as opposed to the terminal losing its broker.",
-    ),
-    "reconnect_backoff_s": (
-        "Retry schedule",
-        "Seconds to wait before each attempt to reconnect a lost terminal, separated by commas. "
-        "The last one repeats for as long as it takes.",
-    ),
-    "rescan_interval_s": (
-        "Rescan every",
-        "Seconds between sweeps for terminals on disk, so a login made in MT5 itself shows "
-        "on an unassigned terminal's card without pressing rescan. Passive reading only; "
-        "a connected terminal's worker already reports its account live. 10 to 3600.",
-    ),
-    "close_terminals": (
-        "Closing terminals",
-        "What happens to a terminal's window when the copier quits or the terminal is "
-        "unassigned. A restart or reconnect never closes one. Closing is immediate, not "
-        "MT5's own exit: anything unsaved in that terminal, such as a chart, is lost.",
-    ),
-    "history_days": (
-        "History kept",
-        "How many days of each trade's history to keep: every step the copier took with it "
-        "on each slave, shown with h. Older steps are deleted. 1 to 365.",
-    ),
-    "join_grace_seconds": (
-        "Join grace",
-        "A gap this short in watching the master is treated as unbroken. After a longer one, "
-        "trades the master already holds are never copied to that slave, because a late copy "
-        "fills far from the master's entry. 0 to 5.",
-    ),
-}
-
 
 @dataclass(frozen=True)
 class GeneralOutcome:

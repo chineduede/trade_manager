@@ -372,12 +372,6 @@ class DayBook:
         for cid in [c for c, s in self._pending.items() if (s.sent_at or 0.0) < cutoff]:
             del self._pending[cid]
 
-    def clear(self, *, ts: float) -> None:
-        self._events.clear()
-        self._pending.clear()
-        self._tick = {}
-        self._since = ts
-
     # --- reading ----------------------------------------------------------------------------
 
     @property

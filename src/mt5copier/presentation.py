@@ -57,7 +57,6 @@ class RowInfo:
     balance: float | None
     equity: float | None
     floating_pl: float | None
-    floating_pl_tier: Tier | None
     currency: str | None
     open_trades: int | None
     """Count of open positions on this terminal right now, or None if unknown (no snapshot
@@ -86,11 +85,6 @@ def row_info(
     balance = snap.balance if snap else None
     equity = snap.equity if snap else None
     floating_pl = None if balance is None or equity is None else equity - balance
-    # Reuses the status good/critical tiers directly for P&L instead of a second green/red pair
-    # kept in sync by hand.
-    pl_tier: Tier | None = (
-        None if floating_pl is None else ("good" if floating_pl >= 0 else "critical")
-    )
     # Prefer the live account's own login/server; fall back to what discovery last read off
     # disk, so the account id is still shown before anything is connected.
     login = snap.login if snap and snap.login else view.cfg.last_login
@@ -114,7 +108,6 @@ def row_info(
         balance=balance,
         equity=equity,
         floating_pl=floating_pl,
-        floating_pl_tier=pl_tier,
         currency=snap.currency if snap else None,
         open_trades=snap.positions if snap else None,
         paused=view.cfg.role is Role.SLAVE and view.cfg.paused,

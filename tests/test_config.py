@@ -183,22 +183,6 @@ def test_a_lot_multiple_must_be_positive() -> None:
             TerminalConfig(terminal_id=TID_A, no_stop_lot_multiple=bad)
 
 
-@pytest.mark.parametrize(
-    ("kwargs", "expected"),
-    [
-        ({"role": Role.SLAVE, "risk_percent": 1.5}, "1.5%"),
-        (
-            {"role": Role.SLAVE, "sizing_mode": SizingMode.FIXED_CASH_RISK, "risk_cash": 250},
-            "250 cash",
-        ),
-        ({"role": Role.MASTER}, "-"),
-        ({"role": Role.UNASSIGNED}, "-"),
-    ],
-)
-def test_risk_label(kwargs: dict[str, object], expected: str) -> None:
-    assert TerminalConfig(terminal_id=TID_A, **kwargs).risk_label() == expected  # type: ignore[arg-type]
-
-
 def test_account_key_is_none_with_no_login() -> None:
     assert account_key(None, "A-Live") is None
 

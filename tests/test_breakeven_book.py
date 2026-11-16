@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from test_breakeven import TID_MASTER, TID_SLAVE, _slave_at, _tick, live, master_pos, slave
 
 from mt5copier import reconcile
-from mt5copier.config import BREAKEVEN_FIELDS, BreakevenMode
+from mt5copier.config import BreakevenMode
 from mt5copier.engine import Engine
 from mt5copier.protocol import ActionKind, OrderCommand, OrderResult, Snapshot, WorkerState
 from mt5copier.settings_edit import apply_edits
@@ -225,8 +225,7 @@ def test_the_store_keeps_the_booking(tmp_path: Path) -> None:
         assert store.get_position(TID_SLAVE, 11).booked  # type: ignore[union-attr]
 
 
-def test_the_percent_is_under_100_and_editing_it_keeps_the_copies() -> None:
-    assert "breakeven_book_percent" in BREAKEVEN_FIELDS
+def test_the_percent_is_under_100() -> None:
     with pytest.raises(ValidationError):
         slave(breakeven_book_percent=100.0)
     outcome = apply_edits(slave(), {"breakeven_book_percent": "30"})

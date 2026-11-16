@@ -178,11 +178,6 @@ class Management(StrEnum):
     own breakeven and booking, none of the master's stop moves or partial closes."""
 
 
-BREAKEVEN_FIELDS = frozenset({"breakeven_mode", "breakeven_trigger_r", "breakeven_book_percent"})
-"""The settings an edit may change without giving up the slave's open copies. They change how
-a copy's stop is managed from here on, never its direction or size."""
-
-
 class TerminalConfig(BaseModel):
     """Per-terminal settings. Survives rescans; only the discovery-derived fields get refreshed."""
 
@@ -384,14 +379,6 @@ class TerminalConfig(BaseModel):
 
     # No cross-field validator: every sizing field is independently constrained by its own
     # Field(), and LOT_MULTIPLE needs nothing but a positive multiplier, which gt=0 gives.
-
-    def risk_label(self) -> str:
-        """Short description of this slave's risk setting, for the UI."""
-        if self.role is not Role.SLAVE:
-            return "-"
-        if self.sizing_mode is SizingMode.FIXED_CASH_RISK:
-            return f"{self.risk_cash:g} cash"
-        return f"{self.risk_percent:g}%"
 
 
 _VIRTUAL_MASTER: TerminalConfig | None = None

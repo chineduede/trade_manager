@@ -45,10 +45,6 @@ _INSTANCE_DIR_RE = re.compile(r"^[0-9A-F]{32}$", re.IGNORECASE)
 
 _TERMINAL_EXE_NAMES = ("terminal64.exe", "terminal.exe")
 
-# bases/ subdirectories that are built-in rather than real trade servers. "Chats" holds MQL5
-# community chat state (chats.dat / users.dat) and was showing up as a phantom server.
-_NON_SERVER_BASES = frozenset({"Custom", "Default", "signals", "Favorites", "Chats"})
-
 # Vendor boilerplate that appears anywhere in an install directory name.
 _LABEL_NOISE_RE = re.compile(
     r"\b(metatrader\s*5|metatrader|mt5|mt4|terminal|client)\b", re.IGNORECASE
@@ -74,7 +70,6 @@ class DiscoveredTerminal:
     label: str
     login: int | None = None
     server: str | None = None
-    servers_seen: tuple[str, ...] = ()
     is_running: bool = False
     pid: int | None = None
     notes: tuple[str, ...] = ()
@@ -178,17 +173,6 @@ def _find_exe(install_path: Path) -> Path | None:
         if candidate.is_file():
             return candidate
     return None
-
-
-def _servers_from_bases(data_path: Path) -> tuple[str, ...]:
-    bases = data_path / "bases"
-    if not bases.is_dir():
-        return ()
-    try:
-        names = [d.name for d in bases.iterdir() if d.is_dir()]
-    except OSError:
-        return ()
-    return tuple(sorted(n for n in names if n not in _NON_SERVER_BASES))
 
 
 def _clean_label(name: str) -> str:
@@ -306,7 +290,6 @@ def discover_terminals(terminal_root: Path | None = None) -> list[DiscoveredTerm
                     label=_label_from_install(install_path, server, data_path.name[:8]),
                     login=login,
                     server=server,
-                    servers_seen=_servers_from_bases(data_path),
                     is_running=is_running,
                     pid=pid,
                     notes=tuple(notes),

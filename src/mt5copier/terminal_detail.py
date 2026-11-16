@@ -48,10 +48,7 @@ class PositionRow:
     """Decimals to show this symbol's prices with (see :func:`price_digits`)."""
     master_ticket: int | None = None
     """The master position this is a copy of, on a slave; None for anything that is not a
-    tracked copy. What the breakeven keys act on."""
-    breakeven: str = ""
-    """This copy's breakeven state in a few words; blank for anything that is not a copy."""
-    breakeven_tier: Tier = "muted"
+    tracked copy. What the breakeven actions act on."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,29 +109,11 @@ def breakeven_rule(cfg: TerminalConfig) -> str:
     return "off"
 
 
-def _breakeven_cell(copy: OpenCopy, rule: str, digits: int) -> tuple[str, Tier]:
-    if copy.breakeven_exempt:
-        return "exempt", "muted"
-    # Its own decimals count too: a level is often one digit finer than the row's prices.
-    if copy.breakeven_sl:
-        return (
-            f"✓ {format_price(copy.breakeven_sl, max(digits, price_digits(copy.breakeven_sl)))}",
-            "good",
-        )
-    if copy.breakeven_at:
-        return (
-            f"at {format_price(copy.breakeven_at, max(digits, price_digits(copy.breakeven_at)))}",
-            "warning",
-        )
-    return rule, "muted"
-
-
 def position_rows(
     snap: Snapshot,
     *,
     is_master: bool,
     copies: Sequence[OpenCopy] | None = None,
-    breakeven: str = "off",
     master_positions: Iterable[Position] | None = None,
     held_by: Mapping[int, int] | None = None,
     slave_count: int = 0,
@@ -144,8 +123,7 @@ def position_rows(
 
     On a **slave**, ``copies`` are what the store believes this slave holds, and each copy is
     named after the master position it follows. On the **master**, ``held_by`` counts, per
-    master ticket, how many slaves hold a copy, out of ``slave_count``. ``breakeven`` is the
-    slave's own trigger (see :func:`breakeven_rule`), shown for a copy with nothing set by hand.
+    master ticket, how many slaves hold a copy, out of ``slave_count``.
     """
     if snap.open_positions is None:
         return None
@@ -186,9 +164,6 @@ def position_rows(
                 link, tier = "ours, not yet matched", "warning"
             else:
                 link, tier = "manual / not ours", "muted"
-        be_text, be_tier = "", "muted"
-        if copy is not None:
-            be_text, be_tier = _breakeven_cell(copy, breakeven, digits)
         rows.append(
             PositionRow(
                 ticket=p.ticket,
@@ -207,8 +182,6 @@ def position_rows(
                 link_tier=tier,
                 digits=digits,
                 master_ticket=copy.master_ticket if copy is not None else None,
-                breakeven=be_text,
-                breakeven_tier=be_tier,
             )
         )
     return rows
@@ -253,14 +226,6 @@ def exposure(positions: Iterable[Position] | None) -> list[Exposure]:
         (Exposure(s, round(net[s], 8), round(gross[s], 8)) for s in net),
         key=lambda e: (-e.gross_lots, e.symbol),
     )
-
-
-def bar(fraction: float | None, width: int) -> str:
-    """A text bar for a 0..1 fraction. Blank track when unknown, so it never reads as empty."""
-    if fraction is None:
-        return "░" * width
-    filled = round(max(0.0, min(1.0, fraction)) * width)
-    return "█" * filled + "░" * (width - filled)
 
 
 def format_duration(seconds: float | None) -> str:

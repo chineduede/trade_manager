@@ -1087,7 +1087,12 @@ def test_rates_are_read_on_the_resolved_symbol(tmp_path: Path) -> None:
     candles, meta = got
     assert mt5.rates_calls == [("EURUSDm", 5, 0, 2)], "read on the broker's own name"
     assert [c.ts for c in candles] == [1_700_000_000, 1_700_000_060]
-    assert (candles[0].open, candles[0].high, candles[0].low, candles[0].close) == (1.08, 1.09, 1.07, 1.085)
+    assert (candles[0].open, candles[0].high, candles[0].low, candles[0].close) == (
+        1.08,
+        1.09,
+        1.07,
+        1.085,
+    )
     assert meta is not None
     assert (meta.digits, meta.point) == (5, 0.0001)
     assert meta.value_per_unit == pytest.approx(100_000.0), "the loss-side tick value per 1.0"

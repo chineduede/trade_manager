@@ -456,13 +456,6 @@ class HistoryStore:
         if gone:
             log.info("trade history: deleted %d steps older than %d days", gone, self._keep_days)
 
-    def prune(self, *, now: float | None = None) -> None:
-        with self._lock:
-            try:
-                self._prune(time.time() if now is None else now)
-            except sqlite3.Error:
-                log.exception("could not prune the trade history")
-
     # --- reading ---------------------------------------------------------------------------
 
     def trades(

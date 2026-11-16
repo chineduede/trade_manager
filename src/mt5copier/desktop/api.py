@@ -907,7 +907,17 @@ class DesktopApi:
                 "message": f"{name}: live trading allowed. Real orders will be sent to this "
                 "account whenever copying is live.",
             }
-        return {"ok": True, "message": f"{name}: demo-only guard back on."}
+        message = f"{name}: demo-only guard back on."
+        held = 0 if self._cfg.dry_run else self._engine.copies_on_real_account(tid)
+        if held:
+            # The warning the old settings advisories carried: those copies stay open with
+            # every close and stop move now refused by the guard.
+            message += (
+                f" It holds {held} open cop{'y' if held == 1 else 'ies'} on a real account, "
+                "and the copier will now refuse to close or move them. Close them by hand, "
+                "or turn the override back on."
+            )
+        return {"ok": True, "message": message}
 
     def rescan(self) -> dict[str, Any]:
         """Passive discovery, on the bridge's own worker thread -- the page awaits the
@@ -2754,7 +2764,6 @@ class DesktopApi:
                     snap,
                     is_master=False,
                     copies=copies,
-                    breakeven=breakeven_rule(tcfg),
                     master_positions=master_positions,
                     orphan_tickets=(o.slave_ticket for o in engine.orphans(tid)),
                 )
@@ -2868,8 +2877,7 @@ class DesktopApi:
                 "tone": "ok",
             }
         ]
-        real = 0 if cfg.dry_run else self._engine.copies_on_real_account(tid)
-        for warning in advisories(outcome, real):
+        for warning in advisories(outcome):
             messages.append({"text": warning, "tone": "warn"})
         why = self._persist()
         if why is not None:

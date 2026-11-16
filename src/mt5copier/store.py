@@ -505,16 +505,6 @@ class MappingStore:
             )
             self._db.commit()
 
-    def forget_terminal(self, terminal_id: str) -> None:
-        with self._lock:
-            self._db.execute("DELETE FROM copies WHERE terminal_id = ?", (terminal_id,))
-            self._db.commit()
-
-    def clear(self) -> None:
-        with self._lock:
-            self._db.execute("DELETE FROM copies")
-            self._db.commit()
-
     # --- reading ---------------------------------------------------------------------------
 
     def get(self, terminal_id: str, master_ticket: int) -> Copy | None:

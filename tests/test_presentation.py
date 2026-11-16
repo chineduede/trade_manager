@@ -52,7 +52,6 @@ def test_row_info_without_a_snapshot_shows_no_numbers() -> None:
     assert row.tier == "muted"
     assert row.balance is None
     assert row.floating_pl is None
-    assert row.floating_pl_tier is None
     assert row.currency is None
 
 
@@ -113,18 +112,6 @@ def test_row_info_derives_positive_floating_pl_from_balance_and_equity() -> None
     assert row.status_text == "connected"
     assert row.tier == "good"
     assert row.floating_pl == 12.5
-    assert row.floating_pl_tier == "good"
-
-
-def test_row_info_derives_negative_floating_pl_as_critical() -> None:
-    """P&L reuses the status good/critical tokens directly, not a second green/red pair kept in sync by hand."""
-    snap = Snapshot(terminal_id=TID, state=WorkerState.CONNECTED, balance=1000.0, equity=950.0)
-    view = TerminalView(
-        cfg=_cfg(), snapshot=snap, supervised=True, process_alive=True, received_at=time.monotonic()
-    )
-    row = _info(view, timeout_s=999.0)
-    assert row.floating_pl == -50.0
-    assert row.floating_pl_tier == "critical"
 
 
 def test_a_held_but_connected_slave_is_downgraded_to_warning() -> None:

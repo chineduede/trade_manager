@@ -16,9 +16,9 @@ a ``MASTER=BROKER`` map out of free text.
 **Only the fields listed here can be edited.** What is missing is deliberate:
 
 * ``allow_live_trading`` is the demo-only guard's override. A guard that a stray keypress can
-  lift is not a guard, so it is not a row in this form, where ``ctrl+s`` or a stray space would
-  reach it. It has its own key and its own dialog, and turning it *on* takes the terminal's name
-  typed out in full: see :func:`set_live_override`.
+  lift is not a guard, so it is not a row in this form, where a stray space would reach it. It
+  has its own dialog, which asks before anything is changed (see the desktop bridge's
+  ``live_override``).
 * ``label`` is owned by discovery, which overwrites it on every rescan and at every start. An
   edit would revert silently the next time the app ran.
 * ``role`` has its own keys, and ``terminal_id`` and ``exe_path`` are not the user's to set,
@@ -50,7 +50,6 @@ from .config import (
     BreakevenMode,
     Management,
     NoStopPolicy,
-    Role,
     SizingMode,
     TerminalConfig,
     account_key,
@@ -525,62 +524,6 @@ def apply_edits(current: TerminalConfig, raw: Mapping[str, str | bool]) -> EditO
     return EditOutcome(config=new, errors={}, changes=changes)
 
 
-LIVE_OVERRIDE = "allow_live_trading"
-
-
-def live_override_phrase(cfg: TerminalConfig) -> str:
-    """What has to be typed to turn the override on: the terminal's own name.
-
-    The name and not a fixed word, because the mistake this guards against is the *wrong
-    terminal* -- a role is a keypress from landing on a funded account -- and a fixed word can be
-    typed without looking at which terminal is selected. The name cannot. It falls back to the
-    first eight characters of the id, which is what the log calls a terminal, when discovery gave
-    it no label.
-    """
-    return cfg.label.strip() or cfg.terminal_id[:8]
-
-
-def set_live_override(
-    current: TerminalConfig, enabled: bool, *, typed: str | None = None
-) -> EditOutcome:
-    """Turn the demo-only guard's override on or off, or say why not.
-
-    Not through :func:`apply_edits`, which refuses this field by name: the form is saved with one
-    keypress and this must not be. Off is the safe direction and needs nothing. On needs both of:
-
-    * **The terminal is a slave.** The guard only ever stands between a *slave* and a broker.
-      ``set_role`` does not touch this flag, so one turned on for a terminal that is not a slave
-      would ride along, unseen, on the day the terminal is made one.
-    * **``typed`` is the terminal's name** (:func:`live_override_phrase`), compared without regard
-      to case or surrounding space. Its default is ``None`` -- "nothing typed" -- and that refuses:
-      a guard that quietly passes when the caller forgets to ask is not one.
-    """
-    if enabled == current.allow_live_trading:
-        return EditOutcome(config=current, errors={}, changes=())
-
-    if enabled:
-        phrase = live_override_phrase(current)
-        if current.role is not Role.SLAVE:
-            return EditOutcome(
-                config=None,
-                errors={LIVE_OVERRIDE: "only a slave is ever traded: make it a slave first"},
-                changes=(),
-            )
-        if typed is None or typed.strip().casefold() != phrase.casefold():
-            return EditOutcome(
-                config=None,
-                errors={LIVE_OVERRIDE: f"that is not the name: type {phrase} to confirm"},
-                changes=(),
-            )
-
-    new = TerminalConfig.model_validate({**current.model_dump(), LIVE_OVERRIDE: enabled})
-    return EditOutcome(
-        config=new,
-        errors={},
-        changes=(Change(LIVE_OVERRIDE, current.allow_live_trading, enabled),),
-    )
-
-
 ACCOUNT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_ -]{0,31}$")
 """The profile-name rule (see ``profiles._NAME_RE``) plus spaces, which a display name like
 "FTMO 100k" needs and a directory name cannot have. The name is cosmetic, so this is not
@@ -653,15 +596,11 @@ def describe_changes(changes: tuple[Change, ...], limit: int | None = None) -> s
     return text
 
 
-def advisories(outcome: EditOutcome, copies_on_real_account: int = 0) -> list[str]:
+def advisories(outcome: EditOutcome) -> list[str]:
     """Warnings for an edit that is allowed but widens what a slave can lose or leaves it exposed.
 
     None is a reason to refuse. Each is something the editor makes one keypress away that was a
     deliberate hand edit before, so the moment it happens is the moment to say so.
-
-    ``copies_on_real_account`` is how many copies the slave holds on an account not known to be
-    a demo (``Engine.copies_on_real_account``): turning the live override off leaves them open
-    with every close and stop move refused by the demo-only guard.
     """
     if outcome.config is None:
         return []
@@ -679,17 +618,4 @@ def advisories(outcome: EditOutcome, copies_on_real_account: int = 0) -> list[st
     cap = changed.get("max_lot")
     if cap is not None and cap.old is not None and cap.new is None:
         out.append("max lot removed: copy size is now limited only by the risk setting.")
-    live = changed.get(LIVE_OVERRIDE)
-    if live is not None and cfg.allow_live_trading:
-        out.append(
-            f"{cfg.label or 'this terminal'} will now be traded whatever its account is, a real "
-            "or prop-firm account included. It stays that way until the override is turned off."
-        )
-    if live is not None and not cfg.allow_live_trading and copies_on_real_account:
-        out.append(
-            f"{cfg.label or 'this terminal'} holds {copies_on_real_account} open "
-            f"cop{'y' if copies_on_real_account == 1 else 'ies'} on a real account, and the "
-            "copier will now refuse to close or move them. Close them by hand, or turn the "
-            "override back on."
-        )
     return out

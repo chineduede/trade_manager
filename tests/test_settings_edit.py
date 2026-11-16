@@ -28,9 +28,7 @@ from mt5copier.settings_edit import (
     copies_word,
     describe_changes,
     initial_values,
-    live_override_phrase,
     rename,
-    set_live_override,
 )
 
 TID = "A" * 32
@@ -473,116 +471,6 @@ def test_a_long_description_is_cut_for_a_notification_but_not_for_the_log() -> N
     assert "SYM29=BROKER29" in full
     assert len(short) == 80
     assert short.endswith("...")
-
-
-# --- the demo-only guard's override ---------------------------------------------------------------
-#
-# Off is the safe direction and takes nothing. On has to be asked for by name, on a slave, and a
-# caller that forgets to ask must be refused rather than waved through.
-
-
-def test_the_phrase_is_the_terminals_name() -> None:
-    assert live_override_phrase(make()) == "Slave"
-
-
-@pytest.mark.parametrize("label", ["", "   "])
-def test_a_terminal_with_no_name_is_confirmed_by_the_first_eight_characters_of_its_id(
-    label: str,
-) -> None:
-    cfg = TerminalConfig(terminal_id=TID, label=label, role=Role.SLAVE)
-    assert live_override_phrase(cfg) == "AAAAAAAA"
-
-
-def test_the_override_is_turned_on_by_typing_the_name() -> None:
-    cfg = make(risk_percent=0.4, copy_pending=True)
-    outcome = set_live_override(cfg, True, typed="Slave")
-    assert outcome.ok
-    assert outcome.config is not None
-    assert outcome.config.allow_live_trading is True
-    assert [(c.name, c.old, c.new) for c in outcome.changes] == [
-        ("allow_live_trading", False, True)
-    ]
-    assert outcome.config.model_dump() == {**cfg.model_dump(), "allow_live_trading": True}, (
-        "nothing else about the terminal is touched"
-    )
-    assert cfg.allow_live_trading is False, "the live object is not edited in place"
-
-
-def test_turning_the_override_off_over_copies_on_a_real_account_warns() -> None:
-    outcome = set_live_override(make(allow_live_trading=True), False)
-    assert outcome.ok
-    (warning,) = advisories(outcome, copies_on_real_account=2)
-    assert "2 open copies on a real account" in warning
-    assert "refuse to close or move them" in warning
-    assert advisories(outcome) == [], "nothing held there, nothing to say"
-
-
-@pytest.mark.parametrize("typed", ["slave", "  Slave  ", "SLAVE"])
-def test_case_and_surrounding_space_do_not_matter(typed: str) -> None:
-    assert set_live_override(make(), True, typed=typed).ok
-
-
-@pytest.mark.parametrize("typed", [None, "", "   ", "Slav", "Slave2", "yes", "LIVE", "Slave Slave"])
-def test_anything_but_the_name_refuses_and_changes_nothing(typed: str | None) -> None:
-    """``None`` is "the caller did not ask". A guard that passes when nobody asked is not one."""
-    outcome = set_live_override(make(), True, typed=typed)
-    assert not outcome.ok
-    assert outcome.config is None
-    assert outcome.changes == ()
-    assert "Slave" in outcome.errors["allow_live_trading"], "it says what to type"
-
-
-def test_forgetting_to_ask_at_all_refuses() -> None:
-    assert not set_live_override(make(), True).ok
-
-
-@pytest.mark.parametrize("role", [Role.MASTER, Role.UNASSIGNED])
-def test_only_a_slave_can_have_the_guard_lifted(role: Role) -> None:
-    """``set_role`` leaves the flag alone, so one lifted on a terminal that is not a slave would
-    ride along, unseen, on the day it is made one -- even with the right name typed."""
-    cfg = TerminalConfig(terminal_id=TID, label="Slave", role=role)
-    outcome = set_live_override(cfg, True, typed="Slave")
-    assert not outcome.ok
-    assert "slave" in outcome.errors["allow_live_trading"]
-
-
-@pytest.mark.parametrize("role", [Role.SLAVE, Role.MASTER, Role.UNASSIGNED])
-def test_turning_it_off_takes_nothing_and_works_whatever_the_role(role: Role) -> None:
-    """The safe direction. A terminal whose role changed with the guard still lifted must be
-    able to have it put back."""
-    cfg = TerminalConfig(terminal_id=TID, label="Slave", role=role, allow_live_trading=True)
-    outcome = set_live_override(cfg, False)
-    assert outcome.ok
-    assert outcome.config is not None
-    assert outcome.config.allow_live_trading is False
-    assert [(c.name, c.old, c.new) for c in outcome.changes] == [
-        ("allow_live_trading", True, False)
-    ]
-
-
-def test_asking_for_the_state_it_already_has_is_not_a_change() -> None:
-    lifted = make(allow_live_trading=True)
-    again = set_live_override(lifted, True)
-    assert again.ok and again.changes == (), "already on: nothing to confirm, nothing to record"
-    already_off = set_live_override(make(), False)
-    assert already_off.ok and already_off.changes == ()
-
-
-def test_the_change_reads_as_one_line_for_the_log() -> None:
-    outcome = set_live_override(make(), True, typed="Slave")
-    assert describe_changes(outcome.changes) == "allow_live_trading off -> on"
-
-
-def test_lifting_the_guard_is_flagged() -> None:
-    outcome = set_live_override(make(), True, typed="Slave")
-    (warning,) = advisories(outcome)
-    assert "Slave" in warning and "prop" in warning
-
-
-def test_putting_the_guard_back_needs_no_warning_of_its_own() -> None:
-    """What it does to copies already open is asked about beforehand, like any other edit."""
-    outcome = set_live_override(make(allow_live_trading=True), False)
-    assert advisories(outcome) == []
 
 
 def test_an_unrelated_edit_says_nothing_about_the_guard() -> None:

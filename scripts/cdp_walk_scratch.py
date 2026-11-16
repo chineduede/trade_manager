@@ -40,7 +40,9 @@ def shot(name: str) -> str:
 
 
 def mouse(kind: str, x: float, y: float, button: str = "left") -> None:
-    lib._rpc(WS, "Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "button": "none"})
+    lib._rpc(
+        WS, "Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y, "button": "none"}
+    )
     if kind == "move":
         return
     for ev_ in ("mousePressed", "mouseReleased"):
@@ -53,15 +55,16 @@ def mouse(kind: str, x: float, y: float, button: str = "left") -> None:
 
 def click_sel(sel: str, button: str = "left") -> bool:
     rect = ev(
-        "(()=>{const e=document.querySelector(%s);if(!e)return null;e.scrollIntoView({block:'center'});"
-        "const r=e.getBoundingClientRect();return [r.x+r.width/2, r.y+r.height/2]})()" % json.dumps(sel)
+        "(()=>{const e=document.querySelector(" + json.dumps(sel) + ");if(!e)return null;"
+        "e.scrollIntoView({block:'center'});"
+        "const r=e.getBoundingClientRect();return [r.x+r.width/2, r.y+r.height/2]})()"
     )
     if not rect:
         return False
     time.sleep(0.15)
     rect = ev(
-        "(()=>{const e=document.querySelector(%s);const r=e.getBoundingClientRect();"
-        "return [r.x+r.width/2, r.y+r.height/2]})()" % json.dumps(sel)
+        "(()=>{const e=document.querySelector(" + json.dumps(sel) + ");"
+        "const r=e.getBoundingClientRect();return [r.x+r.width/2, r.y+r.height/2]})()"
     )
     mouse("click", rect[0], rect[1], button)
     return True
@@ -72,8 +75,13 @@ def press(key: str, code: int) -> None:
         lib._rpc(
             WS,
             "Input.dispatchKeyEvent",
-            {"type": ev_, "key": key, "code": key, "windowsVirtualKeyCode": code,
-             "nativeVirtualKeyCode": code},
+            {
+                "type": ev_,
+                "key": key,
+                "code": key,
+                "windowsVirtualKeyCode": code,
+                "nativeVirtualKeyCode": code,
+            },
         )
 
 
@@ -129,19 +137,26 @@ for page, probe in PROBES.items():
 # ---- 2. Help via F1 ----
 press("F1", 112)
 time.sleep(0.5)
-note("help:F1", visible=ev(VISIBLE),
-     sections=ev("[...document.querySelectorAll('#page-help h2')].map(h=>h.textContent.trim())"),
-     shot=shot("help"))
+note(
+    "help:F1",
+    visible=ev(VISIBLE),
+    sections=ev("[...document.querySelectorAll('#page-help h2')].map(h=>h.textContent.trim())"),
+    shot=shot("help"),
+)
 
 # ---- 3. log dock ----
 click_sel("#log-btn")
 time.sleep(1.5)
-note("logdock:open",
-     hidden=ev("document.getElementById('logdock').hidden"),
-     count=ev("document.getElementById('log-count')?.textContent.trim()"),
-     rows=ev("document.getElementById('log-rows')?.children.length"),
-     firstRows=ev("[...document.getElementById('log-rows').children].slice(0,4).map(r=>r.textContent.trim().replace(/\\s+/g,' ').slice(0,110))"),
-     shot=shot("logdock"))
+note(
+    "logdock:open",
+    hidden=ev("document.getElementById('logdock').hidden"),
+    count=ev("document.getElementById('log-count')?.textContent.trim()"),
+    rows=ev("document.getElementById('log-rows')?.children.length"),
+    firstRows=ev(
+        "[...document.getElementById('log-rows').children].slice(0,4).map(r=>r.textContent.trim().replace(/\\s+/g,' ').slice(0,110))"
+    ),
+    shot=shot("logdock"),
+)
 click_sel("#log-problems")
 time.sleep(1.0)
 note("logdock:problems", count=ev("document.getElementById('log-count')?.textContent.trim()"))
@@ -153,10 +168,14 @@ note("logdock:closed", hidden=ev("document.getElementById('logdock').hidden"))
 # ---- 4. profiles modal ----
 click_sel("#profile-btn")
 time.sleep(0.8)
-note("profiles:modal",
-     title=ev("document.getElementById('modal-title')?.textContent.trim()"),
-     body=ev("document.getElementById('modal-body')?.textContent.trim().replace(/\\s+/g,' ').slice(0,420)"),
-     shot=shot("profiles_modal"))
+note(
+    "profiles:modal",
+    title=ev("document.getElementById('modal-title')?.textContent.trim()"),
+    body=ev(
+        "document.getElementById('modal-body')?.textContent.trim().replace(/\\s+/g,' ').slice(0,420)"
+    ),
+    shot=shot("profiles_modal"),
+)
 press("Escape", 27)
 time.sleep(0.3)
 note("profiles:closed", modalGone=ev("document.getElementById('modal-back')?.hidden"))
@@ -164,65 +183,105 @@ note("profiles:closed", modalGone=ev("document.getElementById('modal-back')?.hid
 # ---- 5. terminals: context menu + cTrader modal + rescan ----
 click_sel('[data-page="terminals"]')
 time.sleep(0.8)
-rect = ev("(()=>{const e=[...document.querySelectorAll('.tcard')].find(c=>c.textContent.includes('Blackbull'));"
-          "const r=e.getBoundingClientRect();return [r.x+r.width/2, r.y+r.height/2]})()")
+rect = ev(
+    "(()=>{const e=[...document.querySelectorAll('.tcard')].find(c=>c.textContent.includes('Blackbull'));"
+    "const r=e.getBoundingClientRect();return [r.x+r.width/2, r.y+r.height/2]})()"
+)
 mouse("click", rect[0], rect[1], "right")
 time.sleep(0.4)
-note("terminals:ctxmenu",
-     items=ev("[...document.querySelectorAll('#ctx-menu button,#ctx-menu .mi')].map(b=>b.textContent.trim().slice(0,60))"),
-     shot=shot("ctx_menu"))
+note(
+    "terminals:ctxmenu",
+    items=ev(
+        "[...document.querySelectorAll('#ctx-menu button,#ctx-menu .mi')].map(b=>b.textContent.trim().slice(0,60))"
+    ),
+    shot=shot("ctx_menu"),
+)
 press("Escape", 27)
 time.sleep(0.2)
 
 click_sel("#ctrader-btn")
 time.sleep(0.5)
-note("terminals:ctrader_modal",
-     title=ev("document.getElementById('modal-title')?.textContent.trim()"),
-     fields=ev("[...document.querySelectorAll('#modal-body input')].map(i=>i.type+':'+(i.placeholder||i.value.slice(0,30)))"),
-     shot=shot("ctrader_modal"))
+note(
+    "terminals:ctrader_modal",
+    title=ev("document.getElementById('modal-title')?.textContent.trim()"),
+    fields=ev(
+        "[...document.querySelectorAll('#modal-body input')].map(i=>i.type+':'+(i.placeholder||i.value.slice(0,30)))"
+    ),
+    shot=shot("ctrader_modal"),
+)
 click_sel("#modal-cancel")
 time.sleep(0.3)
 
 click_sel("#rescan-btn")
 time.sleep(2.0)
-note("terminals:rescan", toasts=ev(TOASTS),
-     btn=ev("document.getElementById('rescan-btn')?.textContent.trim()"))
+note(
+    "terminals:rescan",
+    toasts=ev(TOASTS),
+    btn=ev("document.getElementById('rescan-btn')?.textContent.trim()"),
+)
 
 # ---- 6. guards flows (opened and cancelled) ----
 click_sel('[data-page="guards"]')
 time.sleep(0.8)
 click_sel("#guard-pick-btn")
 time.sleep(0.4)
-note("guards:pick_open",
-     menuHidden=ev("document.getElementById('guard-pick-menu')?.hidden"),
-     groups=ev("[...document.querySelectorAll('#guard-pick-menu .pick-group,#guard-pick-menu h4')].map(g=>g.textContent.trim().slice(0,40))"),
-     rows=ev("[...document.querySelectorAll('#guard-pick-list button,#guard-pick-list .pick-row')].map(r=>r.textContent.trim().replace(/\\s+/g,' ').slice(0,80))"),
-     shot=shot("guard_pick"))
-ev("(()=>{const s=document.getElementById('guard-pick-search');s.value='black';s.dispatchEvent(new Event('input',{bubbles:true}));})()")
+note(
+    "guards:pick_open",
+    menuHidden=ev("document.getElementById('guard-pick-menu')?.hidden"),
+    groups=ev(
+        "[...document.querySelectorAll('#guard-pick-menu .pick-group,#guard-pick-menu h4')].map(g=>g.textContent.trim().slice(0,40))"
+    ),
+    rows=ev(
+        "[...document.querySelectorAll('#guard-pick-list button,#guard-pick-list .pick-row')].map(r=>r.textContent.trim().replace(/\\s+/g,' ').slice(0,80))"
+    ),
+    shot=shot("guard_pick"),
+)
+ev(
+    "(()=>{const s=document.getElementById('guard-pick-search');s.value='black';s.dispatchEvent(new Event('input',{bubbles:true}));})()"
+)
 time.sleep(0.4)
-note("guards:pick_search",
-     rows=ev("[...document.querySelectorAll('#guard-pick-list button,#guard-pick-list .pick-row')].filter(r=>r.offsetParent).map(r=>r.textContent.trim().replace(/\\s+/g,' ').slice(0,80))"))
-clicked = ev("(()=>{const r=[...document.querySelectorAll('#guard-pick-list button,#guard-pick-list .pick-row')].find(b=>b.offsetParent&&/black/i.test(b.textContent));if(!r)return false;r.click();return true})()")
+note(
+    "guards:pick_search",
+    rows=ev(
+        "[...document.querySelectorAll('#guard-pick-list button,#guard-pick-list .pick-row')].filter(r=>r.offsetParent).map(r=>r.textContent.trim().replace(/\\s+/g,' ').slice(0,80))"
+    ),
+)
+clicked = ev(
+    "(()=>{const r=[...document.querySelectorAll('#guard-pick-list button,#guard-pick-list .pick-row')].find(b=>b.offsetParent&&/black/i.test(b.textContent));if(!r)return false;r.click();return true})()"
+)
 time.sleep(1.0)
-note("guards:picked_blackbull", clicked=clicked,
-     pick=ev("document.getElementById('guard-pick-btn')?.textContent.trim().slice(0,90)"),
-     rows=ev("document.getElementById('guard-rows')?.children.length"),
-     none=ev("(d=>d&&!d.hidden?d.textContent.trim().slice(0,160):null)(document.getElementById('guard-none'))"),
-     shot=shot("guards_blackbull"))
+note(
+    "guards:picked_blackbull",
+    clicked=clicked,
+    pick=ev("document.getElementById('guard-pick-btn')?.textContent.trim().slice(0,90)"),
+    rows=ev("document.getElementById('guard-rows')?.children.length"),
+    none=ev(
+        "(d=>d&&!d.hidden?d.textContent.trim().slice(0,160):null)(document.getElementById('guard-none'))"
+    ),
+    shot=shot("guards_blackbull"),
+)
 click_sel("#g-add")
 time.sleep(0.6)
-note("guards:add_modal",
-     title=ev("document.getElementById('modal-title')?.textContent.trim()"),
-     body=ev("document.getElementById('modal-body')?.textContent.trim().replace(/\\s+/g,' ').slice(0,420)"),
-     shot=shot("guard_add"))
+note(
+    "guards:add_modal",
+    title=ev("document.getElementById('modal-title')?.textContent.trim()"),
+    body=ev(
+        "document.getElementById('modal-body')?.textContent.trim().replace(/\\s+/g,' ').slice(0,420)"
+    ),
+    shot=shot("guard_add"),
+)
 press("Escape", 27)
 time.sleep(0.3)
 click_sel("#g-templates")
 time.sleep(0.5)
-note("guards:templates_modal",
-     title=ev("document.getElementById('modal-title')?.textContent.trim()"),
-     body=ev("document.getElementById('modal-body')?.textContent.trim().replace(/\\s+/g,' ').slice(0,300)"),
-     shot=shot("guard_templates"))
+note(
+    "guards:templates_modal",
+    title=ev("document.getElementById('modal-title')?.textContent.trim()"),
+    body=ev(
+        "document.getElementById('modal-body')?.textContent.trim().replace(/\\s+/g,' ').slice(0,300)"
+    ),
+    shot=shot("guard_templates"),
+)
 press("Escape", 27)
 time.sleep(0.3)
 
@@ -230,25 +289,37 @@ time.sleep(0.3)
 click_sel('[data-page="settings"]')
 time.sleep(0.8)
 orig = ev("document.getElementById('cfg-poll').value")
-ev("(()=>{const f=document.getElementById('cfg-poll');f.value='1';f.dispatchEvent(new Event('input',{bubbles:true}));})()")
+ev(
+    "(()=>{const f=document.getElementById('cfg-poll');f.value='1';f.dispatchEvent(new Event('input',{bubbles:true}));})()"
+)
 time.sleep(0.9)
-note("settings:bad_poll",
-     err=ev("document.getElementById('cfg-err-poll_interval_ms')?.textContent.trim().slice(0,160)"),
-     said=ev("document.getElementById('cfg-foot-said')?.textContent.trim().slice(0,160)"),
-     save=ev("document.getElementById('cfg-save')?.disabled"),
-     shot=shot("settings_badpoll"))
-ev("(()=>{const f=document.getElementById('cfg-poll');f.value=%s;f.dispatchEvent(new Event('input',{bubbles:true}));})()" % json.dumps(orig))
+note(
+    "settings:bad_poll",
+    err=ev("document.getElementById('cfg-err-poll_interval_ms')?.textContent.trim().slice(0,160)"),
+    said=ev("document.getElementById('cfg-foot-said')?.textContent.trim().slice(0,160)"),
+    save=ev("document.getElementById('cfg-save')?.disabled"),
+    shot=shot("settings_badpoll"),
+)
+ev(
+    "(()=>{const f=document.getElementById('cfg-poll');f.value="
+    + json.dumps(orig)
+    + ";f.dispatchEvent(new Event('input',{bubbles:true}));})()"
+)
 time.sleep(0.9)
-note("settings:restored",
-     err=ev("document.getElementById('cfg-err-poll_interval_ms')?.textContent.trim().slice(0,160)"),
-     said=ev("document.getElementById('cfg-foot-said')?.textContent.trim().slice(0,160)"))
+note(
+    "settings:restored",
+    err=ev("document.getElementById('cfg-err-poll_interval_ms')?.textContent.trim().slice(0,160)"),
+    said=ev("document.getElementById('cfg-foot-said')?.textContent.trim().slice(0,160)"),
+)
 
 # ---- 8. halt/resume button wording (no click: scratch is halted already) ----
-note("titlebar",
-     halt=ev("document.getElementById('halt-btn')?.textContent.trim()"),
-     livePill=ev("document.getElementById('live-pill')?.textContent.trim()"),
-     statusDry=ev("document.getElementById('status-dry')?.textContent.trim()"),
-     statusCopying=ev("document.getElementById('status-copying')?.textContent.trim()"))
+note(
+    "titlebar",
+    halt=ev("document.getElementById('halt-btn')?.textContent.trim()"),
+    livePill=ev("document.getElementById('live-pill')?.textContent.trim()"),
+    statusDry=ev("document.getElementById('status-dry')?.textContent.trim()"),
+    statusCopying=ev("document.getElementById('status-copying')?.textContent.trim()"),
+)
 
 # ---- errors collected the whole way ----
 note("js_errors", errs=ev("window.__errs||[]"))

@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import sys
 
-import MetaTrader5 as mt5
+import MetaTrader5 as mt5  # noqa: N813 -- the package's own documented alias
 
 PATH = r"C:\Program Files\MetaTrader 5 IC Markets Global\terminal64.exe"
 EXPECT_LOGIN = 52978102  # 52978102@ICMarketsSC-Demo, the noted test master

@@ -163,18 +163,6 @@ def test_discovers_terminal_with_full_metadata(tmp_path: Path, no_running: None)
     assert t.usable and not t.is_running and t.notes == ()
 
 
-def test_chats_is_not_reported_as_a_server(tmp_path: Path, no_running: None) -> None:
-    """bases/Chats holds MQL5 community chat state, not a trade server."""
-    root = tmp_path / "Terminal"
-    make_terminal(
-        root,
-        HASH_A,
-        tmp_path / "pf" / "B MT5",
-        bases=("Broker-Live", "Chats", "Default", "signals"),
-    )
-    assert discover_terminals(root)[0].servers_seen == ("Broker-Live",)
-
-
 def test_skips_non_instance_directories(tmp_path: Path, no_running: None) -> None:
     """Common/, Community/ and Help/ are shared state, not terminals."""
     root = tmp_path / "Terminal"

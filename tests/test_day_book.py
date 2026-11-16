@@ -441,15 +441,6 @@ def test_a_dry_run_files_every_slave_as_not_sent(engine: Engine) -> None:
     assert out.outcome is Outcome.DRY_RUN
 
 
-def test_clearing_detection_state_empties_the_book(engine: Engine) -> None:
-    engine.config.dry_run = True
-    wire(engine, TID_S1)
-    engine._reconcile(master_snap())
-    engine._reconcile(master_snap(pos(ticket=11)))
-    engine.clear_detection_state()
-    assert engine.day_book() == []
-
-
 def test_a_stop_move_says_what_was_set_and_on_which_trade() -> None:
     book = DayBook()
     book.begin_tick(1.0, [pos(ptype=PositionType.SELL)], [])
