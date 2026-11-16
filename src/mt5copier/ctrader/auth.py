@@ -35,7 +35,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
 
-from .. import dpapi
+from .. import dpapi, shared_data
 from ..guards.model import write_json
 from ..logging_setup import get_logger
 from ..paths import ctrader_path
@@ -369,14 +369,23 @@ def refresh(creds: CTraderCredentials) -> None:
 def refresh_if_due(path: Path | None = None) -> bool:
     """Refresh the saved token if it is close to expiring. True if it was refreshed.
 
-    Called by the supervisor at start-up, before any cTrader worker reads the file."""
-    creds = load(path)
-    if not (creds.has_app and creds.refresh_token):
+    Called by the supervisor at start-up, before any cTrader worker reads the file. The file
+    is shared by every profile and a refresh invalidates the old refresh token, so the whole
+    check-refresh-save sits under the shared-folder lock, and the check reads the file only
+    once inside it: two windows starting together refresh once -- the loser waits, re-reads
+    a token that is no longer due, and walks away with it. Generous timeout: the winner is
+    holding the lock across the token call itself."""
+    quick = load(path)
+    if not (quick.has_app and quick.refresh_token):
         return False
-    if creds.expires_at - time.time() > REFRESH_BEFORE_S:
-        return False
-    refresh(creds)
-    save(creds, path)
+    with shared_data.shared_lock(timeout_s=30.0):
+        creds = load(path)  # fresh: the lock's previous holder may have refreshed it
+        if not (creds.has_app and creds.refresh_token):
+            return False
+        if creds.expires_at - time.time() > REFRESH_BEFORE_S:
+            return False
+        refresh(creds)
+        save(creds, path)
     log.info("cTrader token refreshed; good until %s", time.ctime(creds.expires_at))
     return True
 

@@ -493,8 +493,13 @@ def test_copy_status_reads_the_slaves_snapshots(engine: Engine) -> None:
         engine._received_at[SLAVE] = time.monotonic()
 
     held = Position(
-        ticket=777, symbol="EURUSD", type=PositionType.BUY,
-        volume=0.1, price_open=1.08520, sl=1.08000, tp=0.0,
+        ticket=777,
+        symbol="EURUSD",
+        type=PositionType.BUY,
+        volume=0.1,
+        price_open=1.08520,
+        sl=1.08000,
+        tp=0.0,
     )
     snap(held, seq=2)
     assert engine.direct_copy_status() == {1: [{"name": "Beta", "state": "live"}]}

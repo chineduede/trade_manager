@@ -12,6 +12,7 @@ import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .. import shared_data
 from ..logging_setup import get_logger
 from ..news import NewsCalendar
 from ..paths import guard_state_path
@@ -235,23 +236,31 @@ class GuardBook:
             return {}
 
     def _save(self) -> None:
-        """Read-modify-write, merged per dirty account (see ``_dirty``), so two profiles each
-        guarding their own accounts never erase one another's anchors or held breaches."""
+        """Read-modify-write under the shared-folder lock, merged per dirty account (see
+        ``_dirty``), so two profiles each guarding their own accounts never erase one
+        another's anchors or held breaches -- not even at midnight, when both engines cross
+        the same daily reset and save within the same second. A lock timeout lands in the
+        ``OSError`` catch like any failed write; the keys stay dirty, so the next save
+        carries them."""
         try:
-            disk = self._load()
-            merged: dict[str, dict[str, dict[str, dict[str, object]]]] = {
-                "day_equity": _section(disk, "day_equity"),
-                "latched": _section(disk, "latched"),
-            }
-            for key in self._dirty:
-                for name, ours in (("day_equity", self._day_equity), ("latched", self._latched)):
-                    if key in ours:
-                        merged[name][key] = ours[key]
-                    else:
-                        merged[name].pop(key, None)
-            write_json(self._path, merged)
+            with shared_data.shared_lock():
+                self._save_locked()
         except OSError:
             log.exception("could not save guard state to %s", self._path)
+
+    def _save_locked(self) -> None:
+        disk = self._load()
+        merged: dict[str, dict[str, dict[str, dict[str, object]]]] = {
+            "day_equity": _section(disk, "day_equity"),
+            "latched": _section(disk, "latched"),
+        }
+        for key in self._dirty:
+            for name, ours in (("day_equity", self._day_equity), ("latched", self._latched)):
+                if key in ours:
+                    merged[name][key] = ours[key]
+                else:
+                    merged[name].pop(key, None)
+        write_json(self._path, merged)
 
     def _adopt(self, key: str) -> None:
         """Take one account's state from disk, the first time this process sees the account.

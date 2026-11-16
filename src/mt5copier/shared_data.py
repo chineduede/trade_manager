@@ -13,9 +13,13 @@ time.** The profile that touched a thing last is the one whose word is kept. Not
 deleted by a merge: a name or a rule only present in one profile survives.
 
 **Concurrent windows.** Two profiles run as two processes, so shared files are written
-read-modify-write and atomically (:func:`write_json_atomic`). For the names that is done per
-edit here; for the guards it is done in :mod:`mt5copier.guards.model` and ``.book``. The
-timings are last-write-wins by design: they are one machine's facts.
+read-modify-write and atomically (:func:`write_json_atomic`), and every read-modify-write
+holds :func:`shared_lock` -- one mutex for the whole folder -- so two windows writing in the
+same instant cannot each read the state from before the other's edit and drop it. For the
+names that is done per edit here; for the guards it is done in :mod:`mt5copier.guards.model`
+and ``.book``; the cTrader token refresh holds it too (:func:`mt5copier.ctrader.auth.
+refresh_if_due`), because a refresh invalidates the old refresh token. The timings are
+last-write-wins by design: they are one machine's facts.
 """
 
 from __future__ import annotations
@@ -24,8 +28,15 @@ import json
 import os
 import tempfile
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+try:
+    import msvcrt
+except ImportError:  # not Windows: the app is, but nothing here needs to crash elsewhere
+    msvcrt = None  # type: ignore[assignment]
 
 from .logging_setup import get_logger
 from .paths import (
@@ -58,6 +69,48 @@ but ``machine.json`` is the source of truth, overlaid on every load."""
 _MARKER = "migrated.json"
 """Written once the shared folder has been built, so the gathering never runs again -- not
 even when every shared file it produced was empty and so never written."""
+
+_LOCK_NAME = "lock"
+"""The mutex file itself; never holds data, only the byte-range lock."""
+
+
+@contextmanager
+def shared_lock(timeout_s: float = 5.0) -> Iterator[None]:
+    """The one mutex for every read-modify-write under ``shared/``.
+
+    One lock for the whole folder rather than one per file: the writes it guards are a few
+    milliseconds of read-parse-replace against human-driven edits and once-a-day engine
+    saves, so contention is negligible and a single lock cannot deadlock. Byte-range locking
+    through ``msvcrt`` conflicts across file handles too, so it also serialises two threads
+    of one window, not only two windows.
+
+    Waiting past ``timeout_s`` raises ``TimeoutError`` -- an ``OSError``, so the guard-state
+    save's existing catch treats it as any other failed write. A timeout means another
+    process is wedged while holding it; writing unlocked then would be a silent return to
+    the race this exists to close, so failing loudly is the better outcome.
+    """
+    if msvcrt is None:
+        yield
+        return
+    shared_dir().mkdir(parents=True, exist_ok=True)
+    with open(shared_dir() / _LOCK_NAME, "a+b") as fh:
+        deadline = time.monotonic() + timeout_s
+        fh.seek(0)
+        while True:
+            try:
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        f"another window has held the shared-folder lock for {timeout_s:.0f}s"
+                    ) from None
+                time.sleep(0.01)
+        try:
+            yield
+        finally:
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def write_json_atomic(target: Path, payload: object) -> None:
@@ -115,15 +168,21 @@ def migrate() -> None:
     """Build the shared folder once, from what every profile had written.
 
     Runs at each entry point before anything loads from the shared paths. Guarded by a
-    marker file, so it is one-time; until the marker exists it is also idempotent, and two
-    profiles launching at once at worst write the same content twice, atomically. The
-    profiles' own files are left exactly where they were: nothing reads them any more, but
-    they are the rollback story.
+    marker file, so it is one-time, and by :func:`shared_lock`, so two profiles launching at
+    once build it once: the loser waits, finds the marker, and walks away. The profiles' own
+    files are left exactly where they were: nothing reads them any more, but they are the
+    rollback story.
     """
     marker = shared_dir() / _MARKER
     if marker.exists():
         return
+    with shared_lock(timeout_s=30.0):  # generous: first start may gather several profiles
+        if marker.exists():  # the other window built it while this one waited
+            return
+        _migrate_locked(marker)
 
+
+def _migrate_locked(marker: Path) -> None:
     names: dict[str, str] = {}
     machine: dict[str, object] = {}
     for path in _by_age("config.json"):
@@ -221,16 +280,17 @@ def load_names() -> dict[str, str] | None:
 
 
 def set_name(key: str, name: str | None) -> None:
-    """Set (or, given None, clear) one account's name, read-modify-write so a rename made in
-    another profile's window moments ago is not lost under this one."""
+    """Set (or, given None, clear) one account's name, read-modify-write under the lock so a
+    rename made in another profile's window in the same instant is not lost under this one."""
     global _names_stamp_seen
-    names = load_names() or {}
-    if name:
-        names[key] = name
-    else:
-        names.pop(key, None)
-    write_json_atomic(account_names_path(), names)
-    _names_stamp_seen = _names_stamp()
+    with shared_lock():
+        names = load_names() or {}
+        if name:
+            names[key] = name
+        else:
+            names.pop(key, None)
+        write_json_atomic(account_names_path(), names)
+        _names_stamp_seen = _names_stamp()
 
 
 def refresh_names(cfg: AppConfig) -> bool:

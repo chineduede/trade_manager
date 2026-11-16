@@ -206,3 +206,61 @@ def test_guard_book_adopts_an_account_from_disk() -> None:
     book._dirty.add("handed@X")
     book._adopt("handed@X")
     assert book._latched["handed@X"] == {}
+
+
+# --- the lock ----------------------------------------------------------------------------------
+
+
+def test_shared_lock_excludes_a_second_holder() -> None:
+    with shared_data.shared_lock():
+        with pytest.raises(OSError):  # TimeoutError is one; the state save's catch relies on it
+            with shared_data.shared_lock(timeout_s=0.05):
+                pass  # pragma: no cover -- acquiring twice is exactly what must not happen
+    # Released: taking it again succeeds at once.
+    with shared_data.shared_lock(timeout_s=0.05):
+        pass
+
+
+def test_lock_timeout_does_not_lose_a_guard_state_save(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A save that cannot take the lock is logged and dropped -- but the keys stay dirty,
+    so the very next save writes them. The midnight race's worst case, in miniature."""
+    path = shared_dir() / "guard_state.json"
+    book = GuardBook(GuardsDoc(), state_path=path)
+    book._day_equity["mine@Y"] = {"r": {"day": "d", "equity": 2.0}}
+    book._dirty.add("mine@Y")
+
+    def wedged(timeout_s: float = 5.0) -> None:
+        raise TimeoutError("wedged")
+
+    monkeypatch.setattr(shared_data, "shared_lock", wedged)
+    book._save()  # swallowed and logged, never raised
+    assert not path.exists()
+    assert "mine@Y" in book._dirty
+    monkeypatch.undo()
+    book._save()  # the lock is back: the dirty key lands
+    assert "mine@Y" in json.loads(path.read_text(encoding="utf-8"))["day_equity"]
+
+
+def test_refresh_if_due_rereads_under_the_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second window finds the first's fresh token and does not spend the refresh token."""
+    from mt5copier.ctrader import auth
+
+    creds = auth.CTraderCredentials(
+        client_id="id", client_secret="secret", access_token="old", refresh_token="r1"
+    )
+    creds.expires_at = time.time() + 60  # due: well inside REFRESH_BEFORE_S
+    auth.save(creds)
+
+    calls: list[str] = []
+
+    def fake_token_call(params: dict[str, str]) -> dict[str, object]:
+        calls.append(params["refresh_token"])
+        return {"accessToken": "new", "refreshToken": "r2", "expiresIn": 30 * 24 * 3600}
+
+    monkeypatch.setattr(auth, "_token_call", fake_token_call)
+    assert auth.refresh_if_due() is True
+    assert auth.refresh_if_due() is False  # fresh now: the re-read says not due
+    assert calls == ["r1"]
+    assert auth.load().refresh_token == "r2"

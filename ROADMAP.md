@@ -1889,6 +1889,16 @@ its anchors and held breaches. The desktop polls fold in another window's rename
 rule edits (`_refresh_shared`, one stat per poll). What stays per profile, by design:
 mode, dry/live, copying, roles and every per-terminal setting, setups, history, books.
 
+The remaining race windows were then closed with one mutex (`shared_data.shared_lock`:
+a byte-range lock on `shared\lock` via msvcrt, ~ms hold, short timeout, raising an
+OSError the guard-state save already catches — keys stay dirty, the next save carries
+them). It guards every read-modify-write: renames, guards.json saves, guard-state
+saves (the midnight case: both engines crossing the same daily reset), migration
+(double-checked marker: the loser waits, finds it, walks away), and the cTrader
+refresh, which now re-reads inside the lock and skips when another window already
+refreshed — the rotating refresh token is spent once. Readers stay lock-free: atomic
+replace means a read never sees half a file.
+
 - **Terminal detail Overview tab.** The TUI's `enter` page shows what the desktop detail
   page (settings forms only) does not: the three ruled columns — the ACCOUNT (kind, ping,
   connection), the RULE it is copied by (on the master: the slaves it feeds), and how

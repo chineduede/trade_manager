@@ -551,9 +551,7 @@ class NameAccountDialog(ModalScreen[str | None]):
                 if self._current
                 else Text("Something you will recognise: FTMO 100k, E8 eval...", style=MUTED)
             )
-            yield Static(
-                Text("Letters, digits, spaces, - or _ (up to 32).", style=MUTED)
-            )
+            yield Static(Text("Letters, digits, spaces, - or _ (up to 32).", style=MUTED))
             with Horizontal(id="typed-box"):
                 yield Input(
                     value=self._current, placeholder=self._account, id="typed", compact=True
