@@ -581,11 +581,22 @@ def set_live_override(
     )
 
 
+ACCOUNT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_ -]{0,31}$")
+"""The profile-name rule (see ``profiles._NAME_RE``) plus spaces, which a display name like
+"FTMO 100k" needs and a directory name cannot have. The name is cosmetic, so this is not
+protecting anything -- it is one rule for every name the app asks for, instead of two."""
+
+ACCOUNT_NAME_RULE = (
+    "an account name is letters, digits, spaces, - or _ (up to 32, starting with a letter or digit)"
+)
+
+
 def rename(cfg: AppConfig, terminal_id: str, name: str) -> str | None:
     """Set (or, given blank, clear) the name for whichever *account* this terminal is last known
     to be logged into -- see :func:`~mt5copier.config.account_key`'s own docstring for why a name
     follows the account, not the terminal. Refuses when no account is known yet (discovery has
-    never read a login off this terminal) -- there is nothing to attach a name to.
+    never read a login off this terminal) -- there is nothing to attach a name to -- and refuses
+    a name outside :data:`ACCOUNT_NAME_RE`.
 
     Not routed through :func:`apply_edits`: a name is cosmetic, never read by the diff engine or
     the executor, so gating it behind the orphan-confirm step that guards every *trading*
@@ -599,6 +610,8 @@ def rename(cfg: AppConfig, terminal_id: str, name: str) -> str | None:
         return "no account is known for this terminal yet; nothing to name"
     stripped = name.strip()
     if stripped:
+        if not ACCOUNT_NAME_RE.match(stripped):
+            return ACCOUNT_NAME_RULE
         cfg.account_names[key] = stripped
     else:
         cfg.account_names.pop(key, None)

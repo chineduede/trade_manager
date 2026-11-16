@@ -1735,7 +1735,8 @@ function accountNameFlow(c) {
   var note = document.createElement('p');
   note.className = 'muted';
   note.textContent = 'The name is for account ' + account + ' and follows it wherever it is '
-    + 'logged in, on any terminal. Leave it blank to clear the name.';
+    + 'logged in, on any terminal. Leave it blank to clear the name. Names are letters, '
+    + 'digits, spaces, - or _ (up to 32).';
   body.appendChild(note);
   var field = document.createElement('div');
   field.className = 'field';
@@ -1746,6 +1747,7 @@ function accountNameFlow(c) {
   var input = document.createElement('input');
   input.id = 'an-name';
   input.autocomplete = 'off';
+  input.maxLength = 32;
   input.placeholder = account;
   input.value = c.accountName || '';
   field.appendChild(label);

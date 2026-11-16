@@ -618,6 +618,22 @@ def test_rename_to_blank_clears_it_back_to_the_label() -> None:
     assert cfg.display_name(TID) == "Slave"  # make()'s label, not the id fallback
 
 
+def test_rename_refuses_names_outside_the_rule() -> None:
+    """The profile-name rule plus spaces: refused before anything is written."""
+    cfg = _cfg_with_account()
+    for bad in ("x" * 33, "FTMO/100k", "été", "100k!", "-starts-with-dash", "a\tb"):
+        refusal = rename(cfg, TID, bad)
+        assert refusal is not None, bad
+        assert "letters, digits, spaces" in refusal
+    assert cfg.account_names == {}
+
+
+def test_rename_allows_everything_the_rule_names() -> None:
+    cfg = _cfg_with_account()
+    for good in ("FTMO 100k", "E8-eval_2", "x" * 32, "9 lives"):
+        assert rename(cfg, TID, good) is None, good
+
+
 def test_rename_refuses_when_no_account_is_known_yet() -> None:
     cfg = AppConfig(terminals={TID: make()})  # no last_login
     refusal = rename(cfg, TID, "My Funded Account")
