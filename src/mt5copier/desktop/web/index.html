@@ -35,9 +35,9 @@
       <a href="#" class="nav-item" data-page="news" title="News"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M16 2v4M8 2v4M3 10h18"></path></svg><span class="nav-label">News</span></a>
       <a href="#" class="nav-item" data-page="history" title="History"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg><span class="nav-label">History</span></a>
       <a href="#" class="nav-item" data-page="setups" title="Setups"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg><span class="nav-label">Setups</span></a>
-      <a href="#" class="nav-item disabled" title="Settings — still in the TUI for now"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg><span class="nav-label">Settings</span></a>
+      <a href="#" class="nav-item" data-page="settings" title="Settings"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg><span class="nav-label">Settings</span></a>
       <span class="sidebar-space"></span>
-      <span class="sidebar-note">other pages live in the TUI for now · profiles are separate windows</span>
+      <span class="sidebar-note">profiles are separate windows</span>
     </nav>
 
     <main id="main">
@@ -438,6 +438,105 @@
           <button type="button" id="st-rename" class="plain-btn" disabled>Rename</button>
           <button type="button" id="st-delete" class="danger-btn" disabled>Delete</button>
         </div>
+      </section>
+    </div>
+
+    <div class="page" id="page-settings" hidden>
+      <div class="page-head">
+        <h1>Copier settings</h1>
+        <span class="muted">the copier's own switches, for every terminal · each slave's own settings stay in the TUI for now</span>
+      </div>
+
+      <div id="cfg-mode-now" class="small"></div>
+
+      <div id="cfg-cards">
+        <section aria-label="This profile" class="panel cfg-card">
+          <div class="panel-head">
+            <h2>This profile</h2>
+            <span class="muted small mono" id="cfg-profile"></span>
+          </div>
+          <div class="field">
+            <span class="flabel">What this profile is</span>
+            <div role="group" aria-label="What this profile is" class="seg-row seg-stack" id="cfg-profile-mode">
+              <button type="button" data-value="copy" aria-pressed="false">Copies a master terminal</button>
+              <button type="button" data-value="trading" aria-pressed="false">Trades directly from this app</button>
+            </div>
+            <span class="field-note muted">direct trading has no master terminal: the Trading page places orders and every enabled slave copies them · switching needs every copy closed or given up first</span>
+            <span class="field-note red cfg-err" id="cfg-err-profile_mode"></span>
+          </div>
+          <div class="hairline"></div>
+          <div class="field">
+            <span class="flabel">Mode</span>
+            <div role="group" aria-label="Mode" class="seg-row seg-stack" id="cfg-dry">
+              <button type="button" data-value="dry" aria-pressed="false">Dry run — simulates every copy</button>
+              <button type="button" data-value="live" aria-pressed="false">Live — sends real orders</button>
+            </div>
+            <span class="field-note muted">a dry run works out every copy, logs it and sends nothing · going live asks you to type LIVE</span>
+            <span class="field-note red cfg-err" id="cfg-err-dry_run"></span>
+          </div>
+        </section>
+
+        <section aria-label="Connection" class="panel cfg-card">
+          <div class="panel-head"><h2>Connection</h2></div>
+          <div class="two-col">
+            <div class="field">
+              <label for="cfg-poll" class="flabel">Check each terminal every</label>
+              <input id="cfg-poll" class="mono" data-name="poll_interval_ms" inputmode="numeric" autocomplete="off">
+              <span class="field-note muted">milliseconds · 50 to 10000</span>
+              <span class="field-note red cfg-err" id="cfg-err-poll_interval_ms"></span>
+            </div>
+            <div class="field">
+              <label for="cfg-stale" class="flabel">Call a terminal stale after</label>
+              <input id="cfg-stale" class="mono" data-name="heartbeat_timeout_s" inputmode="decimal" autocomplete="off">
+              <span class="field-note muted">seconds without news</span>
+              <span class="field-note red cfg-err" id="cfg-err-heartbeat_timeout_s"></span>
+            </div>
+          </div>
+          <div class="field">
+            <label for="cfg-retry" class="flabel">Retry a lost connection after</label>
+            <input id="cfg-retry" class="mono" data-name="reconnect_backoff_s" autocomplete="off" spellcheck="false">
+            <span class="field-note muted">seconds between attempts, separated by commas — the last one repeats</span>
+            <span class="field-note red cfg-err" id="cfg-err-reconnect_backoff_s"></span>
+          </div>
+          <div class="field">
+            <label for="cfg-grace" class="flabel">Treat a gap of up to</label>
+            <input id="cfg-grace" class="mono" data-name="join_grace_seconds" inputmode="decimal" autocomplete="off">
+            <span class="field-note muted">seconds in watching the master as unbroken · after a longer gap, trades it already holds are never copied late · 0 to 5</span>
+            <span class="field-note red cfg-err" id="cfg-err-join_grace_seconds"></span>
+          </div>
+        </section>
+
+        <section aria-label="Terminals and history" class="panel cfg-card">
+          <div class="panel-head"><h2>Terminals &amp; history</h2></div>
+          <div class="field">
+            <span class="flabel">When the copier quits, or a terminal is unassigned</span>
+            <div role="group" aria-label="Closing terminals" class="seg-row seg-stack" id="cfg-closing">
+              <button type="button" data-value="never" aria-pressed="false">Leave it running</button>
+              <button type="button" data-value="launched" aria-pressed="false">Close it if the copier opened it</button>
+              <button type="button" data-value="all" aria-pressed="false">Close it, even if you opened it</button>
+            </div>
+            <span class="field-note muted">closing is immediate — anything unsaved in that terminal is lost · a restart or reconnect never closes one</span>
+            <span class="field-note red cfg-err" id="cfg-err-close_terminals"></span>
+          </div>
+          <div class="hairline"></div>
+          <div class="field">
+            <label for="cfg-hist" class="flabel">Keep each trade's history for</label>
+            <input id="cfg-hist" class="mono" data-name="history_days" inputmode="numeric" autocomplete="off">
+            <span class="field-note muted">days · 1 to 365 · every step the copier took with a trade, on the History page — older steps are deleted</span>
+            <span class="field-note red cfg-err" id="cfg-err-history_days"></span>
+          </div>
+        </section>
+      </div>
+
+      <section aria-label="Save" class="panel" id="cfg-foot-panel">
+        <div id="cfg-foot">
+          <span class="muted small" id="cfg-changes"></span>
+          <span class="toolbar-space"></span>
+          <button type="button" id="cfg-revert" class="plain-btn">Revert</button>
+          <button type="button" id="cfg-save" class="primary-btn">Save</button>
+        </div>
+        <div class="muted small">The check interval and the retry schedule reach a terminal the next time its connection starts. The rest apply at once.</div>
+        <div class="field-note red cfg-err" id="cfg-err-general"></div>
       </section>
     </div>
     </main>

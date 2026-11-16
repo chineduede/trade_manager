@@ -22,6 +22,14 @@ from .. import setups as setups_mod
 from ..config import AppMode, Role, SizingMode, TerminalConfig, account_key
 from ..day_book import Outcome
 from ..discovery import discover_terminals
+from ..general_edit import (
+    APPLIES_ON_CONNECT,
+    DRY_RUN,
+    GENERAL,
+    apply_general,
+    commit_general,
+    initial_general,
+)
 from ..guards import REGISTRY, GuardRule, GuardsDoc, Level
 from ..guards import model as guards_model
 from ..guards.base import money
@@ -32,6 +40,7 @@ from ..news import HIGH, MEDIUM, symbol_currencies
 from ..paths import active_profile, guards_path, log_dir, setups_path
 from ..presentation import row_info, slave_badge
 from ..protocol import CHART_TIMEFRAMES, OrderType, PendingOrder, Position, PositionType
+from ..settings_edit import describe_changes
 from ..setups import Setup, SetupsDoc
 from ..terminal_detail import margin_gauge
 from . import winframe
@@ -1808,6 +1817,134 @@ class DesktopApi:
         except Exception as exc:
             log.exception("logging %s in to %s@%s failed", tid[:8], acct.login, acct.server)
             return account_switch.LoginResult(False, f"the login process failed: {exc!r}")
+
+    # --- the settings page --------------------------------------------------------------------
+    # The copier's own settings, the TUI g form: what a value means, its bounds, and the two
+    # gates on the mode (copying stopped, LIVE typed) are all general_edit's. This translates.
+
+    def _slave_names(self) -> list[str]:
+        return [self._cfg.display_name(t.terminal_id) for t in self._cfg.slaves]
+
+    def settings_state(self) -> dict[str, Any]:
+        """What the form fills from, and the facts the notes above it word."""
+        cfg = self._cfg
+        return {
+            "profile": active_profile(),
+            "values": initial_general(cfg),
+            "profileMode": cfg.mode.value,
+            "copying": cfg.copying_enabled,
+            "dryRun": cfg.dry_run,
+        }
+
+    @staticmethod
+    def _general_raw(raw: dict[str, Any]) -> dict[str, str | bool]:
+        """The page's fields as apply_general reads them: the mode a bool, the rest text.
+        Only known names pass -- an extra key is a page bug, not a reason to refuse a save."""
+        out: dict[str, str | bool] = {}
+        for name in GENERAL:
+            if name not in raw:
+                continue
+            value = raw[name]
+            out[name] = value if isinstance(value, bool) else str(value)
+        return out
+
+    @staticmethod
+    def _desk_errors(errors: dict[str, str]) -> dict[str, str]:
+        """The model's messages with the TUI's keys reworded for this window: the mode gate
+        names d, which here is the title bar's halt button."""
+        say = {
+            "copying is running: stop it with d first, then change the mode": (
+                "copying is running: halt it (the title bar button) first, then change the mode"
+            ),
+        }
+        return {name: say.get(text, text) for name, text in errors.items()}
+
+    def settings_check(self, raw: dict[str, Any]) -> dict[str, Any]:
+        """Per-field errors and what a save would change, as the person types. Nothing is
+        saved; the sentence keeps the Save button honest the way the guards form's READS-AS
+        does."""
+        outcome = apply_general(self._cfg, self._general_raw(raw))
+        return {
+            "errors": self._desk_errors(outcome.errors),
+            "changes": describe_changes(outcome.changes, limit=160) if outcome.changes else "",
+            "goesLive": outcome.confirm_live,
+        }
+
+    def settings_save(
+        self, raw: dict[str, Any], profile_mode: str, typed: str | None = None
+    ) -> dict[str, Any]:
+        """Save the form, the TUI GeneralForm's own order: everything is checked first, the
+        mode switch is ruled on by the engine, and only then is anything written -- a form
+        half-applied is worse than one refused whole. ``typed`` is the LIVE confirmation;
+        None when not asked yet, and an edit that goes live without it answers ``needLive``
+        so the page can ask and send again."""
+        cfg = self._cfg
+        outcome = apply_general(cfg, self._general_raw(raw), typed=typed)
+        if outcome.confirm_live and typed is None:
+            return {"ok": False, "needLive": True, "slaves": self._slave_names()}
+        if not outcome.ok:
+            return {
+                "ok": False,
+                "errors": self._desk_errors(outcome.errors),
+                "message": "Correct the marked values; nothing was changed.",
+            }
+
+        try:
+            wanted = AppMode(profile_mode)
+        except ValueError:
+            return {"ok": False, "message": f"unknown profile mode {profile_mode!r}"}
+        switched = False
+        if wanted is not cfg.mode:
+            refusal = self._engine.set_mode(wanted)
+            if refusal is not None:
+                return {"ok": False, "errors": {"profile_mode": refusal}, "message": refusal}
+            switched = True
+
+        if not outcome.changes and not switched:
+            return {
+                "ok": True,
+                "messages": [{"text": "The copier's settings: no changes.", "tone": ""}],
+            }
+
+        messages: list[dict[str, str]] = []
+        if outcome.changes:
+            commit_general(cfg, outcome)
+            log.warning("copier settings changed: %s", describe_changes(outcome.changes))
+            messages.append(
+                {"text": f"Saved: {describe_changes(outcome.changes, limit=160)}.", "tone": "ok"}
+            )
+        if switched:
+            messages.append(
+                {
+                    "text": "This profile now trades directly: the Trading page places orders, "
+                    "and every enabled slave copies them."
+                    if wanted is AppMode.TRADING
+                    else "This profile now copies a master terminal: drag one into the MASTER "
+                    "zone on Terminals.",
+                    "tone": "warn",
+                }
+            )
+        changed = {c.name for c in outcome.changes}
+        if DRY_RUN in changed and not cfg.dry_run:
+            messages.append(
+                {
+                    "text": "LIVE: real orders are sent once copying resumes — the title "
+                    "bar button.",
+                    "tone": "warn",
+                }
+            )
+        if changed & set(APPLIES_ON_CONNECT):
+            messages.append(
+                {
+                    "text": "The check interval and retry schedule reach each terminal the "
+                    "next time its connection starts.",
+                    "tone": "",
+                }
+            )
+        why = self._persist()
+        if why is not None:
+            messages.append({"text": why, "tone": "bad"})
+        return {"ok": True, "messages": messages}
 
 
 _HISTORY_SHOWN = 100

@@ -35,7 +35,7 @@ try {
   S.tf = localStorage.getItem('dt-tf') || 'M5';
   defaultRr = localStorage.getItem('dt-rr') || '';
   var savedPage = localStorage.getItem('dt-page');
-  if (['terminals', 'guards', 'news', 'history', 'setups'].indexOf(savedPage) >= 0) S.page = savedPage;
+  if (['terminals', 'guards', 'news', 'history', 'setups', 'settings'].indexOf(savedPage) >= 0) S.page = savedPage;
 } catch (e) { /* storage may be unavailable; defaults are fine */ }
 
 function rememberRr(text) {
@@ -881,7 +881,7 @@ var T = {
 };
 var modalOnConfirm = null;
 
-var PAGES = ['trading', 'terminals', 'guards', 'news', 'history', 'setups'];
+var PAGES = ['trading', 'terminals', 'guards', 'news', 'history', 'setups', 'settings'];
 
 function showPage(name) {
   if (PAGES.indexOf(name) < 0) name = 'trading';
@@ -899,6 +899,7 @@ function showPage(name) {
   if (name === 'news') pollNews();
   if (name === 'history') pollHistory();
   if (name === 'setups') pollSetups();
+  if (name === 'settings') pollSettings();
 }
 
 var terminalsBusy = false;
@@ -2994,6 +2995,218 @@ function commitSetupLoad(name, a, agreed, goLive) {
   });
 }
 
+// --- the settings page -----------------------------------------------------------------
+// The copier's own settings — the TUI g form as cards. What a value means, its bounds and
+// the two gates on the mode (copying stopped, LIVE typed) are general_edit's on the bridge;
+// this fills the fields, asks as they change, and never overwrites typing: the form refills
+// from the engine only while it holds no edits.
+var C = {
+  live: null,      // last settings_state() answer
+  base: null,      // what the fields were last filled from, as a key; null forces a refill
+  serverKey: '',   // the engine's values at that fill, to notice an outside change
+  saving: false
+};
+
+var CFG_INPUTS = ['cfg-poll', 'cfg-stale', 'cfg-retry', 'cfg-grace', 'cfg-hist'];
+var CFG_NAMES = ['profile_mode', 'dry_run', 'poll_interval_ms', 'heartbeat_timeout_s',
+  'reconnect_backoff_s', 'join_grace_seconds', 'close_terminals', 'history_days'];
+
+function segValue(id) {
+  var btn = document.querySelector('#' + id + ' button[aria-pressed="true"]');
+  return btn ? btn.dataset.value : '';
+}
+
+function setSeg(id, value) {
+  document.querySelectorAll('#' + id + ' button').forEach(function (b) {
+    b.setAttribute('aria-pressed', String(b.dataset.value === value));
+  });
+}
+
+function cfgCollect() {
+  var raw = {
+    dry_run: segValue('cfg-dry') === 'dry',
+    close_terminals: segValue('cfg-closing')
+  };
+  CFG_INPUTS.forEach(function (id) { raw[$(id).dataset.name] = $(id).value; });
+  return raw;
+}
+
+function cfgKeyNow() {
+  return JSON.stringify([cfgCollect(), segValue('cfg-profile-mode')]);
+}
+
+function cfgDirty() {
+  return C.base !== null && cfgKeyNow() !== C.base;
+}
+
+function cfgFill(live) {
+  var v = live.values;
+  CFG_INPUTS.forEach(function (id) { $(id).value = String(v[$(id).dataset.name]); });
+  setSeg('cfg-dry', v.dry_run ? 'dry' : 'live');
+  setSeg('cfg-closing', v.close_terminals);
+  setSeg('cfg-profile-mode', live.profileMode);
+  C.base = cfgKeyNow();
+  C.serverKey = JSON.stringify([live.values, live.profileMode]);
+  cfgShowErrors({});
+  $('cfg-changes').textContent = '';
+}
+
+function cfgShowErrors(errors) {
+  CFG_NAMES.forEach(function (name) {
+    $('cfg-err-' + name).textContent = errors[name] || '';
+  });
+  $('cfg-err-general').textContent = errors[''] || '';
+}
+
+var settingsBusy = false;
+var cfgGen = 0; // bumped when a save lands: an answer asked before it is stale and re-asked
+function pollSettings() {
+  if (settingsBusy || !window.pywebview || S.page !== 'settings') return;
+  settingsBusy = true;
+  var gen = cfgGen;
+  api().settings_state().then(function (live) {
+    settingsBusy = false;
+    if (gen !== cfgGen) { pollSettings(); return; }
+    C.live = live;
+    renderSettings();
+  }, function () { settingsBusy = false; });
+}
+
+function renderSettings() {
+  var live = C.live;
+  if (!live) return;
+  $('cfg-profile').textContent = 'profile ' + live.profile;
+
+  // The line above the fields: what is true right now, in the TUI form's own words.
+  var nowEl = $('cfg-mode-now');
+  nowEl.textContent = '';
+  var word = document.createElement('span');
+  word.className = 'mode-word' + (live.dryRun ? '' : ' red');
+  word.textContent = live.dryRun ? 'DRY RUN' : 'LIVE COPYING';
+  nowEl.appendChild(word);
+  var said = document.createElement('span');
+  said.className = 'muted';
+  said.textContent = live.dryRun
+    ? ' · copies are only simulated now.'
+    : ' · orders are being sent now.';
+  nowEl.appendChild(said);
+  var gate = document.createElement('span');
+  gate.className = live.copying ? 'yellow' : 'muted';
+  gate.textContent = live.copying
+    ? ' Copying is running: halt it (the title bar) before changing the mode.'
+    : ' Going live asks you to type LIVE.';
+  nowEl.appendChild(gate);
+
+  // A refill never lands on typing: only on the first show, after a save or revert, or
+  // when the engine's truth moved (the TUI changed something, a setup loaded) while the
+  // form holds no edits of its own.
+  var serverKey = JSON.stringify([live.values, live.profileMode]);
+  if (C.base === null || (!cfgDirty() && serverKey !== C.serverKey)) cfgFill(live);
+
+  $('cfg-save').textContent = C.saving ? 'Saving…' : 'Save';
+  $('cfg-save').disabled = C.saving;
+  $('cfg-revert').disabled = C.saving;
+}
+
+var cfgCheckTimer = null;
+function cfgChanged() {
+  cfgShowErrors({});
+  clearTimeout(cfgCheckTimer);
+  cfgCheckTimer = setTimeout(function () {
+    if (S.page !== 'settings' || !C.live) return;
+    api().settings_check(cfgCollect()).then(function (r) {
+      cfgShowErrors(r.errors || {});
+      var parts = [];
+      if (r.changes) parts.push('Saves: ' + r.changes);
+      if (C.live && segValue('cfg-profile-mode') !== C.live.profileMode) {
+        parts.push(segValue('cfg-profile-mode') === 'trading'
+          ? 'this profile becomes direct trading'
+          : 'this profile goes back to copying a master');
+      }
+      if (r.goesLive) parts.push('going live asks you to type LIVE');
+      $('cfg-changes').textContent = parts.join(' · ');
+    });
+  }, 250);
+}
+
+function saveSettingsFlow(typed) {
+  if (C.saving || !C.live) return;
+  C.saving = true;
+  renderSettings();
+  api().settings_save(cfgCollect(), segValue('cfg-profile-mode'),
+    typed === undefined ? null : typed
+  ).then(function (r) {
+    C.saving = false;
+    if (r.needLive) { renderSettings(); cfgGoLiveModal(r); return; }
+    if (!r.ok) {
+      renderSettings();
+      cfgShowErrors(r.errors || {});
+      if (r.message) toast(r.message, 'bad');
+      return;
+    }
+    (r.messages || []).forEach(function (m) {
+      toast(m.text, m.tone, m.tone === 'warn' || m.tone === 'bad' ? 9000 : 4500);
+    });
+    cfgGen++;
+    C.base = null; // the next answer refills the form from what was saved
+    pollSettings();
+  }, function () {
+    C.saving = false;
+    renderSettings();
+    toast('The engine did not answer; try again.', 'bad');
+  });
+}
+
+function cfgGoLiveModal(r) {
+  // The copier's own gate, the TUI GoLiveDialog: a dry run turns into live copying only
+  // with LIVE typed, and the bridge checks the word again before anything is saved.
+  var body = document.createElement('div');
+  var p1 = document.createElement('p');
+  p1.textContent = 'Live, every trade the master opens is sent as a real order '
+    + (r.slaves && r.slaves.length
+      ? 'to each connected slave (' + r.slaves.join(', ') + ')'
+      : 'to each slave, once there are some')
+    + ': opens, closes, and stop or target moves. A slave on a real-money account stays '
+    + 'held back unless live trading is allowed on it.';
+  body.appendChild(p1);
+  var p2 = document.createElement('p');
+  p2.textContent = 'Copying is halted, and stays halted: nothing is sent until you resume '
+    + 'it. Going back to a dry run is one choice in these settings.';
+  body.appendChild(p2);
+  var field = document.createElement('div');
+  field.className = 'field';
+  var label = document.createElement('label');
+  label.className = 'flabel';
+  label.setAttribute('for', 'st-live-word');
+  label.textContent = 'Type LIVE to switch';
+  var input = document.createElement('input');
+  input.id = 'st-live-word';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  field.appendChild(label);
+  field.appendChild(input);
+  body.appendChild(field);
+  showModal({
+    title: 'Send real orders?',
+    body: body,
+    confirm: 'Go live',
+    danger: true,
+    onConfirm: function () { saveSettingsFlow(input.value); }
+  });
+  var ok = $('modal-confirm');
+  ok.disabled = true;
+  input.addEventListener('input', function () {
+    ok.disabled = input.value.trim() !== 'LIVE';
+  });
+  input.focus();
+}
+
+function revertSettingsFlow() {
+  if (!C.live || C.saving) return;
+  cfgFill(C.live);
+  toast('Put back as saved.', '');
+}
+
 // --- events --------------------------------------------------------------------------------
 function closeDropdowns() {
   document.querySelectorAll('.dd-menu').forEach(function (m) { m.hidden = true; });
@@ -3107,6 +3320,7 @@ function wire() {
         var ok = $('modal-confirm');
         if (!ok.hidden && !ok.disabled) ok.click();
       }
+      else if (ev.target.id.indexOf('cfg-') === 0 && $('modal-back').hidden) saveSettingsFlow();
     }
     if (ev.key === 'Escape') {
       closeDropdowns();
@@ -3335,6 +3549,21 @@ function wire() {
   $('st-rename').addEventListener('click', renameSetupFlow);
   $('st-delete').addEventListener('click', deleteSetupFlow);
 
+  // --- settings page ---
+  CFG_INPUTS.forEach(function (id) {
+    $(id).addEventListener('input', cfgChanged);
+  });
+  ['cfg-profile-mode', 'cfg-dry', 'cfg-closing'].forEach(function (id) {
+    $(id).addEventListener('click', function (ev) {
+      var btn = ev.target.closest('button[data-value]');
+      if (!btn) return;
+      setSeg(id, btn.dataset.value);
+      cfgChanged();
+    });
+  });
+  $('cfg-save').addEventListener('click', function () { saveSettingsFlow(); });
+  $('cfg-revert').addEventListener('click', revertSettingsFlow);
+
   function commitInitial() {
     var live = G.live;
     if (!live || !live.hasAccount) return;
@@ -3364,6 +3593,7 @@ function start() {
   // own pace for it, and the answer is the heaviest poll the bridge serves.
   setInterval(pollHistory, 2000);
   setInterval(pollSetups, 1000);
+  setInterval(pollSettings, 1000);
 }
 
 if (window.pywebview) start();
