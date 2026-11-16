@@ -1086,7 +1086,7 @@ tr.row-new td { animation: row-flash 1.6s ease-out; }
 }
 .prof-btns button:hover { background: var(--panel-raise); }
 .prof-btns button.danger { border-color: var(--red); color: var(--red); font-weight: 600; }
-.prof-new { display: flex; gap: 8px; margin-top: 12px; }
+.prof-new { display: flex; gap: 8px; margin-top: 16px; }
 .prof-new input { flex: 1 1 auto; min-width: 0; height: 38px; }
 .prof-new button {
   flex: 0 0 auto; min-height: 38px; padding: 0 14px; border-radius: 8px;
@@ -1094,6 +1094,9 @@ tr.row-new td { animation: row-flash 1.6s ease-out; }
   color: var(--fg); font-weight: 500;
 }
 .prof-new button:hover { background: var(--panel-raise); }
+/* #modal-body p zeroes every paragraph's top margin; this must out-rank that id rule
+   or the hint hugs the create row. */
+#modal-body p.prof-note { margin-top: 10px; }
 
 /* The book's Close everything: the TUI's F, confirmed in a dialog. */
 #flatten-btn {

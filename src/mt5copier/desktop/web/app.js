@@ -2050,7 +2050,7 @@ function profilesFlow() {
     body.appendChild(make);
 
     var note = document.createElement('p');
-    note.className = 'muted small';
+    note.className = 'muted small prof-note';
     note.textContent = 'Each profile is a whole copier of its own — config, accounts, '
       + 'guards, setups and history — in its own window. Names are letters, digits, '
       + '- or _ (up to 32).';
