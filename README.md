@@ -11,20 +11,25 @@ wouldn't be, sending nothing. Set it to false and those same decisions are dispa
 slaves.
 
 Two guards sit underneath, and neither is optional: a slave is refused unless its account is a
-**demo** (per-slave `allow_live_trading` overrides it; `l` in the UI), and a slave is not copied to until it
-has been **reconciled** against the mapping table with no unexplained positions of ours on it.
+**demo** (per-slave `allow_live_trading` overrides it, behind its own confirmation), and a
+slave is not copied to until it has been **reconciled** against the mapping table with no
+unexplained positions of ours on it.
 
-**No order placed by this copier has been verified against a broker yet** — the wiring is
-tested and the dry run is validated, but the one-slave demo run in the roadmap has not been
-done. See [Roadmap](#roadmap) and [Detection](#detection-stage-2a).
+Opens, closes, partials, SL/TP sync, pending orders and inversion have all been verified
+against real demo brokers — `ROADMAP.md` holds the closed checklists, trade by trade. The UI
+is a desktop window (pywebview over WebView2); the Textual TUI it grew from was removed on
+2026-11-16.
 
 ## Running it
 
 ```bash
 uv sync
-uv run python -m mt5copier          # the desktop window
+uv run python -m mt5copier          # the desktop window, on the last-opened profile
+uv run python -m mt5copier --profile <name>   # a specific profile (made in the titlebar pill)
 uv run python -m mt5copier --list   # passive terminal list, connects to nothing
 ```
+
+Launching a profile whose window is already open focuses that window instead.
 
 Or build the standalone exe:
 
@@ -40,59 +45,40 @@ dist/mt5copier.exe
 | `--list` | Print discovered terminals and exit. Launches nothing, connects to nothing. |
 | `--check` | Verify the MetaTrader5 extension imports. The main smoke test for a frozen build. |
 | `--paths` | Print resolved config and log locations. |
+| `--profile NAME` | Open this profile. It must already exist; a typo never creates one. |
 | `--version` | Version. |
 
-### Keys
+The frozen exe is windowed (`console=False`), so these print nothing visible from it — run
+them through `uv run python -m mt5copier` when verifying a build.
 
-On the Map, select a terminal (its card, or its chip under **NOT YET OPENED**) and press `space`
-for everything that can be done to it; the keys below do the same without the menu.
+### The window
 
-| Key | Action |
-|---|---|
-| `space` | The selected terminal's action menu. A click on a card or chip selects it; a second click opens the menu |
-| `←` / `→` | Select the previous / next terminal |
-| `a`, `1`–`9` | Jump to the master's card, or to a slave's by the number on its card |
-| `enter` | Open the selected terminal's details page |
-| `tab` | Switch between the Map and Log pages |
-| `m` | Make the selected terminal the Master. Refused while another terminal is the master: unassign that one first |
-| `s` | Make the selected terminal a Slave (needs a master) |
-| `u` | Unassign. Unassigning the master also unassigns its slaves. **If that leaves open copies unmanaged, it asks first** and lists them per slave; agreeing orphans them (they stay open, for you to close by hand) |
-| `e` | Edit the selected slave's settings: sizing, the no-stop policy, what it follows, its direction, breakeven, and its symbol prefix, suffix, renames and filters, with a worked example of what a trade would open. **Saving keeps a slave's open copies managed.** Each copy keeps the size, symbol and direction it was opened with, so most settings (invert included) only reach new trades; the ones about what it follows, and breakeven, apply to open copies too. Turning the live override off while the slave holds copies on a real account warns that they can no longer be closed or moved by the copier. In the form `ctrl+s` saves, `esc` cancels, and `F9` still halts copying |
-| `p` | Pause or resume the selected slave: paused, it takes no new trades, and its open copies are still managed |
-| `l` | Turn the selected slave's live-trading override on or off — the demo-only guard's override. **On** needs the terminal's name typed out in full; off takes one press. While any terminal has it on, the top bar says `NON-DEMO ALLOWED` |
-| `o` | Acknowledge the selected slave's untracked positions, so it copies again |
-| `g` | The copier's own settings: dry run or live (going live asks you to type `LIVE`), connection timing, join grace, and which terminals are closed on quit or unassign |
-| `d` | Start/stop copying. Needs a master and at least one slave. |
-| `r` | Rescan for terminals |
-| `t` | Log in to cTrader: the Open API app's id, secret and redirect URI, then the browser. The accounts you tick appear under **NOT YET OPENED**, and can only be slaves. cTrader slaves copy positions (open, close, partial close, SL/TP, breakeven) and limit and stop orders on demo accounts. **Not yet: risk sizing of a symbol quoted in neither the account's currency nor its own base (EURGBP on a USD account)** |
-| `c` | Ask the worker to drop and re-establish its MT5 session |
-| `ctrl+r` | Restart the worker process entirely |
-| `ctrl+l` | Clear the detection ledger (forget every believed copy) |
-| `F9` | **PANIC** — halt copying. Never closes or modifies a position. |
-| `?` | Show every key; `?` again or `esc` closes the list |
-| `q` | Quit |
+One window, a page per concern, with the active profile in the titlebar pill (profiles are
+fully isolated instances — config, stores, logs — and open side by side, each in its own
+window):
 
-On a slave's details page, `b` exempts the selected copy from breakeven (again lifts it), `B`
-types the copy's own breakeven price under the table, and `esc` goes back to the Map. On the Log
-page, `f` shows problems only, `a` / `1`–`9` show one terminal's lines (again shows them all),
-`/` searches, and `enter` opens the terminal a line is about.
+- **Terminals** — the master zone, the slave zone, and every detected terminal below; drag a
+  card between zones to assign it, right-click it for everything else (pause, settings, the
+  live-trading override, account login, naming). None of the detected terminals is launched
+  until it is given a role. A card's hover popover is the full readout, equity included.
+- **Trading** — direct-trading mode's order ticket, chart and virtual book (per profile, this
+  mode replaces the master terminal entirely; the mode is switched on the Settings page).
+- **Guards** — prop-firm rules per account (not per terminal), with buffer bars, templates,
+  and the recent guard actions.
+- **News** — the Forex Factory week and what the news guard will do per release.
+- **History** — one card per copied trade, its steps per slave underneath.
+- **Setups** — saved role/account/settings arrangements; loading one asks before it orphans
+  anything and before it goes live (typing `LIVE`).
+- **Settings** — the copier's own switches: dry run or live, timings, mode.
+- **Help** (`F1`) — how it hangs together.
 
-The bar at the bottom lists the keys that fit; `?` shows the rest.
+The log dock sits under every page: `copier.log` merged with the day book, filterable. The
+titlebar always says whether this is a **DRY RUN** or **LIVE**, and the halt button never
+closes or modifies a position — it only stops copying.
 
-### The screen
-
-The **Map** shows the master's card with a card per slave joined beneath it, each with its
-balance, equity, floating P/L and state (copying, dry run, paused, held, held back by the
-demo-only guard, or down). Under them, the **DAY BOOK** lists the master's latest trades with what
-each slave made of them, skips and refusals included with their reason, and **NOT YET OPENED**
-lists the terminals with no role yet: none of them is launched until it is given one. An empty
-map says what to do next. Roles are set explicitly, never toggled, so replacing the master is two
-steps: unassign it, then pick the new one. The top bar always says whether this is a **DRY RUN**
-or **LIVE**, and shouts about anything held, stale, failed or allowed off-demo.
-
-The **Log** page is `copier.log` merged with the day book, filterable and searchable. A
-terminal's **details page** has its account, the rule it is copied by, how copying to it has gone
-this session, and its open positions.
+A terminal's own page (click its card) has its account, the rule it is copied by, how copying
+has gone this session, and its open positions — including each copy's breakeven state, with
+per-position controls to exempt a copy or give it its own breakeven price.
 
 ## How it works
 
@@ -151,8 +137,9 @@ as a path update, with the role and risk settings preserved.
 These are different failures and the UI shows them differently:
 
 - **disconnected** — snapshots are still arriving, but the terminal has lost its broker link.
-  Our plumbing is healthy; wait, or press `c`.
-- **stale** — snapshots have *stopped* arriving. Our worker has gone quiet. Press `ctrl+r`.
+  Our plumbing is healthy; wait, or ask the worker to reconnect from the terminal's menu.
+- **stale** — snapshots have *stopped* arriving. Our worker has gone quiet; restart it from
+  the terminal's menu.
 
 Conflating the two is how a copier fails silently. Staleness is judged from the supervisor's own
 arrival time rather than the worker's timestamp, because `time.monotonic()` is not defined to be
@@ -160,7 +147,7 @@ comparable across processes and wall clocks can step.
 
 ### Detection (stage 2a)
 
-Press `d` and the engine starts diffing. It polls the master's open positions and compares them
+Start copying and the engine starts diffing. It polls the master's open positions and compares them
 against what it believes each slave already has, deriving opens, closes, partial closes and
 SL/TP changes from the *difference* — it does not consume a stream of deals or order events. A
 state diff is self-healing: a missed tick, a reconnect or a restart still lands on the correct
@@ -178,7 +165,7 @@ observed connected on the previous tick, no more than `join_grace_seconds` ago (
 hard maximum 5 seconds). Anything else re-baselines that slave: whatever the master currently
 holds becomes permanently uncopyable for it, reported once as `PREEXISTING`.
 
-So a position already open when you press `d` is never copied, under any setting. Nor is one
+So a position already open when copying starts is never copied, under any setting. Nor is one
 the master opened while a slave's link was down for more than the grace window. The reason is
 sizing honesty — lots come from the master's entry-to-stop distance, but a late joiner fills at
 *current* price, so the real money at risk isn't the configured amount, and when the master is
@@ -243,10 +230,10 @@ master's *take-profit*, so a master trade with no target inverts into an unstopp
 falls to `no_stop_policy`; and a reversed resting order flips kind as well as direction
 (BUY_LIMIT ↔ SELL_STOP), because the price level is what has to be preserved.
 
-Believed copies are persisted to `%APPDATA%\MT5Copier\dryrun_state.json` so that restarting the
-app re-proposes nothing for positions it already tracked. It is bookkeeping, not settings:
-deleting it (or pressing `ctrl+l`) is harmless, and costs one re-proposed action per open
-master position. Stage 2c replaces it with the SQLite mapping table.
+Believed copies are persisted — dry-run beliefs in their own SQLite store (`dryrun.db`),
+live copies in the mapping table (`mapping.db`) — so that restarting the app re-proposes
+nothing for positions it already tracked. The two never mix: switching `dry_run` swaps the
+store, which is what keeps a pretended position from ever being inherited by a live run.
 
 #### A decline is final
 
@@ -275,7 +262,7 @@ are used, so a bad write can never stop the app from starting.
 
 Prop-firm guards live beside it in `guards.json` (each account's rules, keyed `login@server`,
 and saved templates), with what they recorded — the equity at a daily reset — in
-`guard_state.json`. Both are edited from the guards page (`k` on a slave); see ROADMAP.md,
+`guard_state.json`. Both are edited from the Guards page; see ROADMAP.md,
 "Prop-firm guards".
 
 The filtering, inversion and no-stop-policy fields (`no_stop_policy`, `invert`, `copy_sltp`,
@@ -310,16 +297,16 @@ that pays `commission_per_lot_round_turn`, plus `slippage_buffer_points`, so a b
 loses nothing. The commission is turned into a distance with what a price move is worth on that
 symbol, which the slave's terminal reports when the copy fills. On a symbol where the commission
 setting does not apply, the stop sits that much further out than it needs to; a copy opened
-before this was recorded cannot be priced and is reported once rather than moved. Instead of the
-R trigger, one position can be given its own breakeven price (`B` on the detail page).
+before this was recorded cannot be priced and is reported once rather than moved. Instead of
+the R trigger, one position can be given its own breakeven price on the terminal's page.
 
 Once a copy has gone to
 breakeven, its stop never loosens: a master stop that moves to a tighter level is still copied,
 while one that moves back toward a loss, or is cleared, is ignored for that copy. The action log
 says so once per master stop level (`SKIPPED: the copy is at breakeven ...`), so a
-difference between the two terminals' stops is never unexplained. On the
-detail page, `b` exempts the selected copy from breakeven, and `B` sets that copy's own
-breakeven price, which replaces the slave's trigger and works even with breakeven off.
+difference between the two terminals' stops is never unexplained. On the terminal's page a
+copy can be exempted from breakeven, or given its own breakeven price, which replaces the
+slave's trigger and works even with breakeven off.
 
 The schema is `extra="forbid"`, and a validation failure is treated as corruption, so removing
 a field would otherwise reset every setting the user had. `_migrate()` strips retired keys
@@ -400,19 +387,25 @@ dev tooling (`mypy`, `cython`, `email_validator`), and attribute-style false pos
 ## Development
 
 ```bash
-uv run pytest -q          # 748 tests, no MT5 terminal required
+uv run pytest -q          # 1354 tests, no MT5 terminal required
 uv run ruff check .
-uv run ruff format .
+uv run ruff format --check .
+uv run mypy
 ```
+
+All four pass clean. `scripts/cdp_drive.py` can additionally drive the real window over CDP
+(WebView2's remote-debugging port) for interaction testing; `scripts/demo_master.py` drives
+the demo master terminal for live copy passes.
 
 Tests use a fake MT5 module and synthetic `%APPDATA%\MetaQuotes\Terminal` trees, so the whole
 suite runs without a terminal installed and without connecting to a broker.
 
 ## Roadmap
 
-Stage 1 was the shell. Everything below is now written; **none of it has been run against a
-broker**, which is what `ROADMAP.md`'s demo checklists are for and the only thing that turns
-"built" into "works".
+Stage 1 was the shell. Everything below is written **and has been run against real demo
+brokers** — `ROADMAP.md`'s demo checklists, closed 2026-10-01, are the record. What came
+after (direct trading, guards, news, profiles, cTrader slaves, the desktop app itself) is
+tracked there and in the per-feature notes.
 
 1. ~~**Copy engine** — master position polling and master→slave reconciliation.~~ `reconcile.py`.
 2. ~~**Filling-mode negotiation**~~ — probes `symbol_info.filling_mode` (`& 1` FOK, `& 2` IOC)
