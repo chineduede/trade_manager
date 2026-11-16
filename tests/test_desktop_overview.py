@@ -42,6 +42,14 @@ class _Engine:
         self.stats: dict[str, TerminalStats] = {}
         self.copies: dict[str, list[OpenCopy]] = {}
         self.orphan_list: dict[str, list[Any]] = {}
+        self.direct = False
+        self.virtual_book: tuple[Position, ...] = ()
+
+    def direct_mode(self) -> bool:
+        return self.direct
+
+    def direct_positions(self) -> tuple[Position, ...]:
+        return self.virtual_book
 
     def views(self) -> list[TerminalView]:
         return self._views
@@ -319,6 +327,57 @@ def test_the_rule_column_words_the_unusual_settings(tmp_path: Path) -> None:
     renamed = [r["text"] for r in rule if "is traded as" in r["text"]][1:]
     assert len(renamed) == 3  # three shown, the fourth said as "+1 more"
     assert any("+1 more" in r["text"] for r in rule)
+
+
+def test_direct_mode_links_copies_to_the_virtual_book(tmp_path: Path) -> None:
+    """A direct profile has no master terminal: the virtual book is the master side,
+    or every healthy copy would read "closed on master" in red."""
+    cfg = _cfg(tmp_path)
+    del cfg.terminals[T_M]
+    api, engine = _api(cfg)
+    engine.direct = True
+    engine.virtual_book = (MASTER_POS,)
+    engine._views = [
+        _view(
+            cfg.terminals[T_A],
+            _snap(
+                T_A,
+                open_positions=(
+                    Position(
+                        ticket=11,
+                        symbol="EURUSD",
+                        type=PositionType.BUY,
+                        volume=0.5,
+                        price_open=1.1000,
+                        sl=1.0950,
+                        tp=1.1100,
+                    ),
+                ),
+                live_positions=(
+                    PositionLive(ticket=11, price_current=1.1050, profit=25.0, swap=0.0),
+                ),
+            ),
+        ),
+    ]
+    engine.copies[T_A] = [
+        OpenCopy(
+            master_ticket=900,
+            slave_ticket=11,
+            symbol="EURUSD",
+            volume=0.5,
+            resting=False,
+            risk_distance=0.0050,
+        ),
+    ]
+
+    (row,) = api.terminal_overview_state(T_A)["positions"]["rows"]
+    assert row["link"] == {"text": "#900 (master 1 lots)", "tone": ""}
+
+    # And a copy whose virtual ticket truly is gone still says so.
+    engine.virtual_book = ()
+    (row,) = api.terminal_overview_state(T_A)["positions"]["rows"]
+    assert "closed on master" in row["link"]["text"]
+    assert row["link"]["tone"] == "red"
 
 
 def test_the_small_helpers_say_things_the_tui_way() -> None:

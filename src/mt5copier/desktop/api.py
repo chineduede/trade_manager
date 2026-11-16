@@ -2732,14 +2732,22 @@ class DesktopApi:
                 )
             else:
                 mview = next((v for v in views if v.cfg.role is Role.MASTER), None)
+                if engine.direct_mode():
+                    # Direct trading has no master terminal: the virtual book is the
+                    # master side, or every healthy copy would read "closed on master".
+                    master_positions: tuple[Position, ...] | None = engine.direct_positions()
+                else:
+                    master_positions = (
+                        mview.snapshot.open_positions
+                        if mview is not None and mview.snapshot is not None
+                        else None
+                    )
                 rows = position_rows(
                     snap,
                     is_master=False,
                     copies=copies,
                     breakeven=breakeven_rule(tcfg),
-                    master_positions=mview.snapshot.open_positions
-                    if mview is not None and mview.snapshot is not None
-                    else None,
+                    master_positions=master_positions,
                     orphan_tickets=(o.slave_ticket for o in engine.orphans(tid)),
                 )
             by_ticket = {
