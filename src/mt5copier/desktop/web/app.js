@@ -980,6 +980,10 @@ function symbolChanged() {
   // bars, and the lines drawn from both. Left standing, the old stop draws thousands
   // away from the new price and the old candles pin the scale to the wrong range.
   ['f-stop', 'f-entry', 'f-tp'].forEach(function (id) { $(id).value = ''; });
+  // The TP the person touched belonged to the old symbol and was just cleared with it,
+  // so rr speaks for the target again — otherwise the ticket keeps deferring to a blank
+  // TP field and the target line never comes back on the new symbol.
+  S.lastTouched = 'rr';
   S.candlesKey = '';
   S.meta = null;
   S.metaSymbol = '';
