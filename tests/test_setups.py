@@ -330,3 +330,59 @@ def test_going_live_takes_live_typed_and_going_dry_does_not(
 
 def replace_dry(setup: Setup) -> Setup:
     return setup.model_copy(update={"dry_run": True})
+
+
+# --- direct-trading setups ---------------------------------------------------------------------
+
+
+def test_a_direct_profile_captures_a_masterless_setup(cfg: AppConfig) -> None:
+    from mt5copier.config import AppMode
+
+    cfg.mode = AppMode.TRADING
+    cfg.terminals[TID_MASTER].role = Role.UNASSIGNED
+    setup = setups_mod.capture(cfg)
+    assert setup is not None and setup.direct
+    assert (setup.master, setup.slaves) == (None, (TID_SLAVE,))
+    assert setup.terminals == (TID_SLAVE,)
+    assert setup.accounts == {TID_SLAVE: 222}
+    cfg.terminals[TID_SLAVE].role = Role.UNASSIGNED
+    assert setups_mod.capture(cfg) is None, "a direct profile with no slaves has nothing to save"
+
+
+def test_problems_match_the_setup_to_the_profile_mode(cfg: AppConfig) -> None:
+    from mt5copier.config import AppMode
+
+    direct = Setup(master=None, slaves=(TID_SLAVE,))
+    copying = Setup(master=TID_MASTER, slaves=(TID_SLAVE,))
+    assert any("direct trading" in p for p in setups_mod.problems(direct, cfg))
+    assert setups_mod.problems(copying, cfg) == []
+    cfg.mode = AppMode.TRADING
+    assert any("copying" in p for p in setups_mod.problems(copying, cfg))
+    assert setups_mod.problems(direct, cfg) == []
+
+
+def test_losing_in_a_direct_profile_is_only_the_slaves_that_leave(cfg: AppConfig) -> None:
+    from mt5copier.config import AppMode
+
+    cfg.mode = AppMode.TRADING
+    cfg.terminals[TID_MASTER].role = Role.UNASSIGNED
+    cfg.terminals[TID_THIRD].role = Role.SLAVE
+    kept_and_dropped = setups_mod.losing(Setup(master=None, slaves=(TID_SLAVE,)), cfg)
+    assert kept_and_dropped == [TID_THIRD], "the slave kept in the set keeps its copies"
+    switched = setups_mod.losing(
+        Setup(master=None, slaves=(TID_SLAVE, TID_THIRD), accounts={TID_SLAVE: 999}), cfg
+    )
+    assert switched == [TID_SLAVE], "a slave logged into another account gives its copies up"
+
+
+def test_apply_roles_without_a_master_sets_slaves_and_copying(cfg: AppConfig) -> None:
+    from mt5copier.config import AppMode
+
+    cfg.mode = AppMode.TRADING
+    cfg.terminals[TID_MASTER].role = Role.UNASSIGNED
+    cfg.copying_enabled = False
+    setups_mod.apply_roles(Setup(master=None, slaves=(TID_SLAVE, TID_THIRD), copying=True), cfg)
+    assert roles(cfg)[TID_SLAVE] is Role.SLAVE
+    assert roles(cfg)[TID_THIRD] is Role.SLAVE
+    assert roles(cfg)[TID_MASTER] is Role.UNASSIGNED
+    assert cfg.copying_enabled is True, "no master terminal is needed for direct copying"
