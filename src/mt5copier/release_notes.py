@@ -17,6 +17,18 @@ from .paths import version_seen_path
 
 NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
+        "0.1.3",
+        "2026-11-17",
+        (
+            "The app says what changed: this window, behind the version label at the bottom"
+            " right and on Help — opened once by itself after an update, with a dot on the"
+            " label until it has been read.",
+            "Setups work in direct-trading profiles too: the slaves, their accounts and"
+            " settings save under a name, with the order ticket as the master. A setup loads"
+            " into a profile of the mode it was saved in.",
+        ),
+    ),
+    (
         "0.1.2",
         "2026-11-17",
         (
