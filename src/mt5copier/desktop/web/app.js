@@ -662,6 +662,56 @@ function copiesSummary(r) {
   };
 }
 
+function copiesCell(r) {
+  // Each live copy is a link to its own terminal page, straight to the ticket it holds
+  // there; copies with nothing to visit (closed, unverified, a dry run's) stay as the
+  // summary text the cell always carried.
+  var td = document.createElement('td');
+  if (!r.open) {
+    td.className = 'muted';
+    td.textContent = '—';
+    return td;
+  }
+  var c = r.copies || [];
+  var live = c.filter(function (s) { return s.state === 'live' && s.tid && s.ticket; });
+  var cp = copiesSummary(r);
+  if (!live.length) {
+    td.className = cp.cls;
+    td.textContent = cp.text;
+    if (cp.title) td.title = cp.title;
+    return td;
+  }
+  td.className = 'copies-cell';
+  if (cp.title) td.title = cp.title;
+  live.forEach(function (s, i) {
+    if (i) td.appendChild(document.createTextNode(' '));
+    var link = document.createElement('button');
+    link.type = 'button';
+    link.className = 'linklike copy-link';
+    link.textContent = s.name + ' #' + s.ticket;
+    link.title = 'Open ' + s.name + ' — this copy on its terminal page';
+    link.addEventListener('click', function () {
+      openTerminalDetail(s.tid, 'overview', s.ticket);
+    });
+    td.appendChild(link);
+  });
+  var closed = 0, unknown = 0;
+  c.forEach(function (s) {
+    if (s.state === 'closed') closed++;
+    else if (s.state !== 'live') unknown++;
+  });
+  if (closed || unknown) {
+    var parts = [];
+    if (closed) parts.push(closed + ' closed');
+    if (unknown) parts.push(unknown + ' ?');
+    var tail = document.createElement('span');
+    tail.className = 'muted';
+    tail.textContent = ' · ' + parts.join(' · ');
+    td.appendChild(tail);
+  }
+  return td;
+}
+
 function renderBook() {
   var rows = (S.live && S.live.book) || [];
   var open = rows.filter(function (r) { return r.open; }).length;
@@ -702,21 +752,20 @@ function renderBook() {
     cell(r.tp ? String(r.tp) : '—', r.tp ? '' : 'muted');
     cell(r.open ? (r.now === null ? '—' : String(r.now))
       : (r.expiresMin === null ? 'GTC' : 'expires ' + r.expiresMin + 'm'), 'muted');
-    var cp = copiesSummary(r);
-    var cpCell = cell(r.open ? cp.text : '—', r.open ? cp.cls : 'muted');
-    if (r.open && cp.title) cpCell.title = cp.title;
+    tr.appendChild(copiesCell(r));
 
     var actions = document.createElement('td');
     actions.className = 'actions-cell';
     if (r.open) {
       var be = document.createElement('button');
       be.type = 'button';
-      be.className = 'row-btn';
-      be.textContent = 'BE';
-      be.title = 'Breakeven: move the stop to the entry price';
-      be.addEventListener('click', function () {
-        act(api().modify_position(r.ticket, r.entry, r.tp || 0));
-      });
+      be.className = 'row-btn' + (r.beAt ? ' armed' : '');
+      be.textContent = r.beAt ? 'BE @ ' + r.beAt : 'BE';
+      be.title = r.beAt
+        ? 'Breakeven armed: once the price touches ' + r.beAt
+          + ', the stop moves to the entry. Click to change or disarm.'
+        : 'Breakeven: move the stop to the entry price — now, or once the price touches a level';
+      be.addEventListener('click', function () { breakevenFlow(r); });
       actions.appendChild(be);
       var part = document.createElement('button');
       part.type = 'button';
@@ -804,6 +853,54 @@ function noteProblemEvents(events) {
       + (e.slave ? ' on ' + e.slave : '');
     toast(head + (e.detail ? ' — ' + e.detail : ''), 'bad', 9000);
   });
+}
+
+function breakevenFlow(r) {
+  // The BE button's dialog: empty means now (the button's old immediate move), a price
+  // arms it — the book moves the stop to the entry when the feed touches the price, and
+  // every copy follows. The engine has the last word on the number.
+  var body = document.createElement('div');
+  var p = document.createElement('p');
+  p.textContent = '#' + r.ticket + ' ' + r.symbol + ' ' + r.side
+    + ' — the stop moves to the entry (' + r.entry + ').';
+  body.appendChild(p);
+  var field = document.createElement('div');
+  field.className = 'field';
+  var label = document.createElement('label');
+  label.className = 'flabel';
+  label.setAttribute('for', 'be-price');
+  label.textContent = 'Once the price touches';
+  var input = document.createElement('input');
+  input.id = 'be-price';
+  input.autocomplete = 'off';
+  input.inputMode = 'decimal';
+  input.placeholder = 'now';
+  input.value = r.beAt ? String(r.beAt) : '';
+  field.appendChild(label);
+  field.appendChild(input);
+  body.appendChild(field);
+  var note = document.createElement('span');
+  note.className = 'field-note muted';
+  note.textContent = r.beAt
+    ? 'A new price re-arms it, clearing the field disarms it, and "now" moves the stop '
+      + 'right away.'
+    : 'Leave it empty to move the stop now; type a price to arm it for when the market '
+      + 'gets there.';
+  body.appendChild(note);
+  showModal({
+    title: 'Breakeven #' + r.ticket,
+    body: body,
+    confirm: 'Breakeven',
+    onConfirm: function () {
+      var v = input.value.trim();
+      if (!v && r.beAt) act(api().breakeven_at(r.ticket, 0));
+      else if (!v || v.toLowerCase() === 'now') {
+        act(api().modify_position(r.ticket, r.entry, r.tp || 0));
+      } else act(api().breakeven_at(r.ticket, v));
+    }
+  });
+  input.focus();
+  input.select();
 }
 
 function partialCloseFlow(r) {
@@ -4015,13 +4112,16 @@ var TD_M_INPUTS = ['breakeven_trigger_r', 'breakeven_book_percent',
 var TD_M_SLIDERS = ['breakeven_trigger_r', 'breakeven_book_percent'];
 var TD_M_ERRS = TD_M_INPUTS.concat(['management', 'breakeven_mode']);
 
-function openTerminalDetail(tid, tab) {
+function openTerminalDetail(tid, tab, focusTicket) {
   D.tid = tid;
   D.live = null;
   D.ov = null;
   D.ovDrawn = '';
   D.base = null;
   D.serverKey = '';
+  // A ticket to pick out of the positions table on arrival — the book's copy links
+  // carry the slave's own ticket, and the row flashes once, exactly as a new row does.
+  D.focusTicket = focusTicket || 0;
   tdShowTab(tab || 'overview', true);
   showPage('tdetail');
 }
@@ -4389,6 +4489,7 @@ function ovHead(table, cols) {
 function renderOvPositions(live) {
   var p = live.positions;
   var slave = live.role === 'slave';
+  var focusSeen = false;
   $('ov-pos-title').textContent = 'Positions'
     + (p ? (p.unreadable ? ' · could not be read' : ' · ' + p.rows.length) : '');
   $('ov-exposure').textContent = 'net exposure: ' + (p && p.exposure ? p.exposure : '—');
@@ -4424,6 +4525,10 @@ function renderOvPositions(live) {
   body.textContent = '';
   p.rows.forEach(function (r) {
     var tr = document.createElement('tr');
+    if (D.focusTicket && r.ticket === D.focusTicket) {
+      tr.className = 'row-new';
+      focusSeen = true;
+    }
     ovCell(tr, r.symbol, 'sym');
     ovCell(tr, r.side, 'side-' + r.side);
     ovCell(tr, ovLots(r.lots), 'num');
@@ -4459,6 +4564,13 @@ function renderOvPositions(live) {
     ovCell(tr, r.link.text, r.link.tone || '');
     body.appendChild(tr);
   });
+  if (focusSeen) {
+    var flashed = body.querySelector('tr.row-new');
+    if (flashed && flashed.scrollIntoView) flashed.scrollIntoView({ block: 'nearest' });
+  }
+  // Once the table has drawn, the hunt is over either way: a later redraw must not
+  // flash the row again, nor wait forever for a ticket that is not here.
+  D.focusTicket = 0;
   if (p.total !== null && p.total !== undefined) {
     var totalRow = document.createElement('tr');
     totalRow.className = 'ov-total';

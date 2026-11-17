@@ -138,7 +138,7 @@ keeps partials legible: close 50% and the book row reads 0.50, the fraction left
 
 
 def _position_row(
-    p: Position, bid: float | None, ask: float | None, copies: list[dict[str, str]]
+    p: Position, bid: float | None, ask: float | None, copies: list[dict[str, Any]], be_at: float
 ) -> dict[str, Any]:
     now = None
     if bid is not None and ask is not None:
@@ -154,6 +154,8 @@ def _position_row(
         "sl": p.sl,
         "tp": p.tp,
         "now": now,
+        # An armed breakeven: the price that, once touched, moves the stop to the entry.
+        "beAt": be_at,
         # The ticket is intent; this is what still stands behind it on the slaves,
         # from engine.direct_copy_status: per copy, live / closed / unknown.
         "copies": copies,
@@ -359,12 +361,14 @@ class DesktopApi:
             if p.symbol not in quotes:
                 quotes[p.symbol] = engine.direct_quote(p.symbol)
         statuses = engine.direct_copy_status()
+        breakevens = engine.direct_breakevens()
         rows = [
             _position_row(
                 p,
                 quotes[p.symbol].bid if quotes[p.symbol] else None,
                 quotes[p.symbol].ask if quotes[p.symbol] else None,
                 statuses.get(p.ticket, []),
+                breakevens.get(p.ticket, 0.0),
             )
             for p in positions
         ]
@@ -547,6 +551,25 @@ class DesktopApi:
             return {"ok": False, "message": "give the percent to close, such as 50"}
         why = self._engine.partial_close_direct(int(ticket), pct)
         return self._did(why, f"Closed {pct:g}% of #{ticket}")
+
+    def breakeven_at(self, ticket: int, price: Any) -> dict[str, Any]:
+        """Arm a breakeven price on a direct position -- once the feed touches it, the stop
+        moves to the entry and every copy follows -- or clear it with 0."""
+        try:
+            at = float(price)
+        except (TypeError, ValueError):
+            return {"ok": False, "message": "give the price that should trigger the breakeven"}
+        ticket = int(ticket)
+        why = self._engine.set_direct_breakeven_at(ticket, at)
+        if why is not None:
+            return {"ok": False, "message": why}
+        if not at:
+            return {"ok": True, "message": f"Disarmed #{ticket}'s breakeven."}
+        return {
+            "ok": True,
+            "message": f"Armed #{ticket}: once the price touches {at:g}, "
+            "the stop moves to the entry and every copy follows.",
+        }
 
     def flatten(self) -> dict[str, Any]:
         """Close every position and cancel every resting order; the page confirms first."""

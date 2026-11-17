@@ -275,6 +275,105 @@ def test_close_and_cancel_remove_their_targets(book: VirtualBook) -> None:
     assert not book.orders()
 
 
+# --- armed breakevens -------------------------------------------------------------------------
+
+
+def seed_buy(book: VirtualBook, tp: float = 0.0) -> int:
+    """A buy filled at the ask, 1.08520, stop 1.08."""
+    assert book.open_market("EURUSD", PositionType.BUY, 1.0, 1.08, tp, quote(), now=NOW) is None
+    return book.positions()[-1].ticket
+
+
+def test_breakeven_arms_only_on_an_open_position(book: VirtualBook) -> None:
+    why = book.set_breakeven_at(99, 1.08700)
+    assert why is not None and "not an open position" in why
+
+
+def test_breakeven_price_must_be_past_the_entry(book: VirtualBook) -> None:
+    t = seed_buy(book)
+    why = book.set_breakeven_at(t, 1.08400)  # below a buy's entry
+    assert why is not None and "above the entry" in why
+    assert book.set_breakeven_at(t, 1.08520) is not None  # exactly at it is as useless
+    assert not book.breakevens()
+    assert book.set_breakeven_at(t, -1.0) is not None
+    assert book.set_breakeven_at(t, 1.08700) is None
+    assert book.breakevens() == {t: 1.08700}
+
+
+def test_breakeven_refused_once_the_stop_is_past_the_entry(book: VirtualBook) -> None:
+    t = seed_buy(book)
+    assert book.modify_position(t, 1.08520, 0.0) is None  # already at breakeven by hand
+    why = book.set_breakeven_at(t, 1.08700)
+    assert why is not None and "already at or past" in why
+
+
+def test_breakeven_clears_with_zero(book: VirtualBook) -> None:
+    t = seed_buy(book)
+    assert book.set_breakeven_at(t, 1.08700) is None
+    assert book.set_breakeven_at(t, 0.0) is None
+    assert not book.breakevens()
+    assert book.set_breakeven_at(t, 0.0) is None  # clearing nothing is fine
+
+
+def test_breakeven_fires_when_the_bid_touches_it(book: VirtualBook) -> None:
+    t = seed_buy(book)
+    assert book.set_breakeven_at(t, 1.08700) is None
+    assert book.tick({"EURUSD": (1.08600, 1.08620)}, NOW) == []  # short of the trigger
+    events = book.tick({"EURUSD": (1.08700, 1.08720)}, NOW)
+    assert any("breakeven" in e and "fired" in e for e in events)
+    assert book.positions()[0].sl == 1.08520  # the entry
+    assert not book.breakevens()
+
+
+def test_breakeven_fires_for_a_sell_on_the_ask(book: VirtualBook) -> None:
+    assert book.open_market("EURUSD", PositionType.SELL, 1.0, 1.09, 0.0, quote(), now=NOW) is None
+    t = book.positions()[0].ticket  # filled at the bid, 1.08500
+    why = book.set_breakeven_at(t, 1.08600)  # above a sell's entry
+    assert why is not None and "below the entry" in why
+    assert book.set_breakeven_at(t, 1.08300) is None
+    assert book.tick({"EURUSD": (1.08280, 1.08300)}, NOW)
+    assert book.positions()[0].sl == 1.08500
+
+
+def test_breakeven_stays_put_when_the_stop_moved_past_entry_meanwhile(book: VirtualBook) -> None:
+    t = seed_buy(book)
+    assert book.set_breakeven_at(t, 1.08700) is None
+    assert book.modify_position(t, 1.08600, 0.0) is None  # profit locked in by hand
+    events = book.tick({"EURUSD": (1.08700, 1.08720)}, NOW)
+    assert any("stays" in e for e in events)
+    assert book.positions()[0].sl == 1.08600  # never loosened back to the entry
+    assert not book.breakevens()
+
+
+def test_breakeven_fires_before_the_target_in_the_same_tick(book: VirtualBook) -> None:
+    t = seed_buy(book, tp=1.08800)
+    assert book.set_breakeven_at(t, 1.08700) is None
+    events = book.tick({"EURUSD": (1.08800, 1.08820)}, NOW)
+    assert any("breakeven" in e for e in events)
+    assert any("target" in e for e in events)
+    assert not book.positions() and not book.breakevens()
+
+
+def test_a_closed_position_drops_its_armed_breakeven(book: VirtualBook) -> None:
+    t = seed_buy(book)
+    assert book.set_breakeven_at(t, 1.08700) is None
+    assert book.close_position(t) is None
+    assert not book.breakevens()
+    t2 = seed_buy(book)
+    assert book.set_breakeven_at(t2, 1.08700) is None
+    assert book.tick({"EURUSD": (1.07990, 1.08010)}, NOW)  # the stop at 1.08 is hit
+    assert not book.breakevens()
+
+
+def test_armed_breakevens_survive_a_restart(tmp_path: Path) -> None:
+    path = tmp_path / "virtual_master.json"
+    book = VirtualBook(path)
+    t = seed_buy(book)
+    assert book.set_breakeven_at(t, 1.08700) is None
+    reopened = VirtualBook(path)
+    assert reopened.breakevens() == {t: 1.08700}
+
+
 # --- persistence ------------------------------------------------------------------------------
 
 
