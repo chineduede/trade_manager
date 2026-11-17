@@ -58,6 +58,14 @@ def _cfg(tmp_path: Path) -> AppConfig:
     )
 
 
+def _noon() -> float:
+    """Today at 12:00 local, not the wall clock: the log lines are written at 09:00 and the
+    day-book event at now - 60, and the merge is sorted by time -- a real ``time.time()``
+    before 09:01 would flip the expected order."""
+    lt = time.localtime()
+    return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 12, 0, 0, 0, 0, -1))
+
+
 def _write_log(now: float) -> None:
     day = time.strftime("%Y-%m-%d", time.localtime(now))
     clock = lambda s: f"{day} {s}"  # noqa: E731
@@ -96,7 +104,7 @@ def _api(tmp_path: Path, now: float) -> DesktopApi:
 
 
 def test_the_file_and_the_day_book_merge_with_the_tui_wording(tmp_path: Path) -> None:
-    now = time.time()
+    now = _noon()
     out = _api(tmp_path, now).log_state("", False, "")
 
     assert out["matched"] == 5
@@ -119,7 +127,7 @@ def test_the_file_and_the_day_book_merge_with_the_tui_wording(tmp_path: Path) ->
 
 
 def test_the_filters_narrow_in_the_bridge_and_the_counts_stay_honest(tmp_path: Path) -> None:
-    now = time.time()
+    now = _noon()
     api = _api(tmp_path, now)
 
     one = api.log_state(T_A, False, "")
@@ -138,7 +146,7 @@ def test_the_filters_narrow_in_the_bridge_and_the_counts_stay_honest(tmp_path: P
 
 
 def test_the_tail_is_capped_and_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    now = time.time()
+    now = _noon()
     api = _api(tmp_path, now)
     monkeypatch.setattr(api_mod, "_LOG_SHOWN", 2)
     out = api.log_state("", False, "")
