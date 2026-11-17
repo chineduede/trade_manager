@@ -165,3 +165,42 @@ def test_saving_commits_switches_and_says_what_applies_later(tmp_path: Path) -> 
     assert any(t.startswith("Saved: ") for t in texts)
     assert any("trades directly" in t for t in texts)
     assert any("next time its connection starts" in t for t in texts)
+
+
+# --- the symbol catalog card -------------------------------------------------------------------
+
+
+def _catalogued(cfg: AppConfig, tmp_path: Path) -> DesktopApi:
+    from mt5copier.catalog import CatalogStore
+
+    api, _ = _api(cfg)
+    api._catalog_store = CatalogStore(tmp_path / "catalog.json")
+    return api
+
+
+def test_catalog_state_offers_the_seeds_before_any_save(tmp_path: Path) -> None:
+    api = _catalogued(_cfg(tmp_path), tmp_path)
+    out = api.catalog_state()
+    assert "USD" in out["currencies"] and "EUR" in out["currencies"]
+    assert "US30" in out["classes"]["indices"]
+    assert out["classes"]["stocks"] == ""
+
+
+def test_catalog_save_is_whole_and_read_back(tmp_path: Path) -> None:
+    api = _catalogued(_cfg(tmp_path), tmp_path)
+    out = api.catalog_save("usd, eur sgd", {"indices": "US30 Dow30", "stocks": "AAPL"})
+    assert out["ok"] is True and "3 currencies" in out["message"]
+    state = api.catalog_state()
+    assert state["currencies"] == "EUR SGD USD"
+    assert state["classes"]["indices"] == "US30, DOW30"
+    assert state["classes"]["stocks"] == "AAPL"
+    assert state["classes"]["metals"] == "", "the save is the whole truth: seeds not sent are gone"
+
+
+def test_catalog_save_refuses_junk_per_field(tmp_path: Path) -> None:
+    api = _catalogued(_cfg(tmp_path), tmp_path)
+    out = api.catalog_save("USD EURO", {"indices": "US30", "metals": "X" * 40})
+    assert out["ok"] is False
+    assert "EURO" in out["errors"]["currencies"]
+    assert "metals" in out["errors"]
+    assert not (tmp_path / "catalog.json").exists(), "refused whole: nothing was written"

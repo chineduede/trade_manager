@@ -11,6 +11,7 @@ the same contract the TUI's timer thread already exercises.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import threading
@@ -22,6 +23,7 @@ from .. import __version__, account_switch, role_actions, shared_data
 from .. import config as config_mod
 from .. import profiles as profiles_mod
 from .. import setups as setups_mod
+from ..catalog import LISTED, CatalogStore
 from ..config import (
     AppMode,
     BreakevenMode,
@@ -192,6 +194,10 @@ class DesktopApi:
         # assignment into it, and the file is written after.
         self._guards_doc = guards if guards is not None else GuardsDoc()
         self._setups = setups if setups is not None else SetupsDoc()
+        self._catalog_store = CatalogStore()
+        """The shared symbol catalog, for the settings card. Its own instance beside the
+        engine's: both read the same file, and an mtime check folds either's save into the
+        other."""
         self._window: webview.Window | None = None
         self._maximized = False
         self._setup_busy = False
@@ -2516,6 +2522,54 @@ class DesktopApi:
         if why is not None:
             messages.append({"text": why, "tone": "bad"})
         return {"ok": True, "messages": messages}
+
+    # --- the symbol catalog card --------------------------------------------------------------
+
+    def catalog_state(self) -> dict[str, Any]:
+        """The shared symbol catalog as the settings card edits it: one line of currencies and
+        one list per class, as saved -- or the seeds, before any save has been made."""
+        cat = self._catalog_store.current()
+        return {
+            "currencies": " ".join(sorted(cat.currencies)),
+            "classes": {clas: ", ".join(cat.lists.get(clas, ())) for clas in LISTED},
+        }
+
+    def catalog_save(self, currencies: str, classes: dict[str, Any]) -> dict[str, Any]:
+        """Save the catalog whole, as the card holds it -- the saved file is the complete
+        truth, which is what lets a removed seed stay removed. Refused whole on any problem,
+        with the problems per field."""
+
+        def tokens(text: str) -> list[str]:
+            return [t for t in re.split(r"[\s,;]+", text) if t]
+
+        errors: dict[str, str] = {}
+        codes = tokens(str(currencies))
+        bad = [t for t in codes if not re.fullmatch(r"[A-Za-z]{3}", t)]
+        if bad:
+            errors["currencies"] = "a currency is three letters: " + ", ".join(bad[:5])
+        lists: dict[str, list[str]] = {}
+        for clas in LISTED:
+            names = tokens(str((classes or {}).get(clas, "")))
+            long = [t for t in names if len(t) > 32]
+            if long:
+                errors[clas] = "too long for a symbol name: " + ", ".join(
+                    t[:12] + "…" for t in long[:3]
+                )
+            lists[clas] = names
+        if errors:
+            return {"ok": False, "errors": errors, "message": "Correct the marked lists."}
+        cat = self._catalog_store.save(codes, lists)
+        listed = sum(len(v) for v in cat.lists.values())
+        log.warning(
+            "symbol catalog saved: %d currencies, %d listed symbols", len(cat.currencies), listed
+        )
+        return {
+            "ok": True,
+            "message": (
+                f"Symbol catalog saved: {len(cat.currencies)} currencies, "
+                f"{listed} listed symbols. It applies to every profile at once."
+            ),
+        }
 
     # --- the terminal detail page -------------------------------------------------------------
     # One terminal's own page: its header facts and its settings form, the TUI s form for a

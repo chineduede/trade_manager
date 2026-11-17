@@ -1050,7 +1050,7 @@ function showPage(name) {
   if (name === 'news') pollNews();
   if (name === 'history') pollHistory();
   if (name === 'setups') pollSetups();
-  if (name === 'settings') pollSettings();
+  if (name === 'settings') { pollSettings(); pollCatalog(); }
   if (name === 'tdetail') pollTdetail();
 }
 
@@ -3754,6 +3754,76 @@ function renderSettings() {
   $('cfg-revert').disabled = C.saving;
 }
 
+// --- the symbol catalog card ------------------------------------------------------------
+// Its own save, apart from the copier's whole-or-nothing form: the catalog is shared by
+// every profile, so it lands whole on its own button and never rides along with a profile's
+// settings. The same refill rule as the form above: never onto typing.
+var CAT = { live: null, base: null, serverKey: '', saving: false };
+var CAT_CLASSES = ['indices', 'metals', 'energies', 'crypto', 'stocks'];
+
+function catCollect() {
+  var out = { currencies: $('cat-currencies').value, classes: {} };
+  CAT_CLASSES.forEach(function (c) { out.classes[c] = $('cat-' + c).value; });
+  return out;
+}
+
+function catDirty() {
+  return CAT.base !== null && JSON.stringify(catCollect()) !== CAT.base;
+}
+
+function catFill(live) {
+  $('cat-currencies').value = live.currencies;
+  CAT_CLASSES.forEach(function (c) { $('cat-' + c).value = (live.classes || {})[c] || ''; });
+  CAT.base = JSON.stringify(catCollect());
+  catShowErrors({});
+}
+
+function catShowErrors(errors) {
+  ['currencies'].concat(CAT_CLASSES).forEach(function (c) {
+    $('cat-err-' + c).textContent = errors[c] || '';
+  });
+}
+
+var catBusy = false;
+function pollCatalog() {
+  if (catBusy || !window.pywebview || S.page !== 'settings') return;
+  catBusy = true;
+  api().catalog_state().then(function (live) {
+    catBusy = false;
+    CAT.live = live;
+    var key = JSON.stringify(live);
+    if (CAT.base === null || (!catDirty() && key !== CAT.serverKey)) {
+      catFill(live);
+      CAT.serverKey = key;
+    }
+    $('cat-save').textContent = CAT.saving ? 'Saving…' : 'Save catalog';
+    $('cat-save').disabled = CAT.saving;
+    $('cat-revert').disabled = CAT.saving;
+  }, function () { catBusy = false; });
+}
+
+function catSaveFlow() {
+  if (CAT.saving || !CAT.live) return;
+  CAT.saving = true;
+  var held = catCollect();
+  api().catalog_save(held.currencies, held.classes).then(function (r) {
+    CAT.saving = false;
+    if (!r.ok) {
+      catShowErrors(r.errors || {});
+      if (r.message) toast(r.message, 'bad');
+      pollCatalog();
+      return;
+    }
+    toast(r.message, 'ok');
+    CAT.base = null; // the next answer refills from what was saved
+    pollCatalog();
+  }, function () {
+    CAT.saving = false;
+    toast('The engine did not answer; try again.', 'bad');
+    pollCatalog();
+  });
+}
+
 var cfgCheckTimer = null;
 function cfgChanged() {
   cfgShowErrors({});
@@ -5093,6 +5163,11 @@ function wire() {
     });
   });
   $('cfg-save').addEventListener('click', function () { saveSettingsFlow(); });
+  $('cat-save').addEventListener('click', function () { catSaveFlow(); });
+  $('cat-revert').addEventListener('click', function () { if (CAT.live) catFill(CAT.live); });
+  ['currencies'].concat(CAT_CLASSES).forEach(function (c) {
+    $('cat-' + c).addEventListener('input', function () { catShowErrors({}); });
+  });
   $('cfg-revert').addEventListener('click', revertSettingsFlow);
 
   // --- terminal detail page ---
@@ -5219,6 +5294,8 @@ function start() {
   setInterval(pollHistory, 2000);
   setInterval(pollSetups, 1000);
   setInterval(pollSettings, 1000);
+  // The catalog changes rarely and by hand; two seconds notices another window's save.
+  setInterval(pollCatalog, 2000);
   setInterval(pollTdetail, 1000);
   // The log dock sits under every page, so its poll follows being open, not the page;
   // two seconds is the TUI log page's own pace.

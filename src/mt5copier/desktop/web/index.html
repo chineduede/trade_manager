@@ -546,6 +546,50 @@
           </div>
         </section>
 
+        <section aria-label="Symbol catalog" class="panel cfg-card">
+          <div class="panel-head">
+            <h2>Symbol catalog</h2>
+            <span class="muted small">which asset class each symbol is, for guard rules like Max lots by asset class — shared by every profile</span>
+          </div>
+          <div class="field">
+            <label for="cat-currencies" class="flabel">Currencies</label>
+            <textarea id="cat-currencies" class="cat-list cat-one" rows="1" spellcheck="false" autocomplete="off"></textarea>
+            <span class="field-note muted">three-letter codes, separated by spaces or commas · any pair of two known currencies reads as forex, crosses included</span>
+            <span class="field-note red" id="cat-err-currencies"></span>
+          </div>
+          <div class="field">
+            <label for="cat-indices" class="flabel">Indices</label>
+            <textarea id="cat-indices" class="cat-list" rows="2" spellcheck="false" autocomplete="off"></textarea>
+            <span class="field-note red" id="cat-err-indices"></span>
+          </div>
+          <div class="field">
+            <label for="cat-metals" class="flabel">Metals</label>
+            <textarea id="cat-metals" class="cat-list" rows="2" spellcheck="false" autocomplete="off"></textarea>
+            <span class="field-note red" id="cat-err-metals"></span>
+          </div>
+          <div class="field">
+            <label for="cat-energies" class="flabel">Energies</label>
+            <textarea id="cat-energies" class="cat-list" rows="2" spellcheck="false" autocomplete="off"></textarea>
+            <span class="field-note red" id="cat-err-energies"></span>
+          </div>
+          <div class="field">
+            <label for="cat-crypto" class="flabel">Crypto</label>
+            <textarea id="cat-crypto" class="cat-list" rows="2" spellcheck="false" autocomplete="off"></textarea>
+            <span class="field-note red" id="cat-err-crypto"></span>
+          </div>
+          <div class="field">
+            <label for="cat-stocks" class="flabel">Stocks</label>
+            <textarea id="cat-stocks" class="cat-list" rows="2" spellcheck="false" autocomplete="off"></textarea>
+            <span class="field-note red" id="cat-err-stocks"></span>
+          </div>
+          <span class="field-note muted">base names, as the master writes them without broker decoration · a symbol in no list counts as “everything else” · every guard note names the class it chose, so a misfiled symbol shows itself</span>
+          <div id="cat-foot">
+            <span class="toolbar-space"></span>
+            <button type="button" id="cat-revert" class="plain-btn">Revert</button>
+            <button type="button" id="cat-save" class="primary-btn">Save catalog</button>
+          </div>
+        </section>
+
         <section aria-label="Save" class="panel" id="cfg-foot-panel">
           <div id="cfg-foot">
             <div id="cfg-foot-said">
@@ -950,7 +994,7 @@
           <dt>News</dt><dd>the week's Forex Factory releases, and what the news rule will do about each one — close or breakeven copies minutes before the release, if the rule is on.</dd>
           <dt>History</dt><dd>one card per copied trade with every step under it: placed, filled, changed, closed, and anything a guard did along the way. Money stays in the terminal — no P/L here, on purpose.</dd>
           <dt>Setups</dt><dd>saved arrangements: who copies from whom, each terminal's account and settings. Loading puts one back; it never turns live trading on by itself.</dd>
-          <dt>Settings</dt><dd>the copier's own switches, for every terminal: what the profile is, dry run or live, connection timings. A save lands whole or not at all. The timings are the machine's and shared by every profile; the rest is the profile's own.</dd>
+          <dt>Settings</dt><dd>the copier's own switches, for every terminal: what the profile is, dry run or live, connection timings. A save lands whole or not at all. The timings are the machine's and shared by every profile; the rest is the profile's own. The symbol catalog — which asset class each symbol is, for guard rules that care — also lives here, shared by every profile.</dd>
         </dl>
       </section>
 

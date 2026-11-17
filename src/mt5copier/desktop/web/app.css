@@ -202,6 +202,16 @@ input, select {
   width: 100%;
 }
 select { font-family: var(--mono); font-size: 13.5px; padding: 0 10px; }
+textarea.cat-list {
+  min-height: 64px; padding: 10px 12px; resize: vertical;
+  border-radius: 8px; border: 1px solid var(--border);
+  background: var(--panel-raise); color: var(--fg);
+  font-family: var(--mono); font-size: 13.5px; line-height: 1.55;
+  width: 100%;
+}
+textarea.cat-list.cat-one { min-height: 44px; }
+#cat-foot { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+
 input.accent-blue { border-left: 3px solid var(--blue); }
 input.accent-red { border-left: 3px solid var(--red); }
 input.accent-green { border-left: 3px solid var(--green); }
