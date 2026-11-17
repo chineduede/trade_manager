@@ -127,7 +127,7 @@ def test_saving_words_the_row_and_marks_it_current(tmp_path: Path) -> None:
     assert "already saved" in again["message"]
 
 
-def test_nothing_to_save_without_a_master_or_in_a_direct_profile(tmp_path: Path) -> None:
+def test_nothing_to_save_without_a_master_or_without_slaves_direct(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     cfg.set_role(T_M, Role.UNASSIGNED)
     api, _ = _api(cfg)
@@ -137,11 +137,74 @@ def test_nothing_to_save_without_a_master_or_in_a_direct_profile(tmp_path: Path)
     assert "no master" in refused["message"]
 
     direct = _cfg(tmp_path, mode=AppMode.TRADING)
+    direct.set_role(T_A, Role.UNASSIGNED)
+    direct.set_role(T_B, Role.UNASSIGNED)
     api, _ = _api(direct)
+    assert api.setups_state()["now"] is None
+    refused = api.setup_save("anything")
+    assert refused["ok"] is False
+    assert "no slaves" in refused["message"]
+
+
+def test_a_direct_profile_saves_a_masterless_setup(tmp_path: Path) -> None:
+    direct = _cfg(tmp_path, mode=AppMode.TRADING)
+    api, _ = _api(direct)
+    assert api.setup_save("eval week")["ok"] is True
     out = api.setups_state()
     assert out["direct"] is True
-    assert out["now"] is None
-    assert api.setup_save("anything")["ok"] is False
+    assert out["current"] == "eval week"
+    assert out["now"].startswith("trades directly, 2 slaves")
+    (row,) = out["setups"]
+    assert row["master"] == "trades directly"
+    assert row["slaves"] == "FTMO · 51234, E8 · 20481"
+    assert row["problems"] == []
+    saved = api._setups.setups["eval week"]
+    assert saved.master is None and saved.direct
+    assert set(saved.accounts) == {T_A, T_B}, "the virtual master has no account to keep"
+
+
+def test_a_setup_loads_only_into_its_own_mode(tmp_path: Path) -> None:
+    # A direct setup offered to a copy profile, and the other way around: each is refused
+    # with the way out named, on the row and at the load.
+    direct = _cfg(tmp_path, mode=AppMode.TRADING)
+    api, _ = _api(direct)
+    api.setup_save("eval week")
+    doc = api._setups
+
+    copying = _cfg(tmp_path)
+    api, _ = _api(copying)
+    api._setups.setups.update(doc.setups)
+    api.setup_save("copy week")
+    (eval_row,) = [r for r in api.setups_state()["setups"] if r["name"] == "eval week"]
+    assert any("trades directly" in p for p in eval_row["problems"])
+    refused = api.setup_load_ask("eval week")
+    assert refused["ok"] is False and "direct trading" in refused["message"]
+
+    direct2 = _cfg(tmp_path, mode=AppMode.TRADING)
+    api, _ = _api(direct2)
+    api._setups.setups.update(doc.setups)
+    api._setups.setups["copy week"] = setups_mod.capture(copying) or doc.setups["eval week"]
+    (copy_row,) = [r for r in api.setups_state()["setups"] if r["name"] == "copy week"]
+    assert any("copies a master" in p for p in copy_row["problems"])
+    refused = api.setup_load_ask("copy week")
+    assert refused["ok"] is False and "copying" in refused["message"]
+
+
+def test_loading_a_direct_setup_restores_slaves_and_copying(tmp_path: Path) -> None:
+    direct = _cfg(tmp_path, mode=AppMode.TRADING)
+    api, engine = _api(direct)
+    api.setup_save("eval week")
+    # Drift: one slave unassigned, copying off.
+    direct.set_role(T_B, Role.UNASSIGNED)
+    direct.copying_enabled = False
+    ask = api.setup_load_ask("eval week")
+    assert ask["ok"] is True
+    assert ask["changes"].startswith("trades directly, 2 slaves")
+    done = api.setup_load("eval week", None, False)
+    assert done["ok"] is True
+    assert direct.terminals[T_B].role is Role.SLAVE
+    assert direct.copying_enabled is True
+    assert ("sync",) in engine.calls
 
 
 def test_rename_and_delete_keep_the_file_honest(tmp_path: Path) -> None:

@@ -2070,7 +2070,11 @@ class DesktopApi:
     def _setup_describe(self, setup: Setup) -> str:
         """The roles a setup puts in place, as the change a confirmation names."""
         n = len(setup.slaves)
-        said = f"master {self._setup_on_account(setup, setup.master)}, "
+        said = (
+            "trades directly, "
+            if setup.master is None
+            else f"master {self._setup_on_account(setup, setup.master)}, "
+        )
         said += f"{n} slave{'' if n == 1 else 's'}"
         said += f" ({self._setup_slaves_text(setup)})" if n else ""
         said += ", copying " + ("on" if setup.copying else "off")
@@ -2110,7 +2114,9 @@ class DesktopApi:
         rows = [
             {
                 "name": name,
-                "master": self._setup_on_account(s, s.master),
+                "master": "trades directly"
+                if s.master is None
+                else self._setup_on_account(s, s.master),
                 "slaves": self._setup_slaves_text(s),
                 "copying": s.copying,
                 "dryRun": s.dry_run,
@@ -2131,10 +2137,10 @@ class DesktopApi:
 
     def _captured_or_why(self) -> Setup | str:
         """The roles in place now as a setup to save, or why there is nothing to save."""
-        if self._cfg.mode is AppMode.TRADING:
-            return "this profile trades directly; setups are a copy-mode thing"
         live = setups_mod.capture(self._cfg, self._engine.logins())
         if live is None:
+            if self._cfg.mode is AppMode.TRADING:
+                return "no slaves are assigned: drag terminals into the SLAVES zone first"
             return "no master is assigned: drag one into the MASTER zone before saving a setup"
         return live
 
@@ -2208,12 +2214,6 @@ class DesktopApi:
         if self._setup_busy:
             return {"ok": False, "message": "a setup is already loading; wait for it to finish"}
         cfg = self._cfg
-        if cfg.mode is AppMode.TRADING:
-            # problems() says this too, but with the TUI's key in the sentence.
-            return {
-                "ok": False,
-                "message": "this profile trades directly; setups are a copy-mode thing",
-            }
         logins = self._engine.logins()
         found = setups_mod.problems(setup, cfg, logins)
         if found:
@@ -2305,8 +2305,6 @@ class DesktopApi:
         setup = self._setups.setups.get(name)
         if setup is None:
             return refused("that setup is gone")
-        if cfg.mode is AppMode.TRADING:
-            return refused("this profile trades directly; setups are a copy-mode thing")
         logins = self._engine.logins()
         found = setups_mod.problems(setup, cfg, logins)
         if found:
