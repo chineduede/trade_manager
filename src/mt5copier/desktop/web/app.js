@@ -2654,6 +2654,28 @@ function openRuleForm(type, ruleId) {
     body.className = 'gform';
     var inputs = {};
 
+    if (f.catalog) {
+      // The rule reads the shared symbol catalog, so the form says where that is edited
+      // before the fields, not only in the sentence below the fold.
+      var catNote = document.createElement('div');
+      catNote.className = 'field-note muted gform-catnote';
+      catNote.appendChild(document.createTextNode(
+        'Which symbol is in which class comes from the shared symbol catalog — '));
+      var catLink = document.createElement('button');
+      catLink.type = 'button';
+      catLink.className = 'linklike';
+      catLink.textContent = 'edit it on Settings';
+      catLink.addEventListener('click', function () {
+        closeModal();
+        showPage('settings');
+        var card = document.querySelector('#page-settings section[aria-label="Symbol catalog"]');
+        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+      catNote.appendChild(catLink);
+      catNote.appendChild(document.createTextNode('.'));
+      body.appendChild(catNote);
+    }
+
     f.fields.forEach(function (field) {
       var wrap = document.createElement('div');
       wrap.className = 'field gform-field';

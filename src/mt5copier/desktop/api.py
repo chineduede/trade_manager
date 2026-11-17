@@ -1525,6 +1525,7 @@ class DesktopApi:
             "blurb": kind.blurb,
             "enabled": rule.enabled,
             "fields": fields,
+            "catalog": kind.lots_cap,
         }
 
     def _checked_params(

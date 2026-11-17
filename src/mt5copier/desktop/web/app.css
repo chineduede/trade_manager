@@ -259,6 +259,16 @@ input.accent-green { border-left: 3px solid var(--green); }
 }
 .dd-menu button:hover { background: var(--hairline); }
 
+/* In the rule form the menu keeps to the field's own width and wraps long choices,
+   instead of growing past the modal's edge. */
+.gform-dd .dd-menu { left: 0; right: 0; min-width: 0; }
+.gform-dd .dd-menu button {
+  white-space: normal; height: auto; min-height: 40px;
+  padding: 9px 12px; line-height: 1.4;
+}
+.gform-catnote { margin: -2px 0 4px; }
+.gform-catnote .linklike { font-size: inherit; }
+
 .combo { display: flex; gap: 8px; }
 .combo input { flex: 1 1 auto; min-width: 0; }
 
