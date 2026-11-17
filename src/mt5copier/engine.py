@@ -1021,6 +1021,33 @@ class Engine:
             self._feed_tid = chosen
         return chosen
 
+    def _feed_decor(self) -> tuple[str, str, dict[str, str]]:
+        """The feed broker's configured decoration, for taking its own names back to clean
+        ones: prefix, suffix, and its symbol map reversed (broker name -> clean name).
+        Caller must hold the lock."""
+        tid = self._feed_tid
+        cfg = self._cfg.terminals.get(tid) if tid is not None else None
+        if cfg is None:
+            return "", "", {}
+        back = {v.upper(): k for k, v in cfg.symbol_map.items()}
+        return cfg.symbol_prefix, cfg.symbol_suffix, back
+
+    def feed_decor(self) -> tuple[str, str, dict[str, str]]:
+        """The feed's decoration for callers cleaning its catalog, like the ticket's search."""
+        with self._lock:
+            return self._feed_decor()
+
+    def _feed_clean(self, symbol: str) -> str:
+        """A symbol as the book keys it: upper-cased, the feed broker's decoration taken off.
+
+        The book, the watch and every slave's resolution all start from the clean name; a
+        name that enters as the feed lists it -- typed into the ticket, or picked before the
+        search cleaned them -- would quote and fill on the feed alone while every other slave
+        refuses it as not found. Caller must hold the lock, after the feed is picked."""
+        prefix, suffix, back = self._feed_decor()
+        name = symbol.strip()
+        return (back.get(name.upper()) or undecorate(name, prefix, suffix)).upper()
+
     def _feed_quotes(self) -> tuple[str | None, dict[str, tuple[float, float]]]:
         """The feed's latest prices by clean symbol name. Caller must hold the lock."""
         tid = self._pick_feed()
@@ -1080,7 +1107,7 @@ class Engine:
         """Tell the feed to quote one extra symbol: the one on the ticket, before anything is
         placed on it, so the person sees a live price while they type."""
         with self._lock:
-            self._watch_extra = symbol.strip().upper() if symbol else None
+            self._watch_extra = self._feed_clean(symbol) if symbol else None
 
     def direct_quote(self, symbol: str) -> Quote | None:
         """The feed's current price for one clean symbol name, or None while unknown."""
@@ -1089,7 +1116,7 @@ class Engine:
             snap = self._snapshots.get(tid) if tid is not None else None
             if snap is None:
                 return None
-            wanted = symbol.strip().upper()
+            wanted = self._feed_clean(symbol)
             return next((q for q in snap.quotes if q.symbol == wanted), None)
 
     def direct_feed(self) -> str | None:
@@ -1117,10 +1144,10 @@ class Engine:
         with self._lock:
             if self._virtual is None:
                 return None
-            symbol = symbol.strip().upper()
             tid = self._pick_feed()
             if tid is None:
                 return None
+            symbol = self._feed_clean(symbol)
             key = (symbol, timeframe, tid)
             now = time.monotonic()
             if key != self._rates_asked or now - self._rates_asked_at >= self._RATES_REFRESH_S:
@@ -1220,13 +1247,14 @@ class Engine:
             if book is None:
                 return self._NOT_TRADING
             _, quotes = self._feed_quotes()
+            symbol = self._feed_clean(symbol)
             return book.open_market(
                 symbol,
                 direction,
                 lots,
                 sl,
                 tp,
-                quotes.get(symbol.strip().upper()),
+                quotes.get(symbol),
                 now=time.time(),
             )
 
@@ -1246,6 +1274,7 @@ class Engine:
             if book is None:
                 return self._NOT_TRADING
             _, quotes = self._feed_quotes()
+            symbol = self._feed_clean(symbol)
             return book.place_pending(
                 symbol,
                 order_type,
@@ -1253,7 +1282,7 @@ class Engine:
                 entry,
                 sl,
                 tp,
-                quotes.get(symbol.strip().upper()),
+                quotes.get(symbol),
                 expiration_utc=expiration_utc,
                 now=time.time(),
             )

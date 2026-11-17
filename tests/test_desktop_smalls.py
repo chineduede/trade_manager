@@ -15,11 +15,15 @@ from mt5copier.history import Step
 class _Engine:
     def __init__(self) -> None:
         self.symbols: tuple[str, ...] = ()
+        self.decor: tuple[str, str, dict[str, str]] = ("", "", {})
         self.problems: list[Step] = []
         self.calls: list[tuple[str, Any]] = []
 
     def feed_symbols(self) -> tuple[str, ...]:
         return self.symbols
+
+    def feed_decor(self) -> tuple[str, str, dict[str, str]]:
+        return self.decor
 
     def recent_problems(self, since: float) -> list[Step]:
         return [s for s in self.problems if s.ts >= since]
@@ -57,6 +61,19 @@ def test_symbol_search_offers_clean_base_names_prefix_first() -> None:
 def test_symbol_search_is_empty_while_the_feed_has_pushed_nothing() -> None:
     api, _ = _api()
     assert api.symbol_search("EUR") == {"symbols": [], "known": 0}
+
+
+def test_symbol_search_takes_the_feeds_configured_decoration_off() -> None:
+    """.FX is not on base_name's common list; only the feed's own settings know it. A name
+    left decorated would place on the feed alone and be refused everywhere else."""
+    api, engine = _api()
+    engine.symbols = ("USDJPY.FX", "XAUUSD.FX", "GOLD", "US30")
+    engine.decor = ("", ".FX", {"GOLD": "XAUUSD"})
+    out = api.symbol_search("")
+    # GOLD reverses through the feed's explicit mapping and lands on the XAUUSD already
+    # listed; US30 carries no decoration and stays itself.
+    assert out["symbols"] == ["USDJPY", "XAUUSD", "US30"]
+    assert api.symbol_search("JPY")["symbols"] == ["USDJPY"]
 
 
 def test_partial_close_checks_the_number_before_the_engine_hears_of_it() -> None:
