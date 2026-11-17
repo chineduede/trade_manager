@@ -663,53 +663,74 @@ function copiesSummary(r) {
 }
 
 function copiesCell(r) {
-  // Each live copy is a link to its own terminal page, straight to the ticket it holds
-  // there; copies with nothing to visit (closed, unverified, a dry run's) stay as the
-  // summary text the cell always carried.
+  // The summary the cell always carried — "2 live · 1 closed" — now opens a small menu
+  // naming every copy, each live one a link to the ticket it holds on its own terminal.
+  // The row itself stays one line tall.
   var td = document.createElement('td');
-  if (!r.open) {
-    td.className = 'muted';
-    td.textContent = '—';
-    return td;
-  }
-  var c = r.copies || [];
-  var live = c.filter(function (s) { return s.state === 'live' && s.tid && s.ticket; });
   var cp = copiesSummary(r);
-  if (!live.length) {
-    td.className = cp.cls;
-    td.textContent = cp.text;
-    if (cp.title) td.title = cp.title;
+  if (!r.open || !(r.copies || []).length) {
+    td.className = !r.open ? 'muted' : cp.cls;
+    td.textContent = !r.open ? '—' : cp.text;
+    if (r.open && cp.title) td.title = cp.title;
     return td;
   }
-  td.className = 'copies-cell';
-  if (cp.title) td.title = cp.title;
-  live.forEach(function (s, i) {
-    if (i) td.appendChild(document.createTextNode(' '));
-    var link = document.createElement('button');
-    link.type = 'button';
-    link.className = 'linklike copy-link';
-    link.textContent = s.name + ' #' + s.ticket;
-    link.title = 'Open ' + s.name + ' — this copy on its terminal page';
-    link.addEventListener('click', function () {
-      openTerminalDetail(s.tid, 'overview', s.ticket);
-    });
-    td.appendChild(link);
+  td.className = cp.cls;
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'linklike copies-dd';
+  btn.textContent = cp.text + ' ▾';
+  btn.title = 'The copies behind this ticket — each live one links to its terminal page';
+  btn.addEventListener('click', function (ev) {
+    ev.stopPropagation(); // the document's click-anywhere close must not eat the opening
+    openCopiesMenu(r, btn);
   });
-  var closed = 0, unknown = 0;
-  c.forEach(function (s) {
-    if (s.state === 'closed') closed++;
-    else if (s.state !== 'live') unknown++;
-  });
-  if (closed || unknown) {
-    var parts = [];
-    if (closed) parts.push(closed + ' closed');
-    if (unknown) parts.push(unknown + ' ?');
-    var tail = document.createElement('span');
-    tail.className = 'muted';
-    tail.textContent = ' · ' + parts.join(' · ');
-    td.appendChild(tail);
-  }
+  td.appendChild(btn);
   return td;
+}
+
+function openCopiesMenu(r, anchor) {
+  // The card menu's element, reused: same look, same close-anywhere behaviour.
+  var menu = $('ctx-menu');
+  menu.textContent = '';
+  var head = document.createElement('span');
+  head.className = 'menu-head';
+  head.textContent = '#' + r.ticket + ' ' + r.symbol + ' — copies';
+  menu.appendChild(head);
+  (r.copies || []).forEach(function (s) {
+    var word = s.state === 'unknown' ? 'unverified' : s.state;
+    var name = s.name + (s.ticket ? ' #' + s.ticket : '');
+    if (s.state === 'live' && s.tid && s.ticket) {
+      var item = document.createElement('button');
+      item.type = 'button';
+      item.setAttribute('role', 'menuitem');
+      item.textContent = name + ' — ' + word;
+      item.addEventListener('click', function () {
+        closeMenu();
+        openTerminalDetail(s.tid, 'overview', s.ticket);
+      });
+      menu.appendChild(item);
+    } else {
+      var note = document.createElement('span');
+      note.className = 'menu-note';
+      note.textContent = name + ' — ' + word;
+      menu.appendChild(note);
+    }
+  });
+  menu.hidden = false;
+  var at = anchor.getBoundingClientRect();
+  var w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.max(8, Math.min(at.left, window.innerWidth - w - 8)) + 'px';
+  var y = at.bottom + 6;
+  if (y + h > window.innerHeight - 8) y = Math.max(8, at.top - h - 6);
+  menu.style.top = y + 'px';
+}
+
+function jumpToBook(ticket) {
+  // The way back: a copy's row on a terminal page returns to its ticket in the book.
+  S.focusBookTicket = ticket;
+  bookDrawn = ''; // the rows may be unchanged; the flash still needs a redraw
+  showPage('trading');
+  if (S.live) renderBook();
 }
 
 function renderBook() {
@@ -726,10 +747,15 @@ function renderBook() {
   var body = $('book-body');
   body.textContent = '';
   var seen = {};
+  var focused = null;
   rows.forEach(function (r) {
     seen[r.ticket] = true;
     var tr = document.createElement('tr');
     if (bookTickets && !bookTickets[r.ticket]) tr.className = 'row-new';
+    if (S.focusBookTicket && r.ticket === S.focusBookTicket) {
+      tr.className = 'row-new'; // arrived by the back-link: flash as a new row would
+      focused = tr;
+    }
     function cell(text, cls) {
       var td = document.createElement('td');
       if (cls) td.className = cls;
@@ -793,6 +819,8 @@ function renderBook() {
     body.appendChild(tr);
   });
   bookTickets = seen;
+  if (focused && focused.scrollIntoView) focused.scrollIntoView({ block: 'center' });
+  S.focusBookTicket = 0; // one flash; a later redraw must not hunt again
 }
 
 // --- talking to the engine -----------------------------------------------------------------
@@ -4561,7 +4589,7 @@ function renderOvPositions(live) {
       var be = r.breakeven;
       ovCell(tr, be ? be.text : '', be && be.tone ? be.tone : '');
     }
-    ovCell(tr, r.link.text, r.link.tone || '');
+    tr.appendChild(ovLinkCell(r));
     body.appendChild(tr);
   });
   if (focusSeen) {
@@ -4582,6 +4610,26 @@ function renderOvPositions(live) {
     });
     body.appendChild(totalRow);
   }
+}
+
+function ovLinkCell(r) {
+  // "Copy of #25": in a direct profile the #25 leads back to the Trading page's book,
+  // the mirror of the book's copies menu leading here. A copy-mode profile's master
+  // ticket lives in a real terminal, so there is nowhere in the app to jump to.
+  var td = document.createElement('td');
+  if (r.copyOf && S.live && S.live.direct) {
+    var lk = document.createElement('button');
+    lk.type = 'button';
+    lk.className = 'linklike';
+    lk.textContent = r.link.text;
+    lk.title = 'Back to this ticket on the Trading page';
+    lk.addEventListener('click', function () { jumpToBook(r.copyOf); });
+    td.appendChild(lk);
+  } else {
+    td.textContent = r.link.text;
+    td.className = r.link.tone || '';
+  }
+  return td;
 }
 
 function renderOvOrders(live) {
@@ -4623,7 +4671,7 @@ function renderOvOrders(live) {
     ovCell(tr, ovPrice(r.sl, r.digits), 'num' + (r.sl ? '' : ' muted'));
     ovCell(tr, ovPrice(r.tp, r.digits), 'num' + (r.tp ? '' : ' muted'));
     ovCell(tr, r.placed || '—', 'num muted');
-    if (slave && r.link) ovCell(tr, r.link.text, r.link.tone || '');
+    if (slave && r.link) tr.appendChild(ovLinkCell(r));
     body.appendChild(tr);
   });
 }
