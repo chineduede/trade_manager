@@ -48,12 +48,16 @@ class _WebHandler(SimpleHTTPRequestHandler):
     pywebview's built-in server reuses one port (42001), and with the profile's
     persistent WebView2 storage that stable origin let the browser's disk cache serve
     old app.js and app.css across restarts -- the window ran superseded code while the
-    files on disk were current (seen live: transferSize 0 on both). ``no-cache`` makes
-    every load revalidate against disk, a localhost 304 when nothing changed.
+    files on disk were current (seen live: transferSize 0 on both). ``no-cache`` was not
+    enough: entries stored before it carried heuristic freshness and were served without
+    ever asking the server again, so they never saw the new header (seen live too: a
+    restarted window kept a superseded Settings page while this server already served the
+    current one). ``no-store`` keeps these files out of the cache altogether -- they are
+    a few local kilobytes, and a cache can only ever make them wrong.
     """
 
     def end_headers(self) -> None:
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
         super().end_headers()
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
