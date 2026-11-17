@@ -1517,6 +1517,99 @@ are the design, not a limitation waiting to be lifted.
   `order_calc_profit` answering wrongly before the symbol's prices were ready (unconfirmed);
   either a margin limit or a sanity check on that number would have caught it before sending.
   Until then, a per-slave **Max lot** is the backstop.
+
+  *Lot cap by asset class — designed with the user 2026-11-16, not yet built.* Firms cap lot
+  size differently by what is traded (2 lots on forex, 1 on indices, …), so one new rule, **Max
+  lots by asset class**: a lots ceiling per class — forex, indices, metals, energies, crypto,
+  stocks, and everything else — 0/empty meaning no cap for that class, with the usual
+  warn/decline/shrink on breach, **default shrink** (clamp to the cap, as `max_lot` already
+  behaves). **Scope is a parameter of the same rule**, the user's call: *each new trade on its
+  own*, or *all open lots of the class together, the new trade included* (like Total margin in
+  use).
+  - **Classification comes from a shared, profile-global symbol catalog — the user's call,
+    2026-11-16 — not a heuristic baked into code.** A new shared store (`shared\`, written like
+    the others: `shared_lock` + `write_json_atomic`, later-wins merge) holding: a **currency
+    list** (majors seeded — USD EUR GBP JPY CHF CAD AUD NZD — with SGD and any others addable),
+    from which *any pair of two known currencies is forex*, crosses included; and a **symbol
+    list per other class** (common indices, metals, energies, cryptos seeded; stocks empty),
+    user-extendable. A symbol in no list falls into *everything else*, which has its own cap.
+  - **Broker decoration is translated before lookup** — the user flagged this. The catalog
+    speaks base names (`US30`, `EURUSD`); the engine classifies the *master/base* symbol, and
+    for the total-open scope undecorates a slave's own position symbols through that terminal's
+    prefix, suffix and renames before summing.
+  - **Both scopes reduce to one number at dispatch**, so no rule code or catalog enters the
+    worker: per-trade scope sends the class's cap; total scope sends the room left (cap minus
+    the class's open lots on the slave's snapshot). Either travels on the command as a lots
+    ceiling beside `max_lot`/`max_margin`, and the executor clamps, refuses or warns as it
+    already does for margin. The guard note and log always name the class chosen ("US30 →
+    indices, capped at 1.00"), so a misfiled symbol is visible, never silent.
+  - **The catalog is edited as a general setting** (it is true for every profile), proposed:
+    its own card on the Settings page, with the rule's form linking to it; the rule itself
+    stays per account on the Guards page like every other rule.
+  - On the page, like Margin per trade, there is nothing to measure until a trade comes: the
+    row reads OK with the caps as its detail ("forex ≤ 2.00 · indices ≤ 1.00 lots a trade");
+    the total-open scope measures like Total margin (used = the class's open lots).
+
+  *No hedging — designed with the user 2026-11-16, not yet built.* Firms ban holding opposite
+  exposure, on one account or across accounts (same firm, or grouped firms), and flag a close
+  followed by the opposite entry. One new rule, **No hedging**, gate-checked like the news
+  window (declined before sizing, visible in dry run; warn/decline only — shrink means
+  nothing here):
+  - **What counts as a hedge is a parameter, both offered** (the user's call): *same
+    instrument, opposite direction* (base name via the asset-class catalog, so decoration and
+    renames wash out — the only test available to indices, crypto, energies); or *any shared
+    currency leg, opposite sign* — AUDCAD long is +AUD −CAD, USDCAD short is −USD +CAD, the
+    CAD legs collide. Signed legs come from `news.symbol_currencies`' pair reading plus the
+    catalog's currency list (which makes XAU/XAG legs too). Leg mode is strict by
+    construction — EURUSD long + USDJPY long collide on USD exactly as the AUDCAD example
+    does — so the decline always names the colliding leg and the trade it collides with.
+  - **Scope is a parameter**: this account · its group · every account on this machine. The
+    group is a **free-typed firm tag on prop containers and loose accounts, edited on the
+    Prop accounts tab** — firm-neutral, nothing ships named.
+  - **Period**: a closed trade still counts against opposite entries for N minutes,
+    **default 10** (0 = only while open), for the close-then-flip pattern.
+  - **A shared exposure book carries it across instances** — the new plumbing. Each instance
+    publishes, per account key, its accounts' open signed legs and recent closes to
+    `exposure.json` in `shared\` (snapshot cadence, `shared_lock` + atomic write; entries
+    persist when an app closes — positions do not vanish with the window, so staleness is
+    shown, never dropped). `GuardBook` takes it injected as the news calendar is; the rule
+    contributes held legs to the verdict the way `verdict.news` carries currencies, and the
+    gate refuses the conflicting OPEN/PLACE. **The engine also writes a short-TTL intent
+    entry at dispatch, before sending** (the user's call), shrinking the two-instances-same-
+    second race from snapshot cadence to near zero. Still a safety net, never a guarantee —
+    only the firm's server sees everything at once, and the page says so.
+  - **The hard limit, stated plainly in the UI**: the copier gates copies and direct-ticket
+    trades. A manual trade on a master in another instance cannot be stopped — the guarded
+    slave just refuses to copy it. Protection is per guarded account: the account holding
+    AUDCAD needs no rule for another account's rule to see its exposure.
+- **Prop accounts (containers) — designed with the user 2026-11-16, planned, not built.** A
+  prop firm closes the phase-1 account when it is passed and issues a new login for phase 2,
+  and again for funded — losing every guard and setting with it. A **prop account** is a named
+  container that raw accounts (`login@server`) link into: an **ordered chain of stages**,
+  newest = current, kept forever ("stage 1 · closed"), so a cross-stage timeline is possible
+  later. Linking a new raw account makes it the current stage and it **inherits the
+  container's guards**.
+  - **One aliasing layer, not a copy.** Everything account-owned already funnels through
+    `account_key()` (`config.py`) into three shared stores: `guards.json`,
+    `guard_state.json`, `account_names.json`. A new shared store `prop_accounts.json` (same
+    `shared_lock` + atomic-write discipline, so it is profile-global and crosses app
+    instances) maps raw keys to containers; **guards resolve through it** — a linked
+    account's rules are read and written under the container's identity, so stage 2 is held
+    to *the same rules object*, not a snapshot of it. Unlinked accounts behave exactly as
+    today, and the standing rule stays the default: a terminal logged into a new challenge
+    starts with no guards — linking into a container is the explicit opt-in to inherit.
+  - **What carries, the user's call 2026-11-16: the rules and the initial balance** (editable
+    at link time — a funded account can differ in size). **Guard state never carries**:
+    latches and day-start equity stay keyed by the raw account, so a phase-1 breach cannot
+    hold back a funded account that never breached.
+  - **Terminal copy settings** already survive the same-terminal path (account switch changes
+    only the login). For a new stage on a *different* terminal, linking **offers** to copy
+    the previous stage's terminal settings, reusing the copy-settings-from machinery;
+    skippable.
+  - **UI: its own nav tab** ("Prop accounts"), the user's call: the containers with their
+    stage chains, create/rename, link/unlink an account, the current stage marked; the Guards
+    page header on a linked account says whose rules it is reading. Being a shared store, the
+    tab shows the same containers in every profile and instance.
 - **Post trades to Telegram.** Notify a channel/bot when a copy opens, closes, or modifies.
   Read-only with respect to trading — it must never become a control surface, nothing it does
   can feed back into a trading decision — so it's lower-risk than the two above, but still needs
