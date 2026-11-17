@@ -203,7 +203,8 @@ input, select {
 }
 select { font-family: var(--mono); font-size: 13.5px; padding: 0 10px; }
 textarea.cat-list {
-  min-height: 64px; padding: 10px 12px; resize: vertical;
+  min-height: 64px; padding: 10px 12px;
+  resize: none; overflow: hidden; /* grown to its content by the page: no inner scrolling */
   border-radius: 8px; border: 1px solid var(--border);
   background: var(--panel-raise); color: var(--fg);
   font-family: var(--mono); font-size: 13.5px; line-height: 1.55;
@@ -211,6 +212,8 @@ textarea.cat-list {
 }
 textarea.cat-list.cat-one { min-height: 44px; }
 #cat-foot { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+#cat-foot .plain-btn, #cat-foot .primary-btn { white-space: nowrap; flex: 0 0 auto; }
+#cat-back { flex: 1 1 auto; min-width: 0; text-align: left; }
 
 input.accent-blue { border-left: 3px solid var(--blue); }
 input.accent-red { border-left: 3px solid var(--red); }

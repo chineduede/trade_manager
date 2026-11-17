@@ -2551,11 +2551,10 @@ class DesktopApi:
         lists: dict[str, list[str]] = {}
         for clas in LISTED:
             names = tokens(str((classes or {}).get(clas, "")))
-            long = [t for t in names if len(t) > 32]
-            if long:
-                errors[clas] = "too long for a symbol name: " + ", ".join(
-                    t[:12] + "…" for t in long[:3]
-                )
+            # A base name: letters and digits, with the punctuation broker names carry.
+            odd = [t for t in names if not re.fullmatch(r"[A-Za-z0-9._#&-]{1,32}", t)]
+            if odd:
+                errors[clas] = "not a symbol name: " + ", ".join(t[:16] for t in odd[:3])
             lists[clas] = names
         if errors:
             return {"ok": False, "errors": errors, "message": "Correct the marked lists."}

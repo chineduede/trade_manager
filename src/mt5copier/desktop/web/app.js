@@ -3819,9 +3819,17 @@ function catDirty() {
   return CAT.base !== null && JSON.stringify(catCollect()) !== CAT.base;
 }
 
+function catGrow(el) {
+  // The lists are long and scrolling two visible rows hides what is in a class, so the
+  // field takes the height its content needs.
+  el.style.height = 'auto';
+  el.style.height = el.scrollHeight + 2 + 'px';
+}
+
 function catFill(live) {
   $('cat-currencies').value = live.currencies;
   CAT_CLASSES.forEach(function (c) { $('cat-' + c).value = (live.classes || {})[c] || ''; });
+  ['currencies'].concat(CAT_CLASSES).forEach(function (c) { catGrow($('cat-' + c)); });
   CAT.base = JSON.stringify(catCollect());
   catShowErrors({});
 }
@@ -5228,7 +5236,10 @@ function wire() {
     openRuleForm(r.type, r.ruleId, r);
   });
   ['currencies'].concat(CAT_CLASSES).forEach(function (c) {
-    $('cat-' + c).addEventListener('input', function () { catShowErrors({}); });
+    $('cat-' + c).addEventListener('input', function () {
+      catShowErrors({});
+      catGrow(this);
+    });
   });
   $('cfg-revert').addEventListener('click', revertSettingsFlow);
 
