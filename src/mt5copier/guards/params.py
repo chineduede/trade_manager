@@ -84,6 +84,9 @@ class Param:
     """``(value, words)`` pairs for a CHOICE, in the order they are offered."""
     minimum: float | None = None
     """For a NUMBER: the value must be greater than this."""
+    at_least: float | None = None
+    """For a NUMBER: the value must be at least this -- inclusive, where ``minimum`` is not,
+    for a field whose floor is itself meaningful (a cap where 0 means no cap)."""
     maximum: float | None = None
     """For a NUMBER: the value must be at most this."""
     after: str = ""
@@ -103,6 +106,8 @@ class Param:
                 return None, f"{self.label} must be a number"
             if self.minimum is not None and number <= self.minimum:
                 return None, f"{self.label} must be more than {self.minimum:g}"
+            if self.at_least is not None and number < self.at_least:
+                return None, f"{self.label} must be at least {self.at_least:g}"
             if self.maximum is not None and number > self.maximum:
                 return None, f"{self.label} must be at most {self.maximum:g}"
             return number, None

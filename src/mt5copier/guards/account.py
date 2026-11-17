@@ -10,8 +10,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from ..catalog import Catalog
 from ..news import Calendar
 from ..protocol import Deal, Position, PositionLive, Snapshot
+from ..symbols import undecorate
 from .params import zone_info
 
 _BALANCE = 2
@@ -40,6 +42,11 @@ class AccountView:
     """What this slave's own sizing settings risk on one trade right now, in money."""
     news: Calendar | None = None
     """The news calendar, given only to an account with a news rule."""
+    catalog: Catalog | None = None
+    """The symbol catalog, given only to an account with a rule that reads asset classes."""
+    decor: tuple[str, str, tuple[tuple[str, str], ...]] | None = None
+    """This slave's symbol decoration -- ``(prefix, suffix, (master, slave) renames)`` -- so a
+    position's broker name can be read back to the base name the catalog speaks."""
 
     @classmethod
     def of(
@@ -50,6 +57,8 @@ class AccountView:
         initial_balance: float | None,
         sizing_risk: float | None = None,
         news: Calendar | None = None,
+        catalog: Catalog | None = None,
+        decor: tuple[str, str, tuple[tuple[str, str], ...]] | None = None,
     ) -> AccountView:
         return cls(
             now=now,
@@ -65,7 +74,22 @@ class AccountView:
             initial_balance=initial_balance,
             sizing_risk=sizing_risk,
             news=news,
+            catalog=catalog,
+            decor=decor,
         )
+
+    def base_symbol(self, name: str) -> str:
+        """A position's broker name read back to the base the catalog speaks: an explicit
+        rename reversed first (it cannot be guessed from the name), then the configured
+        prefix and suffix taken off. Without the decoration, the name as it stands -- the
+        catalog's own matching is already forgiving about common decorations."""
+        if self.decor is None:
+            return name
+        prefix, suffix, renames = self.decor
+        for master, slave in renames:
+            if slave.upper() == name.upper():
+                return master
+        return undecorate(name, prefix, suffix)
 
     def balance_at(self, when: float) -> float | None:
         """The balance at ``when``: today's balance less everything every later deal added.

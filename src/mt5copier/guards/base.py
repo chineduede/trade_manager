@@ -68,10 +68,14 @@ class Rule:
     """For a rule that refuses a new trade with no stop loss."""
     news: ClassVar[bool] = False
     """For the rule that refuses new trades around news, by the symbol's currency."""
+    lots_cap: ClassVar[bool] = False
+    """For the rule that caps a new trade's lots by its symbol's asset class. Checked as each
+    trade is sent, like a ``cap`` rule, but the amount depends on the symbol, so the verdict
+    carries the whole table and the engine reduces it to one number at dispatch."""
 
     @classmethod
     def per_trade(cls) -> bool:
-        return cls.cap is not None or cls.needs_stop or cls.news
+        return cls.cap is not None or cls.needs_stop or cls.news or cls.lots_cap
 
     def sentence(self, p: dict[str, ParamValue], currency: str) -> str:
         """The rule as it is set, in words, for the guards page."""

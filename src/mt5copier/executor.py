@@ -61,6 +61,7 @@ from .sizing import (
     SizingFailure,
     SizingResult,
     SymbolFacts,
+    fit_lots,
     fit_margin,
     fit_total_margin,
     lots_for_master_multiple,
@@ -199,7 +200,7 @@ class Executor:
 
         lots = sizing.lots
         notes: tuple[GuardNote, ...] = ()
-        for fit_to in (self._fit_margin, self._fit_total_margin):
+        for fit_to in (self._fit_lots, self._fit_margin, self._fit_total_margin):
             fit = fit_to(cmd, symbol, facts, lots)
             if fit is None:
                 continue
@@ -220,6 +221,24 @@ class Executor:
             cmd.entry if cmd.op is ActionKind.PLACE else self._market_price(symbol, cmd.direction)
         )
         return self._session.margin_for(cmd.direction, symbol, lots, price) if price else None
+
+    def _fit_lots(
+        self, cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float
+    ) -> MarginFit | None:
+        """:func:`mt5copier.sizing.fit_lots`: the asset-class guard's lots ceiling, already
+        reduced to one number by the engine. None without the cap."""
+        if cmd.max_lots is None:
+            return None
+        return fit_lots(
+            lots=lots,
+            cap=cmd.max_lots,
+            mode=cmd.lots_cap,
+            symbol=symbol,
+            facts=facts,
+            rule=cmd.lots_rule,
+            rule_id=cmd.lots_rule_id,
+            allowed=cmd.lots_allowed,
+        )
 
     def _fit_margin(
         self, cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float

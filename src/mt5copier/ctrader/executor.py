@@ -47,6 +47,7 @@ from ..sizing import (
     MarginFit,
     SizingResult,
     SymbolFacts,
+    fit_lots,
     fit_margin,
     fit_total_margin,
     lots_for_master_multiple,
@@ -207,7 +208,7 @@ class CTraderExecutor:
         log.info("#%s on %s: %s", cmd.master_ticket, name, sizing.describe())
         lots = sizing.lots
         notes: tuple[GuardNote, ...] = ()
-        for fit_to in (self._fit_margin, self._fit_total_margin):
+        for fit_to in (self._fit_lots, self._fit_margin, self._fit_total_margin):
             fit = await fit_to(cmd, symbol, facts, lots)
             if fit is None:
                 continue
@@ -648,6 +649,24 @@ class CTraderExecutor:
             cmd.commission_per_lot,
         )
         return replace(cmd, tp=tp)
+
+    async def _fit_lots(
+        self, cmd: OrderCommand, symbol: cv.SymbolInfo, facts: SymbolFacts, lots: float
+    ) -> MarginFit | None:
+        """:func:`mt5copier.sizing.fit_lots`: the asset-class guard's lots ceiling, already
+        one number. None without the cap. Async only to sit in the fit loop."""
+        if cmd.max_lots is None:
+            return None
+        return fit_lots(
+            lots=lots,
+            cap=cmd.max_lots,
+            mode=cmd.lots_cap,
+            symbol=symbol.name,
+            facts=facts,
+            rule=cmd.lots_rule,
+            rule_id=cmd.lots_rule_id,
+            allowed=cmd.lots_allowed,
+        )
 
     async def _fit_margin(
         self, cmd: OrderCommand, symbol: cv.SymbolInfo, facts: SymbolFacts, lots: float

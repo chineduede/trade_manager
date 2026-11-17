@@ -530,6 +530,18 @@ class OrderCommand:
     """``"decline"``, ``"shrink"`` or ``"warn"``, as ``margin_cap``."""
     total_margin_rule: str = ""
     total_margin_rule_id: str = ""
+    max_lots: float | None = None
+    """OPEN / PLACE only: the most lots the asset-class guard lets this trade be. Already
+    reduced to one number by the engine -- the class's cap, or what is left of it once the
+    class's open lots are counted -- so the worker needs no catalog. None for no limit."""
+    lots_cap: str = ""
+    """``"decline"``, ``"shrink"`` or ``"warn"``, as ``margin_cap``."""
+    lots_rule: str = ""
+    """The title of the guard behind ``max_lots``, so the worker's answer can name it."""
+    lots_rule_id: str = ""
+    lots_allowed: str = ""
+    """The engine's reading, for the guard note: ``US30 -> indices, capped at 1 lots a
+    trade``. Always names the class, so a misfiled symbol is visible, never silent."""
     to_breakeven: bool = False
     """MODIFY_SLTP on the master only: move its stop to breakeven, past ``entry`` by the
     position's own commission and ``slippage_points``, worked out by the worker. ``sl`` and

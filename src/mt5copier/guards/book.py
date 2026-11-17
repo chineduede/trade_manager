@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .. import shared_data
+from ..catalog import CLASSES, CatalogStore
 from ..logging_setup import get_logger
 from ..news import NewsCalendar
 from ..paths import guard_state_path
@@ -118,6 +119,27 @@ class Cap:
 
 
 @dataclass(frozen=True, slots=True)
+class ClassLotsCap:
+    """One rule's lots ceilings per asset class. The amount a trade is held to depends on its
+    symbol, so the verdict carries the table and the engine reduces it to one number at
+    dispatch -- the class's cap, or for the ``total`` scope what is left of it once the
+    class's open lots are counted off the slave's snapshot."""
+
+    rule_id: str
+    title: str
+    mode: str
+    """``"decline"``, ``"shrink"`` or ``"warn"``."""
+    scope: str
+    """``"each"`` -- each new trade on its own -- or ``"total"`` -- all open lots of the
+    class together, the new trade included."""
+    caps: tuple[tuple[str, float], ...]
+    """``(class, lots)`` for every class actually capped."""
+
+    def cap_for(self, clas: str) -> float | None:
+        return next((lots for c, lots in self.caps if c == clas), None)
+
+
+@dataclass(frozen=True, slots=True)
 class NewsAct:
     """A news rule acting on the copies the slave holds now, before a release."""
 
@@ -174,6 +196,8 @@ class Verdict:
     max_margin: Cap | None = None
     max_total_margin: Cap | None = None
     """The most margin every open trade and a new one may use together."""
+    class_lots: tuple[ClassLotsCap, ...] = ()
+    """Lots ceilings per asset class, one entry per rule; the engine applies the tightest."""
     news_acts: tuple[NewsAct, ...] = ()
     """News rules acting on open copies now, before a release."""
     close_acts: tuple[CloseAct, ...] = ()
@@ -205,10 +229,13 @@ class GuardBook:
         doc: GuardsDoc,
         state_path: Path | None = None,
         calendar: NewsCalendar | None = None,
+        catalog: CatalogStore | None = None,
     ) -> None:
         self.doc = doc
         self.calendar = calendar
         """The news calendar, asked only for an account with a news rule."""
+        self.catalog = catalog
+        """The symbol catalog, read only for an account with a rule about asset classes."""
         self._path = state_path if state_path is not None else guard_state_path()
         state = self._load()
         self._day_equity: dict[str, dict[str, dict[str, object]]] = _section(state, "day_equity")
@@ -378,7 +405,12 @@ class GuardBook:
     # --- reporting ------------------------------------------------------------------------
 
     def report(
-        self, key: str | None, snap: Snapshot | None, now: float, sizing_risk: float | None = None
+        self,
+        key: str | None,
+        snap: Snapshot | None,
+        now: float,
+        sizing_risk: float | None = None,
+        decor: tuple[str, str, tuple[tuple[str, str], ...]] | None = None,
     ) -> GuardReport:
         guards = self.doc.for_account(key)
         currency = (snap.currency if snap else None) or ""
@@ -386,6 +418,10 @@ class GuardBook:
             r.enabled and getattr(REGISTRY.get(r.type), "news", False) for r in guards.rules
         )
         news = self.calendar.current() if wants_news and self.calendar is not None else None
+        wants_classes = self.catalog is not None and any(
+            r.enabled and getattr(REGISTRY.get(r.type), "lots_cap", False) for r in guards.rules
+        )
+        catalog = self.catalog.current() if wants_classes and self.catalog is not None else None
         view = (
             AccountView.of(
                 snap,
@@ -393,6 +429,8 @@ class GuardBook:
                 initial_balance=guards.initial_balance,
                 sizing_risk=sizing_risk,
                 news=news,
+                catalog=catalog,
+                decor=decor,
             )
             if snap is not None
             else None
@@ -408,13 +446,18 @@ class GuardBook:
         return GuardReport(key, guards.enabled, guards.initial_balance, currency, statuses)
 
     def verdict(
-        self, key: str | None, snap: Snapshot | None, now: float, sizing_risk: float | None = None
+        self,
+        key: str | None,
+        snap: Snapshot | None,
+        now: float,
+        sizing_risk: float | None = None,
+        decor: tuple[str, str, tuple[tuple[str, str], ...]] | None = None,
     ) -> Verdict:
         """What the guards tell the engine to do about this account now -- latching any breach
         that has just acted, so it holds even once the numbers recover."""
         if key is None:
             return NO_VERDICT
-        report = self.report(key, snap, now, sizing_risk)
+        report = self.report(key, snap, now, sizing_risk, decor)
         if not report.enabled:
             return NO_VERDICT
         rules = {r.id: r for r in self.doc.for_account(key).rules}
@@ -428,6 +471,7 @@ class GuardBook:
         news: set[str] = set()
         news_why: list[str] = []
         caps: dict[str, Cap] = {}
+        lots_caps: list[ClassLotsCap] = []
         acts: list[NewsAct] = []
         closes: list[CloseAct] = []
         for status in report.rules:
@@ -462,6 +506,24 @@ class GuardBook:
                     news |= on_news
                     news_why.append(why)
                     news_by.append(status.rule_id)
+                continue
+            if rule.lots_cap:
+                given = rules.get(status.rule_id)
+                if given is not None:
+                    params, _ = given.resolved()
+                    table = tuple(
+                        (clas, float(params[clas])) for clas in CLASSES if float(params[clas]) > 0
+                    )
+                    if table:
+                        lots_caps.append(
+                            ClassLotsCap(
+                                status.rule_id,
+                                status.title,
+                                str(params["on_breach"]),
+                                str(params["scope"]),
+                                table,
+                            )
+                        )
                 continue
             if rule.cap is not None:
                 if status.limit is not None:
@@ -507,6 +569,7 @@ class GuardBook:
             max_risk=caps.get("risk"),
             max_margin=caps.get("margin"),
             max_total_margin=caps.get("total_margin"),
+            class_lots=tuple(lots_caps),
             news_acts=tuple(acts),
             close_acts=tuple(closes),
         )

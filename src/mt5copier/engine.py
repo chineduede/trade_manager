@@ -33,6 +33,7 @@ from .breakeven import (
     guard_stop,
     master_breakeven_due,
 )
+from .catalog import CLASS_WORDS, Catalog, CatalogStore
 from .claims import ClaimBook, ClaimRefusedError, claim_keys
 from .config import (
     VIRTUAL_MASTER_ID,
@@ -327,8 +328,13 @@ class Engine:
         self._day.listener = self._on_step
         self._calendar = calendar if calendar is not None else NewsCalendar()
         """The news calendar: fetched on its own thread, and only once a news rule asks."""
+        self._catalog = CatalogStore()
+        """The shared symbol catalog, for the rules that read asset classes."""
         self._guards = GuardBook(
-            guards if guards is not None else GuardsDoc(), guard_state_path, self._calendar
+            guards if guards is not None else GuardsDoc(),
+            guard_state_path,
+            self._calendar,
+            self._catalog,
         )
         """Each account's prop-firm rules and how they stand."""
         self._verdicts: dict[str, Verdict] = {}
@@ -2023,6 +2029,69 @@ class Engine:
             kind,
         )
 
+    @staticmethod
+    def _decor(cfg: TerminalConfig) -> tuple[str, str, tuple[tuple[str, str], ...]]:
+        """This slave's symbol decoration as the guards take it: prefix, suffix, renames."""
+        return (cfg.symbol_prefix, cfg.symbol_suffix, tuple(sorted(cfg.symbol_map.items())))
+
+    def _class_lots_limit(
+        self, cfg: TerminalConfig, verdict: Verdict, action: Action, snap: Snapshot | None
+    ) -> tuple[float, str, str, str, str] | None:
+        """One lots ceiling for this trade under the asset-class rules, or None for no limit.
+
+        The tightest applicable rule wins: its cap for the symbol's class as it stands, less
+        the class's open lots on this slave for the ``total`` scope. Open lots that cannot be
+        counted follow the margin caps' philosophy -- a warn-only rule lets the trade through
+        as one on its own, any other mode refuses it, because sending unmeasured is the
+        unsafe side. Returns ``(ceiling, mode, rule title, rule id, what was read)``; the
+        last always names the class, so a misfiled symbol is visible, never silent.
+        """
+        if not verdict.class_lots:
+            return None
+        catalog = self._catalog.current()
+        clas = catalog.classify(action.master_symbol)
+        word = CLASS_WORDS.get(clas, clas).lower()
+        read = f"{action.master_symbol} → {word}"
+        best: tuple[float, str, str, str, str] | None = None
+        for rule in verdict.class_lots:
+            cap = rule.cap_for(clas)
+            if cap is None:
+                continue
+            if rule.scope == "total":
+                open_lots = self._class_open_lots(cfg, snap, clas, catalog)
+                if open_lots is None:
+                    ceiling = cap if rule.mode == "warn" else 0.0
+                    allowed = f"{read}: its open lots could not be counted"
+                else:
+                    ceiling = max(0.0, cap - open_lots)
+                    allowed = f"{read}: {open_lots:g} of {cap:g} lots already open"
+            else:
+                ceiling = cap
+                allowed = f"{read}, capped at {cap:g} lots a trade"
+            pick = (ceiling, rule.mode, rule.title, rule.rule_id, allowed)
+            if best is None or pick[0] < best[0]:
+                best = pick
+        return best
+
+    @staticmethod
+    def _class_open_lots(
+        cfg: TerminalConfig, snap: Snapshot | None, clas: str, catalog: Catalog
+    ) -> float | None:
+        """All open lots of one class on this slave, its decoration translated off first --
+        a rename reversed, then the configured prefix and suffix -- so the catalog is asked
+        about base names. None when the positions cannot be read."""
+        if snap is None or snap.open_positions is None:
+            return None
+        back = {slave.upper(): master for master, slave in cfg.symbol_map.items()}
+        total = 0.0
+        for position in snap.open_positions:
+            base = back.get(position.symbol.upper()) or undecorate(
+                position.symbol, cfg.symbol_prefix, cfg.symbol_suffix
+            )
+            if catalog.classify(base) == clas:
+                total += position.volume
+        return total
+
     def _dispatch(
         self,
         action: Action,
@@ -2054,6 +2123,7 @@ class Engine:
         margin = verdict.max_margin
         total = verdict.max_total_margin
         opening = action.kind in (ActionKind.OPEN, ActionKind.PLACE)
+        lots_limit = self._class_lots_limit(cfg, verdict, action, snap) if opening else None
 
         command_id = next(self._command_ids)
         cmd = OrderCommand(
@@ -2097,6 +2167,11 @@ class Engine:
             total_margin_cap=total.mode if opening and total is not None else "",
             total_margin_rule=total.rule if opening and total is not None else "",
             total_margin_rule_id=total.rule_id if opening and total is not None else "",
+            max_lots=lots_limit[0] if lots_limit is not None else None,
+            lots_cap=lots_limit[1] if lots_limit is not None else "",
+            lots_rule=lots_limit[2] if lots_limit is not None else "",
+            lots_rule_id=lots_limit[3] if lots_limit is not None else "",
+            lots_allowed=lots_limit[4] if lots_limit is not None else "",
             # Direct trades only: the ticket's target is an rr intent, so each worker nudges
             # its copy's target out by (rr + 1) x its own commission to keep the realized
             # ratio. A real master's target is that trader's own level and goes untouched.
@@ -2418,7 +2493,11 @@ class Engine:
             return
         risk = self._risk_amount(cfg, snap)
         verdict = self._guards.verdict(
-            account_key(snap.login, snap.server), snap, time.time(), sizing_risk=risk
+            account_key(snap.login, snap.server),
+            snap,
+            time.time(),
+            sizing_risk=risk,
+            decor=self._decor(cfg),
         )
         before = self._verdicts.get(tid, NO_VERDICT)
         self._verdicts[tid] = verdict
@@ -2507,7 +2586,8 @@ class Engine:
             risk = None
             if snap is not None and cfg is not None and cfg.role is Role.SLAVE:
                 risk = self._risk_amount(cfg, snap)
-            return self._guards.report(key, snap, time.time(), sizing_risk=risk)
+            decor = self._decor(cfg) if cfg is not None else None
+            return self._guards.report(key, snap, time.time(), sizing_risk=risk, decor=decor)
 
     @property
     def failed_total(self) -> int:

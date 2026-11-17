@@ -269,6 +269,47 @@ def fit_total_margin(
     )
 
 
+def fit_lots(
+    *,
+    lots: float,
+    cap: float,
+    mode: str,
+    symbol: str,
+    facts: SymbolFacts,
+    rule: str = "",
+    rule_id: str = "",
+    allowed: str = "",
+) -> MarginFit:
+    """The lots to send under the asset-class guard's lots ceiling.
+
+    The engine already reduced the class table to one number, so this is the plain half of
+    :func:`fit_margin`: nothing to price, just a ceiling in the trade's own unit. ``allowed``
+    is the engine's reading -- it names the class, so it is said back wherever the trade is
+    shown."""
+    rule = rule or "A guard"
+
+    def note(action: str, detail: str) -> GuardNote:
+        return GuardNote(rule, action, detail, rule_id)
+
+    if lots <= cap:
+        return MarginFit(lots)
+    over = allowed or f"capped at {cap:g} lots"
+    if mode == "warn":
+        return MarginFit(lots, note=note("warned", f"{lots:g} lots sent as sized: {over}"))
+    if mode == "shrink":
+        fitted = floor_to_step(cap, facts.volume_step)
+        if fitted >= facts.volume_min:
+            return MarginFit(
+                fitted, note=note("shrunk", f"from {lots:g} to {fitted:g} lots: {over}")
+            )
+        why = f"even {facts.volume_min:g} lots on {symbol} is over the cap: {over}"
+        declined = note("declined", why)
+        return MarginFit(None, declined.text(), declined)
+    why = f"{lots:g} lots on {symbol}: {over}"
+    declined = note("declined", why)
+    return MarginFit(None, declined.text(), declined)
+
+
 def floor_to_step(value: float, step: float) -> float:
     d_step = Decimal(str(step))
     stepped = (Decimal(str(value)) / d_step).to_integral_value(rounding="ROUND_DOWN") * d_step

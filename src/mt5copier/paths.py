@@ -199,6 +199,12 @@ def account_names_path() -> Path:
     return shared_dir() / "account_names.json"
 
 
+def catalog_path() -> Path:
+    """The symbol catalog: which asset class a symbol is in, for the guard rules that treat
+    forex differently from indices. Shared: US30 is an index no matter which profile asks."""
+    return shared_dir() / "catalog.json"
+
+
 def machine_path() -> Path:
     """The connection timings -- poll, stale, retry, rescan -- shared by every profile: they
     describe this machine and its terminals, not a trading policy."""
