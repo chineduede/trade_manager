@@ -1026,6 +1026,7 @@ var T = {
   rescanning: false
 };
 var modalOnConfirm = null;
+var modalOnClose = null;
 
 var PAGES = ['trading', 'terminals', 'guards', 'news', 'history', 'setups', 'settings', 'help', 'tdetail'];
 
@@ -1806,6 +1807,7 @@ function showModal(opts) {
   ok.disabled = false; // a flow may disable it again until something is typed
   $('modal-cancel').textContent = opts.cancel || 'Cancel';
   modalOnConfirm = opts.onConfirm || null;
+  modalOnClose = opts.onClose || null;
   $('modal-back').hidden = false;
   if (opts.confirm) ok.focus();
 }
@@ -1813,6 +1815,11 @@ function showModal(opts) {
 function closeModal() {
   $('modal-back').hidden = true;
   modalOnConfirm = null;
+  // Runs on every way out — the button, Escape, a click on the backdrop — so a flow that
+  // must notice the dismissal itself (What's new marking itself read) hears all of them.
+  var fin = modalOnClose;
+  modalOnClose = null;
+  if (fin) fin();
 }
 
 function accountNameFlow(c) {
@@ -5345,13 +5352,62 @@ function wire() {
   $('g-initial').addEventListener('blur', commitInitial);
 }
 
+// The build's own words about itself: every release's notes, newest first, in the one
+// modal. Opened from the version label on the status bar, the Help page's link — and once
+// by itself on the first launch of a new version, where any way of dismissing it marks the
+// notes read, so it never nags. VER is filled once at start; the build cannot change under
+// a running window.
+var VER = { notes: [], unseen: false };
+
+function whatsNewFlow() {
+  var body = document.createElement('div');
+  VER.notes.forEach(function (n) {
+    var head = document.createElement('div');
+    head.className = 'notes-ver';
+    head.textContent = 'v' + n.version;
+    var when = document.createElement('span');
+    when.className = 'muted';
+    when.textContent = ' · ' + n.date;
+    head.appendChild(when);
+    body.appendChild(head);
+    var ul = document.createElement('ul');
+    ul.className = 'notes-lines';
+    n.lines.forEach(function (line) {
+      var li = document.createElement('li');
+      li.textContent = line;
+      ul.appendChild(li);
+    });
+    body.appendChild(ul);
+  });
+  showModal({
+    title: 'What’s new',
+    body: body,
+    cancel: 'Close',
+    onClose: function () {
+      if (!VER.unseen) return;
+      VER.unseen = false;
+      $('ver-dot').hidden = true;
+      api().notes_seen().catch(function () {});
+    }
+  });
+}
+
 function start() {
   // Once, not polled: the build cannot change under a running window. A source run says
   // so, because it works against the dev data root, not the installed app's.
-  api().app_version().then((v) => {
+  api().version_state().then((v) => {
+    if (!v || !v.version) return;
     const el = document.getElementById('help-sub');
-    if (el && v && v.version) el.append(` · v${v.version}${v.dev ? ' · running from source (dev data)' : ''}`);
+    if (el) el.append(` · v${v.version}${v.dev ? ' · running from source (dev data)' : ''}`);
+    VER.notes = v.notes || [];
+    VER.unseen = !!v.unseen;
+    $('ver-num').textContent = 'v' + v.version;
+    $('ver-dot').hidden = !VER.unseen;
+    $('ver-btn').hidden = false;
+    if (VER.unseen) whatsNewFlow();
   }).catch(() => {});
+  $('ver-btn').addEventListener('click', whatsNewFlow);
+  $('help-notes').addEventListener('click', whatsNewFlow);
   makeChart();
   wire();
   showPage(S.page);

@@ -19,7 +19,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
-from .. import __version__, account_switch, role_actions, shared_data
+from .. import __version__, account_switch, release_notes, role_actions, shared_data
 from .. import config as config_mod
 from .. import profiles as profiles_mod
 from .. import setups as setups_mod
@@ -1162,11 +1162,26 @@ class DesktopApi:
 
     # --- profiles -----------------------------------------------------------------------------
 
-    def app_version(self) -> dict[str, Any]:
-        """The running build, for the Help page: the version from the one source, and
-        whether this is a source run (working against the dev data root, not the
-        installed app's)."""
-        return {"version": __version__, "dev": not is_frozen()}
+    def version_state(self) -> dict[str, Any]:
+        """The running build and its changelog, read once at start: the build cannot change
+        under a running window. ``unseen`` is true exactly when this launch is the first of
+        a new version -- the window opens What's new once, and the dismissal comes back
+        through :meth:`notes_seen`. ``dev`` flags a source run, which works against the dev
+        data root, not the installed app's."""
+        return {
+            "version": __version__,
+            "dev": not is_frozen(),
+            "unseen": release_notes.unseen(),
+            "notes": [
+                {"version": v, "date": d, "lines": list(lines)}
+                for v, d, lines in release_notes.NOTES
+            ],
+        }
+
+    def notes_seen(self) -> dict[str, Any]:
+        """What's new was dismissed: nothing shows by itself until the next update."""
+        release_notes.mark_seen()
+        return {"ok": True}
 
     def profiles_state(self) -> dict[str, Any]:
         """The TUI picker's rows. profiles.list_profiles never reads a config through the
