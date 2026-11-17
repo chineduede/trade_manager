@@ -366,8 +366,10 @@ td .row-btn {
 }
 td .row-btn.danger { border-color: var(--red); color: var(--red); font-weight: 600; }
 td .row-btn.armed { border-color: var(--blue); color: var(--blue); font-weight: 600; }
-.copies-cell { font-size: 12.5px; }
-.copy-link { white-space: nowrap; font-size: inherit; }
+/* The copies dropdown trigger keeps the summary's own tone (live green, closed red);
+   the caret and the hover underline are what say it opens. */
+.copies-dd { color: inherit; font-size: inherit; font-weight: inherit; white-space: nowrap; }
+#book-table td.actions-cell { white-space: nowrap; }
 td .row-btn + .row-btn { margin-left: 8px; }
 
 /* --- the terminals page: three zones, cards dragged between them ------------------------- */

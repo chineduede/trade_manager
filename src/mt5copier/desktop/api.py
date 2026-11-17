@@ -3376,6 +3376,9 @@ def _ov_position_row(
             "text": r.link.removeprefix("copy of "),
             "tone": _TIER_TONE.get(r.link_tier, ""),
         },
+        # The master ticket behind a copy, so a direct profile's page can link back to the
+        # Trading page's book row; None for anything that is not a tracked copy.
+        "copyOf": copy.master_ticket if copy is not None else None,
         "breakeven": _ov_breakeven(r, copy, tcfg) if is_slave else None,
     }
 
@@ -3410,4 +3413,5 @@ def _ov_order_row(
         "tp": o.tp,
         "placed": placed,
         "link": link,
+        "copyOf": copy.master_ticket if copy is not None else None,
     }
