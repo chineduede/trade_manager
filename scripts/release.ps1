@@ -9,7 +9,9 @@
 #   1. refuse a dirty tree or a branch other than master: the tag must name exactly
 #      what was shipped, nothing uncommitted riding along;
 #   2. ruff check, ruff format --check, mypy, pytest;
-#   3. bump __version__ in src\mt5copier\__init__.py (the single version source);
+#   3. bump __version__ in src\mt5copier\__init__.py (the single version source) -- but first
+#      the notes gate: release_notes.py's top entry must be the version being cut, so every
+#      release ships with fresh What's new words or not at all;
 #   4. commit the bump and tag it vX.Y.Z;
 #   5. fresh PyInstaller exe + Inno Setup installer (via build_installer.ps1 -Rebuild);
 #   6. copy the installer into releases\ -- the shipping shelf, one file per version,
@@ -79,6 +81,17 @@ if ($Version) {
 }
 if ($new -eq $old) { throw "new version $new equals the current one" }
 if (git tag -l "v$new") { throw "tag v$new already exists" }
+
+# The notes gate: What's new reads release_notes.py, and a release without words for itself
+# is refused -- the words are written while the work is fresh, never reconstructed later.
+$top = uv run python -c "from mt5copier.release_notes import NOTES; print(NOTES[0][0])"
+if ($LASTEXITCODE -ne 0 -or -not $top) {
+    throw "could not read the top entry of src\mt5copier\release_notes.py"
+}
+$top = @($top)[-1].Trim()
+if ($top -ne $new) {
+    throw "release_notes.py's top entry is $top, but v$new is being cut -- write this release's notes first"
+}
 
 Write-Host "version: $old -> $new"
 $initPy = $initPy -replace '(?m)^__version__\s*=\s*"[^"]+"', "__version__ = `"$new`""

@@ -229,6 +229,14 @@ def virtual_book_path() -> Path:
     return user_data_dir() / "virtual_master.json"
 
 
+def version_seen_path() -> Path:
+    """The last version whose What's new was read -- see :mod:`mt5copier.release_notes`.
+
+    Install-wide under the base dir on purpose: an update is news exactly once, however many
+    profiles run, and dismissing the notes in any window answers for them all."""
+    return base_data_dir() / "version_seen.json"
+
+
 def mt5_terminal_root() -> Path:
     r"""``%APPDATA%\MetaQuotes\Terminal`` — where MT5 keeps one data folder per install."""
     appdata = os.environ.get("APPDATA")
