@@ -1518,7 +1518,9 @@ are the design, not a limitation waiting to be lifted.
   either a margin limit or a sanity check on that number would have caught it before sending.
   Until then, a per-slave **Max lot** is the backstop.
 
-  *Lot cap by asset class — designed with the user 2026-11-16, not yet built.* Firms cap lot
+  *Lot cap by asset class — designed with the user 2026-11-16, built 2026-11-17 (30b0cec:
+  catalog + rule + dispatch + both executors; 35bfbdf: the Symbol catalog card on Settings),
+  hands-on check pending.* Firms cap lot
   size differently by what is traded (2 lots on forex, 1 on indices, …), so one new rule, **Max
   lots by asset class**: a lots ceiling per class — forex, indices, metals, energies, crypto,
   stocks, and everything else — 0/empty meaning no cap for that class, with the usual
