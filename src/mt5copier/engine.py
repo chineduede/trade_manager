@@ -23,6 +23,7 @@ from collections import deque
 from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from . import role_actions
 from . import setups as setups_mod
@@ -1188,9 +1189,12 @@ class Engine:
         with self._lock:
             return self._virtual.orders() if self._virtual is not None else ()
 
-    def direct_copy_status(self) -> dict[int, list[dict[str, str]]]:
+    def direct_copy_status(self) -> dict[int, list[dict[str, Any]]]:
         """Each direct ticket's copies, checked against the slaves' latest snapshots:
-        ``{master_ticket: [{"name": slave, "state": "live" | "closed" | "unknown"}]}``.
+        ``{master_ticket: [{"name", "state", "tid", "ticket"}]}`` -- per copy the slave's
+        display name, ``"live" | "closed" | "unknown"``, its terminal id (so the page can
+        link to the terminal), and the copy's own ticket there (None for a copy with no
+        real slave ticket, such as a dry run's).
 
         The book holds intent; this says what is still real behind it, so the page can
         tell whether closing the ticket would close anything. A believed copy whose
@@ -1205,7 +1209,7 @@ class Engine:
         with self._lock:
             now = time.monotonic()
             timeout = self._cfg.heartbeat_timeout_s
-            out: dict[int, list[dict[str, str]]] = {}
+            out: dict[int, list[dict[str, Any]]] = {}
             for cfg in self._cfg.slaves:
                 copies = self._ledger.believed(cfg.terminal_id)
                 if not copies:
@@ -1224,13 +1228,21 @@ class Engine:
                 )
                 name = self._cfg.display_name(cfg.terminal_id)
                 for copy in copies:
-                    if not readable or copy.slave_ticket is None or copy.slave_ticket < 0:
+                    real = copy.slave_ticket is not None and copy.slave_ticket >= 0
+                    if not readable or not real:
                         state = "unknown"
                     elif copy.slave_ticket in open_tickets:
                         state = "live"
                     else:
                         state = "closed"
-                    out.setdefault(copy.master_ticket, []).append({"name": name, "state": state})
+                    out.setdefault(copy.master_ticket, []).append(
+                        {
+                            "name": name,
+                            "state": state,
+                            "tid": cfg.terminal_id,
+                            "ticket": copy.slave_ticket if real else None,
+                        }
+                    )
             return out
 
     def place_direct_market(
@@ -1303,6 +1315,21 @@ class Engine:
             if book is None:
                 return self._NOT_TRADING
             return book.modify_order(ticket, entry, sl, tp, expiration_utc)
+
+    def set_direct_breakeven_at(self, ticket: int, price: float) -> str | None:
+        """Arm a breakeven price on a direct position, or clear it with 0. Once the feed
+        touches the price, the book moves the stop to the entry and every copy follows."""
+        with self._lock:
+            book = self._virtual
+            if book is None:
+                return self._NOT_TRADING
+            return book.set_breakeven_at(ticket, price)
+
+    def direct_breakevens(self) -> dict[int, float]:
+        """Each armed direct breakeven by ticket; empty outside trading mode."""
+        with self._lock:
+            book = self._virtual
+            return book.breakevens() if book is not None else {}
 
     def close_direct(self, ticket: int) -> str | None:
         with self._lock:

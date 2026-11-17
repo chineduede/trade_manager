@@ -245,6 +245,24 @@ def test_modify_mirrors_as_a_modify_sltp(engine: Engine) -> None:
     assert copy.synced_sl == 1.08200 and copy.synced_tp == 1.09800
 
 
+def test_an_armed_breakeven_fires_on_the_feed_and_mirrors_to_the_copy(engine: Engine) -> None:
+    feed(engine, EURUSD_QUOTE)
+    engine.virtual_tick()  # baseline
+    engine.place_direct_market("EURUSD", PositionType.BUY, 1.0, 1.08000, 0.0)
+    engine.virtual_tick()
+    assert engine.set_direct_breakeven_at(1, 1.08700) is None
+    assert engine.direct_breakevens() == {1: 1.08700}
+    engine.virtual_tick()  # still short of the trigger: nothing moves
+    assert engine.direct_positions()[0].sl == 1.08000
+    feed(engine, Quote(symbol="EURUSD", bid=1.08700, ask=1.08720), seq=2)
+    engine.virtual_tick()
+    assert engine.direct_positions()[0].sl == 1.08520  # the entry (filled at the ask)
+    assert engine.direct_breakevens() == {}
+    assert ActionKind.MODIFY_SLTP in kinds(engine)
+    (copy,) = engine._ledger.believed(SLAVE)
+    assert copy.synced_sl == 1.08520
+
+
 def test_cancel_mirrors_as_a_cancel(engine: Engine) -> None:
     feed(engine, EURUSD_QUOTE)
     engine.virtual_tick()  # baseline
@@ -474,7 +492,9 @@ def test_copy_status_reads_the_slaves_snapshots(engine: Engine) -> None:
     # A dry-run copy's ticket is synthetic (the master's negated), so no broker can
     # vouch for it: unknown, not live and not closed.
     assert copy.slave_ticket == -1
-    assert engine.direct_copy_status() == {1: [{"name": "Beta", "state": "unknown"}]}
+    assert engine.direct_copy_status() == {
+        1: [{"name": "Beta", "state": "unknown", "tid": SLAVE, "ticket": None}]
+    }
 
     # As if it had filled live as #777. In the slave's snapshot: live.
     engine._ledger._store.update(SLAVE, copy.master_ticket, slave_ticket=777)
@@ -502,15 +522,21 @@ def test_copy_status_reads_the_slaves_snapshots(engine: Engine) -> None:
         tp=0.0,
     )
     snap(held, seq=2)
-    assert engine.direct_copy_status() == {1: [{"name": "Beta", "state": "live"}]}
+    assert engine.direct_copy_status() == {
+        1: [{"name": "Beta", "state": "live", "tid": SLAVE, "ticket": 777}]
+    }
 
     # Gone from a readable snapshot: closed on the slave on its own.
     snap(seq=3)
-    assert engine.direct_copy_status() == {1: [{"name": "Beta", "state": "closed"}]}
+    assert engine.direct_copy_status() == {
+        1: [{"name": "Beta", "state": "closed", "tid": SLAVE, "ticket": 777}]
+    }
 
-    # A stale snapshot proves nothing either way.
+    # A stale snapshot proves nothing either way; the ticket is still worth naming.
     engine._received_at[SLAVE] = time.monotonic() - engine._cfg.heartbeat_timeout_s - 1.0
-    assert engine.direct_copy_status() == {1: [{"name": "Beta", "state": "unknown"}]}
+    assert engine.direct_copy_status() == {
+        1: [{"name": "Beta", "state": "unknown", "tid": SLAVE, "ticket": 777}]
+    }
 
 
 # --- the feed broker's decoration never reaches the book ---------------------------------------

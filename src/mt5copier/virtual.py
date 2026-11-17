@@ -69,6 +69,7 @@ class VirtualBook:
         self._path = Path(path)
         self._positions: dict[int, Position] = {}
         self._orders: dict[int, PendingOrder] = {}
+        self._be_at: dict[int, float] = {}
         self._next_ticket = 1
         self._load()
 
@@ -85,6 +86,11 @@ class VirtualBook:
         return {p.symbol for p in self._positions.values()} | {
             o.symbol for o in self._orders.values()
         }
+
+    def breakevens(self) -> dict[int, float]:
+        """Each armed breakeven by ticket: the price that, once the feed touches it, moves
+        that position's stop to its entry."""
+        return dict(self._be_at)
 
     # --- trading ------------------------------------------------------------------------
 
@@ -227,6 +233,41 @@ class VirtualBook:
         )
         return None
 
+    def set_breakeven_at(self, ticket: int, price: float) -> str | None:
+        """Arm a breakeven price on a position, or clear it with 0.
+
+        Once the feed touches the price, :meth:`tick` moves the stop to the entry -- exactly
+        the table's immediate breakeven, deferred. The price has to sit on the profitable
+        side of the entry, or firing would park the stop at or behind the market; one the
+        market has already passed is fine -- it fires on the next tick.
+        """
+        p = self._positions.get(ticket)
+        if p is None:
+            return f"#{ticket} is not an open position in this book"
+        if not price:
+            if self._be_at.pop(ticket, None) is not None:
+                self._save()
+                log.info("direct: #%s %s breakeven disarmed", ticket, p.symbol)
+            return None
+        if price < 0:
+            return "the price has to be above zero"
+        if _past_entry(p.type, p.price_open, p.sl):
+            return (
+                f"#{ticket}'s stop is already at or past its entry ({p.price_open:g}); "
+                "there is nothing for a breakeven to do"
+            )
+        beyond = price > p.price_open if p.type is PositionType.BUY else price < p.price_open
+        if not beyond:
+            side = "above" if p.type is PositionType.BUY else "below"
+            return (
+                f"for a {p.type.name.lower()} it has to be {side} the entry ({p.price_open:g}), "
+                "or firing would put the stop at or behind the market"
+            )
+        self._be_at[ticket] = price
+        self._save()
+        log.info("direct: #%s %s breakeven armed at %g", ticket, p.symbol, price)
+        return None
+
     def modify_order(
         self, ticket: int, entry: float, sl: float, tp: float, expiration_utc: int
     ) -> str | None:
@@ -258,6 +299,7 @@ class VirtualBook:
         p = self._positions.pop(ticket, None)
         if p is None:
             return f"#{ticket} is not an open position in this book"
+        self._be_at.pop(ticket, None)
         self._save()
         log.info("direct: closed #%s %s", ticket, p.symbol)
         return None
@@ -336,6 +378,32 @@ class VirtualBook:
                     f"{o.type.name.lower().replace('_', ' ')} filled at {o.price_open:g}"
                 )
 
+        # Armed breakevens fire before the protective levels are read, so a tick that
+        # touches the trigger and the target together closes with the stop already moved --
+        # the same tick on a real broker would have moved the stop first too, the trigger
+        # being nearer the entry than the target.
+        for ticket in sorted(self._be_at):
+            p = self._positions.get(ticket)
+            if p is None:
+                del self._be_at[ticket]
+                continue
+            at = self._be_at[ticket]
+            quote = quotes.get(p.symbol)
+            if quote is None or not _be_fires(p.type, at, quote):
+                continue
+            del self._be_at[ticket]
+            if _past_entry(p.type, p.price_open, p.sl):
+                events.append(
+                    f"#{ticket} {p.symbol} breakeven at {at:g}: the stop was already at or "
+                    f"past the entry, so it stays at {p.sl:g}"
+                )
+                continue
+            self._positions[ticket] = replace(p, sl=p.price_open)
+            events.append(
+                f"#{ticket} {p.symbol} breakeven at {at:g} fired: "
+                f"the stop moved to the entry {p.price_open:g}"
+            )
+
         for ticket in sorted(self._positions):
             p = self._positions[ticket]
             quote = quotes.get(p.symbol)
@@ -344,6 +412,7 @@ class VirtualBook:
             hit = _level_hit(p, quote)
             if hit is not None:
                 del self._positions[ticket]
+                self._be_at.pop(ticket, None)
                 events.append(f"#{ticket} {p.symbol} closed: {hit}")
 
         if events:
@@ -366,6 +435,11 @@ class VirtualBook:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
             positions = {int(d["ticket"]): _position_from(d) for d in raw.get("positions", ())}
             orders = {int(d["ticket"]): _order_from(d) for d in raw.get("orders", ())}
+            be_at = {
+                int(t): float(v)
+                for t, v in raw.get("breakeven_at", {}).items()
+                if int(t) in positions and float(v) > 0
+            }
             next_ticket = int(raw.get("next_ticket", 1))
         except Exception as exc:
             # Moved aside, never deleted: this file is the master side of live copies, and a
@@ -386,6 +460,7 @@ class VirtualBook:
             return
         self._positions = positions
         self._orders = orders
+        self._be_at = be_at
         highest = max([0, *positions, *orders])
         self._next_ticket = max(next_ticket, highest + 1)
 
@@ -394,6 +469,7 @@ class VirtualBook:
             "next_ticket": self._next_ticket,
             "positions": [asdict(p) for p in self.positions()],
             "orders": [asdict(o) for o in self.orders()],
+            "breakeven_at": {str(t): self._be_at[t] for t in sorted(self._be_at)},
         }
         text = json.dumps(payload, indent=2) + "\n"
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -478,6 +554,20 @@ def _pending_fills(order_type: OrderType, entry: float, quote: tuple[float, floa
     if order_type is OrderType.SELL_STOP:
         return bid <= entry
     return False
+
+
+def _past_entry(direction: PositionType, entry: float, price: float) -> bool:
+    """Whether ``price`` sits at or past the entry on the profitable side: a stop there can
+    no longer lose, and a breakeven trigger there (or short of it) could never fire soundly."""
+    return price >= entry if direction is PositionType.BUY else 0 < price <= entry
+
+
+def _be_fires(direction: PositionType, at: float, quote: tuple[float, float]) -> bool:
+    """Whether the feed has touched an armed breakeven price. Read on the side the close
+    would execute at -- a long's bid, a short's ask -- matching :func:`_level_hit`, so the
+    position is provably clear of its entry the moment the stop moves there."""
+    bid, ask = quote
+    return bid >= at if direction is PositionType.BUY else ask <= at
 
 
 def _level_hit(p: Position, quote: tuple[float, float]) -> str | None:

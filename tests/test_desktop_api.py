@@ -46,6 +46,10 @@ class _Engine:
         self.calls.append(("modify_order", a))
         return self.answer
 
+    def set_direct_breakeven_at(self, *a: Any) -> str | None:
+        self.calls.append(("breakeven_at", a))
+        return self.answer
+
     def direct_orders(self) -> tuple[PendingOrder, ...]:
         return (
             PendingOrder(
@@ -122,6 +126,18 @@ def test_modifying_a_resting_order_keeps_its_expiry() -> None:
     assert args == (7, 1.091, 1.096, 1.081, 4200)
 
 
+def test_breakeven_price_reaches_the_engine_and_zero_disarms() -> None:
+    engine = _Engine()
+    out = _api(engine).breakeven_at(3, "1.0870")
+    assert out["ok"] is True and "1.087" in out["message"]
+    out = _api(engine).breakeven_at(3, 0)
+    assert out["ok"] is True and "Disarmed" in out["message"]
+    assert engine.calls == [("breakeven_at", (3, 1.087)), ("breakeven_at", (3, 0.0))]
+    out = _api(engine).breakeven_at(3, "x")
+    assert out["ok"] is False
+    assert len(engine.calls) == 2, "an unreadable price never reaches the engine"
+
+
 def test_rows_carry_what_the_page_shows() -> None:
     p = Position(
         ticket=3,
@@ -132,12 +148,16 @@ def test_rows_carry_what_the_page_shows() -> None:
         sl=64317.0,
         tp=65521.0,
     )
-    copies = [{"name": "IC demo", "state": "live"}, {"name": "FTMO", "state": "closed"}]
-    row = _position_row(p, bid=64784.0, ask=64799.0, copies=copies)
+    copies = [
+        {"name": "IC demo", "state": "live", "tid": "aa", "ticket": 777},
+        {"name": "FTMO", "state": "closed", "tid": "bb", "ticket": 778},
+    ]
+    row = _position_row(p, bid=64784.0, ask=64799.0, copies=copies, be_at=65000.0)
     assert row["side"] == "buy"
     assert row["kind"] == "market"
     assert row["now"] == 64784.0  # a buy closes at the bid
     assert row["copies"] == copies
+    assert row["beAt"] == 65000.0
 
     o = _Engine().direct_orders()[0]
     row = _order_row(o, now=4200 - 600)
