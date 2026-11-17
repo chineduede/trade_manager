@@ -1029,9 +1029,23 @@ var modalOnConfirm = null;
 
 var PAGES = ['trading', 'terminals', 'guards', 'news', 'history', 'setups', 'settings', 'help', 'tdetail'];
 
+var RET = null;
+// A one-shot way back: set by a flow that sends the person to another page mid-task (the
+// rule form's link to the symbol catalog), holding what it takes to resume -- the page, the
+// form and what was typed. Any navigation clears it, so it never lingers past its moment;
+// the flow that wants it sets it right after its own showPage call.
+
+function updateCatBack() {
+  var el = $('cat-back');
+  el.hidden = !RET;
+  el.textContent = RET ? '← Back to ' + RET.title : '';
+}
+
 function showPage(name) {
   if (PAGES.indexOf(name) < 0) name = 'trading';
   S.page = name;
+  RET = null;
+  updateCatBack();
   // A restored 'tdetail' would land with no terminal under it, so it remembers as the
   // Terminals page it came from — which its sidebar highlight already says it is.
   try {
@@ -2647,7 +2661,7 @@ function removeRuleFlow(r) {
 
 // The rule form, built from the parameters the rule declares -- a new rule needs nothing
 // here. The engine checks values and words the sentence; the form only asks.
-function openRuleForm(type, ruleId) {
+function openRuleForm(type, ruleId, preset) {
   api().guard_form(G.tid, type, ruleId).then(function (f) {
     if (!f.ok) { toast(f.message, 'bad'); return; }
     var body = document.createElement('div');
@@ -2666,8 +2680,16 @@ function openRuleForm(type, ruleId) {
       catLink.className = 'linklike';
       catLink.textContent = 'edit it on Settings';
       catLink.addEventListener('click', function () {
+        // Remember the form as it stands, so the catalog card can offer the way back and
+        // the reopened form holds what was already typed.
+        var held = {
+          tid: G.tid, type: type, ruleId: ruleId, title: f.title,
+          values: collect(), enabled: tick.checked
+        };
         closeModal();
-        showPage('settings');
+        showPage('settings'); // clears RET, so it is set after
+        RET = held;
+        updateCatBack();
         var card = document.querySelector('#page-settings section[aria-label="Symbol catalog"]');
         if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
       });
@@ -2677,6 +2699,10 @@ function openRuleForm(type, ruleId) {
     }
 
     f.fields.forEach(function (field) {
+      // Coming back from the catalog link, the form resumes with what was typed.
+      if (preset && preset.values && preset.values[field.name] !== undefined) {
+        field.value = String(preset.values[field.name]);
+      }
       var wrap = document.createElement('div');
       wrap.className = 'field gform-field';
       wrap.dataset.name = field.name;
@@ -2711,7 +2737,7 @@ function openRuleForm(type, ruleId) {
     var tick = document.createElement('input');
     tick.type = 'checkbox';
     tick.id = 'gf-enabled';
-    tick.checked = f.enabled;
+    tick.checked = preset ? !!preset.enabled : f.enabled;
     var tickLabel = document.createElement('label');
     tickLabel.className = 'flabel';
     tickLabel.setAttribute('for', 'gf-enabled');
@@ -5024,8 +5050,15 @@ function wire() {
     if (fn) fn();
   });
   $('modal-cancel').addEventListener('click', closeModal);
+  // Close on a click on the backdrop itself -- but only when the press began there too.
+  // Selecting text in a field can end with the pointer over the backdrop, and the click
+  // event then lands on it (the common ancestor); that is a selection, not a dismissal.
+  var modalPressOnBack = false;
+  $('modal-back').addEventListener('pointerdown', function (ev) {
+    modalPressOnBack = ev.target === $('modal-back');
+  });
   $('modal-back').addEventListener('click', function (ev) {
-    if (ev.target === $('modal-back')) closeModal();
+    if (ev.target === $('modal-back') && modalPressOnBack) closeModal();
   });
   $('ctx-menu').addEventListener('click', function (ev) { ev.stopPropagation(); });
 
@@ -5187,6 +5220,13 @@ function wire() {
   $('cfg-save').addEventListener('click', function () { saveSettingsFlow(); });
   $('cat-save').addEventListener('click', function () { catSaveFlow(); });
   $('cat-revert').addEventListener('click', function () { if (CAT.live) catFill(CAT.live); });
+  $('cat-back').addEventListener('click', function () {
+    var r = RET;
+    if (!r) return;
+    if (r.tid) G.tid = r.tid;
+    showPage('guards');
+    openRuleForm(r.type, r.ruleId, r);
+  });
   ['currencies'].concat(CAT_CLASSES).forEach(function (c) {
     $('cat-' + c).addEventListener('input', function () { catShowErrors({}); });
   });
