@@ -518,9 +518,14 @@ class DesktopApi:
         per connection by its worker), as clean base names: what every slave resolves from.
         Prefix matches first, then anywhere-in-the-name; a dozen at most."""
         q = str(query).strip().upper()
+        # The feed's configured decoration comes off first -- ".FX" and its kind are not on
+        # base_name's common list, and a name left decorated places on the feed alone while
+        # every other slave refuses it as not found.
+        prefix, suffix, back = self._engine.feed_decor()
         names: list[str] = []
         for raw in self._engine.feed_symbols():
-            clean = base_name(raw).upper()
+            undecorated = back.get(raw.upper()) or undecorate(raw, prefix, suffix)
+            clean = base_name(undecorated).upper()
             if clean not in names:
                 names.append(clean)
         if not q:

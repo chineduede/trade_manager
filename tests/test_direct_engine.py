@@ -511,3 +511,47 @@ def test_copy_status_reads_the_slaves_snapshots(engine: Engine) -> None:
     # A stale snapshot proves nothing either way.
     engine._received_at[SLAVE] = time.monotonic() - engine._cfg.heartbeat_timeout_s - 1.0
     assert engine.direct_copy_status() == {1: [{"name": "Beta", "state": "unknown"}]}
+
+
+# --- the feed broker's decoration never reaches the book ---------------------------------------
+
+
+def test_a_symbol_typed_as_the_feed_lists_it_is_cleaned(engine: Engine, cfg: AppConfig) -> None:
+    """The feed broker decorates (EURUSD.FX); the book and every copy start from EURUSD,
+    or every other slave refuses the trade as a symbol it does not list."""
+    cfg.terminals[SLAVE].symbol_suffix = ".FX"
+    feed(engine, EURUSD_QUOTE)
+    engine.virtual_tick()  # baseline, and the feed is picked
+    assert engine.place_direct_market("EURUSD.FX", PositionType.BUY, 1.0, 1.08000, 0.0) is None
+    (position,) = engine.direct_positions()
+    assert position.symbol == "EURUSD"
+    engine.virtual_tick()
+    opened = [r.action for r in engine.recent_actions() if r.action.kind is ActionKind.OPEN]
+    assert opened and opened[-1].master_symbol == "EURUSD"
+    (copy,) = engine._ledger.believed(SLAVE)
+    assert copy.slave_symbol == "EURUSD.FX", "this slave is the feed, and decorates it back on"
+
+
+def test_a_decorated_pending_and_its_watch_are_cleaned_too(engine: Engine, cfg: AppConfig) -> None:
+    cfg.terminals[SLAVE].symbol_suffix = ".FX"
+    feed(engine, EURUSD_QUOTE)
+    engine.virtual_tick()  # the feed is picked, so its decoration is known
+    assert (
+        engine.place_direct_pending("EURUSD.FX", OrderType.BUY_LIMIT, 1.0, 1.08000, 1.07500, 0.0)
+        is None
+    )
+    (order,) = engine.direct_orders()
+    assert order.symbol == "EURUSD"
+    engine.watch_direct("XAUUSD.FX")
+    engine.virtual_tick()
+    watches = [c for c in engine._workers[SLAVE].cmd_q.sent if isinstance(c, WatchCommand)]
+    assert watches and watches[-1].symbols == ("EURUSD", "XAUUSD")
+
+
+def test_an_explicit_feed_mapping_is_reversed_at_the_ticket(engine: Engine, cfg: AppConfig) -> None:
+    """The feed maps clean XAUUSD to its own GOLD; GOLD typed on the ticket is XAUUSD."""
+    cfg.terminals[SLAVE].symbol_map = {"XAUUSD": "GOLD"}
+    feed(engine, Quote(symbol="XAUUSD", bid=2400.0, ask=2400.5))
+    engine.virtual_tick()
+    quote = engine.direct_quote("GOLD")
+    assert quote is not None and quote.bid == 2400.0
