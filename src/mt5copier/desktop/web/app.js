@@ -3389,11 +3389,10 @@ function renderSetups() {
   var roles = $('setups-now-roles');
   var state = $('setups-now-state');
   state.textContent = '';
-  if (live.direct) {
-    roles.textContent = 'this profile trades directly — setups are a copy-mode thing, saved and loaded while it copies';
-    roles.className = 'muted';
-  } else if (live.now === null) {
-    roles.textContent = 'no master assigned — drag one into the MASTER zone on Terminals';
+  if (live.now === null) {
+    roles.textContent = live.direct
+      ? 'no slaves assigned — drag terminals into the SLAVES zone on Terminals'
+      : 'no master assigned — drag one into the MASTER zone on Terminals';
     roles.className = 'yellow';
   } else {
     roles.textContent = live.now;
@@ -3416,7 +3415,7 @@ function renderSetups() {
     note.textContent = 'settings changed since saved on ' + live.changed.join(', ')
       + ' — Update with current keeps the change, loading puts the saved ones back';
   }
-  $('st-save').disabled = live.direct || live.now === null || !!W.loading || !!live.loading;
+  $('st-save').disabled = live.now === null || !!W.loading || !!live.loading;
 
   $('setups-count').textContent = live.setups.length
     ? live.setups.length + ' saved' : '';
@@ -3431,7 +3430,7 @@ function renderSetups() {
   var busy = !!W.loading || !!live.loading; // ours, or a load the bridge is still running
   $('st-load').textContent = busy ? 'Loading…' : 'Load';
   $('st-load').disabled = !picked || busy || !!(picked && picked.problems.length);
-  $('st-update').disabled = !picked || busy || live.direct || live.now === null;
+  $('st-update').disabled = !picked || busy || live.now === null;
   $('st-rename').disabled = !picked || busy;
   $('st-delete').disabled = !picked || busy;
 }

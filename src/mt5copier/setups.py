@@ -1,5 +1,11 @@
-"""``setups.json``: saved setups, each one a master, its slaves, the account each was logged
-into, each one's settings, whether copying was on and whether it was a dry run.
+"""``setups.json``: saved setups, each one a master (or none, in a profile that trades
+directly), its slaves, the account each was logged into, each one's settings, whether copying
+was on and whether it was a dry run.
+
+A setup saved from a direct-trading profile has no master terminal -- its master is the order
+ticket -- and keeps everything else: the slaves, their accounts, their settings, the mode. It
+loads only into a profile that trades directly, as a copy setup loads only into one that
+copies; the mode itself is switched on the settings page, never by a load.
 
 Loading one puts all of that back as it was saved. Each account's guards stay with the account,
 and come along because the account does. Terminals are named by ``terminal_id``, as the config
@@ -53,7 +59,9 @@ Logins = Mapping[str, int | None]
 class Setup(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    master: str
+    master: str | None
+    """None for a setup saved from a profile that trades directly: its master is the order
+    ticket, not a terminal, so there is nothing to name."""
     slaves: tuple[str, ...] = ()
     copying: bool = False
     """Whether copying was on when it was saved; loading it puts it back that way."""
@@ -70,7 +78,14 @@ class Setup(BaseModel):
     that was kept: loading it leaves the mode as it is."""
 
     @property
+    def direct(self) -> bool:
+        """Saved from a profile that trades directly."""
+        return self.master is None
+
+    @property
     def terminals(self) -> tuple[str, ...]:
+        if self.master is None:
+            return self.slaves
         return (self.master, *self.slaves)
 
     def same_roles(self, other: Setup) -> bool:
@@ -96,24 +111,22 @@ def logins_of(cfg: AppConfig) -> dict[str, int | None]:
 
 
 def capture(cfg: AppConfig, logins: Logins | None = None) -> Setup | None:
-    """The roles as they are now, on the accounts they are on, or None while there is no
-    master: nothing to save. A profile that trades directly has none either -- its master is
-    virtual, not a terminal, and setups are a copy-mode thing."""
-    master = cfg.master
-    if master is None or cfg.mode is AppMode.TRADING:
+    """The roles as they are now, on the accounts they are on, or None while there is nothing
+    to save: a copy profile with no master, or a direct-trading profile with no slaves. A
+    direct profile saves a master-less setup -- its master is the order ticket."""
+    direct = cfg.mode is AppMode.TRADING
+    master = None if direct else cfg.master
+    slaves = tuple(t.terminal_id for t in cfg.slaves)
+    if (master is None and not direct) or (direct and not slaves):
         return None
     logins = logins_of(cfg) if logins is None else logins
-    slaves = tuple(t.terminal_id for t in cfg.slaves)
+    named = slaves if master is None else (master.terminal_id, *slaves)
     return Setup(
-        master=master.terminal_id,
+        master=None if master is None else master.terminal_id,
         slaves=slaves,
         copying=cfg.copying_enabled,
-        accounts={
-            tid: login
-            for tid in (master.terminal_id, *slaves)
-            if (login := logins.get(tid)) is not None
-        },
-        settings={tid: settings_of(cfg.terminals[tid]) for tid in (master.terminal_id, *slaves)},
+        accounts={tid: login for tid in named if (login := logins.get(tid)) is not None},
+        settings={tid: settings_of(cfg.terminals[tid]) for tid in named},
         dry_run=cfg.dry_run,
     )
 
@@ -235,8 +248,16 @@ def problems(setup: Setup, cfg: AppConfig, logins: Logins | None = None) -> list
     """Why this setup cannot be loaded here, or nothing. A terminal it names may have been
     removed since, or have no executable to connect with -- the same refusal as pressing m or s
     on it -- or not have the account it has to be logged into."""
-    if cfg.mode is AppMode.TRADING:
-        return ["this profile trades directly; switch it to copying (g) before loading a setup"]
+    if setup.master is not None and cfg.mode is AppMode.TRADING:
+        return [
+            "this setup copies a master terminal; switch the profile to copying "
+            "on the Settings page before loading it"
+        ]
+    if setup.master is None and cfg.mode is not AppMode.TRADING:
+        return [
+            "this setup trades directly; switch the profile to direct trading "
+            "on the Settings page before loading it"
+        ]
     found: list[str] = []
     for tid in setup.terminals:
         tcfg = cfg.terminals.get(tid)
@@ -265,10 +286,17 @@ def losing(setup: Setup, cfg: AppConfig, logins: Logins | None = None) -> list[s
     """The slaves whose copies loading this setup gives up: every one if the master changes --
     another terminal, or the same one on another account -- since what they copied came from the
     old one; otherwise those that stop being slaves, or are logged into another account. A slave
-    kept under the same master, on the same account, keeps its copies, still managed."""
-    master = cfg.master
+    kept under the same master, on the same account, keeps its copies, still managed.
+
+    In a direct profile the master is the profile's own order ticket and cannot change, so
+    only the slaves that leave the set, or switch accounts, give copies up."""
     current = [t.terminal_id for t in cfg.slaves]
     moving = switches(setup, logins_of(cfg) if logins is None else logins)
+    if setup.master is None:
+        if cfg.mode is not AppMode.TRADING:
+            return current  # a mode mismatch, which problems() refuses before any load
+        return [tid for tid in current if tid not in setup.slaves or tid in moving]
+    master = cfg.master
     if master is None or master.terminal_id != setup.master or setup.master in moving:
         return current
     return [tid for tid in current if tid not in setup.slaves or tid in moving]
@@ -284,9 +312,10 @@ def apply_roles(setup: Setup, cfg: AppConfig, leave_out: Collection[str] = ()) -
 
     The caller has checked :func:`problems` and given up what :func:`losing` names."""
     wanted: dict[str, Role] = {}
-    if setup.master not in leave_out:
+    if setup.master is None or setup.master not in leave_out:
         wanted = {tid: Role.SLAVE for tid in setup.slaves if tid not in leave_out}
-        wanted[setup.master] = Role.MASTER
+        if setup.master is not None:
+            wanted[setup.master] = Role.MASTER
     # Unassign first, so the one-master rule holds at every step.
     for tid, tcfg in cfg.terminals.items():
         if tid not in wanted and tcfg.role is not Role.UNASSIGNED:
@@ -294,7 +323,9 @@ def apply_roles(setup: Setup, cfg: AppConfig, leave_out: Collection[str] = ()) -
     for tid, role in wanted.items():
         if cfg.terminals[tid].role is not role:
             cfg.set_role(tid, role)
-    cfg.copying_enabled = setup.copying and setup.master in wanted
+    # A direct profile's master is its own order ticket, so copying stands on its own;
+    # a copy profile cannot copy without the master in place.
+    cfg.copying_enabled = setup.copying and (setup.master is None or setup.master in wanted)
 
 
 def load(path: Path | None = None) -> SetupsDoc:
