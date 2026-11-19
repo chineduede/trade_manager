@@ -17,6 +17,20 @@ from .paths import version_seen_path
 
 NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
+        "0.1.4",
+        "2026-11-19",
+        (
+            "Breakeven can wait for a price: the BE button takes one, wears it while armed,"
+            " and moves the stop to the entry only when the market touches that price —"
+            " every copy follows on the next tick.",
+            "The Copies cell opens a menu: each copy named with its state, the live ones"
+            " linking to the ticket they hold on their terminal's page — and a copy's"
+            " “Copy of #…” there leads back to its row on the Trading page.",
+            "The installed app's window can no longer go blank mid-run, and a development"
+            " run can no longer sit on the installed app's port.",
+        ),
+    ),
+    (
         "0.1.3",
         "2026-11-17",
         (
