@@ -793,6 +793,15 @@ function renderBook() {
         : 'Breakeven: move the stop to the entry price — now, or once the price touches a level';
       be.addEventListener('click', function () { breakevenFlow(r); });
       actions.appendChild(be);
+      var out = document.createElement('button');
+      out.type = 'button';
+      out.className = 'row-btn';
+      out.textContent = 'TP BE';
+      out.title = 'Move the target to the entry plus the copies’ costs — for a '
+        + 'trade that has lost its reason: if the price comes back to the entry, it gets '
+        + 'out at nothing lost';
+      out.addEventListener('click', function () { exitAtEntryFlow(r); });
+      actions.appendChild(out);
       var part = document.createElement('button');
       part.type = 'button';
       part.className = 'row-btn';
@@ -929,6 +938,26 @@ function breakevenFlow(r) {
   });
   input.focus();
   input.select();
+}
+
+function exitAtEntryFlow(r) {
+  // The breakeven idea pointed the other way: a trade whose reason has gone while it
+  // sits in loss should leave the moment the price comes back, not wait on a distant
+  // target. The engine prices the level — the entry plus the dearest copy's costs, the
+  // same allowance a breakeven stop gets — and every copy follows the new target.
+  var body = document.createElement('div');
+  var p = document.createElement('p');
+  p.textContent = '#' + r.ticket + ' ' + r.symbol + ' ' + r.side
+    + ' — the target moves to the entry (' + r.entry + ') plus the copies’ '
+    + 'costs, the same allowance a breakeven stop gets. If the price comes back, the '
+    + 'trade is out at nothing lost; the stop stays where it is.';
+  body.appendChild(p);
+  showModal({
+    title: 'Target to entry #' + r.ticket,
+    body: body,
+    confirm: 'Move the target',
+    onConfirm: function () { act(api().exit_at_entry(r.ticket)); }
+  });
 }
 
 function partialCloseFlow(r) {
