@@ -682,15 +682,27 @@ function copiesCell(r) {
   btn.dataset.tip = 'The copies behind this ticket — each live one links to its terminal page';
   btn.addEventListener('click', function (ev) {
     ev.stopPropagation(); // the document's click-anywhere close must not eat the opening
+    if (menuToggles('copies:' + r.ticket)) return; // second click on the trigger closes
     openCopiesMenu(r, btn);
   });
   td.appendChild(btn);
   return td;
 }
 
+function menuToggles(owner) {
+  // The trigger buttons toggle: a click while their own menu stands closes it. The owner
+  // is a string, not the anchor element, because the poll rebuilds the table's buttons
+  // under an open menu — the name survives the rebuild where the element would not.
+  var menu = $('ctx-menu');
+  if (menu.hidden || menu.dataset.owner !== owner) return false;
+  closeMenu();
+  return true;
+}
+
 function openCopiesMenu(r, anchor) {
   // The card menu's element, reused: same look, same close-anywhere behaviour.
   var menu = $('ctx-menu');
+  menu.dataset.owner = 'copies:' + r.ticket;
   menu.textContent = '';
   var head = document.createElement('span');
   head.className = 'menu-head';
@@ -729,6 +741,7 @@ function openBookActions(r, anchor) {
   // The card menu's element, reused — same look, same close-anywhere behaviour as the
   // copies menu beside it. Every action keeps its explanation as a muted second line.
   var menu = $('ctx-menu');
+  menu.dataset.owner = 'actions:' + r.ticket;
   menu.textContent = '';
   var head = document.createElement('span');
   head.className = 'menu-head';
@@ -880,6 +893,7 @@ function renderBook() {
                 : 'The other actions — modify');
     more.addEventListener('click', function (ev) {
       ev.stopPropagation(); // the document's click-anywhere close must not eat the opening
+      if (menuToggles('actions:' + r.ticket)) return; // second click on ⋯ closes
       openBookActions(r, more);
     });
     actions.appendChild(more);
@@ -895,37 +909,59 @@ function renderBook() {
 // The native title tooltip's job, redrawn in the app's own skin: anything carrying a
 // data-tip shows it after a beat, centred under the element, clamped to the window.
 // Display only (pointer-events: none in the CSS), so it can never swallow a click.
-var TIP = { at: null, timer: 0 };
+// The poll rebuilds the book under the pointer every tick, replacing the hovered
+// element; a shown tip therefore never hides on the spot — it waits a beat for the
+// replacement to arrive and adopts it seamlessly, the same trick the card popover uses.
+var TIP = { at: null, timer: 0, hider: 0 };
 
 function hideTip() {
   clearTimeout(TIP.timer);
+  clearTimeout(TIP.hider);
   TIP.at = null;
   $('tip').hidden = true;
 }
 
 function wireTips() {
   var tip = $('tip');
+  function showNow(el) {
+    tip.textContent = el.dataset.tip;
+    tip.hidden = false;
+    var at = el.getBoundingClientRect();
+    var w = tip.offsetWidth, h = tip.offsetHeight;
+    tip.style.left = Math.max(8, Math.min(at.left + at.width / 2 - w / 2,
+      window.innerWidth - w - 8)) + 'px';
+    var y = at.bottom + 8;
+    if (y + h > window.innerHeight - 8) y = Math.max(8, at.top - h - 8);
+    tip.style.top = y + 'px';
+  }
   document.addEventListener('mouseover', function (ev) {
     var el = ev.target.closest ? ev.target.closest('[data-tip]') : null;
-    if (el === TIP.at) return;
-    hideTip();
-    if (!el) return;
+    if (el === TIP.at) { // same anchor: cancel any hide the churn scheduled
+      clearTimeout(TIP.hider);
+      return;
+    }
+    clearTimeout(TIP.timer);
+    clearTimeout(TIP.hider);
+    if (!el || !el.dataset.tip) {
+      // Off every tipped element. A shown tip lingers a beat instead of vanishing —
+      // if this was only the table rebuilding, the replacement re-adopts it below.
+      TIP.at = null;
+      if (tip.hidden) return;
+      TIP.hider = setTimeout(hideTip, 120);
+      return;
+    }
     TIP.at = el;
-    TIP.timer = setTimeout(function () {
-      if (TIP.at !== el || !el.isConnected || !el.dataset.tip) return;
-      tip.textContent = el.dataset.tip;
-      tip.hidden = false;
-      var at = el.getBoundingClientRect();
-      var w = tip.offsetWidth, h = tip.offsetHeight;
-      tip.style.left = Math.max(8, Math.min(at.left + at.width / 2 - w / 2,
-        window.innerWidth - w - 8)) + 'px';
-      var y = at.bottom + 8;
-      if (y + h > window.innerHeight - 8) y = Math.max(8, at.top - h - 8);
-      tip.style.top = y + 'px';
+    if (!tip.hidden) showNow(el); // already up: follow to the new anchor, no wait, no blink
+    else TIP.timer = setTimeout(function () {
+      if (TIP.at === el && el.isConnected) showNow(el);
     }, 420);
   });
   document.addEventListener('mouseout', function (ev) {
-    if (TIP.at && !(ev.relatedTarget && TIP.at.contains(ev.relatedTarget))) hideTip();
+    // Only the window's edge matters here (no element gains the pointer, so no
+    // mouseover follows); kept gentle for the same rebuild-under-the-pointer reason.
+    if (ev.relatedTarget) return;
+    clearTimeout(TIP.hider);
+    TIP.hider = setTimeout(hideTip, 120);
   });
   ['mousedown', 'wheel'].forEach(function (kind) {
     window.addEventListener(kind, hideTip, true);
@@ -1934,7 +1970,9 @@ function endDrag(e) {
 
 // --- the card's menu and the asking dialogs -------------------------------------------------
 function closeMenu() {
-  $('ctx-menu').hidden = true;
+  var menu = $('ctx-menu');
+  menu.hidden = true;
+  menu.dataset.owner = '';
 }
 
 function openMenu(c, x, y) {
@@ -1942,6 +1980,7 @@ function openMenu(c, x, y) {
   if (!live) return;
   hidePop();
   var menu = $('ctx-menu');
+  menu.dataset.owner = 'card:' + c.tid;
   menu.textContent = '';
   var head = document.createElement('span');
   head.className = 'menu-head';
