@@ -23,6 +23,8 @@ NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "A trade's row keeps two buttons however many actions exist: Close, and a ⋯ menu"
             " holding the rest — BE, TP BE, Partial, Modify — each with a line saying what"
             " it does. An armed breakeven keeps its blue BE on the ⋯ button.",
+            "Close and Cancel ask first, like every other action already did — a misclick"
+            " on the red button can no longer take a trade and its copies out.",
             "Hover hints wear the app's own skin everywhere, instead of the system's plain"
             " yellow box.",
         ),

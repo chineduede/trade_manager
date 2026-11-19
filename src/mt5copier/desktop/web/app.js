@@ -771,20 +771,8 @@ function openBookActions(r, anchor) {
     desc: r.open ? 'Change the stop or the target'
       : 'Change the entry, the stop, the target or the expiry',
     fn: function () { enterModify(r); }
-  }, { sep: true }, {
-    name: r.open ? 'Close' : 'Cancel',
-    desc: r.open ? 'Close it and every copy behind it' : 'Take the resting order off the book',
-    cls: 'danger',
-    fn: function () { act(r.open ? api().close(r.ticket) : api().cancel(r.ticket)); }
   });
   items.forEach(function (item) {
-    if (item.sep) {
-      var sep = document.createElement('div');
-      sep.className = 'menu-sep';
-      sep.setAttribute('aria-hidden', 'true');
-      menu.appendChild(sep);
-      return;
-    }
     var btn = document.createElement('button');
     btn.type = 'button';
     btn.setAttribute('role', 'menuitem');
@@ -876,9 +864,7 @@ function renderBook() {
     remove.type = 'button';
     remove.className = 'row-btn danger';
     remove.textContent = r.open ? 'Close' : 'Cancel';
-    remove.addEventListener('click', function () {
-      act(r.open ? api().close(r.ticket) : api().cancel(r.ticket));
-    });
+    remove.addEventListener('click', function () { closeFlow(r); });
     actions.appendChild(remove);
     var more = document.createElement('button');
     more.type = 'button';
@@ -1128,6 +1114,30 @@ function partialCloseFlow(r) {
   });
   input.focus();
   input.select();
+}
+
+function closeFlow(r) {
+  // The red button asks first, like every gentler action already did — it is the one
+  // click a slip of the hand must not fire, and it takes every copy with it.
+  var body = document.createElement('div');
+  var p = document.createElement('p');
+  p.textContent = r.open
+    ? 'Close #' + r.ticket + ' ' + r.symbol + ' ' + r.side + ' ' + r.lots
+      + ' lot' + (r.lots === 1 ? '' : 's') + '? Every copy follows on the next tick.'
+    : 'Cancel the resting order #' + r.ticket + ' ' + r.symbol + ' ' + r.side + ' '
+      + r.kind + ' ' + r.lots + ' lot' + (r.lots === 1 ? '' : 's')
+      + '? Every copy’s order goes with it.';
+  body.appendChild(p);
+  showModal({
+    title: (r.open ? 'Close #' : 'Cancel #') + r.ticket + '?',
+    body: body,
+    confirm: r.open ? 'Close it' : 'Cancel the order',
+    cancel: 'Keep it',
+    danger: true,
+    onConfirm: function () {
+      act(r.open ? api().close(r.ticket) : api().cancel(r.ticket));
+    }
+  });
 }
 
 function flattenFlow() {
