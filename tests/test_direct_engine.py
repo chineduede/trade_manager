@@ -263,6 +263,78 @@ def test_an_armed_breakeven_fires_on_the_feed_and_mirrors_to_the_copy(engine: En
     assert copy.synced_sl == 1.08520
 
 
+def _give_the_copy_costs(engine: Engine) -> None:
+    """A dry run's fill reports no costs; give the copy what a real deal would carry."""
+    engine._ledger._store.update(
+        SLAVE, 1, point=0.00001, digits=5, price_value=100_000.0, commission_per_lot=7.0
+    )
+
+
+def test_exit_at_entry_parks_the_target_past_the_copys_costs(engine: Engine) -> None:
+    feed(engine, EURUSD_QUOTE)
+    engine.virtual_tick()  # baseline
+    engine.place_direct_market("EURUSD", PositionType.BUY, 1.0, 1.08000, 1.09500)
+    engine.virtual_tick()
+    _give_the_copy_costs(engine)
+    assert engine.direct_exit_at_entry(1) is None
+    p = engine.direct_positions()[0]
+    # The entry (filled at the ask) plus the copy's commission as a distance: 7.0 over
+    # what a 1.0 move is worth on a lot. The stop has not moved.
+    assert p.tp == 1.08527 and p.sl == 1.08000
+    engine.virtual_tick()
+    assert ActionKind.MODIFY_SLTP in kinds(engine)
+    (copy,) = engine._ledger.believed(SLAVE)
+    assert copy.synced_tp == 1.08527
+    # The price comes back to the entry: the target closes the trade, and the copy with it.
+    feed(engine, Quote(symbol="EURUSD", bid=1.08530, ask=1.08550), seq=2)
+    engine.virtual_tick()
+    assert not engine.direct_positions()
+    assert ActionKind.CLOSE in kinds(engine)
+
+
+def test_exit_at_entry_for_a_sell_sits_below_the_entry(engine: Engine) -> None:
+    feed(engine, EURUSD_QUOTE)
+    engine.virtual_tick()  # baseline
+    engine.place_direct_market("EURUSD", PositionType.SELL, 1.0, 1.09000, 0.0)
+    engine.virtual_tick()
+    _give_the_copy_costs(engine)
+    assert engine.direct_exit_at_entry(1) is None
+    p = engine.direct_positions()[0]
+    assert p.tp == 1.08493  # the entry (the bid) minus the commission distance
+
+
+def test_exit_at_entry_needs_a_copy_with_costs(engine: Engine) -> None:
+    feed(engine, EURUSD_QUOTE)
+    engine.virtual_tick()  # baseline
+    engine.place_direct_market("EURUSD", PositionType.BUY, 1.0, 1.08000, 0.0)
+    engine.virtual_tick()
+    why = engine.direct_exit_at_entry(1)  # the dry run's copy carries no point size
+    assert why is not None and "costs" in why
+
+
+def test_exit_at_entry_refuses_a_stop_already_past_the_entry(engine: Engine) -> None:
+    feed(engine, EURUSD_QUOTE)
+    engine.virtual_tick()  # baseline
+    engine.place_direct_market("EURUSD", PositionType.BUY, 1.0, 1.08000, 0.0)
+    engine.virtual_tick()
+    _give_the_copy_costs(engine)
+    assert engine.modify_direct(1, 1.08520, 0.0) is None  # breakeven by hand
+    why = engine.direct_exit_at_entry(1)
+    assert why is not None and "cannot lose" in why
+
+
+def test_exit_at_entry_refuses_a_trade_already_past_the_level(engine: Engine) -> None:
+    feed(engine, EURUSD_QUOTE)
+    engine.virtual_tick()  # baseline
+    engine.place_direct_market("EURUSD", PositionType.BUY, 1.0, 1.08000, 0.0)
+    engine.virtual_tick()
+    _give_the_copy_costs(engine)
+    feed(engine, Quote(symbol="EURUSD", bid=1.09000, ask=1.09020), seq=2)
+    engine.virtual_tick()
+    why = engine.direct_exit_at_entry(1)
+    assert why is not None and "close it instead" in why
+
+
 def test_cancel_mirrors_as_a_cancel(engine: Engine) -> None:
     feed(engine, EURUSD_QUOTE)
     engine.virtual_tick()  # baseline

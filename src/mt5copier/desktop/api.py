@@ -571,6 +571,22 @@ class DesktopApi:
             "the stop moves to the entry and every copy follows.",
         }
 
+    def exit_at_entry(self, ticket: int) -> dict[str, Any]:
+        """Move a direct position's target to its entry plus the copies' costs: the way
+        out of a trade whose reason has gone -- a price that comes back to the entry
+        takes it out at nothing lost. The engine prices the level; the stop stays."""
+        ticket = int(ticket)
+        why = self._engine.direct_exit_at_entry(ticket)
+        if why is not None:
+            return {"ok": False, "message": why}
+        tp = next((p.tp for p in self._engine.direct_positions() if p.ticket == ticket), 0.0)
+        at = f" at {tp:g}" if tp else ""
+        return {
+            "ok": True,
+            "message": f"#{ticket}'s target now waits{at}: back to the entry and it is "
+            "out at nothing lost. Every copy follows.",
+        }
+
     def flatten(self) -> dict[str, Any]:
         """Close every position and cancel every resting order; the page confirms first."""
         count = self._engine.flatten_direct()

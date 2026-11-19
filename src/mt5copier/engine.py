@@ -33,6 +33,7 @@ from .breakeven import (
     check_breakeven_price,
     guard_stop,
     master_breakeven_due,
+    stop_past_entry,
 )
 from .catalog import CLASS_WORDS, Catalog, CatalogStore
 from .claims import ClaimBook, ClaimRefusedError, claim_keys
@@ -1324,6 +1325,60 @@ class Engine:
             if book is None:
                 return self._NOT_TRADING
             return book.set_breakeven_at(ticket, price)
+
+    def direct_exit_at_entry(self, ticket: int) -> str | None:
+        """Move a direct position's target to its entry plus the copies' costs.
+
+        The breakeven idea pointed the other way: a trade whose reason has gone while it
+        sits in loss should leave the moment the price comes back, not wait on a distant
+        target. The target moves to the entry plus the dearest live copy's commission and
+        slippage buffer -- the same allowance a breakeven stop gets (see
+        :func:`mt5copier.breakeven.buffer_distance`) -- so the exit really is at nothing
+        lost, on the costliest account. The stop stays where it is, and every copy follows
+        the new target through the ordinary diff. None means done; otherwise why not.
+        """
+        with self._lock:
+            book = self._virtual
+            if book is None:
+                return self._NOT_TRADING
+            p = next((x for x in book.positions() if x.ticket == ticket), None)
+            if p is None:
+                return f"#{ticket} is not an open position in this book"
+            sign = 1.0 if p.type is PositionType.BUY else -1.0
+            if p.sl and (p.sl - p.price_open) * sign >= 0:
+                return (
+                    f"#{ticket}'s stop is already at or past its entry ({p.price_open:g}); "
+                    "it cannot lose, so there is nothing for an entry exit to do"
+                )
+            buffer = point = 0.0
+            digits = 0
+            for cfg in self._cfg.slaves:
+                for copy in self._ledger.believed(cfg.terminal_id):
+                    if copy.master_ticket != ticket or copy.point <= 0:
+                        continue
+                    b = buffer_distance(copy, cfg)
+                    if b is None or (point > 0 and b < buffer):
+                        continue
+                    buffer, point, digits = b, copy.point, copy.digits
+            if point <= 0:
+                return (
+                    f"none of #{ticket}'s copies has its costs on record, so the exit "
+                    "level cannot be priced; close it by hand instead"
+                )
+            # At least half a point past the entry, so the rounding lands the target a
+            # full point onto the profitable side even when the costs round to nothing --
+            # the book refuses a target sitting exactly at the entry.
+            tp = stop_past_entry(p.type, p.price_open, max(buffer, point / 2), point, digits)
+            _, quotes = self._feed_quotes()
+            quote = quotes.get(p.symbol)
+            if quote is not None:
+                price = quote[0] if p.type is PositionType.BUY else quote[1]
+                if (price - tp) * sign >= 0:
+                    return (
+                        f"#{ticket} is already at or past {tp:g}, the entry plus its "
+                        "costs; close it instead to keep what it holds"
+                    )
+            return book.modify_position(ticket, p.sl, tp)
 
     def direct_breakevens(self) -> dict[int, float]:
         """Each armed direct breakeven by ticket; empty outside trading mode."""

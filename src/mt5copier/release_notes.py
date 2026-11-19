@@ -28,6 +28,9 @@ NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             " “Copy of #…” there leads back to its row on the Trading page.",
             "The installed app's window can no longer go blank mid-run, and a development"
             " run can no longer sit on the installed app's port.",
+            "A TP BE button beside BE, for a trade that has lost its reason: the target"
+            " moves to the entry plus the copies' costs, so a price that comes back to"
+            " your entry takes the trade out at nothing lost.",
         ),
     ),
     (
