@@ -17,6 +17,17 @@ from .paths import version_seen_path
 
 NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
+        "0.1.5",
+        "2026-11-19",
+        (
+            "A trade's row keeps two buttons however many actions exist: Close, and a ⋯ menu"
+            " holding the rest — BE, TP BE, Partial, Modify — each with a line saying what"
+            " it does. An armed breakeven keeps its blue BE on the ⋯ button.",
+            "Hover hints wear the app's own skin everywhere, instead of the system's plain"
+            " yellow box.",
+        ),
+    ),
+    (
         "0.1.4",
         "2026-11-19",
         (
