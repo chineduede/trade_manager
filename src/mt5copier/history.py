@@ -10,15 +10,14 @@ the slave are read back: one the slave never took is a line in the log, not a tr
 Display only: nothing that decides what to send may read it. Steps are kept for
 ``AppConfig.history_days`` and pruned on opening and about hourly after.
 
-Settings follow :mod:`mt5copier.store`'s (WAL, ``synchronous=NORMAL``, a 30s busy timeout), but
-losing this file loses nothing the copier needs, so a write that fails is logged and dropped.
+How the file is held is :mod:`mt5copier.sqlite_store`'s (WAL, ``synchronous=NORMAL``, a 30s
+busy timeout), but losing this file loses nothing the copier needs, so a write that fails is
+logged and dropped.
 """
 
 from __future__ import annotations
 
-import os
 import sqlite3
-import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
@@ -28,6 +27,7 @@ from .day_book import MasterEvent, Outcome, SlaveOutcome, describe_guard
 from .logging_setup import get_logger
 from .protocol import ActionKind
 from .reconcile import Action
+from .sqlite_store import SqliteStore
 
 log = get_logger(__name__)
 
@@ -72,9 +72,9 @@ CREATE INDEX IF NOT EXISTS guard_actions_by_account ON guard_actions (account, t
 """
 
 _ADDED_COLUMNS = (
-    ("lots", "REAL"),
-    ("action", "TEXT NOT NULL DEFAULT ''"),
-    ("guard", "TEXT NOT NULL DEFAULT ''"),
+    ("steps", "lots", "REAL"),
+    ("steps", "action", "TEXT NOT NULL DEFAULT ''"),
+    ("steps", "guard", "TEXT NOT NULL DEFAULT ''"),
 )
 """Columns added after the table first shipped, added on open to a file that lacks them."""
 
@@ -314,42 +314,17 @@ def step_for(head: MasterEvent, outcome: SlaveOutcome, action: Action | None) ->
 # --- the store -------------------------------------------------------------------------------
 
 
-class HistoryStore:
-    """Thread-safe: the engine writes, the app reads. Like :class:`~mt5copier.store.
-    MappingStore`, a connection inherited across a spawn is reopened, never reused."""
+class HistoryStore(SqliteStore):
+    """Thread-safe: the engine writes, the app reads. How the file is held is
+    :class:`SqliteStore`'s; it opens lazily, on the first step written or read."""
+
+    SCHEMA = _SCHEMA
+    ADDED_COLUMNS = _ADDED_COLUMNS
 
     def __init__(self, path: Path | str = ":memory:", *, keep_days: int = 30) -> None:
-        self._path = str(path)
+        super().__init__(path)
         self._keep_days = keep_days
-        self._lock = threading.RLock()
-        self._pid = os.getpid()
-        self._conn: sqlite3.Connection | None = None
         self._pruned = 0.0
-
-    @property
-    def _db(self) -> sqlite3.Connection:
-        if self._conn is None or os.getpid() != self._pid:
-            if self._path != ":memory:":
-                Path(self._path).parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(self._path, check_same_thread=False, timeout=30.0)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.execute("PRAGMA busy_timeout=30000")
-            conn.executescript(_SCHEMA)
-            have = {r["name"] for r in conn.execute("PRAGMA table_info(steps)")}
-            for name, decl in _ADDED_COLUMNS:
-                if name not in have:
-                    conn.execute(f"ALTER TABLE steps ADD COLUMN {name} {decl}")
-            conn.commit()
-            self._conn, self._pid = conn, os.getpid()
-        return self._conn
-
-    def close(self) -> None:
-        with self._lock:
-            if self._conn is not None:
-                self._conn.close()
-                self._conn = None
 
     @property
     def keep_days(self) -> int:

@@ -13,29 +13,22 @@ tracking them, and the next startup cannot tell them from a stranger's trades. H
 a synchronous mode that survives a process crash, and writes that commit immediately rather
 than at some convenient later point.
 
-SQLite settings follow ``zele-mt5``'s ``core/database/service.py``, which got this part right:
-``journal_mode=WAL`` so a reader never blocks the writer, ``synchronous=NORMAL`` (durable
-across a process crash, which is the failure that actually happens, while not paying an fsync
-per commit for a machine-level power loss), and a 30s ``busy_timeout`` so a momentary lock
-waits instead of raising.
+How the file is held -- WAL, ``synchronous=NORMAL``, the 30s busy timeout, the reopen after
+a spawn -- is :mod:`mt5copier.sqlite_store`'s, shared with the trade history.
 """
 
 from __future__ import annotations
 
-import os
 import sqlite3
-import threading
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 
-from .logging_setup import get_logger
 from .protocol import OrderType, PositionType
 from .reconcile import CopiedOrder, CopiedPosition
-
-log = get_logger(__name__)
+from .sqlite_store import SqliteStore
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS copies (
@@ -82,24 +75,23 @@ CREATE TABLE IF NOT EXISTS master_trades (
 """
 
 _ADDED_COLUMNS = (
-    ("point", "REAL NOT NULL DEFAULT 0"),
-    ("digits", "INTEGER NOT NULL DEFAULT 0"),
-    ("risk_distance", "REAL NOT NULL DEFAULT 0"),
-    ("price_value", "REAL NOT NULL DEFAULT 0"),
-    ("breakeven_sl", "REAL NOT NULL DEFAULT 0"),
-    ("breakeven_exempt", "INTEGER NOT NULL DEFAULT 0"),
-    ("breakeven_at", "REAL NOT NULL DEFAULT 0"),
-    ("book_fraction", "REAL NOT NULL DEFAULT 0"),
-    ("book_tries", "INTEGER NOT NULL DEFAULT 0"),
-    ("booked", "INTEGER NOT NULL DEFAULT 0"),
-    ("commission_per_lot", "REAL NOT NULL DEFAULT 0"),
-    ("master_managed", "INTEGER NOT NULL DEFAULT -1"),
-    ("guard_close", "INTEGER NOT NULL DEFAULT 0"),
-    ("synced_expiration", "INTEGER NOT NULL DEFAULT 0"),
+    ("copies", "point", "REAL NOT NULL DEFAULT 0"),
+    ("copies", "digits", "INTEGER NOT NULL DEFAULT 0"),
+    ("copies", "risk_distance", "REAL NOT NULL DEFAULT 0"),
+    ("copies", "price_value", "REAL NOT NULL DEFAULT 0"),
+    ("copies", "breakeven_sl", "REAL NOT NULL DEFAULT 0"),
+    ("copies", "breakeven_exempt", "INTEGER NOT NULL DEFAULT 0"),
+    ("copies", "breakeven_at", "REAL NOT NULL DEFAULT 0"),
+    ("copies", "book_fraction", "REAL NOT NULL DEFAULT 0"),
+    ("copies", "book_tries", "INTEGER NOT NULL DEFAULT 0"),
+    ("copies", "booked", "INTEGER NOT NULL DEFAULT 0"),
+    ("copies", "commission_per_lot", "REAL NOT NULL DEFAULT 0"),
+    ("copies", "master_managed", "INTEGER NOT NULL DEFAULT -1"),
+    ("copies", "guard_close", "INTEGER NOT NULL DEFAULT 0"),
+    ("copies", "synced_expiration", "INTEGER NOT NULL DEFAULT 0"),
 )
-"""Columns added after the table first shipped, for breakeven and booking at it. ``CREATE TABLE
-IF NOT EXISTS`` leaves an older file's table as it was, so each is added on open when it is
-missing. The defaults read as "not known" and "not triggered", which is what an older copy is."""
+"""Columns added after the table first shipped, for breakeven and booking at it. The defaults
+read as "not known" and "not triggered", which is what an older copy is."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,61 +205,20 @@ class Copy:
         )
 
 
-class MappingStore:
+class MappingStore(SqliteStore):
     """The copier's record of what it owns.
 
-    One instance per process. The connection is guarded by a lock and by the pid that opened
-    it: a SQLite connection must never be used across a spawn, and this project spawns a
-    worker per terminal, so an inherited handle is reopened rather than quietly corrupting
-    the file.
+    One instance per process; how the file is held is :class:`SqliteStore`'s. It opens
+    eagerly: a mapping store that cannot open its file must fail at startup, not on the
+    first trade.
     """
 
+    SCHEMA = _SCHEMA
+    ADDED_COLUMNS = _ADDED_COLUMNS
+
     def __init__(self, path: Path | str = ":memory:") -> None:
-        self._path = str(path)
-        self._lock = threading.RLock()
-        self._pid = os.getpid()
-        self._conn: sqlite3.Connection | None = None
+        super().__init__(path)
         self._connect()
-
-    # --- connection ------------------------------------------------------------------------
-
-    def _connect(self) -> None:
-        if self._path != ":memory:":
-            Path(self._path).parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(self._path, check_same_thread=False, timeout=30.0)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=30000")
-        conn.executescript(_SCHEMA)
-        have = {r["name"] for r in conn.execute("PRAGMA table_info(copies)")}
-        for name, decl in _ADDED_COLUMNS:
-            if name not in have:
-                conn.execute(f"ALTER TABLE copies ADD COLUMN {name} {decl}")
-        conn.commit()
-        self._conn = conn
-        self._pid = os.getpid()
-
-    @property
-    def _db(self) -> sqlite3.Connection:
-        if self._conn is None or os.getpid() != self._pid:
-            # Inherited across a spawn, or closed. Reopening is the only safe move.
-            log.debug("reopening mapping store in pid %s", os.getpid())
-            self._connect()
-        assert self._conn is not None
-        return self._conn
-
-    def close(self) -> None:
-        with self._lock:
-            if self._conn is not None:
-                self._conn.close()
-                self._conn = None
-
-    def __enter__(self) -> MappingStore:
-        return self
-
-    def __exit__(self, *exc: object) -> None:
-        self.close()
 
     # --- writing ---------------------------------------------------------------------------
 
