@@ -304,7 +304,7 @@ function renderModify() {
     var cps = document.createElement('span');
     cps.className = cp.cls;
     cps.textContent = 'copies: ' + cp.text;
-    cps.title = cp.title;
+    cps.dataset.tip = cp.title;
     facts.appendChild(cps);
   }
 
@@ -615,7 +615,7 @@ function renderShell() {
   // and anyone already on the page is walked off it.
   var tradingTab = document.querySelector('#sidebar .nav-item[data-page="trading"]');
   tradingTab.classList.toggle('disabled', !live.direct);
-  tradingTab.title = live.direct
+  tradingTab.dataset.tip = live.direct
     ? 'Trading'
     : 'This profile copies a master terminal' + (live.feed ? ' (' + live.feed + ')' : '')
       + ' — place trades there. Direct trading (no master) turns this page back on.';
@@ -671,7 +671,7 @@ function copiesCell(r) {
   if (!r.open || !(r.copies || []).length) {
     td.className = !r.open ? 'muted' : cp.cls;
     td.textContent = !r.open ? '—' : cp.text;
-    if (r.open && cp.title) td.title = cp.title;
+    if (r.open && cp.title) td.dataset.tip = cp.title;
     return td;
   }
   td.className = cp.cls;
@@ -679,18 +679,30 @@ function copiesCell(r) {
   btn.type = 'button';
   btn.className = 'linklike copies-dd';
   btn.textContent = cp.text + ' ▾';
-  btn.title = 'The copies behind this ticket — each live one links to its terminal page';
+  btn.dataset.tip = 'The copies behind this ticket — each live one links to its terminal page';
   btn.addEventListener('click', function (ev) {
     ev.stopPropagation(); // the document's click-anywhere close must not eat the opening
+    if (menuToggles('copies:' + r.ticket)) return; // second click on the trigger closes
     openCopiesMenu(r, btn);
   });
   td.appendChild(btn);
   return td;
 }
 
+function menuToggles(owner) {
+  // The trigger buttons toggle: a click while their own menu stands closes it. The owner
+  // is a string, not the anchor element, because the poll rebuilds the table's buttons
+  // under an open menu — the name survives the rebuild where the element would not.
+  var menu = $('ctx-menu');
+  if (menu.hidden || menu.dataset.owner !== owner) return false;
+  closeMenu();
+  return true;
+}
+
 function openCopiesMenu(r, anchor) {
   // The card menu's element, reused: same look, same close-anywhere behaviour.
   var menu = $('ctx-menu');
+  menu.dataset.owner = 'copies:' + r.ticket;
   menu.textContent = '';
   var head = document.createElement('span');
   head.className = 'menu-head';
@@ -720,6 +732,69 @@ function openCopiesMenu(r, anchor) {
   var at = anchor.getBoundingClientRect();
   var w = menu.offsetWidth, h = menu.offsetHeight;
   menu.style.left = Math.max(8, Math.min(at.left, window.innerWidth - w - 8)) + 'px';
+  var y = at.bottom + 6;
+  if (y + h > window.innerHeight - 8) y = Math.max(8, at.top - h - 6);
+  menu.style.top = y + 'px';
+}
+
+function openBookActions(r, anchor) {
+  // The card menu's element, reused — same look, same close-anywhere behaviour as the
+  // copies menu beside it. Every action keeps its explanation as a muted second line.
+  var menu = $('ctx-menu');
+  menu.dataset.owner = 'actions:' + r.ticket;
+  menu.textContent = '';
+  var head = document.createElement('span');
+  head.className = 'menu-head';
+  head.textContent = '#' + r.ticket + ' ' + r.symbol;
+  menu.appendChild(head);
+  var items = [];
+  if (r.open) {
+    items.push({
+      name: r.beAt ? 'BE @ ' + r.beAt + ' — armed' : 'BE',
+      desc: r.beAt
+        ? 'Once the price touches ' + r.beAt + ', the stop moves to the entry — change or disarm'
+        : 'Move the stop to the entry — now, or once the price touches a level',
+      cls: r.beAt ? 'armed' : '',
+      fn: function () { breakevenFlow(r); }
+    }, {
+      name: 'TP BE',
+      desc: 'The target waits at the entry plus the copies’ costs — out at nothing lost',
+      fn: function () { exitAtEntryFlow(r); }
+    }, {
+      name: 'Partial',
+      desc: 'Close a percent of it; every copy mirrors the same fraction',
+      fn: function () { partialCloseFlow(r); }
+    });
+  }
+  items.push({
+    name: 'Modify',
+    desc: r.open ? 'Change the stop or the target'
+      : 'Change the entry, the stop, the target or the expiry',
+    fn: function () { enterModify(r); }
+  });
+  items.forEach(function (item) {
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.setAttribute('role', 'menuitem');
+    btn.className = 'mi' + (item.cls ? ' ' + item.cls : '');
+    var name = document.createElement('span');
+    name.className = 'mi-name';
+    name.textContent = item.name;
+    btn.appendChild(name);
+    var desc = document.createElement('span');
+    desc.className = 'mi-desc';
+    desc.textContent = item.desc;
+    btn.appendChild(desc);
+    btn.addEventListener('click', function () {
+      closeMenu();
+      item.fn();
+    });
+    menu.appendChild(btn);
+  });
+  menu.hidden = false;
+  var at = anchor.getBoundingClientRect();
+  var w = menu.offsetWidth, h = menu.offsetHeight;
+  menu.style.left = Math.max(8, Math.min(at.right - w, window.innerWidth - w - 8)) + 'px';
   var y = at.bottom + 6;
   if (y + h > window.innerHeight - 8) y = Math.max(8, at.top - h - 6);
   menu.style.top = y + 'px';
@@ -780,56 +855,103 @@ function renderBook() {
       : (r.expiresMin === null ? 'GTC' : 'expires ' + r.expiresMin + 'm'), 'muted');
     tr.appendChild(copiesCell(r));
 
+    // Two buttons only, however many actions exist: Close (the urgent one, always one
+    // click away) and a ⋯ menu with the rest, each action carrying its one-line why —
+    // the menu teaches what the old native tooltips did, in the app's own skin.
     var actions = document.createElement('td');
     actions.className = 'actions-cell';
-    if (r.open) {
-      var be = document.createElement('button');
-      be.type = 'button';
-      be.className = 'row-btn' + (r.beAt ? ' armed' : '');
-      be.textContent = r.beAt ? 'BE @ ' + r.beAt : 'BE';
-      be.title = r.beAt
-        ? 'Breakeven armed: once the price touches ' + r.beAt
-          + ', the stop moves to the entry. Click to change or disarm.'
-        : 'Breakeven: move the stop to the entry price — now, or once the price touches a level';
-      be.addEventListener('click', function () { breakevenFlow(r); });
-      actions.appendChild(be);
-      var out = document.createElement('button');
-      out.type = 'button';
-      out.className = 'row-btn';
-      out.textContent = 'TP BE';
-      out.title = 'Move the target to the entry plus the copies’ costs — for a '
-        + 'trade that has lost its reason: if the price comes back to the entry, it gets '
-        + 'out at nothing lost';
-      out.addEventListener('click', function () { exitAtEntryFlow(r); });
-      actions.appendChild(out);
-      var part = document.createElement('button');
-      part.type = 'button';
-      part.className = 'row-btn';
-      part.textContent = 'Partial';
-      part.title = 'Close a percent of it; every copy mirrors the same fraction';
-      part.addEventListener('click', function () { partialCloseFlow(r); });
-      actions.appendChild(part);
-    }
-    var modify = document.createElement('button');
-    modify.type = 'button';
-    modify.className = 'row-btn';
-    modify.textContent = 'Modify';
-    modify.addEventListener('click', function () { enterModify(r); });
     var remove = document.createElement('button');
     remove.type = 'button';
     remove.className = 'row-btn danger';
     remove.textContent = r.open ? 'Close' : 'Cancel';
-    remove.addEventListener('click', function () {
-      act(r.open ? api().close(r.ticket) : api().cancel(r.ticket));
-    });
-    actions.appendChild(modify);
+    remove.addEventListener('click', function () { closeFlow(r); });
     actions.appendChild(remove);
+    var more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'row-btn more' + (r.beAt ? ' armed' : '');
+    more.textContent = r.beAt ? 'BE ⋯' : '⋯';
+    more.setAttribute('aria-label', 'More actions');
+    more.setAttribute('aria-haspopup', 'menu');
+    more.dataset.tip = r.beAt
+      ? 'Breakeven armed: once the price touches ' + r.beAt
+        + ', the stop moves to the entry. The other actions live here too.'
+      : (r.open ? 'The other actions — breakeven, partial close, modify'
+                : 'The other actions — modify');
+    more.addEventListener('click', function (ev) {
+      ev.stopPropagation(); // the document's click-anywhere close must not eat the opening
+      if (menuToggles('actions:' + r.ticket)) return; // second click on ⋯ closes
+      openBookActions(r, more);
+    });
+    actions.appendChild(more);
     tr.appendChild(actions);
     body.appendChild(tr);
   });
   bookTickets = seen;
   if (focused && focused.scrollIntoView) focused.scrollIntoView({ block: 'center' });
   S.focusBookTicket = 0; // one flash; a later redraw must not hunt again
+}
+
+// --- the hover tip --------------------------------------------------------------------------
+// The native title tooltip's job, redrawn in the app's own skin: anything carrying a
+// data-tip shows it after a beat, centred under the element, clamped to the window.
+// Display only (pointer-events: none in the CSS), so it can never swallow a click.
+// The poll rebuilds the book under the pointer every tick, replacing the hovered
+// element; a shown tip therefore never hides on the spot — it waits a beat for the
+// replacement to arrive and adopts it seamlessly, the same trick the card popover uses.
+var TIP = { at: null, timer: 0, hider: 0 };
+
+function hideTip() {
+  clearTimeout(TIP.timer);
+  clearTimeout(TIP.hider);
+  TIP.at = null;
+  $('tip').hidden = true;
+}
+
+function wireTips() {
+  var tip = $('tip');
+  function showNow(el) {
+    tip.textContent = el.dataset.tip;
+    tip.hidden = false;
+    var at = el.getBoundingClientRect();
+    var w = tip.offsetWidth, h = tip.offsetHeight;
+    tip.style.left = Math.max(8, Math.min(at.left + at.width / 2 - w / 2,
+      window.innerWidth - w - 8)) + 'px';
+    var y = at.bottom + 8;
+    if (y + h > window.innerHeight - 8) y = Math.max(8, at.top - h - 8);
+    tip.style.top = y + 'px';
+  }
+  document.addEventListener('mouseover', function (ev) {
+    var el = ev.target.closest ? ev.target.closest('[data-tip]') : null;
+    if (el === TIP.at) { // same anchor: cancel any hide the churn scheduled
+      clearTimeout(TIP.hider);
+      return;
+    }
+    clearTimeout(TIP.timer);
+    clearTimeout(TIP.hider);
+    if (!el || !el.dataset.tip) {
+      // Off every tipped element. A shown tip lingers a beat instead of vanishing —
+      // if this was only the table rebuilding, the replacement re-adopts it below.
+      TIP.at = null;
+      if (tip.hidden) return;
+      TIP.hider = setTimeout(hideTip, 120);
+      return;
+    }
+    TIP.at = el;
+    if (!tip.hidden) showNow(el); // already up: follow to the new anchor, no wait, no blink
+    else TIP.timer = setTimeout(function () {
+      if (TIP.at === el && el.isConnected) showNow(el);
+    }, 420);
+  });
+  document.addEventListener('mouseout', function (ev) {
+    // Only the window's edge matters here (no element gains the pointer, so no
+    // mouseover follows); kept gentle for the same rebuild-under-the-pointer reason.
+    if (ev.relatedTarget) return;
+    clearTimeout(TIP.hider);
+    TIP.hider = setTimeout(hideTip, 120);
+  });
+  ['mousedown', 'wheel'].forEach(function (kind) {
+    window.addEventListener(kind, hideTip, true);
+  });
 }
 
 // --- talking to the engine -----------------------------------------------------------------
@@ -992,6 +1114,30 @@ function partialCloseFlow(r) {
   });
   input.focus();
   input.select();
+}
+
+function closeFlow(r) {
+  // The red button asks first, like every gentler action already did — it is the one
+  // click a slip of the hand must not fire, and it takes every copy with it.
+  var body = document.createElement('div');
+  var p = document.createElement('p');
+  p.textContent = r.open
+    ? 'Close #' + r.ticket + ' ' + r.symbol + ' ' + r.side + ' ' + r.lots
+      + ' lot' + (r.lots === 1 ? '' : 's') + '? Every copy follows on the next tick.'
+    : 'Cancel the resting order #' + r.ticket + ' ' + r.symbol + ' ' + r.side + ' '
+      + r.kind + ' ' + r.lots + ' lot' + (r.lots === 1 ? '' : 's')
+      + '? Every copy’s order goes with it.';
+  body.appendChild(p);
+  showModal({
+    title: (r.open ? 'Close #' : 'Cancel #') + r.ticket + '?',
+    body: body,
+    confirm: r.open ? 'Close it' : 'Cancel the order',
+    cancel: 'Keep it',
+    danger: true,
+    onConfirm: function () {
+      act(r.open ? api().close(r.ticket) : api().cancel(r.ticket));
+    }
+  });
 }
 
 function flattenFlow() {
@@ -1395,7 +1541,7 @@ function marginRow(c) {
   // where a tight card does not squeeze it into "guards 2…".
   if (c.guard && c.guard.text) {
     var badge = cardLine('tcard-guard ' + (c.guard.tone || ''), c.guard.text);
-    badge.title = c.guard.text;
+    badge.dataset.tip = c.guard.text;
     row.appendChild(badge);
   }
   return row;
@@ -1481,7 +1627,7 @@ function terminalCard(c, live) {
       + ' slave' + (live.slaves.length === 1 ? '' : 's');
   }
   var infoLine = cardLine(infoCls, info);
-  if (infoTitle) infoLine.title = infoTitle;
+  if (infoTitle) infoLine.dataset.tip = infoTitle;
   el.appendChild(infoLine);
   el.appendChild(marginRow(c));
 
@@ -1834,7 +1980,9 @@ function endDrag(e) {
 
 // --- the card's menu and the asking dialogs -------------------------------------------------
 function closeMenu() {
-  $('ctx-menu').hidden = true;
+  var menu = $('ctx-menu');
+  menu.hidden = true;
+  menu.dataset.owner = '';
 }
 
 function openMenu(c, x, y) {
@@ -1842,6 +1990,7 @@ function openMenu(c, x, y) {
   if (!live) return;
   hidePop();
   var menu = $('ctx-menu');
+  menu.dataset.owner = 'card:' + c.tid;
   menu.textContent = '';
   var head = document.createElement('span');
   head.className = 'menu-head';
@@ -3113,11 +3262,11 @@ function renderNews() {
   mine.disabled = !mc || !mc.length;
   var mineLabel = document.querySelector('label[for="news-mine"]');
   if (mc === null) {
-    mineLabel.title = 'a symbol in the book cannot be read, so any news moves it';
+    mineLabel.dataset.tip = 'a symbol in the book cannot be read, so any news moves it';
   } else if (!mc.length) {
-    mineLabel.title = 'nothing is open to narrow by';
+    mineLabel.dataset.tip = 'nothing is open to narrow by';
   } else {
-    mineLabel.title = 'shows ' + mc.join(', ');
+    mineLabel.dataset.tip = 'shows ' + mc.join(', ');
   }
 
   var days = $('news-days');
@@ -3614,13 +3763,13 @@ function setupRow(s) {
       var dot = document.createElement('span');
       dot.className = 'strow-dot';
       dot.textContent = '● ';
-      dot.title = 'the roles in place now';
+      dot.dataset.tip = 'the roles in place now';
       el.appendChild(dot);
     }
     el.appendChild(document.createTextNode(s.name));
   });
-  cell(function (el) { el.textContent = s.master; el.title = s.master; });
-  cell(function (el) { el.textContent = s.slaves; el.title = s.slaves; });
+  cell(function (el) { el.textContent = s.master; el.dataset.tip = s.master; });
+  cell(function (el) { el.textContent = s.slaves; el.dataset.tip = s.slaves; });
   cell(function (el) {
     var on = document.createElement('span');
     on.className = s.copying ? 'green' : 'muted';
@@ -4651,7 +4800,7 @@ function ovLinkCell(r) {
     lk.type = 'button';
     lk.className = 'linklike';
     lk.textContent = r.link.text;
-    lk.title = 'Back to this ticket on the Trading page';
+    lk.dataset.tip = 'Back to this ticket on the Trading page';
     lk.addEventListener('click', function () { jumpToBook(r.copyOf); });
     td.appendChild(lk);
   } else {
@@ -5138,6 +5287,7 @@ function wire() {
     closeDropdowns();
     closeMenu();
   });
+  wireTips();
 
   $('reset-btn').addEventListener('click', function () {
     ['f-stop', 'f-rr', 'f-tp', 'f-entry'].forEach(function (id) { $(id).value = ''; });
