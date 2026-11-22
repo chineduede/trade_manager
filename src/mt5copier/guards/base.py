@@ -49,6 +49,12 @@ class Memory(Protocol):
 
     def day_start_equity(self, rule_id: str, day: str) -> float | None: ...
 
+    def opens_today(self, day: str) -> tuple[int, int]:
+        """How many trades the copier placed on this account on ``day``, a local date from
+        :func:`~mt5copier.guards.account.local_day`: market opens, then pending orders
+        placed. ``(0, 0)`` for any other day."""
+        ...
+
 
 class Rule:
     type: ClassVar[str]

@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 
 from ..catalog import Catalog
 from ..news import Calendar
-from ..protocol import Deal, Position, PositionLive, Snapshot
+from ..protocol import Deal, PendingOrder, Position, PositionLive, Snapshot
 from ..symbols import undecorate
 from .params import zone_info
 
@@ -38,6 +38,8 @@ class AccountView:
     deals_since: float | None
     initial_balance: float | None
     """The account size the person entered on the guards page; the firms' "initial balance"."""
+    pendings: tuple[PendingOrder, ...] | None = None
+    """Resting limit/stop orders, hand-placed ones included; None while they are unread."""
     sizing_risk: float | None = None
     """What this slave's own sizing settings risk on one trade right now, in money."""
     news: Calendar | None = None
@@ -72,6 +74,7 @@ class AccountView:
             deals=snap.deals,
             deals_since=snap.deals_since,
             initial_balance=initial_balance,
+            pendings=snap.pending_orders,
             sizing_risk=sizing_risk,
             news=news,
             catalog=catalog,
@@ -129,6 +132,16 @@ class AccountView:
         if live is None or live.profit is None:
             return None
         return live.profit + (live.swap or 0.0)
+
+
+def local_day(now: float) -> str:
+    """The date at ``now`` on this computer's clock: the key trade counts file under.
+
+    Local on purpose, where every other daily thing here takes a zone: the trade-count rules
+    stop the person overtrading, so their day ends at the midnight on the wall where they
+    sit, not on a broker's clock or UTC's.
+    """
+    return datetime.fromtimestamp(now).date().isoformat()
 
 
 def last_reset(now: float, at: str, zone: str) -> tuple[float, str]:

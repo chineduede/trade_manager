@@ -18,6 +18,16 @@ from .paths import version_seen_path
 
 NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
+        "0.1.6",
+        "2026-11-22",
+        (
+            "Two guard rules against overtrading: Max trades a day caps what the copier"
+            " places between one midnight and the next on your computer's clock, and Max"
+            " open trades caps how many are open at once. Each says whether pending orders"
+            " count, and each can block new trades or only warn.",
+        ),
+    ),
+    (
         "0.1.5",
         "2026-11-19",
         (

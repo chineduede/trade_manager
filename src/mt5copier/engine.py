@@ -2452,6 +2452,15 @@ class Engine:
         if master is not None and result.terminal_id == master.terminal_id:
             self._on_master_result(master, result)
             return
+        if result.ok and result.op in (ActionKind.OPEN, ActionKind.PLACE):
+            # Counted before the correlation check below: even an answer the ledger stopped
+            # waiting for placed a real trade at the broker, and the trade-count rules count
+            # placements, not beliefs.
+            self._guards.record_open(
+                self._account_of(result.terminal_id),
+                pending=result.op is ActionKind.PLACE and not result.filled_at_market,
+                now=time.time(),
+            )
         key = (result.terminal_id, result.master_ticket, result.op)
         expected = self._pending_cmd.get(key)
         if expected is None or expected[0] != result.command_id:
