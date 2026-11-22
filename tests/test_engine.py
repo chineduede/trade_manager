@@ -14,6 +14,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from fake_workers import FakeProcess, FakeWorker
 
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.engine import Engine, TerminalView
@@ -52,47 +53,12 @@ def engine(cfg: AppConfig, monkeypatch: pytest.MonkeyPatch) -> Engine:
 
     def fake_spawn(tcfg: TerminalConfig) -> None:
         spawned.append(tcfg.terminal_id)
-        eng._workers[tcfg.terminal_id] = _FakeWorker(tcfg.terminal_id)  # type: ignore[assignment]
+        eng._workers[tcfg.terminal_id] = FakeWorker(tcfg.terminal_id)  # type: ignore[assignment]
         eng._received_at[tcfg.terminal_id] = time.monotonic()
 
     monkeypatch.setattr(eng, "_spawn_worker", fake_spawn)
     eng.spawned = spawned  # type: ignore[attr-defined]
     return eng
-
-
-class _FakeProcess:
-    def __init__(self) -> None:
-        self.alive = True
-        self.terminated = False
-
-    def is_alive(self) -> bool:
-        return self.alive
-
-    def join(self, timeout: float | None = None) -> None:
-        self.alive = False
-
-    def terminate(self) -> None:
-        self.terminated = True
-        self.alive = False
-
-
-class _FakeQueue:
-    def __init__(self) -> None:
-        self.sent: list[object] = []
-
-    def put_nowait(self, item: object) -> None:
-        self.sent.append(item)
-
-    def close(self) -> None:
-        pass
-
-
-class _FakeWorker:
-    def __init__(self, terminal_id: str) -> None:
-        self.terminal_id = terminal_id
-        self.process = _FakeProcess()
-        self.cmd_q = _FakeQueue()
-        self.started_at = time.monotonic()
 
 
 # --- TerminalView semantics ----------------------------------------------------------------
@@ -217,7 +183,7 @@ def test_stop_worker_escalates_to_terminate(engine: Engine) -> None:
     engine.sync()
     worker = engine._workers[TID_A]
 
-    class Stubborn(_FakeProcess):
+    class Stubborn(FakeProcess):
         def join(self, timeout: float | None = None) -> None:
             pass  # never exits on its own
 
@@ -833,7 +799,7 @@ def test_reaping_a_worker_releases_its_claims(cfg: AppConfig, tmp_path: Path) ->
     eng = Engine(cfg, claims=mine)
     mine.acquire([f"terminal:{TID_A}"])
     eng._claimed[TID_A] = (f"terminal:{TID_A}",)
-    eng._workers[TID_A] = _FakeWorker(TID_A)  # type: ignore[assignment]
+    eng._workers[TID_A] = FakeWorker(TID_A)  # type: ignore[assignment]
 
     eng._reap(TID_A)
 

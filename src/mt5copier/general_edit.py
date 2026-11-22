@@ -15,8 +15,6 @@ by refusing, so the form can open the question and then save again with the answ
 
 from __future__ import annotations
 
-import math
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 
@@ -24,7 +22,7 @@ from pydantic import ValidationError
 
 from . import shared_data
 from .config import AppConfig
-from .settings_edit import Change
+from .settings_edit import _SEPARATORS, Change, _EntryError, _float, _message, _number
 
 DRY_RUN = "dry_run"
 LIVE_WORD = "LIVE"
@@ -62,10 +60,6 @@ class GeneralOutcome:
         return self.values is not None
 
 
-def _number(value: float) -> str:
-    return format(value, ".15g")
-
-
 def initial_general(cfg: AppConfig) -> dict[str, str | bool]:
     """The form's starting values. The mode is ``True`` for a dry run, as the field is."""
     return {
@@ -78,24 +72,6 @@ def initial_general(cfg: AppConfig) -> dict[str, str | bool]:
         "close_terminals": cfg.close_terminals.value,
         "history_days": str(cfg.history_days),
     }
-
-
-class _EntryError(Exception):
-    pass
-
-
-_SEPARATORS = re.compile(r"[\s,;]+")
-
-
-def _float(text: str) -> float:
-    try:
-        value = float(text)
-    except ValueError:
-        hint = " (use a dot for decimals)" if "," in text else ""
-        raise _EntryError(f"not a number{hint}") from None
-    if not math.isfinite(value):
-        raise _EntryError("must be a finite number")
-    return value
 
 
 def _parse(name: str, raw: str | bool) -> object:
@@ -123,24 +99,6 @@ def _parse(name: str, raw: str | bool) -> object:
         except ValueError:
             raise _EntryError("must be a whole number") from None
     return _float(text)
-
-
-_BOUNDS = {
-    "greater_than": "greater than",
-    "greater_than_equal": "at least",
-    "less_than": "less than",
-    "less_than_equal": "at most",
-}
-
-
-def _message(err: Mapping[str, object]) -> str:
-    kind = str(err.get("type"))
-    ctx = err.get("ctx")
-    if kind in _BOUNDS and isinstance(ctx, Mapping) and ctx:
-        limit = next(iter(ctx.values()))
-        shown = _number(limit) if isinstance(limit, int | float) else limit
-        return f"must be {_BOUNDS[kind]} {shown}"
-    return str(err["msg"])
 
 
 def apply_general(

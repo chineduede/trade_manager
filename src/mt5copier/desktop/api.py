@@ -137,6 +137,16 @@ on every direct trade, so the master's volume never reaches a slave's sizing. On
 keeps partials legible: close 50% and the book row reads 0.50, the fraction left."""
 
 
+def _no(message: str) -> dict[str, Any]:
+    """A refusal, in the one shape every endpoint answers with: ``{ok, message}``. The pair
+    used to be spelled out at every return; these two say it once."""
+    return {"ok": False, "message": message}
+
+
+def _ok(message: str) -> dict[str, Any]:
+    return {"ok": True, "message": message}
+
+
 def _position_row(
     p: Position, bid: float | None, ask: float | None, copies: list[dict[str, Any]], be_at: float
 ) -> dict[str, Any]:
@@ -500,22 +510,22 @@ class DesktopApi:
             entry = float(ticket.get("entry") or 0.0)
             expiry_min = float(ticket.get("expiryMinutes") or 0.0)
         except (KeyError, TypeError, ValueError):
-            return {"ok": False, "message": "the ticket did not read; check its numbers"}
+            return _no("the ticket did not read; check its numbers")
         direction = PositionType.BUY if side == "buy" else PositionType.SELL
         if kind == "market":
             why = self._engine.place_direct_market(symbol, direction, _NOMINAL_LOTS, sl, tp)
         else:
             order_type = _ORDER_TYPES.get((side, kind))
             if order_type is None:
-                return {"ok": False, "message": f"unknown order kind {kind!r}"}
+                return _no(f"unknown order kind {kind!r}")
             expiration = int(time.time() + expiry_min * 60) if expiry_min > 0 else 0
             why = self._engine.place_direct_pending(
                 symbol, order_type, _NOMINAL_LOTS, entry, sl, tp, expiration
             )
         if why is not None:
-            return {"ok": False, "message": why}
+            return _no(why)
         what = "Opened" if kind == "market" else "Resting"
-        return {"ok": True, "message": f"{what} {symbol}; copies follow on the next tick."}
+        return _ok(f"{what} {symbol}; copies follow on the next tick.")
 
     def symbol_search(self, query: str) -> dict[str, Any]:
         """Symbols matching what is typed, from the feed broker's own catalog (pushed once
@@ -548,7 +558,7 @@ class DesktopApi:
         try:
             pct = float(percent)
         except (TypeError, ValueError):
-            return {"ok": False, "message": "give the percent to close, such as 50"}
+            return _no("give the percent to close, such as 50")
         why = self._engine.partial_close_direct(int(ticket), pct)
         return self._did(why, f"Closed {pct:g}% of #{ticket}")
 
@@ -558,18 +568,17 @@ class DesktopApi:
         try:
             at = float(price)
         except (TypeError, ValueError):
-            return {"ok": False, "message": "give the price that should trigger the breakeven"}
+            return _no("give the price that should trigger the breakeven")
         ticket = int(ticket)
         why = self._engine.set_direct_breakeven_at(ticket, at)
         if why is not None:
-            return {"ok": False, "message": why}
+            return _no(why)
         if not at:
-            return {"ok": True, "message": f"Disarmed #{ticket}'s breakeven."}
-        return {
-            "ok": True,
-            "message": f"Armed #{ticket}: once the price touches {at:g}, "
-            "the stop moves to the entry and every copy follows.",
-        }
+            return _ok(f"Disarmed #{ticket}'s breakeven.")
+        return _ok(
+            f"Armed #{ticket}: once the price touches {at:g}, "
+            "the stop moves to the entry and every copy follows."
+        )
 
     def exit_at_entry(self, ticket: int) -> dict[str, Any]:
         """Move a direct position's target to its entry plus the copies' costs: the way
@@ -578,25 +587,22 @@ class DesktopApi:
         ticket = int(ticket)
         why = self._engine.direct_exit_at_entry(ticket)
         if why is not None:
-            return {"ok": False, "message": why}
+            return _no(why)
         tp = next((p.tp for p in self._engine.direct_positions() if p.ticket == ticket), 0.0)
         at = f" at {tp:g}" if tp else ""
-        return {
-            "ok": True,
-            "message": f"#{ticket}'s target now waits{at}: back to the entry and it is "
-            "out at nothing lost. Every copy follows.",
-        }
+        return _ok(
+            f"#{ticket}'s target now waits{at}: back to the entry and it is "
+            "out at nothing lost. Every copy follows."
+        )
 
     def flatten(self) -> dict[str, Any]:
         """Close every position and cancel every resting order; the page confirms first."""
         count = self._engine.flatten_direct()
         if count == 0:
-            return {"ok": False, "message": "nothing was open or resting"}
-        return {
-            "ok": True,
-            "message": f"closed everything: {count} position(s) and order(s); "
-            "copies follow on the next tick.",
-        }
+            return _no("nothing was open or resting")
+        return _ok(
+            f"closed everything: {count} position(s) and order(s); copies follow on the next tick."
+        )
 
     def modify_position(self, ticket: int, sl: float, tp: float) -> dict[str, Any]:
         why = self._engine.modify_direct(int(ticket), float(sl), float(tp or 0.0))
@@ -616,9 +622,9 @@ class DesktopApi:
         cfg = self._cfg
         if not cfg.copying_enabled:
             if not cfg.slaves:
-                return {"ok": False, "message": "no slaves to copy to; assign one first"}
+                return _no("no slaves to copy to; assign one first")
             if cfg.mode is not AppMode.TRADING and cfg.master is None:
-                return {"ok": False, "message": "no master designated; this profile copies one"}
+                return _no("no master designated; this profile copies one")
             cfg.copying_enabled = True
         else:
             cfg.copying_enabled = False
@@ -627,15 +633,15 @@ class DesktopApi:
         except OSError as exc:
             log.exception("config save failed")
             cfg.copying_enabled = not cfg.copying_enabled
-            return {"ok": False, "message": f"could not save config: {exc}"}
+            return _no(f"could not save config: {exc}")
         self._engine.sync()
-        return {"ok": True, "message": "Copying resumed." if cfg.copying_enabled else "Halted."}
+        return _ok("Copying resumed." if cfg.copying_enabled else "Halted.")
 
     @staticmethod
     def _did(why: str | None, done: str) -> dict[str, Any]:
         if why is not None:
-            return {"ok": False, "message": why}
-        return {"ok": True, "message": f"{done}; copies follow on the next tick."}
+            return _no(why)
+        return _ok(f"{done}; copies follow on the next tick.")
 
     # --- the terminals page -----------------------------------------------------------------
 
@@ -773,40 +779,37 @@ class DesktopApi:
     def assign_master(self, tid: str) -> dict[str, Any]:
         tid = str(tid)
         if tid not in self._cfg.terminals:
-            return {"ok": False, "message": "that terminal is gone; rescan"}
+            return _no("that terminal is gone; rescan")
         refusal = role_actions.set_master(self._cfg, tid)
         if refusal is not None:
-            return {"ok": False, "message": refusal}
+            return _no(refusal)
         why = self._persist()
         if why is not None:
-            return {"ok": False, "message": why}
-        return {"ok": True, "message": f"master: {self._cfg.display_name(tid)}"}
+            return _no(why)
+        return _ok(f"master: {self._cfg.display_name(tid)}")
 
     def assign_slave(self, tid: str) -> dict[str, Any]:
         tid = str(tid)
         if tid not in self._cfg.terminals:
-            return {"ok": False, "message": "that terminal is gone; rescan"}
+            return _no("that terminal is gone; rescan")
         refusal = role_actions.set_slave(self._cfg, tid)
         if refusal is not None:
-            return {"ok": False, "message": refusal}
+            return _no(refusal)
         why = self._persist()
         if why is not None:
-            return {"ok": False, "message": why}
+            return _no(why)
         name = self._cfg.display_name(tid)
-        return {"ok": True, "message": f"{name} is now a slave; it connects on the next tick."}
+        return _ok(f"{name} is now a slave; it connects on the next tick.")
 
     def unassign_stake(self, tid: str) -> dict[str, Any]:
         """What unassigning would give up, for the page to show before anything happens.
         The engine checks again at the moment of commitment; this is only the asking."""
         tid = str(tid)
         if tid not in self._cfg.terminals:
-            return {"ok": False, "message": "that terminal is gone; rescan"}
+            return _no("that terminal is gone; rescan")
         stake = self._engine.copies_at_stake(tid)
         if stake is None:
-            return {
-                "ok": False,
-                "message": "its open copies could not be read, so they cannot be given up safely",
-            }
+            return _no("its open copies could not be read, so they cannot be given up safely")
         out = [
             {
                 "tid": slave_tid,
@@ -831,7 +834,7 @@ class DesktopApi:
         per slave the master tickets, exactly as the engine re-checks it."""
         tid = str(tid)
         if tid not in self._cfg.terminals:
-            return {"ok": False, "message": "that terminal is gone; rescan"}
+            return _no("that terminal is gone; rescan")
         name = self._cfg.display_name(tid)
         was_master = self._cfg.terminals[tid].role is Role.MASTER
         swept = [t.terminal_id for t in self._cfg.slaves] if was_master else []
@@ -840,10 +843,10 @@ class DesktopApi:
         )
         refusal = self._engine.unassign(tid, orphan=orphan)
         if refusal is not None:
-            return {"ok": False, "message": f"{name} was not unassigned: {refusal}"}
+            return _no(f"{name} was not unassigned: {refusal}")
         why = self._persist()
         if why is not None:
-            return {"ok": False, "message": why}
+            return _no(why)
         message = f"{name} unassigned."
         if swept:
             names = ", ".join(self._cfg.display_name(t) for t in swept)
@@ -851,7 +854,7 @@ class DesktopApi:
         if orphan:
             total = sum(len(t) for t in orphan.values())
             message += f" {total} cop{'y' if total == 1 else 'ies'} orphaned: they stay open and are no longer managed."
-        return {"ok": True, "message": message}
+        return _ok(message)
 
     def rename_account(self, tid: str, name: str) -> dict[str, Any]:
         """Name (or, given blank, unname) the account this terminal is last known to be logged
@@ -860,86 +863,80 @@ class DesktopApi:
         terminal, so the name follows a login to another terminal."""
         tid = str(tid)
         if tid not in self._cfg.terminals:
-            return {"ok": False, "message": "that terminal is gone; rescan"}
+            return _no("that terminal is gone; rescan")
         tcfg = self._cfg.terminals[tid]
         key = account_key(tcfg.last_login, tcfg.last_server)
         refusal = rename(self._cfg, tid, str(name or ""))
         if refusal is not None:
-            return {"ok": False, "message": refusal}
+            return _no(refusal)
         why = self._persist()
         if why is not None:
-            return {"ok": False, "message": why}
+            return _no(why)
         stripped = str(name or "").strip()
         if stripped:
-            return {"ok": True, "message": f"{key} is now called {stripped}."}
-        return {
-            "ok": True,
-            "message": f"The name for {key} is cleared; it shows as its login again.",
-        }
+            return _ok(f"{key} is now called {stripped}.")
+        return _ok(f"The name for {key} is cleared; it shows as its login again.")
 
     def set_pause(self, tid: str, paused: bool) -> dict[str, Any]:
         tid = str(tid)
         if tid not in self._cfg.terminals:
-            return {"ok": False, "message": "that terminal is gone; rescan"}
+            return _no("that terminal is gone; rescan")
         name = self._cfg.display_name(tid)
         try:
             self._engine.set_paused(tid, bool(paused))
         except ValueError as exc:
-            return {"ok": False, "message": str(exc)}
+            return _no(str(exc))
         why = self._persist()
         if why is not None:
-            return {"ok": False, "message": why}
+            return _no(why)
         if paused:
             log.warning("%s paused: no new trades will be copied to it", name)
-            return {
-                "ok": True,
-                "message": f"{name} paused: no new trades are copied to it. "
-                "Copies it already holds are still closed, reduced and kept in sync.",
-            }
+            return _ok(
+                f"{name} paused: no new trades are copied to it. "
+                "Copies it already holds are still closed, reduced and kept in sync."
+            )
         log.warning("%s resumed", name)
-        return {
-            "ok": True,
-            "message": f"{name} resumed: trades opened from now on are copied. "
-            "Any opened while paused are not.",
-        }
+        return _ok(
+            f"{name} resumed: trades opened from now on are copied. "
+            "Any opened while paused are not."
+        )
 
     def reconnect(self, tid: str) -> dict[str, Any]:
         self._engine.reconnect(str(tid))
-        return {"ok": True, "message": "Reconnect requested."}
+        return _ok("Reconnect requested.")
 
     def restart_worker(self, tid: str) -> dict[str, Any]:
         self._engine.restart(str(tid))
-        return {"ok": True, "message": "Worker restarted."}
+        return _ok("Worker restarted.")
 
     def acknowledge_orphans(self, tid: str) -> dict[str, Any]:
         tid = str(tid)
         if tid not in self._cfg.terminals:
-            return {"ok": False, "message": "that terminal is gone; rescan"}
+            return _no("that terminal is gone; rescan")
         name = self._cfg.display_name(tid)
         count = self._engine.acknowledge_orphans(tid)
         if count == 0:
-            return {"ok": True, "message": f"{name} has no unacknowledged orphans."}
-        return {
-            "ok": True,
-            "message": f"Acknowledged {count} orphan(s) on {name}. They stay open and "
-            "untracked; anything the master opened while it was held is not copied to it.",
-        }
+            return _ok(f"{name} has no unacknowledged orphans.")
+        return _ok(
+            f"Acknowledged {count} orphan(s) on {name}. They stay open and "
+            "untracked; anything the master opened while it was held is not copied to it."
+        )
 
     def live_override(self, tid: str, allow: bool) -> dict[str, Any]:
         """The demo-only guard's override: deliberate, logged as a warning, like the TUI's
         LiveDialog. The page asks before calling this; the engine applies it atomically."""
         tid = str(tid)
         if tid not in self._cfg.terminals:
-            return {"ok": False, "message": "that terminal is gone; rescan"}
+            return _no("that terminal is gone; rescan")
         old = self._cfg.terminals[tid]
         allow = bool(allow)
         name = self._cfg.display_name(tid)
         if old.allow_live_trading == allow:
-            return {"ok": True, "message": f"{name}: already so."}
+            return _ok(f"{name}: already so.")
         new: TerminalConfig = old.model_copy(update={"allow_live_trading": allow})
         refusal = self._engine.apply_settings(new)
         if refusal is not None:
-            return {"ok": False, "message": refusal}
+            return _no(refusal)
         log.warning(
             "settings changed for %s (%s): %s",
             name,
@@ -950,13 +947,12 @@ class DesktopApi:
         )
         why = self._persist()
         if why is not None:
-            return {"ok": False, "message": why}
+            return _no(why)
         if allow:
-            return {
-                "ok": True,
-                "message": f"{name}: live trading allowed. Real orders will be sent to this "
-                "account whenever copying is live.",
-            }
+            return _ok(
+                f"{name}: live trading allowed. Real orders will be sent to this "
+                "account whenever copying is live."
+            )
         message = f"{name}: demo-only guard back on."
         held = 0 if self._cfg.dry_run else self._engine.copies_on_real_account(tid)
         if held:
@@ -967,7 +963,7 @@ class DesktopApi:
                 "and the copier will now refuse to close or move them. Close them by hand, "
                 "or turn the override back on."
             )
-        return {"ok": True, "message": message}
+        return _ok(message)
 
     def rescan(self) -> dict[str, Any]:
         """Passive discovery, on the bridge's own worker thread -- the page awaits the
@@ -976,17 +972,17 @@ class DesktopApi:
             found = discover_terminals()
         except Exception as exc:
             log.exception("discovery failed")
-            return {"ok": False, "message": f"discovery failed: {exc}"}
+            return _no(f"discovery failed: {exc}")
         before = set(self._cfg.terminals)
         config_mod.merge_discovery(self._cfg, found)
         new = set(self._cfg.terminals) - before
         why = self._persist()
         if why is not None:
-            return {"ok": False, "message": why}
+            return _no(why)
         message = f"{len(found)} terminals found"
         if new:
             message += f", {len(new)} new"
-        return {"ok": True, "message": message + "."}
+        return _ok(message + ".")
 
     # --- account login ------------------------------------------------------------------------
     # The TUI's i flow: an unassigned MT5 terminal is logged into one of the accounts that
@@ -1078,7 +1074,7 @@ class DesktopApi:
         cfg = self._cfg
         why = self._account_login_refused(tid)
         if why is not None:
-            return {"ok": False, "message": why}
+            return _no(why)
         name = cfg.display_name(tid)
         acct = next(
             (
@@ -1089,23 +1085,19 @@ class DesktopApi:
             None,
         )
         if acct is None:
-            return {"ok": False, "message": f"{name} has no saved account {key}; rescan"}
+            return _no(f"{name} has no saved account {key}; rescan")
         tcfg = cfg.terminals[tid]
         if account_key(tcfg.last_login, tcfg.last_server) == key:
-            return {
-                "ok": False,
-                "message": f"{name} is already logged in to {self._account_called(key)}",
-            }
+            return _no(f"{name} is already logged in to {self._account_called(key)}")
         used_by = self._account_used_by(tid, key)
         if used_by is not None:
-            return {
-                "ok": False,
-                "message": f"{self._account_called(key)} is in use by {used_by}: an account "
-                "is used on one terminal at a time",
-            }
+            return _no(
+                f"{self._account_called(key)} is in use by {used_by}: an account "
+                "is used on one terminal at a time"
+            )
         with self._busy_lock:
             if tid in self._logging_in:
-                return {"ok": False, "message": f"{name} is already logging in"}
+                return _no(f"{name} is already logging in")
             self._logging_in.add(tid)
         try:
             result = self._log_in(tid, acct)
@@ -1114,7 +1106,7 @@ class DesktopApi:
                 self._logging_in.discard(tid)
         called = self._account_called(key)
         if not result.ok:
-            return {"ok": False, "message": f"{name} was not logged in to {called}: {result.said}"}
+            return _no(f"{name} was not logged in to {called}: {result.said}")
         # Keep the account the login left the terminal on, as the one it was last on --
         # record_login also withdraws the live override when a known account was left.
         tcfg = cfg.terminals[tid]
@@ -1124,7 +1116,7 @@ class DesktopApi:
         message = f"{name} is logged in to {called}"
         if why is not None:
             message += f" — {why}"
-        return {"ok": True, "message": message}
+        return _ok(message)
 
     # --- the cTrader login --------------------------------------------------------------------
 
@@ -1153,12 +1145,9 @@ class DesktopApi:
         if not secret:
             secret = creds.client_secret
         if not client_id or not secret:
-            return {"ok": False, "message": "The client id and the secret are both needed."}
+            return _no("The client id and the secret are both needed.")
         if not redirect.startswith(("http://127.0.0.1:", "http://localhost:")):
-            return {
-                "ok": False,
-                "message": "The redirect URI must be http://127.0.0.1:<port>/... or localhost.",
-            }
+            return _no("The redirect URI must be http://127.0.0.1:<port>/... or localhost.")
         creds = creds.model_copy(
             update={"client_id": client_id, "client_secret": secret, "redirect_uri": redirect}
         )
@@ -1172,12 +1161,12 @@ class DesktopApi:
         try:
             accounts = ctrader_auth.log_in(creds, cancel=cancel)
         except ctrader_auth.LoginCancelled:
-            return {"ok": False, "message": "the waiting cTrader login was given up"}
+            return _no("the waiting cTrader login was given up")
         except ctrader_auth.LoginError as exc:
-            return {"ok": False, "message": str(exc)}
+            return _no(str(exc))
         except Exception as exc:
             log.exception("cTrader login failed")
-            return {"ok": False, "message": f"the login failed: {exc!r}"}
+            return _no(f"the login failed: {exc!r}")
         finally:
             with self._busy_lock:
                 if self._ctrader_cancel is cancel:
@@ -1191,13 +1180,13 @@ class DesktopApi:
             if tcfg.is_ctrader:
                 self._engine.reconnect(tcfg.terminal_id)
         if not accounts:
-            return {"ok": False, "message": "cTrader login done, but no account was ticked"}
+            return _no("cTrader login done, but no account was ticked")
         msg = f"cTrader: {len(accounts)} account{'s' if len(accounts) != 1 else ''} allowed"
         if added:
             msg += f", {len(added)} new under DETECTED: drag one into SLAVES"
         if why is not None:
             msg += f" — {why}"
-        return {"ok": True, "message": msg}
+        return _ok(msg)
 
     # --- profiles -----------------------------------------------------------------------------
 
@@ -1250,11 +1239,11 @@ class DesktopApi:
         name = str(name).strip()
         info = next((p for p in profiles_mod.list_profiles() if p.name == name), None)
         if info is None:
-            return {"ok": False, "message": f"no profile called {name!r}"}
+            return _no(f"no profile called {name!r}")
         if name == active_profile():
-            return {"ok": False, "message": f"{name!r} is this window"}
+            return _no(f"{name!r} is this window")
         if info.running:
-            return {"ok": False, "message": f"{name!r} is already running (pid {info.pid})"}
+            return _no(f"{name!r} is already running (pid {info.pid})")
         if is_frozen():
             cmd = [sys.executable, "--desktop", "--profile", name]
         else:
@@ -1277,27 +1266,27 @@ class DesktopApi:
                 stderr=subprocess.DEVNULL,
             )
         except OSError as exc:
-            return {"ok": False, "message": f"could not open {name!r}: {exc}"}
+            return _no(f"could not open {name!r}: {exc}")
         log.info("profile %r opened in its own window", name)
-        return {"ok": True, "message": f"{name!r} is opening in its own window…"}
+        return _ok(f"{name!r} is opening in its own window…")
 
     def profile_create(self, name: str) -> dict[str, Any]:
         name = str(name).strip()
         try:
             profiles_mod.create(name)
         except profiles_mod.ProfileError as exc:
-            return {"ok": False, "message": str(exc)}
+            return _no(str(exc))
         log.info("profile %r created", name)
-        return {"ok": True, "message": f"{name!r} made — open it to set it up"}
+        return _ok(f"{name!r} made — open it to set it up")
 
     def profile_rename(self, old: str, new: str) -> dict[str, Any]:
         old, new = str(old).strip(), str(new).strip()
         try:
             profiles_mod.rename(old, new)
         except profiles_mod.ProfileError as exc:
-            return {"ok": False, "message": str(exc)}
+            return _no(str(exc))
         log.info("profile %r renamed to %r", old, new)
-        return {"ok": True, "message": f"{old!r} is now {new!r}"}
+        return _ok(f"{old!r} is now {new!r}")
 
     def profile_delete(self, name: str) -> dict[str, Any]:
         """Delete a profile and every record it keeps. The page confirms first; the model
@@ -1306,9 +1295,9 @@ class DesktopApi:
         try:
             profiles_mod.delete(name)
         except profiles_mod.ProfileError as exc:
-            return {"ok": False, "message": str(exc)}
+            return _no(str(exc))
         log.info("profile %r deleted", name)
-        return {"ok": True, "message": f"deleted {name!r} and every record it kept"}
+        return _ok(f"deleted {name!r} and every record it kept")
 
     # --- the guards page --------------------------------------------------------------------
 
@@ -1554,10 +1543,10 @@ class DesktopApi:
         rule_type = str(rule_type)
         kind = REGISTRY.get(rule_type)
         if kind is None:
-            return {"ok": False, "message": f"{rule_type!r} is not a rule this version knows"}
+            return _no(f"{rule_type!r} is not a rule this version knows")
         picked = self._account_and_guards(str(tid))
         if isinstance(picked, str):
-            return {"ok": False, "message": picked}
+            return _no(picked)
         _, guards = picked
         rule = next((r for r in guards.rules if r.id == rule_id), None)
         if rule is None:
@@ -1625,10 +1614,10 @@ class DesktopApi:
     ) -> dict[str, Any]:
         rule_type = str(rule_type)
         if rule_type not in REGISTRY:
-            return {"ok": False, "message": f"{rule_type!r} is not a rule this version knows"}
+            return _no(f"{rule_type!r} is not a rule this version knows")
         picked = self._account_and_guards(str(tid))
         if isinstance(picked, str):
-            return {"ok": False, "message": picked}
+            return _no(picked)
         key, guards = picked
         values, errors = self._checked_params(rule_type, params or {})
         if errors:
@@ -1642,112 +1631,101 @@ class DesktopApi:
             rules = tuple(new if r.id == old.id else r for r in guards.rules)
         why = self._save_guards(key, guards.model_copy(update={"rules": rules}))
         if why is not None:
-            return {"ok": False, "message": why}
-        return {"ok": True, "message": f"{title}: saved"}
+            return _no(why)
+        return _ok(f"{title}: saved")
 
     def guard_remove_rule(self, tid: str, rule_id: str) -> dict[str, Any]:
         picked = self._account_and_guards(str(tid))
         if isinstance(picked, str):
-            return {"ok": False, "message": picked}
+            return _no(picked)
         key, guards = picked
         rule = next((r for r in guards.rules if r.id == rule_id), None)
         if rule is None:
-            return {"ok": False, "message": "that rule is already gone"}
+            return _no("that rule is already gone")
         title = REGISTRY[rule.type].title if rule.type in REGISTRY else rule.type
         rules = tuple(r for r in guards.rules if r.id != rule.id)
         why = self._save_guards(key, guards.model_copy(update={"rules": rules}))
         if why is not None:
-            return {"ok": False, "message": why}
-        return {"ok": True, "message": f"{title}: removed"}
+            return _no(why)
+        return _ok(f"{title}: removed")
 
     def guard_toggle_rule(self, tid: str, rule_id: str) -> dict[str, Any]:
         picked = self._account_and_guards(str(tid))
         if isinstance(picked, str):
-            return {"ok": False, "message": picked}
+            return _no(picked)
         key, guards = picked
         rule = next((r for r in guards.rules if r.id == rule_id), None)
         if rule is None:
-            return {"ok": False, "message": "that rule is already gone"}
+            return _no("that rule is already gone")
         flipped = rule.model_copy(update={"enabled": not rule.enabled})
         rules = tuple(flipped if r.id == rule.id else r for r in guards.rules)
         title = REGISTRY[rule.type].title if rule.type in REGISTRY else rule.type
         why = self._save_guards(key, guards.model_copy(update={"rules": rules}))
         if why is not None:
-            return {"ok": False, "message": why}
+            return _no(why)
         if flipped.enabled:
-            return {"ok": True, "message": f"{title} is back on; it is enforced again"}
-        return {
-            "ok": True,
-            "message": f"{title} is off; it will not check or act until switched back on",
-        }
+            return _ok(f"{title} is back on; it is enforced again")
+        return _ok(f"{title} is off; it will not check or act until switched back on")
 
     def guard_toggle_all(self, tid: str) -> dict[str, Any]:
         picked = self._account_and_guards(str(tid))
         if isinstance(picked, str):
-            return {"ok": False, "message": picked}
+            return _no(picked)
         key, guards = picked
         if not guards.rules:
-            return {"ok": False, "message": "no rules to switch"}
+            return _no("no rules to switch")
         on_now = not guards.enabled
         why = self._save_guards(key, guards.model_copy(update={"enabled": on_now}))
         if why is not None:
-            return {"ok": False, "message": why}
+            return _no(why)
         if on_now:
-            return {"ok": True, "message": "all guards on: every rule is enforced again"}
-        return {
-            "ok": True,
-            "message": "all guards off: nothing is checked on this account until switched back on",
-        }
+            return _ok("all guards on: every rule is enforced again")
+        return _ok("all guards off: nothing is checked on this account until switched back on")
 
     def guard_set_initial(self, tid: str, text: str) -> dict[str, Any]:
         picked = self._account_and_guards(str(tid))
         if isinstance(picked, str):
-            return {"ok": False, "message": picked}
+            return _no(picked)
         key, guards = picked
         text = str(text or "").replace(",", "").replace(" ", "").strip()
         if not text:
             why = self._save_guards(key, guards.model_copy(update={"initial_balance": None}))
-            return (
-                {"ok": False, "message": why}
-                if why
-                else {"ok": True, "message": "initial balance cleared"}
-            )
+            return _no(why) if why else _ok("initial balance cleared")
         try:
             value = float(text)
         except ValueError:
-            return {"ok": False, "message": "the initial balance did not read as an amount"}
+            return _no("the initial balance did not read as an amount")
         if value <= 0:
-            return {"ok": False, "message": "the initial balance must be more than 0"}
+            return _no("the initial balance must be more than 0")
         why = self._save_guards(key, guards.model_copy(update={"initial_balance": value}))
         if why is not None:
-            return {"ok": False, "message": why}
-        return {"ok": True, "message": f"initial balance {money(value)}"}
+            return _no(why)
+        return _ok(f"initial balance {money(value)}")
 
     def guard_clear_latch(self, tid: str, rule_id: str) -> dict[str, Any]:
         if self._engine.clear_guard_latch(str(tid), str(rule_id)):
-            return {
-                "ok": True,
-                "message": "Breach cleared; new trades go through again once the rule is back under the point it acts at.",
-            }
-        return {"ok": False, "message": "that rule is not holding a breach"}
+            return _ok(
+                "Breach cleared; new trades go through again once the rule is back under the point it acts at."
+            )
+        return _no("that rule is not holding a breach")
 
     def guard_save_template(self, tid: str, name: str) -> dict[str, Any]:
         picked = self._account_and_guards(str(tid))
         if isinstance(picked, str):
-            return {"ok": False, "message": picked}
+            return _no(picked)
         _, guards = picked
         name = str(name or "").strip()
         if not name:
-            return {"ok": False, "message": "give the template a name"}
+            return _no("give the template a name")
         if not guards.rules:
-            return {"ok": False, "message": "no rules to save"}
+            return _no("no rules to save")
         self._guards_doc.templates[name] = guards.rules
         try:
             guards_model.save(self._guards_doc, guards_path())
         except OSError as exc:
             log.exception("guards save failed")
-            return {"ok": False, "message": f"could not save the guards: {exc}"}
-        return {"ok": True, "message": f"template {name!r} saved"}
+            return _no(f"could not save the guards: {exc}")
+        return _ok(f"template {name!r} saved")
 
     def guard_apply_rules(self, tid: str, source: dict[str, str]) -> dict[str, Any]:
         """Replace this account's rules with a template's or another account's -- each under
@@ -1755,7 +1733,7 @@ class DesktopApi:
         before calling this when rules would be replaced."""
         picked = self._account_and_guards(str(tid))
         if isinstance(picked, str):
-            return {"ok": False, "message": picked}
+            return _no(picked)
         key, guards = picked
         source = source or {}
         if "template" in source:
@@ -1765,14 +1743,14 @@ class DesktopApi:
             held = self._guards_doc.for_account(str(source.get("account", ""))).rules
             said = str(source.get("name") or "the other account")
         if not held:
-            return {"ok": False, "message": "nothing to apply from there"}
+            return _no("nothing to apply from there")
         fresh = tuple(
             GuardRule(type=r.type, enabled=r.enabled, params=dict(r.params)) for r in held
         )
         why = self._save_guards(key, guards.model_copy(update={"rules": fresh}))
         if why is not None:
-            return {"ok": False, "message": why}
-        return {"ok": True, "message": f"rules from {said}"}
+            return _no(why)
+        return _ok(f"rules from {said}")
 
     # --- the news page ----------------------------------------------------------------------
     # The calendar as the feed says it, and against each release what the news rules will
@@ -1839,13 +1817,10 @@ class DesktopApi:
         calendar = self._engine.news_calendar()
         if calendar.refresh():
             cal = calendar.current()
-            return {
-                "ok": True,
-                "message": f"calendar scanned: {len(cal.events or ())} releases this week",
-            }
+            return _ok(f"calendar scanned: {len(cal.events or ())} releases this week")
         cal = calendar.current()
         why = cal.said or "the feed could not be read"
-        return {"ok": False, "message": f"{why}; the last copy stands"}
+        return _no(f"{why}; the last copy stands")
 
     def _news_rules(self) -> list[dict[str, Any]]:
         """Each enforced news rule: the account's display name and its resolved parameters.
@@ -2186,61 +2161,58 @@ class DesktopApi:
     def setup_save(self, name: str) -> dict[str, Any]:
         name = str(name or "").strip()
         if not name:
-            return {"ok": False, "message": "give the setup a name"}
+            return _no("give the setup a name")
         if name in self._setups.setups:
-            return {
-                "ok": False,
-                "message": f"{name} is already saved: pick it and press Update with current",
-            }
+            return _no(f"{name} is already saved: pick it and press Update with current")
         live = self._captured_or_why()
         if isinstance(live, str):
-            return {"ok": False, "message": live}
+            return _no(live)
         self._setups.setups[name] = live
         why = self._save_setups()
         if why is not None:
-            return {"ok": False, "message": why}
-        return {"ok": True, "message": f"setup {name} saved"}
+            return _no(why)
+        return _ok(f"setup {name} saved")
 
     def setup_update(self, name: str) -> dict[str, Any]:
         """Save an existing setup again as the roles in place now. The page asks first."""
         name = str(name)
         if name not in self._setups.setups:
-            return {"ok": False, "message": "that setup is gone"}
+            return _no("that setup is gone")
         live = self._captured_or_why()
         if isinstance(live, str):
-            return {"ok": False, "message": live}
+            return _no(live)
         self._setups.setups[name] = live
         why = self._save_setups()
         if why is not None:
-            return {"ok": False, "message": why}
-        return {"ok": True, "message": f"setup {name} updated"}
+            return _no(why)
+        return _ok(f"setup {name} updated")
 
     def setup_rename(self, old: str, new: str) -> dict[str, Any]:
         old, new = str(old), str(new or "").strip()
         setups = self._setups.setups
         if old not in setups:
-            return {"ok": False, "message": "that setup is gone"}
+            return _no("that setup is gone")
         if not new:
-            return {"ok": False, "message": "give the setup a name"}
+            return _no("give the setup a name")
         if new == old:
-            return {"ok": True, "message": f"setup {old} keeps its name"}
+            return _ok(f"setup {old} keeps its name")
         if new in setups:
-            return {"ok": False, "message": f"a setup called {new} is already saved"}
+            return _no(f"a setup called {new} is already saved")
         setups[new] = setups.pop(old)
         why = self._save_setups()
         if why is not None:
-            return {"ok": False, "message": why}
-        return {"ok": True, "message": f"setup {old} renamed {new}"}
+            return _no(why)
+        return _ok(f"setup {old} renamed {new}")
 
     def setup_delete(self, name: str) -> dict[str, Any]:
         """Forget a saved setup. The page asks first; the roles in place do not change."""
         name = str(name)
         if self._setups.setups.pop(name, None) is None:
-            return {"ok": False, "message": "that setup is already gone"}
+            return _no("that setup is already gone")
         why = self._save_setups()
         if why is not None:
-            return {"ok": False, "message": why}
-        return {"ok": True, "message": f"setup {name} deleted"}
+            return _no(why)
+        return _ok(f"setup {name} deleted")
 
     def setup_load_ask(self, name: str) -> dict[str, Any]:
         """What loading this setup would do, for the page to ask with: the change as one
@@ -2249,14 +2221,14 @@ class DesktopApi:
         name = str(name)
         setup = self._setups.setups.get(name)
         if setup is None:
-            return {"ok": False, "message": "that setup is gone"}
+            return _no("that setup is gone")
         if self._setup_busy:
-            return {"ok": False, "message": "a setup is already loading; wait for it to finish"}
+            return _no("a setup is already loading; wait for it to finish")
         cfg = self._cfg
         logins = self._engine.logins()
         found = setups_mod.problems(setup, cfg, logins)
         if found:
-            return {"ok": False, "message": f"setup {name} cannot be loaded: {'; '.join(found)}"}
+            return _no(f"setup {name} cannot be loaded: {'; '.join(found)}")
         if setups_mod.in_place(setup, cfg, logins):
             return {"ok": False, "already": True, "message": f"setup {name} is already in place"}
         # Unreadable reads as nothing to ask about; the engine reads again and refuses.
@@ -2274,7 +2246,7 @@ class DesktopApi:
         for tid, login in setups_mod.switches(setup, logins).items():
             account = setups_mod.find_account(cfg, tid, login)
             if isinstance(account, str):  # problems() has checked; a race reads as a refusal
-                return {"ok": False, "message": f"setup {name} cannot be loaded: {account}"}
+                return _no(f"setup {name} cannot be loaded: {account}")
             key = account_key(account.login, account.server) or ""
             switching.append(cfg.display_name(tid))
             logs_in.append(f"{cfg.display_name(tid)} logs in to {self._account_called(key)}")
@@ -2527,7 +2499,7 @@ class DesktopApi:
         try:
             wanted = AppMode(profile_mode)
         except ValueError:
-            return {"ok": False, "message": f"unknown profile mode {profile_mode!r}"}
+            return _no(f"unknown profile mode {profile_mode!r}")
         switched = False
         if wanted is not cfg.mode:
             refusal = self._engine.set_mode(wanted)
@@ -2620,13 +2592,10 @@ class DesktopApi:
         log.warning(
             "symbol catalog saved: %d currencies, %d listed symbols", len(cat.currencies), listed
         )
-        return {
-            "ok": True,
-            "message": (
-                f"Symbol catalog saved: {len(cat.currencies)} currencies, "
-                f"{listed} listed symbols. It applies to every profile at once."
-            ),
-        }
+        return _ok(
+            f"Symbol catalog saved: {len(cat.currencies)} currencies, "
+            f"{listed} listed symbols. It applies to every profile at once."
+        )
 
     # --- the terminal detail page -------------------------------------------------------------
     # One terminal's own page: its header facts and its settings form, the TUI s form for a
@@ -2751,7 +2720,7 @@ class DesktopApi:
         cfg = self._cfg
         tcfg = cfg.terminals.get(tid)
         if tcfg is None:
-            return {"ok": False, "message": "that terminal is gone; rescan"}
+            return _no("that terminal is gone; rescan")
         view = self._view_of(tid)
         card = self._card(view, self._engine.holds()) if view is not None else None
         out: dict[str, Any] = {
@@ -2794,7 +2763,7 @@ class DesktopApi:
         cfg = self._cfg
         tcfg = cfg.terminals.get(tid)
         if tcfg is None:
-            return {"ok": False, "message": "that terminal is gone; rescan"}
+            return _no("that terminal is gone; rescan")
         engine = self._engine
         holds = engine.holds()
         views = engine.views()
@@ -2964,7 +2933,7 @@ class DesktopApi:
         cfg = self._cfg
         tcfg = cfg.terminals.get(tid)
         if tcfg is None:
-            return {"ok": False, "message": "that terminal is gone; rescan"}
+            return _no("that terminal is gone; rescan")
         outcome = apply_edits(tcfg, self._terminal_raw(raw))
         if not outcome.ok:
             return {
@@ -3006,7 +2975,7 @@ class DesktopApi:
         suffix and renames are its broker's, so they stay out. Nothing is saved here."""
         src = self._cfg.terminals.get(str(source_tid))
         if src is None or src.role is not Role.SLAVE:
-            return {"ok": False, "message": "that slave is gone; pick another"}
+            return _no("that slave is gone; pick another")
         values = initial_values(src)
         for name in self._BROKERS_OWN:
             values.pop(name, None)
