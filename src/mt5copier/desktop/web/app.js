@@ -4004,6 +4004,55 @@ function commitSetupLoad(name, a, agreed, goLive) {
 // the two gates on the mode (copying stopped, LIVE typed) are general_edit's on the bridge;
 // this fills the fields, asks as they change, and never overwrites typing: the form refills
 // from the engine only while it holds no edits.
+// --- what every form card shares ----------------------------------------------------------
+// Three cards edit saved state through the bridge -- the settings form, the symbol catalog,
+// a terminal's own page -- and they hold the same contract: a refill never lands on typing,
+// a save holds the button while the ask is out, field errors surface without losing what
+// was typed, and success refills from what was saved. The contract lives here; each card
+// brings its own fields, words and error surfaces.
+
+function refillDue(store, dirty, serverKey) {
+  // Only on the first show, after a save or revert (base cleared), or when the engine's
+  // truth moved (another window, a loaded setup) while the form holds no edits of its own.
+  return store.base === null || (!dirty() && serverKey !== store.serverKey);
+}
+
+function saveForm(f) {
+  // f: store, call(), render(), showErrors(errors), repoll() -- plus needLive(r) where a
+  // save can ask for the typed word, saved() for a generation bump, and repollOnRefusal
+  // where a refused save should still redraw from the engine's state (the catalog).
+  var store = f.store;
+  if (store.saving || !store.live) return;
+  store.saving = true;
+  f.render();
+  f.call().then(function (r) {
+    store.saving = false;
+    if (r.needLive && f.needLive) { f.render(); f.needLive(r); return; }
+    if (!r.ok) {
+      f.render();
+      f.showErrors(r.errors || {});
+      if (r.message) toast(r.message, 'bad');
+      if (f.repollOnRefusal) f.repoll();
+      return;
+    }
+    if (r.messages) {
+      r.messages.forEach(function (m) {
+        toast(m.text, m.tone, m.tone === 'warn' || m.tone === 'bad' ? 9000 : 4500);
+      });
+    } else if (r.message) {
+      toast(r.message, 'ok');
+    }
+    if (f.saved) f.saved();
+    store.base = null; // the next answer refills the form from what was saved
+    f.repoll();
+  }, function () {
+    store.saving = false;
+    f.render();
+    toast('The engine did not answer; try again.', 'bad');
+    if (f.repollOnRefusal) f.repoll();
+  });
+}
+
 var C = {
   live: null,      // last settings_state() answer
   base: null,      // what the fields were last filled from, as a key; null forces a refill
@@ -4104,11 +4153,8 @@ function renderSettings() {
     : ' Going live asks you to type LIVE.';
   nowEl.appendChild(gate);
 
-  // A refill never lands on typing: only on the first show, after a save or revert, or
-  // when the engine's truth moved (the TUI changed something, a setup loaded) while the
-  // form holds no edits of its own.
   var serverKey = JSON.stringify([live.values, live.profileMode]);
-  if (C.base === null || (!cfgDirty() && serverKey !== C.serverKey)) cfgFill(live);
+  if (refillDue(C, cfgDirty, serverKey)) cfgFill(live);
 
   $('cfg-save').textContent = C.saving ? 'Saving…' : 'Save';
   $('cfg-save').disabled = C.saving;
@@ -4162,35 +4208,31 @@ var pollCatalog = registerPoll('settings', 2000, function () {
     catBusy = false;
     CAT.live = live;
     var key = JSON.stringify(live);
-    if (CAT.base === null || (!catDirty() && key !== CAT.serverKey)) {
+    if (refillDue(CAT, catDirty, key)) {
       catFill(live);
       CAT.serverKey = key;
     }
-    $('cat-save').textContent = CAT.saving ? 'Saving…' : 'Save catalog';
-    $('cat-save').disabled = CAT.saving;
-    $('cat-revert').disabled = CAT.saving;
+    renderCatButtons();
   }, function () { catBusy = false; });
 });
 
+function renderCatButtons() {
+  $('cat-save').textContent = CAT.saving ? 'Saving…' : 'Save catalog';
+  $('cat-save').disabled = CAT.saving;
+  $('cat-revert').disabled = CAT.saving;
+}
+
 function catSaveFlow() {
-  if (CAT.saving || !CAT.live) return;
-  CAT.saving = true;
-  var held = catCollect();
-  api().catalog_save(held.currencies, held.classes).then(function (r) {
-    CAT.saving = false;
-    if (!r.ok) {
-      catShowErrors(r.errors || {});
-      if (r.message) toast(r.message, 'bad');
-      pollCatalog();
-      return;
+  saveForm({
+    store: CAT,
+    render: renderCatButtons,
+    showErrors: catShowErrors,
+    repoll: pollCatalog,
+    repollOnRefusal: true,
+    call: function () {
+      var held = catCollect();
+      return api().catalog_save(held.currencies, held.classes);
     }
-    toast(r.message, 'ok');
-    CAT.base = null; // the next answer refills from what was saved
-    pollCatalog();
-  }, function () {
-    CAT.saving = false;
-    toast('The engine did not answer; try again.', 'bad');
-    pollCatalog();
   });
 }
 
@@ -4216,30 +4258,17 @@ function cfgChanged() {
 }
 
 function saveSettingsFlow(typed) {
-  if (C.saving || !C.live) return;
-  C.saving = true;
-  renderSettings();
-  api().settings_save(cfgCollect(), segValue('cfg-profile-mode'),
-    typed === undefined ? null : typed
-  ).then(function (r) {
-    C.saving = false;
-    if (r.needLive) { renderSettings(); cfgGoLiveModal(r); return; }
-    if (!r.ok) {
-      renderSettings();
-      cfgShowErrors(r.errors || {});
-      if (r.message) toast(r.message, 'bad');
-      return;
+  saveForm({
+    store: C,
+    render: renderSettings,
+    showErrors: cfgShowErrors,
+    repoll: pollSettings,
+    needLive: cfgGoLiveModal,
+    saved: function () { cfgGen++; },
+    call: function () {
+      return api().settings_save(cfgCollect(), segValue('cfg-profile-mode'),
+        typed === undefined ? null : typed);
     }
-    (r.messages || []).forEach(function (m) {
-      toast(m.text, m.tone, m.tone === 'warn' || m.tone === 'bad' ? 9000 : 4500);
-    });
-    cfgGen++;
-    C.base = null; // the next answer refills the form from what was saved
-    pollSettings();
-  }, function () {
-    C.saving = false;
-    renderSettings();
-    toast('The engine did not answer; try again.', 'bad');
   });
 }
 
@@ -4946,10 +4975,8 @@ function renderTdetail() {
     tdLiveCard(live);
   }
 
-  // A refill never lands on typing: first show, after a save or revert, or when the
-  // engine's truth moved while the form holds no edits of its own.
   var serverKey = JSON.stringify(live.values || null);
-  if (D.base === null || (!tdDirty() && serverKey !== D.serverKey)) {
+  if (refillDue(D, tdDirty, serverKey)) {
     tdFill(live);
     if (live.role === 'slave') tdRenderExample(live.example);
     else if (live.role === 'master') tdRenderSymex(live.symbolExample);
@@ -5008,28 +5035,15 @@ function tdChanged() {
 }
 
 function saveTdetailFlow() {
-  if (D.saving || !D.live) return;
-  var slave = tdIsSlave();
-  D.saving = true;
-  renderTdetail();
-  api().terminal_settings_save(D.tid, slave ? tdCollect() : tdmCollect()).then(function (r) {
-    D.saving = false;
-    if (!r.ok) {
-      renderTdetail();
-      tdShowErrors(r.errors || {});
-      if (r.message) toast(r.message, 'bad');
-      return;
+  saveForm({
+    store: D,
+    render: renderTdetail,
+    showErrors: tdShowErrors,
+    repoll: pollTdetail,
+    saved: function () { D.gen++; },
+    call: function () {
+      return api().terminal_settings_save(D.tid, tdIsSlave() ? tdCollect() : tdmCollect());
     }
-    (r.messages || []).forEach(function (m) {
-      toast(m.text, m.tone, m.tone === 'warn' || m.tone === 'bad' ? 9000 : 4500);
-    });
-    D.gen++;
-    D.base = null; // the next answer refills the form from what was saved
-    pollTdetail();
-  }, function () {
-    D.saving = false;
-    renderTdetail();
-    toast('The engine did not answer; try again.', 'bad');
   });
 }
 
