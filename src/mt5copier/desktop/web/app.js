@@ -1330,6 +1330,47 @@ var modalOnClose = null;
 
 var PAGES = ['trading', 'terminals', 'guards', 'news', 'history', 'setups', 'settings', 'help', 'tdetail'];
 
+// --- the page polls, registered once ------------------------------------------------------
+// Every nav page polls the same way: nothing while the page is elsewhere, else ask the
+// bridge, keep the answer, redraw. Registering wires a poll into showPage (an immediate
+// ask on arrival) and the boot intervals, so a new page is one call here, not edits in
+// three places. The trading poll and the log dock's are not pages' and stay their own.
+var POLLS = [];
+
+function registerPoll(page, every, tick) {
+  function gated(fresh) {
+    if (!window.pywebview || S.page !== page) return;
+    tick(fresh);
+  }
+  POLLS.push({ page: page, every: every, poll: gated });
+  return gated;
+}
+
+function statePoll(page, every, fetch, store, render) {
+  // The common body: one ask in flight is enough, and the answer lands in store.live.
+  var busy = false;
+  return registerPoll(page, every, function () {
+    if (busy) return;
+    busy = true;
+    fetch().then(function (live) {
+      busy = false;
+      store.live = live;
+      render();
+    }, function () { busy = false; });
+  });
+}
+
+function pageAct(promise, store, repoll) {
+  // A page action: toast the outcome and redraw from fresh state either way.
+  promise.then(function (r) {
+    toast(r.message, r.ok ? 'ok' : 'bad');
+    store.drawn = '';
+    repoll();
+  }, function () {
+    toast('The engine did not answer; try again.', 'bad');
+  });
+}
+
 var RET = null;
 // A one-shot way back: set by a flow that sends the person to another page mid-task (the
 // rule form's link to the symbol catalog), holding what it takes to resume -- the page, the
@@ -1360,35 +1401,15 @@ function showPage(name) {
     if (active) a.setAttribute('aria-current', 'page');
     else a.removeAttribute('aria-current');
   });
-  if (name === 'terminals') pollTerminals();
-  if (name === 'guards') pollGuards();
-  if (name === 'news') pollNews();
-  if (name === 'history') pollHistory();
-  if (name === 'setups') pollSetups();
-  if (name === 'settings') { pollSettings(); pollCatalog(); }
-  if (name === 'tdetail') pollTdetail();
+  POLLS.forEach(function (p) { if (p.page === name) p.poll(); });
 }
 
-var terminalsBusy = false;
-function pollTerminals() {
-  if (terminalsBusy || !window.pywebview || S.page !== 'terminals') return;
-  terminalsBusy = true;
-  api().terminals_state().then(function (live) {
-    terminalsBusy = false;
-    T.live = live;
-    renderTerminals();
-  }, function () { terminalsBusy = false; });
-}
+var pollTerminals = statePoll('terminals', 1000, function () {
+  return api().terminals_state();
+}, T, function () { renderTerminals(); });
 
 function tact(promise) {
-  // A terminals action: toast the outcome and redraw from fresh state either way.
-  promise.then(function (r) {
-    toast(r.message, r.ok ? 'ok' : 'bad');
-    T.drawn = '';
-    pollTerminals();
-  }, function () {
-    toast('The engine did not answer; try again.', 'bad');
-  });
+  pageAct(promise, T, pollTerminals);
 }
 
 function money(v) {
@@ -2531,25 +2552,12 @@ var G = {
   from: null        // { tid, name } when a terminal page's guard line led here: the way back
 };
 
-var guardsBusy = false;
-function pollGuards() {
-  if (guardsBusy || !window.pywebview || S.page !== 'guards') return;
-  guardsBusy = true;
-  api().guards_state(G.tid).then(function (live) {
-    guardsBusy = false;
-    G.live = live;
-    renderGuards();
-  }, function () { guardsBusy = false; });
-}
+var pollGuards = statePoll('guards', 1000, function () {
+  return api().guards_state(G.tid);
+}, G, function () { renderGuards(); });
 
 function gact(promise) {
-  promise.then(function (r) {
-    toast(r.message, r.ok ? 'ok' : 'bad');
-    G.drawn = '';
-    pollGuards();
-  }, function () {
-    toast('The engine did not answer; try again.', 'bad');
-  });
+  pageAct(promise, G, pollGuards);
 }
 
 function renderGuards() {
@@ -3168,16 +3176,9 @@ try {
   N.mine = localStorage.getItem('dt-news-mine') === '1';
 } catch (e) { /* defaults are fine */ }
 
-var newsBusy = false;
-function pollNews() {
-  if (newsBusy || !window.pywebview || S.page !== 'news') return;
-  newsBusy = true;
-  api().news_state().then(function (live) {
-    newsBusy = false;
-    N.live = live;
-    renderNews();
-  }, function () { newsBusy = false; });
-}
+var pollNews = statePoll('news', 1000, function () {
+  return api().news_state();
+}, N, function () { renderNews(); });
 
 function newsFilterPass(e, mineList) {
   // An 'ALL' release (an OPEC meeting) belongs to no one currency and moves everything,
@@ -3364,8 +3365,9 @@ var H = {
 
 var histAsked = 0;   // stamps each ask, so a slow answer can never cover a newer one
 var histAnswered = 0;
-function pollHistory(fresh) {
-  if (!window.pywebview || S.page !== 'history') return;
+// The history is an after-the-fact read of everything kept; two seconds is the TUI's
+// own pace for it, and the answer is the heaviest poll the bridge serves.
+var pollHistory = registerPoll('history', 2000, function (fresh) {
   if (!fresh && histAnswered < histAsked) return; // one in flight is enough for a poll
   var stamp = ++histAsked;
   api().history_state(H.tid, H.symbol, H.failed, H.find).then(function (live) {
@@ -3374,7 +3376,7 @@ function pollHistory(fresh) {
     H.live = live;
     renderHistory();
   }, function () { if (stamp > histAnswered) histAnswered = stamp; });
-}
+});
 
 function histFilterChanged() {
   // The narrowing happens in the bridge, so a changed filter asks afresh at once.
@@ -3661,25 +3663,12 @@ var W = {
   loading: ''     // the setup being loaded, while the bridge logs terminals in and applies it
 };
 
-var setupsBusy = false;
-function pollSetups() {
-  if (setupsBusy || !window.pywebview || S.page !== 'setups') return;
-  setupsBusy = true;
-  api().setups_state().then(function (live) {
-    setupsBusy = false;
-    W.live = live;
-    renderSetups();
-  }, function () { setupsBusy = false; });
-}
+var pollSetups = statePoll('setups', 1000, function () {
+  return api().setups_state();
+}, W, function () { renderSetups(); });
 
 function wact(promise) {
-  promise.then(function (r) {
-    toast(r.message, r.ok ? 'ok' : 'bad');
-    W.drawn = '';
-    pollSetups();
-  }, function () {
-    toast('The engine did not answer; try again.', 'bad');
-  });
+  pageAct(promise, W, pollSetups);
 }
 
 function selSetup() {
@@ -3930,9 +3919,41 @@ function loadSetupFlow(name) {
   }, function () { toast('The engine did not answer; try again.', 'bad'); });
 }
 
+function typedLiveModal(opts) {
+  // The copier's own gate, the TUI GoLiveDialog: a dry run turns into live copying only
+  // with LIVE typed -- the word unlocks the confirm button, so going live is never one
+  // stray click, and the bridge checks the word again where the save takes it. Both
+  // go-live flows (loading a live setup, switching the settings) share this shell and
+  // bring only their own words: title, body paragraphs, confirm and field labels.
+  var field = document.createElement('div');
+  field.className = 'field';
+  var label = document.createElement('label');
+  label.className = 'flabel';
+  label.setAttribute('for', 'st-live-word');
+  label.textContent = opts.label;
+  var input = document.createElement('input');
+  input.id = 'st-live-word';
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  field.appendChild(label);
+  field.appendChild(input);
+  opts.body.appendChild(field);
+  showModal({
+    title: opts.title,
+    body: opts.body,
+    confirm: opts.confirm,
+    danger: true,
+    onConfirm: function () { opts.onConfirm(input.value); }
+  });
+  var ok = $('modal-confirm');
+  ok.disabled = true;
+  input.addEventListener('input', function () {
+    ok.disabled = input.value.trim() !== 'LIVE';
+  });
+  input.focus();
+}
+
 function goLiveModal(name, a, agreed) {
-  // The copier's own gate, as the TUI's GoLiveDialog: a dry run turns into live copying
-  // only with LIVE typed; the engine refuses the load without it.
   var body = document.createElement('div');
   var p1 = document.createElement('p');
   p1.textContent = 'Setup ' + name + ' was saved copying live'
@@ -3946,32 +3967,13 @@ function goLiveModal(name, a, agreed) {
     p2.textContent = 'Real orders will be sent to: ' + a.slaves.join(', ') + '.';
     body.appendChild(p2);
   }
-  var field = document.createElement('div');
-  field.className = 'field';
-  var label = document.createElement('label');
-  label.className = 'flabel';
-  label.setAttribute('for', 'st-live-word');
-  label.textContent = 'Type LIVE to load it live';
-  var input = document.createElement('input');
-  input.id = 'st-live-word';
-  input.autocomplete = 'off';
-  input.spellcheck = false;
-  field.appendChild(label);
-  field.appendChild(input);
-  body.appendChild(field);
-  showModal({
+  typedLiveModal({
     title: 'Go live?',
     body: body,
     confirm: 'Load it LIVE',
-    danger: true,
+    label: 'Type LIVE to load it live',
     onConfirm: function () { commitSetupLoad(name, a, agreed, true); }
   });
-  var ok = $('modal-confirm');
-  ok.disabled = true;
-  input.addEventListener('input', function () {
-    ok.disabled = input.value.trim() !== 'LIVE';
-  });
-  input.focus();
 }
 
 function commitSetupLoad(name, a, agreed, goLive) {
@@ -4063,17 +4065,19 @@ function cfgShowErrors(errors) {
 
 var settingsBusy = false;
 var cfgGen = 0; // bumped when a save lands: an answer asked before it is stale and re-asked
-function pollSettings() {
-  if (settingsBusy || !window.pywebview || S.page !== 'settings') return;
+var pollSettings = registerPoll('settings', 1000, function () {
+  if (settingsBusy) return;
   settingsBusy = true;
   var gen = cfgGen;
   api().settings_state().then(function (live) {
     settingsBusy = false;
+    // An edit landed while this answer was in flight: it is stale against the form, so
+    // ask again rather than letting it overwrite what was just typed.
     if (gen !== cfgGen) { pollSettings(); return; }
     C.live = live;
     renderSettings();
   }, function () { settingsBusy = false; });
-}
+});
 
 function renderSettings() {
   var live = C.live;
@@ -4150,8 +4154,9 @@ function catShowErrors(errors) {
 }
 
 var catBusy = false;
-function pollCatalog() {
-  if (catBusy || !window.pywebview || S.page !== 'settings') return;
+// The catalog changes rarely and by hand; two seconds notices another window's save.
+var pollCatalog = registerPoll('settings', 2000, function () {
+  if (catBusy) return;
   catBusy = true;
   api().catalog_state().then(function (live) {
     catBusy = false;
@@ -4165,7 +4170,7 @@ function pollCatalog() {
     $('cat-save').disabled = CAT.saving;
     $('cat-revert').disabled = CAT.saving;
   }, function () { catBusy = false; });
-}
+});
 
 function catSaveFlow() {
   if (CAT.saving || !CAT.live) return;
@@ -4239,8 +4244,6 @@ function saveSettingsFlow(typed) {
 }
 
 function cfgGoLiveModal(r) {
-  // The copier's own gate, the TUI GoLiveDialog: a dry run turns into live copying only
-  // with LIVE typed, and the bridge checks the word again before anything is saved.
   var body = document.createElement('div');
   var p1 = document.createElement('p');
   p1.textContent = 'Live, every trade the master opens is sent as a real order '
@@ -4254,32 +4257,13 @@ function cfgGoLiveModal(r) {
   p2.textContent = 'Copying is halted, and stays halted: nothing is sent until you resume '
     + 'it. Going back to a dry run is one choice in these settings.';
   body.appendChild(p2);
-  var field = document.createElement('div');
-  field.className = 'field';
-  var label = document.createElement('label');
-  label.className = 'flabel';
-  label.setAttribute('for', 'st-live-word');
-  label.textContent = 'Type LIVE to switch';
-  var input = document.createElement('input');
-  input.id = 'st-live-word';
-  input.autocomplete = 'off';
-  input.spellcheck = false;
-  field.appendChild(label);
-  field.appendChild(input);
-  body.appendChild(field);
-  showModal({
+  typedLiveModal({
     title: 'Send real orders?',
     body: body,
     confirm: 'Go live',
-    danger: true,
-    onConfirm: function () { saveSettingsFlow(input.value); }
+    label: 'Type LIVE to switch',
+    onConfirm: function (word) { saveSettingsFlow(word); }
   });
-  var ok = $('modal-confirm');
-  ok.disabled = true;
-  input.addEventListener('input', function () {
-    ok.disabled = input.value.trim() !== 'LIVE';
-  });
-  input.focus();
 }
 
 function revertSettingsFlow() {
@@ -4868,8 +4852,8 @@ function renderTdOverview(live) {
 }
 
 var tdetailBusy = false;
-function pollTdetail() {
-  if (tdetailBusy || !window.pywebview || S.page !== 'tdetail' || !D.tid) return;
+var pollTdetail = registerPoll('tdetail', 1000, function () {
+  if (tdetailBusy || !D.tid) return;
   tdetailBusy = true;
   var tid = D.tid;
   if (D.tab === 'overview') {
@@ -4900,7 +4884,7 @@ function pollTdetail() {
     D.live = live;
     renderTdetail();
   }, function () { tdetailBusy = false; });
-}
+});
 
 var TD_KIND = {
   unread: { text: 'account not read yet', cls: 'small muted' },
@@ -5753,17 +5737,7 @@ function start() {
   pollRates();
   setInterval(poll, 600);
   setInterval(pollRates, 1500);
-  setInterval(pollTerminals, 1000);
-  setInterval(pollGuards, 1000);
-  setInterval(pollNews, 1000);
-  // The history is an after-the-fact read of everything kept; two seconds is the TUI's
-  // own pace for it, and the answer is the heaviest poll the bridge serves.
-  setInterval(pollHistory, 2000);
-  setInterval(pollSetups, 1000);
-  setInterval(pollSettings, 1000);
-  // The catalog changes rarely and by hand; two seconds notices another window's save.
-  setInterval(pollCatalog, 2000);
-  setInterval(pollTdetail, 1000);
+  POLLS.forEach(function (p) { setInterval(p.poll, p.every); });
   // The log dock sits under every page, so its poll follows being open, not the page;
   // two seconds is the TUI log page's own pace.
   if (LG.open) setLogOpen(true);
