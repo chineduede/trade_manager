@@ -29,6 +29,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..execution import backoff_delay
 from ..logging_setup import configure, get_logger
 from ..protocol import (
     ACCOUNT_TRADE_MODE_DEMO,
@@ -78,12 +79,6 @@ SPOT_WAIT_S = 2.0
 cTrader sends a symbol's price right after the subscription, even with its market closed."""
 
 _TOKEN_CODES = frozenset({"CH_ACCESS_TOKEN_INVALID", "OA_AUTH_TOKEN_EXPIRED", "ACCESS_DENIED"})
-
-
-def _backoff_delay(schedule: list[float], attempt: int) -> float:
-    if not schedule:
-        return 5.0
-    return schedule[min(attempt, len(schedule)) - 1]
 
 
 class _Account:
@@ -717,7 +712,7 @@ async def _run(
                 ok, err = await account.connect()
                 if not ok:
                     account.error = err
-                    next_retry_at = time.monotonic() + _backoff_delay(backoff, attempts)
+                    next_retry_at = time.monotonic() + backoff_delay(backoff, attempts)
                     wlog.warning("connect attempt %d failed: %s", attempts, err)
                     seq += 1
                     publish(
@@ -736,7 +731,7 @@ async def _run(
             seq += 1
             publish(await account.poll(terminal_id, seq, attempts))
             if not account.connected:
-                next_retry_at = time.monotonic() + _backoff_delay(backoff, 1)
+                next_retry_at = time.monotonic() + backoff_delay(backoff, 1)
             await asyncio.sleep(interval)
     except Exception:
         wlog.exception("worker crashed")

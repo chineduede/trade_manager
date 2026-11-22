@@ -1,14 +1,19 @@
 """Order-request decisions that need no connection: filling mode, and what a retcode means.
 
 Both are pure lookups over MT5 constants, and both are places the obvious implementation is
-wrong in a way that only shows up against a real broker.
+wrong in a way that only shows up against a real broker. The bottom of the module holds the
+two scraps both brokers' back ends share verbatim -- the result shell every executor answer
+is built on, and the retry backoff both workers pace by -- said once here rather than copied,
+because an edit to a copy is how the two brokers drift apart.
 """
 
 from __future__ import annotations
 
 from enum import IntEnum, StrEnum
+from typing import Any
 
 from .logging_setup import get_logger
+from .protocol import OrderCommand, OrderResult
 
 log = get_logger(__name__)
 
@@ -292,3 +297,28 @@ def describe_retcode(retcode: int | None) -> str:
         return f"{Retcode(int(retcode)).name} ({int(retcode)})"
     except ValueError:
         return f"unknown retcode {retcode}"
+
+
+# --- what both brokers share ----------------------------------------------------------------
+
+
+def command_result(cmd: OrderCommand, terminal_id: str, *, ok: bool, **kw: Any) -> OrderResult:
+    """The shell of every executor answer: identity copied from the command, the outcome
+    defaulted from ``ok``. Both brokers' ``_fail``/``_ok`` delegate here, so a result can
+    never claim to answer a command it does not."""
+    kw.setdefault("outcome", (Outcome.SUCCEEDED if ok else Outcome.FATAL).value)
+    return OrderResult(
+        command_id=cmd.command_id,
+        terminal_id=terminal_id,
+        op=cmd.op,
+        master_ticket=cmd.master_ticket,
+        ok=ok,
+        **kw,
+    )
+
+
+def backoff_delay(schedule: list[float], attempt: int) -> float:
+    """Delay before retry ``attempt`` (1-based); the final entry repeats indefinitely."""
+    if not schedule:
+        return 5.0
+    return schedule[min(attempt, len(schedule)) - 1]

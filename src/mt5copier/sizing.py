@@ -27,7 +27,7 @@ from enum import StrEnum
 
 from .config import SizingMode, TerminalConfig
 from .logging_setup import get_logger
-from .protocol import GuardNote, PositionType
+from .protocol import GuardNote, OrderCommand, PositionType
 
 log = get_logger(__name__)
 
@@ -308,6 +308,75 @@ def fit_lots(
     why = f"{lots:g} lots on {symbol}: {over}"
     declined = note("declined", why)
     return MarginFit(None, declined.text(), declined)
+
+
+# The three fits as both brokers' executors actually call them: fed from the command's own
+# fields, None when the command carries no such cap. Only the two broker reads -- what margin
+# the trade would take, what margin is in use -- are passed in, because only an executor can
+# ask its broker, and the MT5 one asks synchronously where cTrader awaits.
+
+
+def fit_lots_for(
+    cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float
+) -> MarginFit | None:
+    """:func:`fit_lots` from the command. None without the cap."""
+    if cmd.max_lots is None:
+        return None
+    return fit_lots(
+        lots=lots,
+        cap=cmd.max_lots,
+        mode=cmd.lots_cap,
+        symbol=symbol,
+        facts=facts,
+        rule=cmd.lots_rule,
+        rule_id=cmd.lots_rule_id,
+        allowed=cmd.lots_allowed,
+    )
+
+
+def fit_margin_for(
+    cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float, *, margin: float | None
+) -> MarginFit | None:
+    """:func:`fit_margin` from the command, ``margin`` asked of the broker. None without
+    the cap."""
+    if cmd.max_margin is None:
+        return None
+    return fit_margin(
+        lots=lots,
+        margin=margin,
+        cap=cmd.max_margin,
+        mode=cmd.margin_cap,
+        symbol=symbol,
+        facts=facts,
+        rule=cmd.margin_rule,
+        rule_id=cmd.margin_rule_id,
+    )
+
+
+def fit_total_margin_for(
+    cmd: OrderCommand,
+    symbol: str,
+    facts: SymbolFacts,
+    lots: float,
+    *,
+    margin: float | None,
+    in_use: float | None,
+) -> MarginFit | None:
+    """:func:`fit_total_margin` from the command, ``margin`` and ``in_use`` asked of the
+    broker. None without the cap."""
+    if cmd.max_total_margin is None:
+        return None
+    return fit_total_margin(
+        lots=lots,
+        margin=margin,
+        total=cmd.max_total_margin,
+        in_use=in_use,
+        mode=cmd.total_margin_cap,
+        symbol=symbol,
+        facts=facts,
+        rule=cmd.total_margin_rule,
+        rule_id=cmd.total_margin_rule_id,
+    )
 
 
 def floor_to_step(value: float, step: float) -> float:

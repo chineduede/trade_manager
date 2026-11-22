@@ -33,7 +33,7 @@ import asyncio
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
-from ..execution import Outcome
+from ..execution import Outcome, command_result
 from ..logging_setup import get_logger
 from ..protocol import (
     ActionKind,
@@ -47,9 +47,9 @@ from ..sizing import (
     MarginFit,
     SizingResult,
     SymbolFacts,
-    fit_lots,
-    fit_margin,
-    fit_total_margin,
+    fit_lots_for,
+    fit_margin_for,
+    fit_total_margin_for,
     lots_for_master_multiple,
     lots_for_risk,
     quantize_volume,
@@ -653,57 +653,34 @@ class CTraderExecutor:
     async def _fit_lots(
         self, cmd: OrderCommand, symbol: cv.SymbolInfo, facts: SymbolFacts, lots: float
     ) -> MarginFit | None:
-        """:func:`mt5copier.sizing.fit_lots`: the asset-class guard's lots ceiling, already
-        one number. None without the cap. Async only to sit in the fit loop."""
-        if cmd.max_lots is None:
-            return None
-        return fit_lots(
-            lots=lots,
-            cap=cmd.max_lots,
-            mode=cmd.lots_cap,
-            symbol=symbol.name,
-            facts=facts,
-            rule=cmd.lots_rule,
-            rule_id=cmd.lots_rule_id,
-            allowed=cmd.lots_allowed,
-        )
+        """:func:`mt5copier.sizing.fit_lots_for`: the asset-class guard's lots ceiling,
+        already one number. Async only to sit in the fit loop."""
+        return fit_lots_for(cmd, symbol.name, facts, lots)
 
     async def _fit_margin(
         self, cmd: OrderCommand, symbol: cv.SymbolInfo, facts: SymbolFacts, lots: float
     ) -> MarginFit | None:
-        """:func:`mt5copier.sizing.fit_margin`, with the margin asked of cTrader. None without
-        the cap."""
+        """:func:`mt5copier.sizing.fit_margin_for`, with the margin asked of cTrader --
+        only under a cap, so a trade without one costs no extra request."""
         if cmd.max_margin is None:
             return None
         margin = await self._margin(cmd.direction, symbol, lots)
-        return fit_margin(
-            lots=lots,
-            margin=margin,
-            cap=cmd.max_margin,
-            mode=cmd.margin_cap,
-            symbol=symbol.name,
-            facts=facts,
-            rule=cmd.margin_rule,
-            rule_id=cmd.margin_rule_id,
-        )
+        return fit_margin_for(cmd, symbol.name, facts, lots, margin=margin)
 
     async def _fit_total_margin(
         self, cmd: OrderCommand, symbol: cv.SymbolInfo, facts: SymbolFacts, lots: float
     ) -> MarginFit | None:
-        """:func:`mt5copier.sizing.fit_total_margin`, with the margin in use asked of cTrader
-        now. None without the cap."""
+        """:func:`mt5copier.sizing.fit_total_margin_for`, with the margin in use asked of
+        cTrader now."""
         if cmd.max_total_margin is None:
             return None
-        return fit_total_margin(
-            lots=lots,
+        return fit_total_margin_for(
+            cmd,
+            symbol.name,
+            facts,
+            lots,
             margin=await self._margin(cmd.direction, symbol, lots),
-            total=cmd.max_total_margin,
             in_use=await self._account.used_margin(),
-            mode=cmd.total_margin_cap,
-            symbol=symbol.name,
-            facts=facts,
-            rule=cmd.total_margin_rule,
-            rule_id=cmd.total_margin_rule_id,
         )
 
     async def _margin(
@@ -984,26 +961,10 @@ class CTraderExecutor:
     # --- helpers --------------------------------------------------------------------------
 
     def _fail(self, cmd: OrderCommand, **kw: Any) -> OrderResult:
-        kw.setdefault("outcome", Outcome.FATAL.value)
-        return OrderResult(
-            command_id=cmd.command_id,
-            terminal_id=self._terminal_id,
-            op=cmd.op,
-            master_ticket=cmd.master_ticket,
-            ok=False,
-            **kw,
-        )
+        return command_result(cmd, self._terminal_id, ok=False, **kw)
 
     def _ok(self, cmd: OrderCommand, **kw: Any) -> OrderResult:
-        kw.setdefault("outcome", Outcome.SUCCEEDED.value)
-        return OrderResult(
-            command_id=cmd.command_id,
-            terminal_id=self._terminal_id,
-            op=cmd.op,
-            master_ticket=cmd.master_ticket,
-            ok=True,
-            **kw,
-        )
+        return command_result(cmd, self._terminal_id, ok=True, **kw)
 
 
 def _opened(event: Any) -> bool:

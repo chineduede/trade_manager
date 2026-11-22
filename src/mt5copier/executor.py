@@ -41,6 +41,7 @@ from .execution import (
     alternative_filling,
     choose_filling,
     classify,
+    command_result,
     is_transient,
     price_refused,
 )
@@ -61,9 +62,9 @@ from .sizing import (
     SizingFailure,
     SizingResult,
     SymbolFacts,
-    fit_lots,
-    fit_margin,
-    fit_total_margin,
+    fit_lots_for,
+    fit_margin_for,
+    fit_total_margin_for,
     lots_for_master_multiple,
     lots_for_risk,
     quantize_volume,
@@ -225,56 +226,32 @@ class Executor:
     def _fit_lots(
         self, cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float
     ) -> MarginFit | None:
-        """:func:`mt5copier.sizing.fit_lots`: the asset-class guard's lots ceiling, already
-        reduced to one number by the engine. None without the cap."""
-        if cmd.max_lots is None:
-            return None
-        return fit_lots(
-            lots=lots,
-            cap=cmd.max_lots,
-            mode=cmd.lots_cap,
-            symbol=symbol,
-            facts=facts,
-            rule=cmd.lots_rule,
-            rule_id=cmd.lots_rule_id,
-            allowed=cmd.lots_allowed,
-        )
+        """:func:`mt5copier.sizing.fit_lots_for`: the asset-class guard's lots ceiling,
+        already reduced to one number by the engine."""
+        return fit_lots_for(cmd, symbol, facts, lots)
 
     def _fit_margin(
         self, cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float
     ) -> MarginFit | None:
-        """:func:`mt5copier.sizing.fit_margin`, with the margin asked of the terminal. None
-        without the cap."""
+        """:func:`mt5copier.sizing.fit_margin_for`, with the margin asked of the terminal --
+        only under a cap, so a trade without one costs no extra call."""
         if cmd.max_margin is None:
             return None
-        return fit_margin(
-            lots=lots,
-            margin=self._new_margin(cmd, symbol, lots),
-            cap=cmd.max_margin,
-            mode=cmd.margin_cap,
-            symbol=symbol,
-            facts=facts,
-            rule=cmd.margin_rule,
-            rule_id=cmd.margin_rule_id,
-        )
+        return fit_margin_for(cmd, symbol, facts, lots, margin=self._new_margin(cmd, symbol, lots))
 
     def _fit_total_margin(
         self, cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float
     ) -> MarginFit | None:
-        """:func:`mt5copier.sizing.fit_total_margin`, with the margin in use read now. None
-        without the cap."""
+        """:func:`mt5copier.sizing.fit_total_margin_for`, with the margin in use read now."""
         if cmd.max_total_margin is None:
             return None
-        return fit_total_margin(
-            lots=lots,
+        return fit_total_margin_for(
+            cmd,
+            symbol,
+            facts,
+            lots,
             margin=self._new_margin(cmd, symbol, lots),
-            total=cmd.max_total_margin,
             in_use=self._session.margin_used(),
-            mode=cmd.total_margin_cap,
-            symbol=symbol,
-            facts=facts,
-            rule=cmd.total_margin_rule,
-            rule_id=cmd.total_margin_rule_id,
         )
 
     # --- the guard ------------------------------------------------------------------------
@@ -1194,26 +1171,10 @@ class Executor:
     # --- helpers --------------------------------------------------------------------------
 
     def _fail(self, cmd: OrderCommand, **kw: Any) -> OrderResult:
-        kw.setdefault("outcome", Outcome.FATAL.value)
-        return OrderResult(
-            command_id=cmd.command_id,
-            terminal_id=self._terminal_id,
-            op=cmd.op,
-            master_ticket=cmd.master_ticket,
-            ok=False,
-            **kw,
-        )
+        return command_result(cmd, self._terminal_id, ok=False, **kw)
 
     def _ok(self, cmd: OrderCommand, **kw: Any) -> OrderResult:
-        kw.setdefault("outcome", Outcome.SUCCEEDED.value)
-        return OrderResult(
-            command_id=cmd.command_id,
-            terminal_id=self._terminal_id,
-            op=cmd.op,
-            master_ticket=cmd.master_ticket,
-            ok=True,
-            **kw,
-        )
+        return command_result(cmd, self._terminal_id, ok=True, **kw)
 
 
 def _int_or_none(value: Any) -> int | None:
