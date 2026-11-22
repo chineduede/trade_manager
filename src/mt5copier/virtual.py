@@ -29,12 +29,11 @@ same lock its reconcile tick holds, so a tick never sees half an edit.
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from collections.abc import Mapping
 from dataclasses import asdict, replace
 from pathlib import Path
 
+from .json_store import quarantine, write_json
 from .logging_setup import get_logger
 from .protocol import OrderType, PendingOrder, Position, PositionType
 
@@ -445,18 +444,7 @@ class VirtualBook:
             # Moved aside, never deleted: this file is the master side of live copies, and a
             # parse error must leave the evidence for a human rather than silently starting
             # an empty book whose first tick would close every copy.
-            backup = self._path.with_suffix(f".bad-{os.getpid()}.json")
-            try:
-                self._path.replace(backup)
-                log.error(
-                    "virtual book at %s was invalid (%s); moved to %s", self._path, exc, backup
-                )
-            except OSError:
-                log.error(
-                    "virtual book at %s was invalid (%s) and could not be moved aside",
-                    self._path,
-                    exc,
-                )
+            quarantine(self._path, str(exc), "the virtual book")
             return
         self._positions = positions
         self._orders = orders
@@ -471,21 +459,7 @@ class VirtualBook:
             "orders": [asdict(o) for o in self.orders()],
             "breakeven_at": {str(t): self._be_at[t] for t in sorted(self._be_at)},
         }
-        text = json.dumps(payload, indent=2) + "\n"
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_name = tempfile.mkstemp(
-            dir=str(self._path.parent), prefix=self._path.name + ".", suffix=".tmp"
-        )
-        tmp = Path(tmp_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-                fh.write(text)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, self._path)
-        except BaseException:
-            tmp.unlink(missing_ok=True)
-            raise
+        write_json(self._path, payload)
 
 
 # --- pure rules -----------------------------------------------------------------------------

@@ -437,6 +437,33 @@ class Command:
 
 
 @dataclass(frozen=True, slots=True)
+class TradeConstraint:
+    """One cap the guards put on this trade, carried with the command so the worker can hold
+    the trade to it after sizing, without reading config or catalog.
+
+    The engine decides the number -- a margin allowance, what is left of a total, a class's
+    lots ceiling -- and the worker measures the trade against it, because only the worker can
+    ask its broker what the trade would cost. A new kind of per-trade limit is a new ``kind``
+    here and its arithmetic in :mod:`mt5copier.sizing`; nothing else on the wire changes."""
+
+    kind: str
+    """What is limited: ``"lots"``, ``"margin"`` or ``"total_margin"``. A kind this build's
+    worker does not know is declined, never ignored -- the guard asked for a limit, and
+    sending the trade unmeasured is the unsafe side."""
+    cap: float
+    """The limit, in the kind's own unit: lots, or the account's money."""
+    mode: str
+    """What to do with a trade over the cap: ``"decline"`` it, ``"shrink"`` it to fit, or
+    ``"warn"`` and send it as sized."""
+    rule: str = ""
+    """The title of the guard behind the cap, so the worker's answer can name it."""
+    rule_id: str = ""
+    allowed: str = ""
+    """The engine's reading, for the guard note: ``US30 -> indices, capped at 1 lots a
+    trade``. Always names the class, so a misfiled symbol is visible, never silent."""
+
+
+@dataclass(frozen=True, slots=True)
 class OrderCommand:
     """Supervisor -> worker: one thing to do on this slave's terminal.
 
@@ -512,36 +539,10 @@ class OrderCommand:
     allow_live: bool = False
     """Explicit per-slave override of the demo-only guard. Absent this, the worker refuses to
     trade any account that is not a demo -- see :mod:`mt5copier.executor`."""
-    max_margin: float | None = None
-    """OPEN / PLACE only: the most margin, in the account's money, a prop-firm guard lets this
-    trade use. Only the worker can price margin, so the engine sends the limit and the worker
-    holds the trade to it after sizing. None for no limit."""
-    margin_cap: str = ""
-    """What the worker does with a trade over ``max_margin``: ``"decline"`` it, ``"shrink"``
-    it to fit, or ``"warn"`` and send it as sized."""
-    margin_rule: str = ""
-    """The title of the guard behind ``max_margin``, so the worker's answer can name it."""
-    margin_rule_id: str = ""
-    max_total_margin: float | None = None
-    """OPEN / PLACE only: the most margin every open position and this trade may use together,
-    in the account's money. The worker takes off the margin in use when it sends, read then,
-    so a trade sent just before this one is counted. None for no limit."""
-    total_margin_cap: str = ""
-    """``"decline"``, ``"shrink"`` or ``"warn"``, as ``margin_cap``."""
-    total_margin_rule: str = ""
-    total_margin_rule_id: str = ""
-    max_lots: float | None = None
-    """OPEN / PLACE only: the most lots the asset-class guard lets this trade be. Already
-    reduced to one number by the engine -- the class's cap, or what is left of it once the
-    class's open lots are counted -- so the worker needs no catalog. None for no limit."""
-    lots_cap: str = ""
-    """``"decline"``, ``"shrink"`` or ``"warn"``, as ``margin_cap``."""
-    lots_rule: str = ""
-    """The title of the guard behind ``max_lots``, so the worker's answer can name it."""
-    lots_rule_id: str = ""
-    lots_allowed: str = ""
-    """The engine's reading, for the guard note: ``US30 -> indices, capped at 1 lots a
-    trade``. Always names the class, so a misfiled symbol is visible, never silent."""
+    constraints: tuple[TradeConstraint, ...] = ()
+    """OPEN / PLACE only: the guards' per-trade caps, applied in this order by the worker's
+    fit loop, each against the lots the one before let through. Empty for no limits, and for
+    every command that opens nothing."""
     to_breakeven: bool = False
     """MODIFY_SLTP on the master only: move its stop to breakeven, past ``entry`` by the
     position's own commission and ``slippage_points``, worked out by the worker. ``sl`` and

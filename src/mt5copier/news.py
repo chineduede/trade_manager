@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from .json_store import write_json
 from .logging_setup import get_logger
 from .paths import news_path
 
@@ -243,9 +244,6 @@ class NewsCalendar:
         with self._lock:
             self._events, self._fetched_at, self._error = events, now, ""
         log.info("news calendar fetched: %d events this week", len(events))
-        # Here, not at the top: the guards import this module, and their package imports rules.
-        from .guards.model import write_json
-
         try:
             write_json(self._path, {"fetched_at": now, "events": raw})
         except OSError:

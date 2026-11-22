@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 import psutil
 
 from .discovery import find_terminal_pid
-from .execution import OrderTime
+from .execution import OrderTime, backoff_delay
 from .executor import UNREADABLE, Executor, LivePosition, ReadFailure
 from .logging_setup import configure, get_logger
 from .protocol import (
@@ -923,13 +923,6 @@ def _opt_int(obj: object, name: str) -> int | None:
         return None
 
 
-def _backoff_delay(schedule: list[float], attempt: int) -> float:
-    """Delay before retry ``attempt`` (1-based); the final entry repeats indefinitely."""
-    if not schedule:
-        return 5.0
-    return schedule[min(attempt, len(schedule)) - 1]
-
-
 def run_worker(
     terminal_id: str,
     exe_path: str,
@@ -1109,7 +1102,7 @@ def run_worker(
                 )
                 ok, err = session.connect()
                 if not ok:
-                    delay = _backoff_delay(backoff, attempts)
+                    delay = backoff_delay(backoff, attempts)
                     next_retry_at = time.monotonic() + delay
                     wlog.warning("connect attempt %d failed: %s", attempts, err)
                     seq += 1
@@ -1131,7 +1124,7 @@ def run_worker(
             snap = session.poll(terminal_id, seq, attempts)
             publish(snap)
             if not session.connected:
-                next_retry_at = time.monotonic() + _backoff_delay(backoff, 1)
+                next_retry_at = time.monotonic() + backoff_delay(backoff, 1)
             time.sleep(interval)
 
     except KeyboardInterrupt:

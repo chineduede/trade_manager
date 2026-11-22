@@ -12,19 +12,15 @@ quietly delete a limit the person set.
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 import uuid
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..logging_setup import get_logger
+from ..json_store import quarantine, write_json
 from ..paths import guards_path
 from .base import REGISTRY
 from .params import ParamValue, resolve
-
-log = get_logger(__name__)
 
 GUARDS_VERSION = 1
 
@@ -82,12 +78,7 @@ def load(path: Path | None = None) -> GuardsDoc:
     try:
         return GuardsDoc.model_validate(json.loads(target.read_text(encoding="utf-8")))
     except Exception as exc:
-        backup = target.with_suffix(f".bad-{os.getpid()}.json")
-        try:
-            target.replace(backup)
-            log.error("guards at %s were invalid (%s); moved to %s", target, exc, backup)
-        except OSError:
-            log.error("guards at %s were invalid (%s) and could not be moved aside", target, exc)
+        quarantine(target, str(exc), "guards")
         return GuardsDoc()
 
 
@@ -120,19 +111,3 @@ def save(doc: GuardsDoc, path: Path | None = None) -> Path:
                     doc.templates.setdefault(name, rules)
         write_json(target, doc.model_dump(mode="json"))
     return target
-
-
-def write_json(target: Path, payload: object) -> None:
-    target.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, indent=2) + "\n"
-    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=target.name + ".", suffix=".tmp")
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, target)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise

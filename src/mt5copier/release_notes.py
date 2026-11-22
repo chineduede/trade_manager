@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 
 from . import __version__
+from .json_store import write_json
 from .paths import version_seen_path
 
 NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
@@ -114,7 +115,7 @@ def unseen() -> bool:
 
 
 def mark_seen() -> None:
-    """Record that the running version's notes were shown and dismissed."""
-    path = version_seen_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"last": __version__}), encoding="utf-8")
+    """Record that the running version's notes were shown and dismissed. Atomically, like
+    every other JSON file: a half-written file reads as a fresh install, which would mark
+    this build's notes read without them ever being shown."""
+    write_json(version_seen_path(), {"last": __version__})

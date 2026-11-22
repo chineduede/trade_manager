@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 import pytest
+from fake_workers import FakeWorker
 
 from mt5copier.config import (
     VIRTUAL_MASTER_ID,
@@ -67,36 +68,6 @@ def cfg(exe: Path) -> AppConfig:
     )
 
 
-class _FakeProcess:
-    def is_alive(self) -> bool:
-        return True
-
-    def join(self, timeout: float | None = None) -> None:
-        pass
-
-    def terminate(self) -> None:
-        pass
-
-
-class _FakeQueue:
-    def __init__(self) -> None:
-        self.sent: list[object] = []
-
-    def put_nowait(self, item: object) -> None:
-        self.sent.append(item)
-
-    def close(self) -> None:
-        pass
-
-
-class _FakeWorker:
-    def __init__(self, terminal_id: str) -> None:
-        self.terminal_id = terminal_id
-        self.process = _FakeProcess()
-        self.cmd_q = _FakeQueue()
-        self.started_at = time.monotonic()
-
-
 @pytest.fixture
 def engine(cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Engine:
     eng = Engine(
@@ -110,7 +81,7 @@ def engine(cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> E
     monkeypatch.setattr(
         eng,
         "_spawn_worker",
-        lambda tcfg: eng._workers.__setitem__(tcfg.terminal_id, _FakeWorker(tcfg.terminal_id)),
+        lambda tcfg: eng._workers.__setitem__(tcfg.terminal_id, FakeWorker(tcfg.terminal_id)),
     )
     eng.sync()
     return eng

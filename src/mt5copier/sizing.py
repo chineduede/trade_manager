@@ -27,7 +27,7 @@ from enum import StrEnum
 
 from .config import SizingMode, TerminalConfig
 from .logging_setup import get_logger
-from .protocol import GuardNote, PositionType
+from .protocol import GuardNote, PositionType, TradeConstraint
 
 log = get_logger(__name__)
 
@@ -308,6 +308,67 @@ def fit_lots(
     why = f"{lots:g} lots on {symbol}: {over}"
     declined = note("declined", why)
     return MarginFit(None, declined.text(), declined)
+
+
+MARGIN_KINDS = frozenset({"margin", "total_margin"})
+"""The constraint kinds whose fit needs the trade's margin priced by the broker --
+``total_margin`` also needs the margin in use, read at send time."""
+
+
+def fit_constraint(
+    constraint: TradeConstraint,
+    symbol: str,
+    facts: SymbolFacts,
+    lots: float,
+    *,
+    margin: float | None = None,
+    in_use: float | None = None,
+) -> MarginFit:
+    """One :class:`~mt5copier.protocol.TradeConstraint` applied: the dispatch both brokers'
+    fit loops share. ``margin`` and ``in_use`` are the broker reads the :data:`MARGIN_KINDS`
+    need; the ``lots`` kind needs none. A kind this build does not know is declined, never
+    ignored -- the guard asked for a limit, and sending unmeasured is the unsafe side."""
+    if constraint.kind == "lots":
+        return fit_lots(
+            lots=lots,
+            cap=constraint.cap,
+            mode=constraint.mode,
+            symbol=symbol,
+            facts=facts,
+            rule=constraint.rule,
+            rule_id=constraint.rule_id,
+            allowed=constraint.allowed,
+        )
+    if constraint.kind == "margin":
+        return fit_margin(
+            lots=lots,
+            margin=margin,
+            cap=constraint.cap,
+            mode=constraint.mode,
+            symbol=symbol,
+            facts=facts,
+            rule=constraint.rule,
+            rule_id=constraint.rule_id,
+        )
+    if constraint.kind == "total_margin":
+        return fit_total_margin(
+            lots=lots,
+            margin=margin,
+            total=constraint.cap,
+            in_use=in_use,
+            mode=constraint.mode,
+            symbol=symbol,
+            facts=facts,
+            rule=constraint.rule,
+            rule_id=constraint.rule_id,
+        )
+    note = GuardNote(
+        constraint.rule or "A guard",
+        "declined",
+        f"this build cannot enforce its {constraint.kind!r} limit",
+        constraint.rule_id,
+    )
+    return MarginFit(None, note.text(), note)
 
 
 def floor_to_step(value: float, step: float) -> float:

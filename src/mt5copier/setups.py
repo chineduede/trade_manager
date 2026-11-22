@@ -27,7 +27,6 @@ runs that. This module only keeps the file and answers questions about it.
 from __future__ import annotations
 
 import json
-import os
 import time
 from collections.abc import Collection, Mapping
 from pathlib import Path
@@ -38,7 +37,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from . import account_switch
 from .account_switch import Account
 from .config import AppConfig, AppMode, Role, TerminalConfig
-from .guards.model import write_json
+from .json_store import quarantine, write_json
 from .logging_setup import get_logger
 from .paths import setups_path
 from .settings_edit import BY_NAME
@@ -337,12 +336,7 @@ def load(path: Path | None = None) -> SetupsDoc:
     try:
         return SetupsDoc.model_validate(json.loads(target.read_text(encoding="utf-8")))
     except Exception as exc:
-        backup = target.with_suffix(f".bad-{os.getpid()}.json")
-        try:
-            target.replace(backup)
-            log.error("setups at %s were invalid (%s); moved to %s", target, exc, backup)
-        except OSError:
-            log.error("setups at %s were invalid (%s) and could not be moved aside", target, exc)
+        quarantine(target, str(exc), "setups")
         return SetupsDoc()
 
 

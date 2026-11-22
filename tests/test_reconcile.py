@@ -11,13 +11,13 @@ all.
 
 from __future__ import annotations
 
-import queue
 import threading
 import time
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from fake_workers import FakeQueue, FakeWorker
 
 from mt5copier.config import AppConfig, NoStopPolicy, Role, SizingMode, TerminalConfig
 from mt5copier.engine import Engine
@@ -1527,41 +1527,9 @@ def wire_slave(
     eng._received_at[terminal_id] = time.monotonic() - age_s
 
 
-class _FakeProcess:
-    def is_alive(self) -> bool:
-        return True
-
-    def join(self, timeout: float | None = None) -> None:
-        pass
-
-
-class _FakeQueue:
-    """Records what the engine tried to send, instead of crossing a process boundary."""
-
-    def __init__(self, accept: bool = True) -> None:
-        self.sent: list[object] = []
-        self.accept = accept
-
-    def put_nowait(self, item: object) -> None:
-        if not self.accept:
-            raise queue.Full
-        self.sent.append(item)
-
-    def close(self) -> None:
-        pass
-
-
-class _FakeWorker:
-    def __init__(self, terminal_id: str, accept: bool = True) -> None:
-        self.terminal_id = terminal_id
-        self.process = _FakeProcess()
-        self.cmd_q = _FakeQueue(accept=accept)
-        self.started_at = time.monotonic()
-
-
-def arm_slave(eng: Engine, terminal_id: str = TID_SLAVE, accept: bool = True) -> _FakeQueue:
+def arm_slave(eng: Engine, terminal_id: str = TID_SLAVE, accept: bool = True) -> FakeQueue:
     """Give the engine somewhere to send commands, without spawning a process."""
-    worker = _FakeWorker(terminal_id, accept=accept)
+    worker = FakeWorker(terminal_id, accept=accept)
     eng._workers[terminal_id] = worker  # type: ignore[assignment]
     return worker.cmd_q
 
@@ -2797,7 +2765,7 @@ def test_the_orphans_survive_the_next_reconciliation_still_acknowledged(
     assert cmd_q.sent == []
 
 
-def watched_copy_of_11(engine_cfg: AppConfig, tmp_path: Path) -> tuple[Engine, _FakeQueue]:
+def watched_copy_of_11(engine_cfg: AppConfig, tmp_path: Path) -> tuple[Engine, FakeQueue]:
     """A live engine whose slave holds a copy of the master's trade 11, after one tick with the
     master holding it too. Continuity is established, and the tick derives nothing: the copy
     matches the master, which is what makes anything sent afterwards down to the edit."""

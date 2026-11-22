@@ -41,6 +41,7 @@ from .execution import (
     alternative_filling,
     choose_filling,
     classify,
+    command_result,
     is_transient,
     price_refused,
 )
@@ -54,16 +55,16 @@ from .protocol import (
     OrderResult,
     PositionType,
     SizingBasis,
+    TradeConstraint,
 )
 from .reconcile import round_turn_per_lot
 from .sizing import (
+    MARGIN_KINDS,
     MarginFit,
     SizingFailure,
     SizingResult,
     SymbolFacts,
-    fit_lots,
-    fit_margin,
-    fit_total_margin,
+    fit_constraint,
     lots_for_master_multiple,
     lots_for_risk,
     quantize_volume,
@@ -200,10 +201,8 @@ class Executor:
 
         lots = sizing.lots
         notes: tuple[GuardNote, ...] = ()
-        for fit_to in (self._fit_lots, self._fit_margin, self._fit_total_margin):
-            fit = fit_to(cmd, symbol, facts, lots)
-            if fit is None:
-                continue
+        for constraint in cmd.constraints:
+            fit = self._fit(constraint, cmd, symbol, facts, lots)
             if fit.note is not None:
                 notes += (fit.note,)
                 log.warning("#%s on %s: %s", cmd.master_ticket, symbol, fit.note.text())
@@ -222,59 +221,25 @@ class Executor:
         )
         return self._session.margin_for(cmd.direction, symbol, lots, price) if price else None
 
-    def _fit_lots(
-        self, cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float
-    ) -> MarginFit | None:
-        """:func:`mt5copier.sizing.fit_lots`: the asset-class guard's lots ceiling, already
-        reduced to one number by the engine. None without the cap."""
-        if cmd.max_lots is None:
-            return None
-        return fit_lots(
-            lots=lots,
-            cap=cmd.max_lots,
-            mode=cmd.lots_cap,
-            symbol=symbol,
-            facts=facts,
-            rule=cmd.lots_rule,
-            rule_id=cmd.lots_rule_id,
-            allowed=cmd.lots_allowed,
-        )
-
-    def _fit_margin(
-        self, cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float
-    ) -> MarginFit | None:
-        """:func:`mt5copier.sizing.fit_margin`, with the margin asked of the terminal. None
-        without the cap."""
-        if cmd.max_margin is None:
-            return None
-        return fit_margin(
-            lots=lots,
-            margin=self._new_margin(cmd, symbol, lots),
-            cap=cmd.max_margin,
-            mode=cmd.margin_cap,
-            symbol=symbol,
-            facts=facts,
-            rule=cmd.margin_rule,
-            rule_id=cmd.margin_rule_id,
-        )
-
-    def _fit_total_margin(
-        self, cmd: OrderCommand, symbol: str, facts: SymbolFacts, lots: float
-    ) -> MarginFit | None:
-        """:func:`mt5copier.sizing.fit_total_margin`, with the margin in use read now. None
-        without the cap."""
-        if cmd.max_total_margin is None:
-            return None
-        return fit_total_margin(
-            lots=lots,
-            margin=self._new_margin(cmd, symbol, lots),
-            total=cmd.max_total_margin,
-            in_use=self._session.margin_used(),
-            mode=cmd.total_margin_cap,
-            symbol=symbol,
-            facts=facts,
-            rule=cmd.total_margin_rule,
-            rule_id=cmd.total_margin_rule_id,
+    def _fit(
+        self,
+        constraint: TradeConstraint,
+        cmd: OrderCommand,
+        symbol: str,
+        facts: SymbolFacts,
+        lots: float,
+    ) -> MarginFit:
+        """:func:`mt5copier.sizing.fit_constraint`, with the broker reads only this kind
+        needs -- the margin is priced per fit, because the lots may have shrunk since the
+        last one."""
+        needs_margin = constraint.kind in MARGIN_KINDS
+        return fit_constraint(
+            constraint,
+            symbol,
+            facts,
+            lots,
+            margin=self._new_margin(cmd, symbol, lots) if needs_margin else None,
+            in_use=self._session.margin_used() if constraint.kind == "total_margin" else None,
         )
 
     # --- the guard ------------------------------------------------------------------------
@@ -1194,26 +1159,10 @@ class Executor:
     # --- helpers --------------------------------------------------------------------------
 
     def _fail(self, cmd: OrderCommand, **kw: Any) -> OrderResult:
-        kw.setdefault("outcome", Outcome.FATAL.value)
-        return OrderResult(
-            command_id=cmd.command_id,
-            terminal_id=self._terminal_id,
-            op=cmd.op,
-            master_ticket=cmd.master_ticket,
-            ok=False,
-            **kw,
-        )
+        return command_result(cmd, self._terminal_id, ok=False, **kw)
 
     def _ok(self, cmd: OrderCommand, **kw: Any) -> OrderResult:
-        kw.setdefault("outcome", Outcome.SUCCEEDED.value)
-        return OrderResult(
-            command_id=cmd.command_id,
-            terminal_id=self._terminal_id,
-            op=cmd.op,
-            master_ticket=cmd.master_ticket,
-            ok=True,
-            **kw,
-        )
+        return command_result(cmd, self._terminal_id, ok=True, **kw)
 
 
 def _int_or_none(value: Any) -> int | None:

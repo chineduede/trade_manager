@@ -87,6 +87,7 @@ from .protocol import (
     RatesRequest,
     RatesResult,
     Snapshot,
+    TradeConstraint,
     WatchCommand,
     WorkerState,
 )
@@ -2231,10 +2232,22 @@ class Engine:
         verdict = self._verdicts.get(cfg.terminal_id, NO_VERDICT)
         risk, risk_note = self._capped_risk(action, cfg, risk, verdict)
         notes = tuple(n for n in (risk_note, self._stop_note(action, cfg, verdict), pending) if n)
-        margin = verdict.max_margin
-        total = verdict.max_total_margin
         opening = action.kind in (ActionKind.OPEN, ActionKind.PLACE)
-        lots_limit = self._class_lots_limit(cfg, verdict, action, snap) if opening else None
+        constraints: tuple[TradeConstraint, ...] = ()
+        if opening:
+            # Lots first: it is the plain ceiling, and each later fit measures the lots the
+            # one before let through.
+            lots_limit = self._class_lots_limit(cfg, verdict, action, snap)
+            if lots_limit is not None:
+                constraints += (TradeConstraint("lots", *lots_limit),)
+            for kind, cap in (
+                ("margin", verdict.max_margin),
+                ("total_margin", verdict.max_total_margin),
+            ):
+                if cap is not None:
+                    constraints += (
+                        TradeConstraint(kind, cap.amount, cap.mode, cap.rule, cap.rule_id),
+                    )
 
         command_id = next(self._command_ids)
         cmd = OrderCommand(
@@ -2270,19 +2283,7 @@ class Engine:
             # on ownership. This is a hint for a human reading the terminal.
             comment=f"c{action.master_ticket}",
             allow_live=cfg.allow_live_trading,
-            max_margin=margin.amount if opening and margin is not None else None,
-            margin_cap=margin.mode if opening and margin is not None else "",
-            margin_rule=margin.rule if opening and margin is not None else "",
-            margin_rule_id=margin.rule_id if opening and margin is not None else "",
-            max_total_margin=total.amount if opening and total is not None else None,
-            total_margin_cap=total.mode if opening and total is not None else "",
-            total_margin_rule=total.rule if opening and total is not None else "",
-            total_margin_rule_id=total.rule_id if opening and total is not None else "",
-            max_lots=lots_limit[0] if lots_limit is not None else None,
-            lots_cap=lots_limit[1] if lots_limit is not None else "",
-            lots_rule=lots_limit[2] if lots_limit is not None else "",
-            lots_rule_id=lots_limit[3] if lots_limit is not None else "",
-            lots_allowed=lots_limit[4] if lots_limit is not None else "",
+            constraints=constraints,
             # Direct trades only: the ticket's target is an rr intent, so each worker nudges
             # its copy's target out by (rr + 1) x its own commission to keep the realized
             # ratio. A real master's target is that trader's own level and goes untouched.

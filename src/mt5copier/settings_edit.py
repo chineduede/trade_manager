@@ -372,6 +372,17 @@ class _EntryError(Exception):
     pass
 
 
+def _float(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        hint = " (use a dot for decimals)" if "," in text else ""
+        raise _EntryError(f"not a number{hint}") from None
+    if not math.isfinite(value):
+        raise _EntryError("must be a finite number")
+    return value
+
+
 _BOUNDS = {
     "greater_than": ("greater than", "gt"),
     "greater_than_equal": ("at least", "ge"),
@@ -459,14 +470,7 @@ def _parse(spec: EditableField, raw: str | bool) -> object:
             return int(text)
         except ValueError:
             raise _EntryError("must be a whole number") from None
-    try:
-        number = float(text)
-    except ValueError:
-        hint = " (use a dot for decimals)" if "," in text else ""
-        raise _EntryError(f"not a number{hint}") from None
-    if not math.isfinite(number):
-        raise _EntryError("must be a finite number")
-    return number
+    return _float(text)
 
 
 def copies_word(count: int) -> str:

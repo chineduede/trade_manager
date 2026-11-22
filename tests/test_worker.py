@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from mt5copier.execution import backoff_delay
 from mt5copier.executor import UNREADABLE
 from mt5copier.protocol import (
     Command,
@@ -26,7 +27,7 @@ from mt5copier.protocol import (
     WatchCommand,
     WorkerState,
 )
-from mt5copier.worker import _backoff_delay, _expiration_utc, _Session, run_worker
+from mt5copier.worker import _expiration_utc, _Session, run_worker
 
 
 @dataclass
@@ -207,11 +208,11 @@ class FakeMT5:
 
 def test_backoff_follows_schedule_then_repeats_last() -> None:
     schedule = [1.0, 2.0, 5.0]
-    assert [_backoff_delay(schedule, n) for n in (1, 2, 3, 4, 99)] == [1.0, 2.0, 5.0, 5.0, 5.0]
+    assert [backoff_delay(schedule, n) for n in (1, 2, 3, 4, 99)] == [1.0, 2.0, 5.0, 5.0, 5.0]
 
 
 def test_backoff_with_empty_schedule_has_a_sane_default() -> None:
-    assert _backoff_delay([], 1) == 5.0
+    assert backoff_delay([], 1) == 5.0
 
 
 # --- session -------------------------------------------------------------------------------

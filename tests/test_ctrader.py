@@ -34,6 +34,7 @@ from mt5copier.protocol import (
     PositionType,
     SizingBasis,
     Snapshot,
+    TradeConstraint,
     WorkerState,
 )
 
@@ -1113,9 +1114,7 @@ async def test_the_total_margin_cap_counts_what_the_account_has_open() -> None:
         sizing_basis=SizingBasis.MASTER_LOT_MULTIPLE,
         master_volume=2.0,
         lot_multiple=1.0,
-        max_total_margin=1_500.0,
-        total_margin_cap="shrink",
-        total_margin_rule="Total margin in use",
+        constraints=(TradeConstraint("total_margin", 1_500.0, "shrink", "Total margin in use"),),
     )
     results = await _results(api, cmd)
     assert results[0].ok, results[0].error
@@ -1135,8 +1134,7 @@ async def test_the_margin_per_trade_cap_on_ctrader() -> None:
         sizing_basis=SizingBasis.MASTER_LOT_MULTIPLE,
         master_volume=2.0,
         lot_multiple=1.0,
-        max_margin=500.0,
-        margin_cap="decline",
+        constraints=(TradeConstraint("margin", 500.0, "decline"),),
     )
     results = await _results(api, cmd)
     assert not results[0].ok
