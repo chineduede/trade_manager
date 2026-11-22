@@ -42,14 +42,14 @@ from ..protocol import (
     OrderResult,
     PositionType,
     SizingBasis,
+    TradeConstraint,
 )
 from ..sizing import (
+    MARGIN_KINDS,
     MarginFit,
     SizingResult,
     SymbolFacts,
-    fit_lots_for,
-    fit_margin_for,
-    fit_total_margin_for,
+    fit_constraint,
     lots_for_master_multiple,
     lots_for_risk,
     quantize_volume,
@@ -208,10 +208,8 @@ class CTraderExecutor:
         log.info("#%s on %s: %s", cmd.master_ticket, name, sizing.describe())
         lots = sizing.lots
         notes: tuple[GuardNote, ...] = ()
-        for fit_to in (self._fit_lots, self._fit_margin, self._fit_total_margin):
-            fit = await fit_to(cmd, symbol, facts, lots)
-            if fit is None:
-                continue
+        for constraint in cmd.constraints:
+            fit = await self._fit(constraint, cmd, symbol, facts, lots)
             if fit.note is not None:
                 notes += (fit.note,)
                 log.warning("#%s on %s: %s", cmd.master_ticket, name, fit.note.text())
@@ -650,38 +648,24 @@ class CTraderExecutor:
         )
         return replace(cmd, tp=tp)
 
-    async def _fit_lots(
-        self, cmd: OrderCommand, symbol: cv.SymbolInfo, facts: SymbolFacts, lots: float
-    ) -> MarginFit | None:
-        """:func:`mt5copier.sizing.fit_lots_for`: the asset-class guard's lots ceiling,
-        already one number. Async only to sit in the fit loop."""
-        return fit_lots_for(cmd, symbol.name, facts, lots)
-
-    async def _fit_margin(
-        self, cmd: OrderCommand, symbol: cv.SymbolInfo, facts: SymbolFacts, lots: float
-    ) -> MarginFit | None:
-        """:func:`mt5copier.sizing.fit_margin_for`, with the margin asked of cTrader --
-        only under a cap, so a trade without one costs no extra request."""
-        if cmd.max_margin is None:
-            return None
-        margin = await self._margin(cmd.direction, symbol, lots)
-        return fit_margin_for(cmd, symbol.name, facts, lots, margin=margin)
-
-    async def _fit_total_margin(
-        self, cmd: OrderCommand, symbol: cv.SymbolInfo, facts: SymbolFacts, lots: float
-    ) -> MarginFit | None:
-        """:func:`mt5copier.sizing.fit_total_margin_for`, with the margin in use asked of
-        cTrader now."""
-        if cmd.max_total_margin is None:
-            return None
-        return fit_total_margin_for(
-            cmd,
-            symbol.name,
-            facts,
-            lots,
-            margin=await self._margin(cmd.direction, symbol, lots),
-            in_use=await self._account.used_margin(),
+    async def _fit(
+        self,
+        constraint: TradeConstraint,
+        cmd: OrderCommand,
+        symbol: cv.SymbolInfo,
+        facts: SymbolFacts,
+        lots: float,
+    ) -> MarginFit:
+        """:func:`mt5copier.sizing.fit_constraint`, with the broker reads only this kind
+        needs, each awaited from cTrader -- the margin per fit, because the lots may have
+        shrunk since the last one."""
+        margin = (
+            await self._margin(cmd.direction, symbol, lots)
+            if constraint.kind in MARGIN_KINDS
+            else None
         )
+        in_use = await self._account.used_margin() if constraint.kind == "total_margin" else None
+        return fit_constraint(constraint, symbol.name, facts, lots, margin=margin, in_use=in_use)
 
     async def _margin(
         self, direction: PositionType, symbol: cv.SymbolInfo, lots: float
