@@ -13,8 +13,9 @@ time.** The profile that touched a thing last is the one whose word is kept. Not
 deleted by a merge: a name or a rule only present in one profile survives.
 
 **Concurrent windows.** Two profiles run as two processes, so shared files are written
-read-modify-write and atomically (:func:`write_json_atomic`), and every read-modify-write
-holds :func:`shared_lock` -- one mutex for the whole folder -- so two windows writing in the
+read-modify-write and atomically (:func:`mt5copier.json_store.write_json`), and every
+read-modify-write holds :func:`shared_lock` -- one mutex for the whole folder -- so two
+windows writing in the
 same instant cannot each read the state from before the other's edit and drop it. For the
 names that is done per edit here; for the guards it is done in :mod:`mt5copier.guards.model`
 and ``.book``; the cTrader token refresh holds it too (:func:`mt5copier.ctrader.auth.
@@ -24,9 +25,6 @@ last-write-wins by design: they are one machine's facts.
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -38,6 +36,7 @@ try:
 except ImportError:  # not Windows: the app is, but nothing here needs to crash elsewhere
     msvcrt = None  # type: ignore[assignment]
 
+from .json_store import read_json, write_json
 from .logging_setup import get_logger
 from .paths import (
     account_names_path,
@@ -113,39 +112,6 @@ def shared_lock(timeout_s: float = 5.0) -> Iterator[None]:
             msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
 
 
-def write_json_atomic(target: Path, payload: object) -> None:
-    """A temp file beside the target, then ``os.replace``: a crash never leaves half a file.
-
-    The same shape :mod:`mt5copier.config` and :mod:`mt5copier.guards.model` use; repeated
-    here rather than imported so this module depends on nothing but :mod:`paths`.
-    """
-    target.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(payload, indent=2) + "\n"
-    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=target.name + ".", suffix=".tmp")
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, target)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-
-
-def _read_json(path: Path) -> Any:
-    """The parsed file, or None when it is absent or unreadable. Never raises: every shared
-    file must be optional, or a bad write in one window could stop every profile starting."""
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return None
-    except Exception as exc:
-        log.warning("shared file %s unreadable (%s); treated as absent", path, exc)
-        return None
-
-
 def _data_dirs() -> list[Path]:
     """Every profile's data folder: the base dir (the default profile) and each child of
     ``profiles/``. Only migration looks at these; afterwards nothing reads a profile's copy."""
@@ -186,7 +152,7 @@ def _migrate_locked(marker: Path) -> None:
     names: dict[str, str] = {}
     machine: dict[str, object] = {}
     for path in _by_age("config.json"):
-        raw = _read_json(path)
+        raw = read_json(path)
         if not isinstance(raw, dict):
             continue
         got = raw.get("account_names")
@@ -199,7 +165,7 @@ def _migrate_locked(marker: Path) -> None:
     accounts: dict[str, Any] = {}
     templates: dict[str, Any] = {}
     for path in _by_age("guards.json"):
-        raw = _read_json(path)
+        raw = read_json(path)
         if not isinstance(raw, dict):
             continue
         got = raw.get("accounts")
@@ -212,7 +178,7 @@ def _migrate_locked(marker: Path) -> None:
     day_equity: dict[str, Any] = {}
     latched: dict[str, Any] = {}
     for path in _by_age("guard_state.json"):
-        raw = _read_json(path)
+        raw = read_json(path)
         if not isinstance(raw, dict):
             continue
         got = raw.get("day_equity")
@@ -224,16 +190,14 @@ def _migrate_locked(marker: Path) -> None:
 
     shared_dir().mkdir(parents=True, exist_ok=True)
     if names and not account_names_path().exists():
-        write_json_atomic(account_names_path(), names)
+        write_json(account_names_path(), names)
     if machine and not machine_path().exists():
-        write_json_atomic(machine_path(), machine)
+        write_json(machine_path(), machine)
     if (accounts or templates) and not guards_path().exists():
         # version 1 == guards.model.GUARDS_VERSION; a literal, to keep this import-free.
-        write_json_atomic(
-            guards_path(), {"version": 1, "accounts": accounts, "templates": templates}
-        )
+        write_json(guards_path(), {"version": 1, "accounts": accounts, "templates": templates})
     if (day_equity or latched) and not guard_state_path().exists():
-        write_json_atomic(guard_state_path(), {"day_equity": day_equity, "latched": latched})
+        write_json(guard_state_path(), {"day_equity": day_equity, "latched": latched})
     # Whole-file stores: the newest profile's copy is taken as it stands. ctrader.json is a
     # DPAPI blob bound to the Windows user, so a byte copy stays decryptable.
     for name, target in (("ctrader.json", ctrader_path()), ("news.json", news_path())):
@@ -244,7 +208,7 @@ def _migrate_locked(marker: Path) -> None:
             except OSError:
                 log.exception("could not carry %s into the shared folder", copies[-1])
 
-    write_json_atomic(
+    write_json(
         marker,
         {
             "when": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -271,7 +235,7 @@ def _names_stamp() -> float | None:
 def load_names() -> dict[str, str] | None:
     """The shared names, or None when the file has never been written -- which is the one
     case the profile's own ``config.json`` copy still counts (it feeds :func:`migrate`)."""
-    raw = _read_json(account_names_path())
+    raw = read_json(account_names_path())
     if raw is None:
         return None
     if not isinstance(raw, dict):
@@ -289,7 +253,7 @@ def set_name(key: str, name: str | None) -> None:
             names[key] = name
         else:
             names.pop(key, None)
-        write_json_atomic(account_names_path(), names)
+        write_json(account_names_path(), names)
         _names_stamp_seen = _names_stamp()
 
 
@@ -315,7 +279,7 @@ def save_machine(cfg: AppConfig) -> None:
     """Write the machine fields as this config now holds them. Called when a settings save
     actually changed one of them -- not on every config save, so a window that has sat open
     while another changed the timings cannot quietly put the old values back."""
-    write_json_atomic(machine_path(), {f: getattr(cfg, f) for f in MACHINE_FIELDS})
+    write_json(machine_path(), {f: getattr(cfg, f) for f in MACHINE_FIELDS})
 
 
 def apply(cfg: AppConfig) -> None:
@@ -328,7 +292,7 @@ def apply(cfg: AppConfig) -> None:
         cfg.account_names = names
         _names_stamp_seen = _names_stamp()
 
-    machine = _read_json(machine_path())
+    machine = read_json(machine_path())
     if not isinstance(machine, dict):
         return
     picked = {f: machine[f] for f in MACHINE_FIELDS if f in machine}

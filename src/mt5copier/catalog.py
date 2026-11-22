@@ -17,17 +17,17 @@ name at all.
 
 The file, once written, is the whole truth -- removing a seeded symbol keeps it removed --
 and an absent file means the seeds. Writes go through :func:`mt5copier.shared_data.
-shared_lock` + :func:`~mt5copier.shared_data.write_json_atomic` like every shared store.
+shared_lock` + :func:`mt5copier.json_store.write_json` like every shared store.
 """
 
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import shared_data
+from .json_store import read_json, write_json
 from .logging_setup import get_logger
 from .paths import catalog_path
 
@@ -227,10 +227,8 @@ class CatalogStore:
             return DEFAULT
         if stamp == self._stamp:
             return self._cached
-        try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            log.warning("catalog at %s unreadable (%s); using the seeds", self._path, exc)
+        raw = read_json(self._path, unreadable="using the seeds")
+        if raw is None:
             return DEFAULT
         self._stamp = stamp
         self._cached = _parse(raw)
@@ -241,7 +239,7 @@ class CatalogStore:
         the complete truth, which is what lets a removed seed stay removed."""
         fresh = _parse({"currencies": currencies, "classes": lists})
         with shared_data.shared_lock():
-            shared_data.write_json_atomic(self._path, fresh.payload())
+            write_json(self._path, fresh.payload())
         self._stamp = self._mtime()
         self._cached = fresh
         return fresh

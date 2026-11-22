@@ -8,19 +8,19 @@ new trade's risk or margin, close the worst copy or every copy.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .. import shared_data
 from ..catalog import CLASSES, CatalogStore
+from ..json_store import read_json, write_json
 from ..logging_setup import get_logger
 from ..news import NewsCalendar
 from ..paths import guard_state_path
 from ..protocol import Snapshot
 from .account import AccountView, last_reset
 from .base import REGISTRY, SEVERITY, Level, Measure
-from .model import GuardRule, GuardsDoc, write_json
+from .model import GuardRule, GuardsDoc
 from .rules.news import acting
 
 log = get_logger(__name__)
@@ -253,14 +253,8 @@ class GuardBook:
         exactly as the profile that owns them wrote them."""
 
     def _load(self) -> dict[str, object]:
-        try:
-            raw = json.loads(self._path.read_text(encoding="utf-8"))
-            return raw if isinstance(raw, dict) else {}
-        except FileNotFoundError:
-            return {}
-        except Exception as exc:
-            log.warning("guard state at %s unreadable (%s); starting empty", self._path, exc)
-            return {}
+        raw = read_json(self._path, unreadable="starting empty")
+        return raw if isinstance(raw, dict) else {}
 
     def _save(self) -> None:
         """Read-modify-write under the shared-folder lock, merged per dirty account (see

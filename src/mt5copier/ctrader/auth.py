@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import os
 import secrets
 import select
 import socket
@@ -36,7 +35,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ValidationError
 
 from .. import dpapi, shared_data
-from ..guards.model import write_json
+from ..json_store import quarantine, write_json
 from ..logging_setup import get_logger
 from ..paths import ctrader_path
 from .client import DEMO_HOST, CTraderClient, OpenApiError
@@ -137,18 +136,9 @@ def load(path: Path | None = None) -> CTraderCredentials:
     try:
         return _read(target)[0]
     except Exception as exc:
-        backup = target.with_suffix(f".bad-{os.getpid()}.json")
-        try:
-            target.replace(backup)
-            log.error(
-                "cTrader credentials at %s could not be read (%s); moved to %s; press t to "
-                "log in again",
-                target,
-                _why(exc),
-                backup,
-            )
-        except OSError:
-            log.error("cTrader credentials at %s could not be read (%s)", target, _why(exc))
+        # _why, not the exception itself: a validation error quotes values, and these are
+        # secrets.
+        quarantine(target, _why(exc), "cTrader credentials")
         return CTraderCredentials()
 
 

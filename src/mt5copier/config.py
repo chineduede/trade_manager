@@ -23,8 +23,6 @@ position size -- it sizes from its own balance and its own risk setting every ti
 from __future__ import annotations
 
 import json
-import os
-import tempfile
 from enum import StrEnum
 from pathlib import Path
 from typing import Self
@@ -38,6 +36,7 @@ from pydantic import (
 )
 
 from .discovery import DiscoveredTerminal
+from .json_store import quarantine, write_json
 from .logging_setup import get_logger
 from .paths import config_path
 
@@ -820,38 +819,15 @@ def load(path: Path | None = None) -> AppConfig:
         shared_data.apply(cfg)
         return cfg
     except Exception as exc:
-        backup = target.with_suffix(f".bad-{os.getpid()}.json")
-        try:
-            target.replace(backup)
-            log.error("config at %s was invalid (%s); moved to %s", target, exc, backup)
-        except OSError:
-            log.error("config at %s was invalid (%s) and could not be moved aside", target, exc)
+        quarantine(target, str(exc), "config")
         cfg = AppConfig()
         shared_data.apply(cfg)
         return cfg
 
 
 def save(cfg: AppConfig, path: Path | None = None) -> Path:
-    """Write config atomically.
-
-    Writes to a temp file in the same directory then ``os.replace``, which is atomic on NTFS.
-    A half-written config after a crash would be worse than a stale one.
-    """
+    """Write config atomically (:func:`mt5copier.json_store.write_json`)."""
     target = path or config_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    payload = cfg.model_dump(mode="json", exclude_none=False)
-    text = json.dumps(payload, indent=2, sort_keys=False) + "\n"
-
-    fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=target.name + ".", suffix=".tmp")
-    tmp = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, target)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+    write_json(target, cfg.model_dump(mode="json", exclude_none=False))
     log.debug("config saved to %s", target)
     return target
