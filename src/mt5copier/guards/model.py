@@ -87,8 +87,10 @@ def save(doc: GuardsDoc, path: Path | None = None) -> Path:
 
     The file is shared by every profile, so first fold in what another profile's window may
     have saved since this one loaded: per account and per template, memory wins and keys only
-    on disk are adopted into ``doc`` -- nothing in the app ever deletes an account or a
-    template, so adopting a disk-only key can never resurrect something just removed. The
+    on disk are adopted into ``doc`` -- nothing in the app ever deletes an account, and a
+    template is deleted from memory and file together under this same lock (see
+    :func:`delete_template`), so adopting a disk-only key can never resurrect something this
+    window just removed. The
     adoption mutates ``doc`` on purpose: the UI and the engine hold it, and should see an
     account another profile has started guarding. Read and write sit under the shared-folder
     lock, so two windows saving in the same instant fold into each other rather than the
@@ -98,16 +100,38 @@ def save(doc: GuardsDoc, path: Path | None = None) -> Path:
 
     target = path or guards_path()
     with shared_data.shared_lock():
-        if target.exists():
-            try:
-                disk = GuardsDoc.model_validate(json.loads(target.read_text(encoding="utf-8")))
-            except Exception:
-                # Unreadable disk copy: write ours whole; load() moves bad files aside anyway.
-                disk = None
-            if disk is not None:
-                for key, guards in disk.accounts.items():
-                    doc.accounts.setdefault(key, guards)
-                for name, rules in disk.templates.items():
-                    doc.templates.setdefault(name, rules)
+        _fold_in(doc, target)
+        write_json(target, doc.model_dump(mode="json"))
+    return target
+
+
+def _fold_in(doc: GuardsDoc, target: Path) -> None:
+    """Adopt into ``doc`` the keys only the file has -- what another window saved since this
+    one loaded. Memory wins per key. Call under the shared lock."""
+    if not target.exists():
+        return
+    try:
+        disk = GuardsDoc.model_validate(json.loads(target.read_text(encoding="utf-8")))
+    except Exception:
+        # Unreadable disk copy: write ours whole; load() moves bad files aside anyway.
+        return
+    for key, guards in disk.accounts.items():
+        doc.accounts.setdefault(key, guards)
+    for name, rules in disk.templates.items():
+        doc.templates.setdefault(name, rules)
+
+
+def delete_template(doc: GuardsDoc, name: str, path: Path | None = None) -> Path:
+    """Drop one saved template from ``doc`` and the file together, under the shared lock, so
+    a save racing from another window folds around the removal rather than past it. A window
+    that still holds the name in memory adopts the removal on its next poll; only a guards
+    save it makes in that gap writes the template back -- the cost of a file with no
+    tombstones, and a far smaller door than leaving the name in the file."""
+    from .. import shared_data
+
+    target = path or guards_path()
+    with shared_data.shared_lock():
+        _fold_in(doc, target)
+        doc.templates.pop(name, None)
         write_json(target, doc.model_dump(mode="json"))
     return target

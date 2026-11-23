@@ -250,7 +250,10 @@ class DesktopApi:
         self._guards_stamp = stamp
         fresh = guards_model.load(guards_path())
         self._guards_doc.accounts.update(fresh.accounts)
-        self._guards_doc.templates.update(fresh.templates)
+        # Wholesale, not update(): a template edit always saves at once, so memory never
+        # holds one the file lacks -- except one another window just deleted, which this
+        # replacement is what lets go of.
+        self._guards_doc.templates = dict(fresh.templates)
 
     # --- window chrome ----------------------------------------------------------------------
 
@@ -1337,8 +1340,20 @@ class DesktopApi:
         return time.strftime("%b %d %H:%M", here)
 
     @staticmethod
+    def _count_words(rule_type: str) -> str | None:
+        """The unit words for a rule that counts trades rather than measures money, from its
+        limit parameter's own ``after`` words: ``trades a day``. None for a money rule."""
+        kind = REGISTRY.get(rule_type)
+        if kind is None or not kind.counts:
+            return None
+        return next((p.after for p in kind.params if p.name == "limit"), "")
+
+    @staticmethod
     def _limit_text(s: RuleStatus, currency: str) -> str:
         if s.limit is not None:
+            words = DesktopApi._count_words(s.type)
+            if words is not None:
+                return f"{s.limit:g} {words}".rstrip()
             out = money(s.limit, currency)
             if s.type == "total_margin":
                 out += " in all"
@@ -1363,11 +1378,12 @@ class DesktopApi:
             return {"kind": "off"}
         if s.fraction is not None and s.used is not None:
             word = "in use" if s.type == "total_margin" else "used"
+            amount = f"{s.used:g}" if DesktopApi._count_words(s.type) is not None else money(s.used)
             return {
                 "kind": "bar",
                 "fraction": s.fraction,
                 "holdsBack": s.holds_back,
-                "moneyLine": f"{money(s.used)} {word}",
+                "moneyLine": f"{amount} {word}",
             }
         if s.type == "margin_per_trade":
             return {"kind": "text", "text": "checked as each trade is sent", "tone": "muted"}
@@ -1719,13 +1735,27 @@ class DesktopApi:
             return _no("give the template a name")
         if not guards.rules:
             return _no("no rules to save")
+        replaced = name in self._guards_doc.templates
         self._guards_doc.templates[name] = guards.rules
         try:
             guards_model.save(self._guards_doc, guards_path())
         except OSError as exc:
             log.exception("guards save failed")
             return _no(f"could not save the guards: {exc}")
-        return _ok(f"template {name!r} saved")
+        return _ok(f"template {name!r} " + ("replaced" if replaced else "saved"))
+
+    def guard_delete_template(self, name: str) -> dict[str, Any]:
+        """Remove a saved template. Templates live in the shared guards file, so the name
+        goes for every account and profile; rules an account took from it stay its own."""
+        name = str(name or "")
+        if name not in self._guards_doc.templates:
+            return _no("that template is already gone")
+        try:
+            guards_model.delete_template(self._guards_doc, name, guards_path())
+        except OSError as exc:
+            log.exception("guards save failed")
+            return _no(f"could not save the guards: {exc}")
+        return _ok(f"template {name!r} deleted")
 
     def guard_apply_rules(self, tid: str, source: dict[str, str]) -> dict[str, Any]:
         """Replace this account's rules with a template's or another account's -- each under

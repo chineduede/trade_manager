@@ -181,6 +181,18 @@ def test_guards_save_memory_wins_per_account() -> None:
     assert guards_model.load().accounts[key].initial_balance == 100_000.0
 
 
+def test_delete_template_holds_through_a_later_save() -> None:
+    rule = GuardRule(type="daily_loss")
+    guards_model.save(GuardsDoc(templates={"theirs": (rule,)}))  # another window's template
+    mine = GuardsDoc(templates={"mine": (rule,)})
+    guards_model.save(mine)
+    guards_model.delete_template(mine, "mine")
+    assert "mine" not in mine.templates
+    assert set(guards_model.load().templates) == {"theirs"}  # the other window's survives
+    guards_model.save(mine)  # a later save from this window must not write it back
+    assert set(guards_model.load().templates) == {"theirs"}
+
+
 def test_guard_state_save_merges_per_dirty_account() -> None:
     path = shared_dir() / "guard_state.json"
     _write(path, {"day_equity": {"theirs@X": {"r": {"day": "d", "equity": 1.0}}}, "latched": {}})

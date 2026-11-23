@@ -26,6 +26,7 @@ class DailyTrades(Rule):
     type = "daily_trades"
     title = "Max trades a day"
     blurb = "caps how many trades are placed in a day"
+    counts = True
     params = (
         Param(
             "limit", "Limit", ParamKind.NUMBER, 5.0, at_least=1, whole=True, after="trades a day"
@@ -70,6 +71,7 @@ class OpenTrades(Rule):
     type = "open_trades"
     title = "Max open trades"
     blurb = "caps how many trades are open at once"
+    counts = True
     params = (
         Param(
             "limit", "Limit", ParamKind.NUMBER, 3.0, at_least=1, whole=True, after="open at once"
