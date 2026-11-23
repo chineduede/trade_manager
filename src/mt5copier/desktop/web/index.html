@@ -33,6 +33,7 @@
       <a href="#" class="nav-item" data-page="terminals" data-tip="Terminals"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"></rect><rect x="14" y="3" width="7" height="7"></rect><rect x="3" y="14" width="7" height="7"></rect><rect x="14" y="14" width="7" height="7"></rect></svg><span class="nav-label">Terminals</span></a>
       <a href="#" class="nav-item active" aria-current="page" data-page="trading" data-tip="Trading"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"></path></svg><span class="nav-label">Trading</span></a>
       <a href="#" class="nav-item" data-page="guards" data-tip="Guards"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg><span class="nav-label">Guards</span></a>
+      <a href="#" class="nav-item" data-page="prop" data-tip="Prop accounts"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg><span class="nav-label">Prop accounts</span></a>
       <a href="#" class="nav-item" data-page="news" data-tip="News"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M16 2v4M8 2v4M3 10h18"></path></svg><span class="nav-label">News</span></a>
       <a href="#" class="nav-item" data-page="history" data-tip="History"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg><span class="nav-label">History</span></a>
       <a href="#" class="nav-item" data-page="setups" data-tip="Setups"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg><span class="nav-label">Setups</span></a>
@@ -335,6 +336,25 @@
       </section>
 
       <div id="guard-none" class="muted" hidden>No account to guard yet. Rules belong to an account, so the copier has to have seen one: connect a terminal once (or log one in), and it appears here — a slave or not.</div>
+    </div>
+
+    <div class="page" id="page-prop" hidden>
+      <div class="page-head">
+        <h1>Prop accounts</h1>
+        <span class="muted">one chain per prop account — link each stage's new login and it inherits the chain's guards</span>
+      </div>
+
+      <section aria-label="Prop accounts" class="panel" id="prop-panel">
+        <div id="prop-toolbar">
+          <span class="muted small" id="prop-count"></span>
+          <span class="toolbar-space"></span>
+          <button type="button" id="pp-new" class="primary-btn">New prop account…</button>
+        </div>
+        <div id="prop-list"></div>
+        <div id="prop-empty" class="muted" hidden>None yet. A prop firm hands out a fresh login for each stage of a challenge — phase 2, then funded — and the guards set on the old login die with it. Make a prop account, link the current login into it, and every later stage inherits the same rules and initial balance the moment it is linked.</div>
+      </section>
+
+      <div class="muted small" id="prop-note">Rules are edited on the Guards page as always — a linked account reads and writes its chain's rules. Breaches, day anchors and trade counts stay each login's own: a closed stage's breach never holds back the stage that replaced it.</div>
     </div>
 
     <div class="page" id="page-news" hidden>
@@ -993,6 +1013,7 @@
           <dt>Terminals</dt><dd>every terminal as a card in three zones — the master, the slaves, and the detected ones not yet used. Drag to assign, right-click for actions, click a card for its own page.</dd>
           <dt>Trading</dt><dd>the direct-trading ticket: place, modify, partly close or flatten — and every enabled slave copies it. Greyed out unless the profile trades directly.</dd>
           <dt>Guards</dt><dd>rules that watch an account — daily loss, drawdown, lot caps and the rest — and decline, shrink or stop trades before a limit is reached. Rules belong to the account, and follow it to any terminal, in any profile.</dd>
+          <dt>Prop accounts</dt><dd>one named chain per prop account. When the firm closes a stage and issues a new login, link it into the chain and it reads the chain's guard rules and initial balance — the same rules, not a copy. Breaches and day counts stay each login's own, and old stages are kept for the record.</dd>
           <dt>News</dt><dd>the week's Forex Factory releases, and what the news rule will do about each one — close or breakeven copies minutes before the release, if the rule is on.</dd>
           <dt>History</dt><dd>one card per copied trade with every step under it: placed, filled, changed, closed, and anything a guard did along the way. Money stays in the terminal — no P/L here, on purpose.</dd>
           <dt>Setups</dt><dd>saved arrangements: who copies from whom — or, in a direct-trading profile, which slaves trade — each terminal's account and settings. A setup loads into a profile of the mode it was saved in, and loading never turns live trading on by itself.</dd>

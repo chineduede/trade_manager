@@ -68,6 +68,7 @@ from .paths import (
     mapping_db_path,
     virtual_book_path,
 )
+from .prop_accounts import PropStore
 from .protocol import (
     ACCOUNT_TRADE_MODE_DEMO,
     COPIER_MAGIC,
@@ -333,11 +334,15 @@ class Engine:
         """The news calendar: fetched on its own thread, and only once a news rule asks."""
         self._catalog = CatalogStore()
         """The shared symbol catalog, for the rules that read asset classes."""
+        self._props = PropStore()
+        """The prop account containers: a linked account reads its rules under its
+        container's identity."""
         self._guards = GuardBook(
             guards if guards is not None else GuardsDoc(),
             guard_state_path,
             self._calendar,
             self._catalog,
+            self._props,
         )
         """Each account's prop-firm rules and how they stand."""
         self._verdicts: dict[str, Verdict] = {}

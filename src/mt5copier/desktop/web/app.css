@@ -812,6 +812,31 @@ body.dragging-terminals .zone-cue { display: inline-block; }
 #setups-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 #setups-foot > .muted { flex: 0 1 auto; max-width: 620px; }
 
+/* --- the prop accounts page --- */
+#prop-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 14px; }
+#prop-list { display: flex; flex-direction: column; gap: 16px; }
+.prop-card {
+  border: 1px solid var(--hairline);
+  border-radius: 10px;
+  background: var(--panel-raise);
+  padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 10px;
+}
+.prop-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.prop-name { font-weight: 600; font-size: 15.5px; }
+.prop-chain { display: flex; flex-direction: column; }
+.prop-stage {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px;
+  padding: 8px 2px;
+  border-bottom: 1px solid var(--hairline-soft);
+  font-size: 13.5px;
+}
+.prop-stage:last-child { border-bottom: 0; }
+.prop-stage-tag { font-size: 12px; font-weight: 600; min-width: 118px; }
+.prop-stage-name { font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.prop-stage:not(.current) .prop-stage-name { color: var(--muted); font-weight: 500; }
+#prop-note { max-width: 760px; }
+
 /* --- the settings page ----------------------------------------------------------------------
    The copier's own settings, the TUI g form as cards: this profile, connection, terminals
    and history on one row, the save bar a full-width card of the same grid so every edge

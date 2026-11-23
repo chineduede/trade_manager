@@ -18,6 +18,7 @@ from ..json_store import read_json, write_json
 from ..logging_setup import get_logger
 from ..news import NewsCalendar
 from ..paths import guard_state_path
+from ..prop_accounts import PropStore
 from ..protocol import Snapshot
 from .account import AccountView, last_reset, local_day
 from .base import REGISTRY, SEVERITY, Level, Measure
@@ -241,12 +242,18 @@ class GuardBook:
         state_path: Path | None = None,
         calendar: NewsCalendar | None = None,
         catalog: CatalogStore | None = None,
+        props: PropStore | None = None,
     ) -> None:
         self.doc = doc
         self.calendar = calendar
         """The news calendar, asked only for an account with a news rule."""
         self.catalog = catalog
         """The symbol catalog, read only for an account with a rule about asset classes."""
+        self.props = props
+        """The prop account containers. An account linked into one reads its *rules* under
+        the container's identity (:meth:`_rules_key`); everything stateful in this book --
+        latches, day-start equity, trade counts -- stays keyed by the raw account, so a
+        closed stage's breach can never hold back the stage that replaced it."""
         self._path = state_path if state_path is not None else guard_state_path()
         state = self._load()
         self._day_equity: dict[str, dict[str, dict[str, object]]] = _section(state, "day_equity")
@@ -270,6 +277,14 @@ class GuardBook:
     def _load(self) -> dict[str, object]:
         raw = read_json(self._path, unreadable="starting empty")
         return raw if isinstance(raw, dict) else {}
+
+    def _rules_key(self, key: str | None) -> str | None:
+        """The identity this account's *rules* are read under: its prop container's, when
+        it is linked into one. Used exactly where ``self.doc`` is consulted, and nowhere a
+        state section is keyed."""
+        if self.props is None:
+            return key
+        return self.props.current().rules_key(key)
 
     def _sections(self) -> tuple[tuple[str, dict[str, Any]], ...]:
         """Every per-account section the state file holds, for saving and adopting alike."""
@@ -337,7 +352,7 @@ class GuardBook:
         if before is None or now - before > _CONTINUITY_S:
             return
         changed = False
-        for rule in self.doc.for_account(key).rules:
+        for rule in self.doc.for_account(self._rules_key(key)).rules:
             params, problems = rule.resolved()
             if problems or "reset" not in params or "zone" not in params:
                 continue
@@ -426,7 +441,7 @@ class GuardBook:
 
     def title(self, key: str | None, rule_id: str) -> str:
         """A rule's title, by its id on this account; ``a guard`` once it is gone."""
-        for given in self.doc.for_account(key).rules:
+        for given in self.doc.for_account(self._rules_key(key)).rules:
             if given.id == rule_id:
                 rule = REGISTRY.get(given.type)
                 return rule.title if rule is not None else given.type
@@ -451,7 +466,7 @@ class GuardBook:
         sizing_risk: float | None = None,
         decor: tuple[str, str, tuple[tuple[str, str], ...]] | None = None,
     ) -> GuardReport:
-        guards = self.doc.for_account(key)
+        guards = self.doc.for_account(self._rules_key(key))
         currency = (snap.currency if snap else None) or ""
         wants_news = self.calendar is not None and any(
             r.enabled and getattr(REGISTRY.get(r.type), "news", False) for r in guards.rules
@@ -499,7 +514,7 @@ class GuardBook:
         report = self.report(key, snap, now, sizing_risk, decor)
         if not report.enabled:
             return NO_VERDICT
-        rules = {r.id: r for r in self.doc.for_account(key).rules}
+        rules = {r.id: r for r in self.doc.for_account(self._rules_key(key)).rules}
         held: list[str] = []
         held_by: list[str] = []
         news_by: list[str] = []

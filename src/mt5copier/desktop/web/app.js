@@ -1328,7 +1328,7 @@ var T = {
 var modalOnConfirm = null;
 var modalOnClose = null;
 
-var PAGES = ['trading', 'terminals', 'guards', 'news', 'history', 'setups', 'settings', 'help', 'tdetail'];
+var PAGES = ['trading', 'terminals', 'guards', 'prop', 'news', 'history', 'setups', 'settings', 'help', 'tdetail'];
 
 // --- the page polls, registered once ------------------------------------------------------
 // Every nav page polls the same way: nothing while the page is elsewhere, else ask the
@@ -2594,6 +2594,11 @@ function renderGuards() {
   if (!live.hasAccount) {
     notes.push("this terminal's account is not known yet: connect it once, then its rules can be set");
   } else {
+    if (live.prop) {
+      notes.push('prop account ‘' + live.prop.name + '’ — these are its rules, read by '
+        + 'every linked stage; this login is stage ' + live.prop.stage + ' of ' + live.prop.stages
+        + (live.prop.current ? '' : ' (a closed stage)'));
+    }
     if (!live.enabled) notes.push('ALL OFF — every rule is ignored until All on is ticked again');
     if (!live.isSlave) {
       notes.push('not copying as a slave yet — the rules stay with the account and act from '
@@ -3194,6 +3199,284 @@ function makeChoiceDropdown(field, onChange) {
   root.appendChild(btn);
   root.appendChild(menu);
   return { el: root, value: function () { return current; } };
+}
+
+// --- the prop accounts page ------------------------------------------------------------
+// Named containers with an ordered chain of stage logins; the current stage reads the
+// chain's guard rules. What links and what resolves is the engine's (prop_accounts.json
+// + guards.json, both shared stores); this page asks and draws.
+var PA = { live: null, drawn: '' };
+
+var pollProp = statePoll('prop', 1000, function () {
+  return api().prop_state();
+}, PA, function () { renderProp(); });
+
+function pact(promise) {
+  pageAct(promise, PA, pollProp);
+}
+
+function pactMessages(promise) {
+  // Linking says several things (inherited rules, balance, copied settings), each its own
+  // toast, the settings save's way.
+  promise.then(function (r) {
+    if (r.messages) {
+      r.messages.forEach(function (m) {
+        toast(m.text, m.tone, m.tone === 'warn' || m.tone === 'bad' ? 9000 : 4500);
+      });
+    } else if (r.message) {
+      toast(r.message, r.ok ? 'ok' : 'bad');
+    }
+    PA.drawn = '';
+    pollProp();
+  }, function () {
+    toast('The engine did not answer; try again.', 'bad');
+  });
+}
+
+function renderProp() {
+  var live = PA.live;
+  if (!live) return;
+  var key = JSON.stringify(live);
+  if (key === PA.drawn) return;
+  PA.drawn = key;
+  $('prop-count').textContent = live.containers.length
+    ? live.containers.length + ' prop account' + (live.containers.length === 1 ? '' : 's')
+    : '';
+  var list = $('prop-list');
+  list.textContent = '';
+  live.containers.forEach(function (c) { list.appendChild(propCard(c)); });
+  $('prop-empty').hidden = !!live.containers.length;
+  $('prop-note').hidden = !live.containers.length;
+}
+
+function propCard(c) {
+  var card = document.createElement('div');
+  card.className = 'prop-card';
+
+  var head = document.createElement('div');
+  head.className = 'prop-head';
+  var name = document.createElement('span');
+  name.className = 'prop-name';
+  name.textContent = c.name;
+  head.appendChild(name);
+  var sub = document.createElement('span');
+  sub.className = 'muted small';
+  var bits = [c.rules + ' rule' + (c.rules === 1 ? '' : 's')];
+  if (c.initialBalance) bits.push('initial balance ' + money(c.initialBalance));
+  if (!c.enabled && c.rules) bits.push('ALL OFF');
+  sub.textContent = bits.join(' · ');
+  head.appendChild(sub);
+  var space = document.createElement('span');
+  space.className = 'toolbar-space';
+  head.appendChild(space);
+
+  function btn(label, cls, fn) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = cls;
+    b.textContent = label;
+    b.addEventListener('click', fn);
+    head.appendChild(b);
+  }
+  btn('Link account…', 'primary-btn', function () { propLinkFlow(c); });
+  btn('Rename', 'plain-btn', function () { propRenameFlow(c); });
+  btn('Delete', 'danger-btn', function () { propDeleteFlow(c); });
+  card.appendChild(head);
+
+  var chain = document.createElement('div');
+  chain.className = 'prop-chain';
+  if (!c.stages.length) {
+    var none = document.createElement('div');
+    none.className = 'muted small prop-stage';
+    none.textContent = 'no stages yet — link the challenge’s current login';
+    chain.appendChild(none);
+  }
+  c.stages.forEach(function (s) {
+    var row = document.createElement('div');
+    row.className = 'prop-stage' + (s.current ? ' current' : '');
+    var tag = document.createElement('span');
+    tag.className = 'prop-stage-tag ' + (s.current ? 'green' : 'muted');
+    tag.textContent = 'stage ' + s.stage + ' · ' + (s.current ? 'current' : 'closed');
+    row.appendChild(tag);
+    var who = document.createElement('span');
+    who.className = 'prop-stage-name';
+    who.textContent = s.name;
+    if (s.name !== s.key) who.dataset.tip = s.key;
+    row.appendChild(who);
+    var where = document.createElement('span');
+    where.className = 'muted small';
+    if (s.connected && s.tid) {
+      var link = document.createElement('button');
+      link.type = 'button';
+      link.className = 'linklike';
+      link.textContent = 'on ' + s.connected + ' — its rules';
+      link.addEventListener('click', function () {
+        G.tid = s.tid;
+        G.from = null;
+        G.drawn = '';
+        showPage('guards');
+      });
+      where.appendChild(link);
+    } else if (s.connected) {
+      where.textContent = 'on ' + s.connected;
+    } else {
+      where.textContent = 'not connected';
+    }
+    row.appendChild(where);
+    var gap = document.createElement('span');
+    gap.className = 'toolbar-space';
+    row.appendChild(gap);
+    var un = document.createElement('button');
+    un.type = 'button';
+    un.className = 'linklike muted';
+    un.textContent = 'Unlink';
+    un.addEventListener('click', function () { propUnlinkFlow(c, s); });
+    row.appendChild(un);
+    chain.appendChild(row);
+  });
+  card.appendChild(chain);
+  return card;
+}
+
+function propNameModal(title, start, go, fn) {
+  var body = document.createElement('div');
+  var note = document.createElement('p');
+  note.className = 'muted';
+  note.textContent = 'Name the prop account the way you say it: the firm and the size, '
+    + 'say. Up to 32 characters, and no two alike.';
+  body.appendChild(note);
+  var field = document.createElement('div');
+  field.className = 'field';
+  var label = document.createElement('label');
+  label.className = 'flabel';
+  label.setAttribute('for', 'pp-name');
+  label.textContent = 'Name';
+  var input = document.createElement('input');
+  input.id = 'pp-name';
+  input.autocomplete = 'off';
+  input.maxLength = 32;
+  input.value = start || '';
+  field.appendChild(label);
+  field.appendChild(input);
+  body.appendChild(field);
+  showModal({
+    title: title,
+    body: body,
+    confirm: go,
+    onConfirm: function () { fn(input.value); }
+  });
+  input.focus();
+  input.select();
+}
+
+function propNewFlow() {
+  propNameModal('New prop account', '', 'Create it', function (name) {
+    pact(api().prop_create(name));
+  });
+}
+
+function propRenameFlow(c) {
+  propNameModal('Rename ' + c.name, c.name, 'Save the name', function (name) {
+    pact(api().prop_rename(c.id, name));
+  });
+}
+
+function propDeleteFlow(c) {
+  confirmModal(
+    'Delete ' + c.name + '?',
+    'The chain is forgotten and every account in it falls back to rules of its own — '
+    + 'usually none. The accounts themselves are untouched; nothing is closed or logged out.',
+    'Delete it', true,
+    function () { pact(api().prop_delete(c.id)); }
+  );
+}
+
+function propUnlinkFlow(c, s) {
+  confirmModal(
+    'Unlink ' + s.name + '?',
+    'It leaves ' + c.name + '’s chain and stops reading its rules. Rules it kept '
+    + 'under its own name from before linking come back; otherwise it is unguarded.',
+    'Unlink it', true,
+    function () { pact(api().prop_unlink(c.id, s.key)); }
+  );
+}
+
+function propLinkFlow(c) {
+  var live = PA.live;
+  if (!live) return;
+  if (!live.linkable.length) {
+    toast('No account to link: every account the copier knows is already in a chain.', 'bad');
+    return;
+  }
+  var options = live.linkable.map(function (a) {
+    return {
+      label: a.name,
+      sub: a.name === a.key ? '' : a.key,
+      fn: function () { propLinkForm(c, a); }
+    };
+  });
+  pickModal('Link which account into ' + c.name + '?', options, 'search name, account id, server…');
+}
+
+function propLinkForm(c, a) {
+  api().prop_link_form(c.id, a.key).then(function (f) {
+    if (!f.ok) { toast(f.message, 'bad'); return; }
+    var body = document.createElement('div');
+    var said = document.createElement('p');
+    said.className = 'muted';
+    if (f.adopts) {
+      said.textContent = a.name + ' becomes the first stage, and its own '
+        + f.adopts + ' rule(s) and initial balance become the chain’s.';
+    } else if (f.inherits) {
+      said.textContent = a.name + ' becomes the current stage and reads the chain’s '
+        + f.inherits + ' rule(s) from now on.'
+        + (f.dormant ? ' Its own ' + f.dormant + ' rule(s) lie dormant while linked.' : '');
+    } else {
+      said.textContent = a.name + ' becomes the current stage. The chain has no rules '
+        + 'yet; set them on the Guards page and every stage after this reads them too.';
+    }
+    body.appendChild(said);
+    var field = document.createElement('div');
+    field.className = 'field';
+    var label = document.createElement('label');
+    label.className = 'flabel';
+    label.setAttribute('for', 'pp-initial');
+    label.textContent = 'Initial balance, the account size (a funded stage may differ)';
+    var input = document.createElement('input');
+    input.id = 'pp-initial';
+    input.inputMode = 'decimal';
+    input.autocomplete = 'off';
+    input.value = f.initialBalance === null || f.initialBalance === undefined
+      ? '' : String(f.initialBalance);
+    field.appendChild(label);
+    field.appendChild(input);
+    body.appendChild(field);
+    var copyTick = null;
+    if (f.settingsOffer) {
+      var wrap = document.createElement('div');
+      wrap.className = 'tick-wrap';
+      copyTick = document.createElement('input');
+      copyTick.type = 'checkbox';
+      copyTick.id = 'pp-copy';
+      copyTick.checked = true;
+      var tl = document.createElement('label');
+      tl.className = 'flabel';
+      tl.setAttribute('for', 'pp-copy');
+      tl.textContent = 'Copy terminal settings from ' + f.settingsOffer.from + ' to '
+        + f.settingsOffer.to + ' (the broker’s own symbol fields stay put)';
+      wrap.appendChild(copyTick);
+      wrap.appendChild(tl);
+      body.appendChild(wrap);
+    }
+    showModal({
+      title: 'Link ' + a.name + ' into ' + c.name,
+      body: body,
+      confirm: 'Link as current stage',
+      onConfirm: function () {
+        pactMessages(api().prop_link(c.id, a.key, input.value, !!(copyTick && copyTick.checked)));
+      }
+    });
+  }, function () { toast('The engine did not answer; try again.', 'bad'); });
 }
 
 // --- the news page -------------------------------------------------------------------------
@@ -5585,6 +5868,9 @@ function wire() {
       logFilterChanged();
     }, 250);
   });
+
+  // --- prop accounts page ---
+  $('pp-new').addEventListener('click', propNewFlow);
 
   // --- setups page ---
   $('st-save').addEventListener('click', saveSetupFlow);
