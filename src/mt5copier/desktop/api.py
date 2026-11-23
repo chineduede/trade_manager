@@ -1962,6 +1962,7 @@ class DesktopApi:
         messages: list[dict[str, Any]] = [
             {"text": f"{self._account_name(key)} is now {c.name!r}'s current stage.", "tone": "ok"}
         ]
+        changed = False
         if (
             not guards.rules
             and guards.initial_balance is None
@@ -1971,6 +1972,7 @@ class DesktopApi:
             # container's. The raw entry stays in guards.json untouched -- dormant while
             # linked, and the fallback if the account is ever unlinked.
             guards = own
+            changed = True
             said = f"{len(own.rules)} rule(s)" if own.rules else "its initial balance"
             messages.append(
                 {"text": f"Took over {said} from {self._account_name(key)}.", "tone": ""}
@@ -1989,12 +1991,16 @@ class DesktopApi:
                         "tone": "warn",
                     }
                 )
-        if balance is not None:
+        if balance is not None and balance != guards.initial_balance:
             guards = guards.model_copy(update={"initial_balance": balance})
+            changed = True
             messages.append({"text": f"Initial balance {money(balance)}.", "tone": ""})
-        save_why = self._save_guards(rkey, guards)
-        if save_why is not None:
-            messages.append({"text": save_why, "tone": "bad"})
+        if changed:
+            # Only a link that actually moved rules or the balance writes guards.json: a
+            # plain link is the map's business alone, and guards.json never forgets a key.
+            save_why = self._save_guards(rkey, guards)
+            if save_why is not None:
+                messages.append({"text": save_why, "tone": "bad"})
         if copy_settings:
             messages.append(self._copy_stage_settings(prev_key, key))
         return {"ok": True, "messages": messages}
