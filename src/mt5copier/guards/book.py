@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from .. import shared_data
 from ..catalog import CLASSES, CatalogStore
@@ -18,7 +19,7 @@ from ..logging_setup import get_logger
 from ..news import NewsCalendar
 from ..paths import guard_state_path
 from ..protocol import Snapshot
-from .account import AccountView, last_reset
+from .account import AccountView, last_reset, local_day
 from .base import REGISTRY, SEVERITY, Level, Measure
 from .model import GuardRule, GuardsDoc
 from .rules.news import acting
@@ -222,6 +223,16 @@ class _Recall:
         equity = entry.get("equity")
         return float(equity) if isinstance(equity, int | float) else None
 
+    def opens_today(self, day: str) -> tuple[int, int]:
+        entry = self._book._opens.get(self._key)
+        if entry is None or entry.get("day") != day:
+            return (0, 0)
+        market, pending = entry.get("market"), entry.get("pending")
+        return (
+            market if isinstance(market, int) else 0,
+            pending if isinstance(pending, int) else 0,
+        )
+
 
 class GuardBook:
     def __init__(
@@ -243,6 +254,10 @@ class GuardBook:
         """Per account and rule: a breach being held, with ``until`` -- the reset day it lasts
         through, or ``"hand"`` -- and what it was when it tripped. On disk, so a restart does
         not lift a block the account earned."""
+        self._opens: dict[str, dict[str, object]] = _section(state, "opens")
+        """Per account: how many trades the copier placed on it today -- ``day`` (a local
+        date), ``market`` and ``pending`` counts -- for the trade-count rules. On disk, so a
+        restart does not hand back a day's worth of trades."""
         self._seen: dict[str, float] = {}
         """Per account, when its previous snapshot arrived: what tells a reset that was watched
         from one that happened while the copier was off."""
@@ -255,6 +270,14 @@ class GuardBook:
     def _load(self) -> dict[str, object]:
         raw = read_json(self._path, unreadable="starting empty")
         return raw if isinstance(raw, dict) else {}
+
+    def _sections(self) -> tuple[tuple[str, dict[str, Any]], ...]:
+        """Every per-account section the state file holds, for saving and adopting alike."""
+        return (
+            ("day_equity", self._day_equity),
+            ("latched", self._latched),
+            ("opens", self._opens),
+        )
 
     def _save(self) -> None:
         """Read-modify-write under the shared-folder lock, merged per dirty account (see
@@ -271,12 +294,11 @@ class GuardBook:
 
     def _save_locked(self) -> None:
         disk = self._load()
-        merged: dict[str, dict[str, dict[str, dict[str, object]]]] = {
-            "day_equity": _section(disk, "day_equity"),
-            "latched": _section(disk, "latched"),
+        merged: dict[str, dict[str, Any]] = {
+            name: _section(disk, name) for name, _ in self._sections()
         }
         for key in self._dirty:
-            for name, ours in (("day_equity", self._day_equity), ("latched", self._latched)):
+            for name, ours in self._sections():
                 if key in ours:
                     merged[name][key] = ours[key]
                 else:
@@ -293,7 +315,7 @@ class GuardBook:
         if key in self._dirty:
             return
         disk = self._load()
-        for name, ours in (("day_equity", self._day_equity), ("latched", self._latched)):
+        for name, ours in self._sections():
             theirs = _section(disk, name).get(key)
             if theirs is not None:
                 ours[key] = theirs
@@ -330,6 +352,29 @@ class GuardBook:
         if changed:
             self._dirty.add(key)
             self._save()
+
+    def record_open(self, key: str | None, *, pending: bool, now: float) -> None:
+        """Count one trade the copier placed on this account -- a filled market order, or a
+        pending order that rested -- for the trade-count rules.
+
+        Counted whether or not such a rule is set, so a rule added at noon knows the
+        morning; what it costs is one small write per trade placed. The day is this
+        computer's (:func:`~mt5copier.guards.account.local_day`), and a stale entry rolls
+        over here rather than on a timer: the first trade of a new day resets the counts.
+        """
+        if key is None:
+            return
+        self._adopt(key)
+        day = local_day(now)
+        entry = self._opens.get(key)
+        if entry is None or entry.get("day") != day:
+            entry = {"day": day, "market": 0, "pending": 0}
+            self._opens[key] = entry
+        kind = "pending" if pending else "market"
+        count = entry.get(kind)
+        entry[kind] = (count if isinstance(count, int) else 0) + 1
+        self._dirty.add(key)
+        self._save()
 
     # --- latches ---------------------------------------------------------------------------
 
@@ -588,7 +633,7 @@ def _why(status: RuleStatus) -> str:
     return f"{status.title} {standing}" if standing else status.title
 
 
-def _section(state: dict[str, object], name: str) -> dict[str, dict[str, dict[str, object]]]:
+def _section(state: dict[str, object], name: str) -> dict[str, dict[str, Any]]:
     value = state.get(name, {})
     return value if isinstance(value, dict) else {}
 

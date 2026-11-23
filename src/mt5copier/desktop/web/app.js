@@ -2821,27 +2821,67 @@ function guardUsedCell(r) {
 }
 
 // --- guards: asking and editing -------------------------------------------------------------
-function pickModal(title, options) {
-  // A list to pick from: each option {label, sub, fn} is a row; picking closes the modal.
+function pickModal(title, options, search) {
+  // A list to pick from: each option {label, sub, fn} is a row; a bare {label} heads the
+  // rows after it; picking closes the modal. With `search` (the placeholder words) a box
+  // above the list narrows it as typed — every word must appear in a row's label or sub,
+  // a head stays only while something under it matches, and Enter picks the first match.
   var body = document.createElement('div');
-  body.className = 'pick-list';
-  options.forEach(function (o) {
-    if (!o.fn) {
-      body.appendChild(cardLine('pick-head', o.label));
-      return;
-    }
-    var b = document.createElement('button');
-    b.type = 'button';
-    b.className = 'pick-item' + (o.cls ? ' ' + o.cls : '');
-    b.appendChild(cardLine('pick-label', o.label));
-    if (o.sub) b.appendChild(cardLine('pick-sub muted', o.sub));
-    b.addEventListener('click', function () {
-      closeModal();
-      o.fn();
+  var input = null;
+  if (search) {
+    input = document.createElement('input');
+    input.className = 'pick-search';
+    input.placeholder = search;
+    input.autocomplete = 'off';
+    input.spellcheck = false;
+    body.appendChild(input);
+  }
+  var list = document.createElement('div');
+  list.className = 'pick-list';
+  body.appendChild(list);
+  function build() {
+    list.textContent = '';
+    var terms = (input ? input.value : '').toLowerCase().split(/\s+/)
+      .filter(function (t) { return t; });
+    var head = null;
+    options.forEach(function (o) {
+      if (!o.fn) {
+        head = o;
+        return;
+      }
+      var hay = (o.label + ' ' + (o.sub || '')).toLowerCase();
+      if (!terms.every(function (t) { return hay.indexOf(t) >= 0; })) return;
+      if (head) {
+        list.appendChild(cardLine('pick-head', head.label));
+        head = null;
+      }
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'pick-item' + (o.cls ? ' ' + o.cls : '');
+      b.appendChild(cardLine('pick-label', o.label));
+      if (o.sub) b.appendChild(cardLine('pick-sub muted', o.sub));
+      b.addEventListener('click', function () {
+        closeModal();
+        o.fn();
+      });
+      list.appendChild(b);
     });
-    body.appendChild(b);
-  });
+    if (!list.childNodes.length) {
+      list.appendChild(cardLine('muted gp-none', 'nothing matches that search'));
+    }
+  }
+  build();
+  if (input) {
+    input.addEventListener('input', build);
+    input.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter') {
+        var first = list.querySelector('.pick-item');
+        if (first) first.click();
+      }
+    });
+  }
   showModal({ title: title, body: body, confirm: '' });
+  if (input) input.focus();
 }
 
 function confirmModal(title, said, go, danger, fn) {
@@ -2870,7 +2910,7 @@ function addRuleFlow() {
       });
     });
   });
-  pickModal('Add a rule', options);
+  pickModal('Add a rule', options, 'search the rules and what they do…');
 }
 
 function templatesFlow() {

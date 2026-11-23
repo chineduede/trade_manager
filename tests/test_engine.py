@@ -18,6 +18,7 @@ from fake_workers import FakeProcess, FakeWorker
 
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.engine import Engine, TerminalView
+from mt5copier.guards import AccountGuards, GuardRule
 from mt5copier.protocol import ActionKind, OrderResult, PositionType, Snapshot, WorkerState
 
 TID_A = "A" * 32
@@ -536,6 +537,36 @@ def test_drain_consumes_order_results(engine: Engine) -> None:
     )
     assert [r.result.master_ticket for r in engine.recent_results()] == [11]
     assert engine.failed_total == 1
+
+
+def test_successful_placements_count_for_the_trade_count_guards(engine: Engine) -> None:
+    """Only a placement that really happened burns a slot: a filled OPEN, a rested PLACE, or a
+    PLACE that fell back to market -- never a failure or a close. Counted even though no
+    command is in flight for them: a late answer still placed a real trade."""
+    key = "1001@Demo"
+    engine._guards.doc.set_account(
+        key, AccountGuards(rules=(GuardRule(type="daily_trades", params={"limit": 3}),))
+    )
+
+    def result(cid: int, op: ActionKind, ok: bool = True, **kw: object) -> OrderResult:
+        return OrderResult(command_id=cid, terminal_id=TID_B, op=op, master_ticket=cid, ok=ok, **kw)  # type: ignore[arg-type]
+
+    connected = Snapshot(
+        terminal_id=TID_B, state=WorkerState.CONNECTED, seq=1, login=1001, server="Demo"
+    )
+    run_drain(
+        engine,
+        [
+            connected,
+            result(1, ActionKind.OPEN),
+            result(2, ActionKind.PLACE),
+            result(3, ActionKind.PLACE, filled_at_market=True),
+            result(4, ActionKind.OPEN, ok=False, error="refused"),
+            result(5, ActionKind.CLOSE),
+        ],
+    )
+    status = engine._guards.report(key, connected, time.time()).rules[0]
+    assert (status.used, status.limit) == (3.0, 3.0)
 
 
 def test_drain_tracks_connection_uptime_and_disconnects(engine: Engine) -> None:

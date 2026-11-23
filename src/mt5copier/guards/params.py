@@ -89,6 +89,8 @@ class Param:
     for a field whose floor is itself meaningful (a cap where 0 means no cap)."""
     maximum: float | None = None
     """For a NUMBER: the value must be at most this."""
+    whole: bool = False
+    """For a NUMBER that counts things: the value must be a whole number."""
     after: str = ""
     """Words the form puts after the value, such as a unit."""
     only_if: tuple[str, str] | None = None
@@ -110,6 +112,8 @@ class Param:
                 return None, f"{self.label} must be at least {self.at_least:g}"
             if self.maximum is not None and number > self.maximum:
                 return None, f"{self.label} must be at most {self.maximum:g}"
+            if self.whole and number != int(number):
+                return None, f"{self.label} must be a whole number"
             return number, None
         text = str(value).strip()
         if self.kind is ParamKind.CHOICE:
