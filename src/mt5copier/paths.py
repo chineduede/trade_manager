@@ -205,6 +205,13 @@ def catalog_path() -> Path:
     return shared_dir() / "catalog.json"
 
 
+def prop_accounts_path() -> Path:
+    """The prop account containers: which raw accounts chain into which named container,
+    so a new challenge stage inherits the container's guard rules. Shared, as the guards
+    it aliases are: the chain is about the accounts, not about any profile's copying."""
+    return shared_dir() / "prop_accounts.json"
+
+
 def machine_path() -> Path:
     """The connection timings -- poll, stale, retry, rescan -- shared by every profile: they
     describe this machine and its terminals, not a trading policy."""

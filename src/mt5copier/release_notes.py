@@ -21,6 +21,14 @@ NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         "0.1.7",
         "2026-11-23",
         (
+            "Prop accounts: a named chain for each challenge. When the firm closes a stage"
+            " and hands you a new login, link it on the new Prop accounts page and it"
+            " inherits the chain's guard rules and initial balance on the spot — the same"
+            " rules, not a copy, so editing them once covers every stage. Breaches, day"
+            " anchors and trade counts stay each login's own, and old stages are kept in"
+            " the chain for the record.",
+            "Linking can also carry the previous stage's terminal settings onto the new"
+            " stage's terminal, when they sit on different ones.",
             "The counting rules say their limits as counts — “5 trades a day”, “3 open at"
             " once” — no longer dressed up as money.",
             "Templates can be replaced and deleted: saving under a name already taken asks,"

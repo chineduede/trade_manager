@@ -66,6 +66,7 @@ from ..logging_setup import get_logger
 from ..news import HIGH, MEDIUM, symbol_currencies
 from ..paths import active_profile, guards_path, is_frozen, log_dir, setups_path
 from ..presentation import read_log_tail, row_info, slave_badge
+from ..prop_accounts import PROP_PREFIX, PropStore
 from ..protocol import (
     ACCOUNT_TRADE_MODE_DEMO,
     CHART_TIMEFRAMES,
@@ -210,6 +211,10 @@ class DesktopApi:
         """The shared symbol catalog, for the settings card. Its own instance beside the
         engine's: both read the same file, and an mtime check folds either's save into the
         other."""
+        self._prop_store = PropStore()
+        """The prop account containers, for the Prop accounts page and for resolving whose
+        rules a linked account reads. Its own instance beside the engine's, like the
+        catalog's: same file, mtime folds the saves together."""
         self._window: webview.Window | None = None
         self._maximized = False
         self._setup_busy = False
@@ -1319,6 +1324,28 @@ class DesktopApi:
                 return view
         return None
 
+    def _rules_key(self, key: str | None) -> str | None:
+        """The identity this account's guard rules live under: its prop container's when
+        it is linked into one, else the raw key. Saves and reads must agree on it, so every
+        guards endpoint resolves through here; guard *state* never does."""
+        return self._prop_store.current().rules_key(key)
+
+    def _prop_of(self, key: str | None) -> dict[str, Any] | None:
+        """The page-header note for a linked account: whose rules it is reading."""
+        if key is None:
+            return None
+        found = self._prop_store.current().container_of(key)
+        if found is None:
+            return None
+        cid, c = found
+        return {
+            "id": cid,
+            "name": c.name,
+            "stage": c.stages.index(key) + 1,
+            "stages": len(c.stages),
+            "current": c.current == key,
+        }
+
     def _save_guards(self, key: str, guards: Any) -> str | None:
         """One assignment into the shared doc, then the file; the engine reads the doc live.
         Returns why the write failed, or None -- the change then holds until the app closes,
@@ -1484,7 +1511,8 @@ class DesktopApi:
 
         report = engine.guard_report(tid)
         key = self._account_of_view(chosen)
-        guards = self._guards_doc.for_account(key)
+        rkey = self._rules_key(key)
+        guards = self._guards_doc.for_account(rkey)
         actions = engine.guard_actions(tid)
         last_by_rule: dict[str, GuardAction] = {}
         for a in actions:
@@ -1509,8 +1537,8 @@ class DesktopApi:
         others = []
         offered: set[str] = set()
         for view in engine.views():
-            vkey = account_key(view.cfg.last_login, view.cfg.last_server)
-            if view.cfg.terminal_id == tid or vkey is None or vkey == key or vkey in offered:
+            vkey = self._rules_key(account_key(view.cfg.last_login, view.cfg.last_server))
+            if view.cfg.terminal_id == tid or vkey is None or vkey == rkey or vkey in offered:
                 continue
             held = self._guards_doc.for_account(vkey).rules
             if held:
@@ -1526,6 +1554,7 @@ class DesktopApi:
             "accounts": chips,
             "selected": tid,
             "hasAccount": key is not None,
+            "prop": self._prop_of(key),
             "isSlave": chosen.cfg.role is Role.SLAVE,
             "currency": report.currency,
             "enabled": report.enabled,
@@ -1551,7 +1580,8 @@ class DesktopApi:
         key = self._account_of_view(view)
         if key is None:
             return "this terminal's account is not known yet: connect it once"
-        return key, self._guards_doc.for_account(key)
+        rkey = self._rules_key(key) or key
+        return rkey, self._guards_doc.for_account(rkey)
 
     def guard_form(self, tid: str, rule_type: str, rule_id: str | None) -> dict[str, Any]:
         """The form for one rule, built from the parameters the rule declares -- the same
@@ -1782,6 +1812,272 @@ class DesktopApi:
             return _no(why)
         return _ok(f"rules from {said}")
 
+    # --- the prop accounts page ---------------------------------------------------------------
+    # Containers with a chain of stages, so a new challenge login inherits the container's
+    # guards. The page is a window onto the shared store: every profile and instance shows
+    # the same containers, and all the state lives in prop_accounts.json + guards.json.
+
+    def _view_of_account(self, key: str) -> TerminalView | None:
+        """The connected terminal this account is logged into right now, if any."""
+        for view in self._engine.views():
+            if self._account_of_view(view) == key:
+                return view
+        return None
+
+    def _terminal_of_account(self, key: str) -> TerminalConfig | None:
+        """The terminal that last held this account, connected or not -- where its settings
+        live. The live view first; else the remembered login."""
+        view = self._view_of_account(key)
+        if view is not None:
+            return view.cfg
+        for tcfg in self._cfg.terminals.values():
+            if account_key(tcfg.last_login, tcfg.last_server) == key:
+                return tcfg
+        return None
+
+    def _account_name(self, key: str) -> str:
+        """The friendly name when one is kept, else the key itself (``login@server``)."""
+        return self._cfg.account_names.get(key) or key
+
+    def prop_state(self) -> dict[str, Any]:
+        """Everything the Prop accounts page redraws from: each container with its chain,
+        its rules as guards.json holds them under the container's identity, and the
+        accounts that could be linked."""
+        self._refresh_shared()
+        doc = self._prop_store.current()
+        linked = {s for c in doc.containers.values() for s in c.stages}
+        containers = []
+        for cid, c in sorted(doc.containers.items(), key=lambda kv: kv[1].name.casefold()):
+            guards = self._guards_doc.for_account(PROP_PREFIX + cid)
+            stages = []
+            for i, key in enumerate(c.stages):
+                view = self._view_of_account(key)
+                stages.append(
+                    {
+                        "key": key,
+                        "name": self._account_name(key),
+                        "stage": i + 1,
+                        "current": i == len(c.stages) - 1,
+                        "connected": self._cfg.display_name(view.cfg.terminal_id)
+                        if view is not None
+                        else None,
+                        "tid": view.cfg.terminal_id if view is not None else None,
+                    }
+                )
+            containers.append(
+                {
+                    "id": cid,
+                    "name": c.name,
+                    "rules": len(guards.rules),
+                    "enabled": guards.enabled,
+                    "initialBalance": guards.initial_balance,
+                    "stages": stages,
+                }
+            )
+        # Any account the copier knows and no chain holds can be linked: the terminals'
+        # current and remembered logins, and every account ever given a friendly name.
+        known: dict[str, None] = {}
+        for view in self._engine.views():
+            akey = self._account_of_view(view)
+            if akey is not None:
+                known.setdefault(akey, None)
+        for tcfg in self._cfg.terminals.values():
+            akey = account_key(tcfg.last_login, tcfg.last_server)
+            if akey is not None:
+                known.setdefault(akey, None)
+        for akey in self._cfg.account_names:
+            known.setdefault(akey, None)
+        linkable = [
+            {"key": akey, "name": self._account_name(akey)} for akey in known if akey not in linked
+        ]
+        linkable.sort(key=lambda a: str(a["name"]).casefold())
+        return {"containers": containers, "linkable": linkable}
+
+    def prop_create(self, name: str) -> dict[str, Any]:
+        cid, why = self._prop_store.create(str(name or ""))
+        if why is not None:
+            return _no(why)
+        return {"ok": True, "id": cid, "message": f"prop account {str(name).strip()!r} created"}
+
+    def prop_rename(self, cid: str, name: str) -> dict[str, Any]:
+        why = self._prop_store.rename(str(cid), str(name or ""))
+        return _no(why) if why else _ok("renamed")
+
+    def prop_delete(self, cid: str) -> dict[str, Any]:
+        """Forget a container. The page asks first; the rules kept under its identity go
+        dormant in guards.json, and every stage falls back to its own raw identity."""
+        doc = self._prop_store.current()
+        c = doc.containers.get(str(cid))
+        why = self._prop_store.delete(str(cid))
+        if why is not None:
+            return _no(why)
+        said = f"prop account {c.name!r} deleted" if c is not None else "deleted"
+        return _ok(f"{said}; its accounts keep no rules of their own")
+
+    def prop_link_form(self, cid: str, key: str) -> dict[str, Any]:
+        """What the link dialog says before the person commits: what the account will
+        inherit (or seed, for a first link), the initial balance box's starting value, and
+        whether the previous stage's terminal settings can be copied over."""
+        self._refresh_shared()
+        doc = self._prop_store.current()
+        c = doc.containers.get(str(cid))
+        if c is None:
+            return _no("that prop account is gone")
+        key = str(key)
+        guards = self._guards_doc.for_account(PROP_PREFIX + str(cid))
+        own = self._guards_doc.for_account(key)
+        adopts = (
+            not guards.rules
+            and guards.initial_balance is None
+            and bool(own.rules or own.initial_balance is not None)
+        )
+        offer = self._settings_offer(c.current, key)
+        balance = guards.initial_balance if not adopts else own.initial_balance
+        return {
+            "ok": True,
+            "container": c.name,
+            "account": self._account_name(key),
+            "inherits": len(guards.rules),
+            "adopts": len(own.rules) if adopts else 0,
+            "dormant": len(own.rules) if (own.rules and not adopts) else 0,
+            "initialBalance": balance,
+            "settingsOffer": offer,
+        }
+
+    def _settings_offer(self, prev_key: str | None, new_key: str) -> dict[str, Any] | None:
+        """Whether linking can copy the previous stage's terminal settings: only when the
+        new stage sits on a *different* terminal (the same terminal keeps them anyway),
+        both are slaves, and both terminals are still known."""
+        if prev_key is None:
+            return None
+        src = self._terminal_of_account(prev_key)
+        dst = self._terminal_of_account(new_key)
+        if src is None or dst is None or src.terminal_id == dst.terminal_id:
+            return None
+        if src.role is not Role.SLAVE or dst.role is not Role.SLAVE:
+            return None
+        return {
+            "from": self._cfg.display_name(src.terminal_id),
+            "to": self._cfg.display_name(dst.terminal_id),
+        }
+
+    def prop_link(
+        self, cid: str, key: str, initial_text: str, copy_settings: bool
+    ) -> dict[str, Any]:
+        """Link an account as the container's current stage. A first link into an empty
+        container adopts the account's own rules and initial balance as the container's --
+        that is what makes a container out of an already guarded account -- and any balance
+        typed in the dialog lands on the container, where every stage reads it."""
+        cid, key = str(cid), str(key)
+        text = str(initial_text or "").replace(",", "").replace(" ", "").strip()
+        balance: float | None = None
+        if text:
+            try:
+                balance = float(text)
+            except ValueError:
+                return _no("the initial balance did not read as an amount")
+            if balance <= 0:
+                return _no("the initial balance must be more than 0")
+        doc = self._prop_store.current()
+        c = doc.containers.get(cid)
+        if c is None:
+            return _no("that prop account is gone")
+        prev_key = c.current
+        rkey = PROP_PREFIX + cid
+        guards = self._guards_doc.for_account(rkey)
+        own = self._guards_doc.for_account(key)
+        why = self._prop_store.link(cid, key)
+        if why is not None:
+            return _no(why)
+        messages: list[dict[str, Any]] = [
+            {"text": f"{self._account_name(key)} is now {c.name!r}'s current stage.", "tone": "ok"}
+        ]
+        changed = False
+        if (
+            not guards.rules
+            and guards.initial_balance is None
+            and (own.rules or own.initial_balance is not None)
+        ):
+            # First guarded account into an empty container: its rules BECOME the
+            # container's. The raw entry stays in guards.json untouched -- dormant while
+            # linked, and the fallback if the account is ever unlinked.
+            guards = own
+            changed = True
+            said = f"{len(own.rules)} rule(s)" if own.rules else "its initial balance"
+            messages.append(
+                {"text": f"Took over {said} from {self._account_name(key)}.", "tone": ""}
+            )
+        elif guards.rules:
+            messages.append(
+                {
+                    "text": f"It now reads {c.name!r}'s {len(guards.rules)} rule(s).",
+                    "tone": "",
+                }
+            )
+            if own.rules:
+                messages.append(
+                    {
+                        "text": f"Its own {len(own.rules)} rule(s) lie dormant while linked.",
+                        "tone": "warn",
+                    }
+                )
+        if balance is not None and balance != guards.initial_balance:
+            guards = guards.model_copy(update={"initial_balance": balance})
+            changed = True
+            messages.append({"text": f"Initial balance {money(balance)}.", "tone": ""})
+        if changed:
+            # Only a link that actually moved rules or the balance writes guards.json: a
+            # plain link is the map's business alone, and guards.json never forgets a key.
+            save_why = self._save_guards(rkey, guards)
+            if save_why is not None:
+                messages.append({"text": save_why, "tone": "bad"})
+        if copy_settings:
+            messages.append(self._copy_stage_settings(prev_key, key))
+        return {"ok": True, "messages": messages}
+
+    def _copy_stage_settings(self, prev_key: str | None, new_key: str) -> dict[str, Any]:
+        """Copy the previous stage's terminal settings onto the new stage's terminal --
+        the settings form's own path (apply_edits, the engine swapping it in), minus the
+        broker's-own fields, so prefix, suffix and renames stay the target's."""
+        offer = self._settings_offer(prev_key, new_key)
+        if offer is None:
+            return {
+                "text": "Settings were not copied: the terminals did not line up.",
+                "tone": "warn",
+            }
+        src = self._terminal_of_account(prev_key or "")
+        dst = self._terminal_of_account(new_key)
+        assert src is not None and dst is not None
+        values = initial_values(src)
+        values["symbol_map"] = ", ".join(f"{k}={t}" for k, t in sorted(dst.symbol_map.items()))
+        for name in self._BROKERS_OWN:
+            values.pop(name, None)
+        outcome = apply_edits(dst, values)
+        if not outcome.ok:
+            return {
+                "text": f"Settings were not copied: {'; '.join(outcome.errors.values())}",
+                "tone": "bad",
+            }
+        new = outcome.config
+        assert new is not None
+        if outcome.changes:
+            refusal = self._engine.apply_settings(new)
+            if refusal is not None:
+                return {"text": f"Settings were not copied: {refusal}", "tone": "bad"}
+            self._persist()
+        return {"text": f"Settings copied from {offer['from']} to {offer['to']}.", "tone": "ok"}
+
+    def prop_unlink(self, cid: str, key: str) -> dict[str, Any]:
+        """Take an account out of a chain. Its rules identity falls back to whatever
+        guards.json still holds under its raw key -- usually nothing."""
+        why = self._prop_store.unlink(str(cid), str(key))
+        if why is not None:
+            return _no(why)
+        own = self._guards_doc.for_account(str(key))
+        if own.rules:
+            return _ok(f"unlinked; it reads its own {len(own.rules)} rule(s) from before again")
+        return _ok("unlinked; it keeps no rules of its own now")
+
     # --- the news page ----------------------------------------------------------------------
     # The calendar as the feed says it, and against each release what the news rules will
     # do -- computed from the same parameters the guard acts with, so the page never
@@ -1865,7 +2161,7 @@ class DesktopApi:
             if key is None or key in seen:
                 continue
             seen.add(key)
-            guards = self._guards_doc.for_account(key)
+            guards = self._guards_doc.for_account(self._rules_key(key))
             if not guards.enabled:
                 continue
             for r in guards.rules:
