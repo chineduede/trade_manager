@@ -25,6 +25,8 @@ NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             " places between one midnight and the next on your computer's clock, and Max"
             " open trades caps how many are open at once. Each says whether pending orders"
             " count, and each can block new trades or only warn.",
+            "Adding a guard rule got a search box: type a word from a rule's name or what"
+            " it does, and Enter takes the first match.",
         ),
     ),
     (
