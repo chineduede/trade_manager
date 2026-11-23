@@ -12,6 +12,8 @@ import time
 from typing import Any
 
 from mt5copier.desktop.api import _NOMINAL_LOTS, DesktopApi, _order_row, _position_row
+from mt5copier.guards import Level
+from mt5copier.guards.book import RuleStatus
 from mt5copier.protocol import OrderType, PendingOrder, Position, PositionType
 
 
@@ -136,6 +138,27 @@ def test_breakeven_price_reaches_the_engine_and_zero_disarms() -> None:
     out = _api(engine).breakeven_at(3, "x")
     assert out["ok"] is False
     assert len(engine.calls) == 2, "an unreadable price never reaches the engine"
+
+
+def _status(rule_type: str, used: float, limit: float) -> RuleStatus:
+    return RuleStatus(
+        rule_id="r1", type=rule_type, title="", sentence="", level=Level.OK, used=used, limit=limit
+    )
+
+
+def test_counting_rules_read_as_counts_not_money() -> None:
+    daily = _status("daily_trades", used=1.0, limit=2.0)
+    assert DesktopApi._limit_text(daily, "USD") == "2 trades a day"
+    assert DesktopApi._used_cell(daily)["moneyLine"] == "1 used"
+    open_ = _status("open_trades", used=0.0, limit=3.0)
+    assert DesktopApi._limit_text(open_, "USD") == "3 open at once"
+    assert DesktopApi._used_cell(open_)["moneyLine"] == "0 used"
+
+
+def test_money_rules_still_read_as_money() -> None:
+    loss = _status("daily_loss", used=300.0, limit=2000.0)
+    assert DesktopApi._limit_text(loss, "USD") == "2,000.00 USD"
+    assert DesktopApi._used_cell(loss)["moneyLine"] == "300.00 used"
 
 
 def test_rows_carry_what_the_page_shows() -> None:

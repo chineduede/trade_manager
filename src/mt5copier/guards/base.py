@@ -78,6 +78,9 @@ class Rule:
     """For the rule that caps a new trade's lots by its symbol's asset class. Checked as each
     trade is sent, like a ``cap`` rule, but the amount depends on the symbol, so the verdict
     carries the whole table and the engine reduces it to one number at dispatch."""
+    counts: ClassVar[bool] = False
+    """For a rule whose ``used`` and ``limit`` count trades rather than measure money: the
+    page then shows ``2 trades a day``, never ``2.00 USD``."""
 
     @classmethod
     def per_trade(cls) -> bool:

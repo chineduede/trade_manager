@@ -18,6 +18,18 @@ from .paths import version_seen_path
 
 NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
+        "0.1.7",
+        "2026-11-23",
+        (
+            "The counting rules say their limits as counts — “5 trades a day”, “3 open at"
+            " once” — no longer dressed up as money.",
+            "Templates can be replaced and deleted: saving under a name already taken asks,"
+            " then overwrites, and the Templates window gained a Delete under its Apply list."
+            " A deleted template goes for every account and profile; rules an account took"
+            " from it stay.",
+        ),
+    ),
+    (
         "0.1.6",
         "2026-11-22",
         (

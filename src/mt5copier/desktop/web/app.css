@@ -889,6 +889,8 @@ input[type="range"]:focus-visible { outline: 2px solid var(--blue); outline-offs
 .pick-item:hover { background: var(--panel-raise); }
 .pick-label { font-weight: 600; }
 .pick-sub { font-size: 12.5px; }
+/* A pick that removes something, such as deleting a template: red, like other danger buttons. */
+.pick-item.pick-danger .pick-label { color: var(--red); }
 .gform { display: flex; flex-direction: column; gap: 12px; }
 .gform-line { display: flex; align-items: center; gap: 10px; }
 .gform-line input { flex: 1 1 auto; min-width: 0; }

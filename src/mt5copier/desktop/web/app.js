@@ -2927,18 +2927,40 @@ function templatesFlow() {
       fn: saveTemplateFlow
     });
   }
-  live.templates.forEach(function (t) {
-    options.push({
-      label: 'Apply ' + t.name,
-      sub: t.rules + ' rule' + (t.rules === 1 ? '' : 's'),
-      fn: function () { replaceRulesFlow({ template: t.name }, 'template ' + t.name, t.rules); }
+  if (live.templates.length) {
+    options.push({ label: 'APPLY' });
+    live.templates.forEach(function (t) {
+      options.push({
+        label: 'Apply ' + t.name,
+        sub: t.rules + ' rule' + (t.rules === 1 ? '' : 's'),
+        fn: function () { replaceRulesFlow({ template: t.name }, 'template ' + t.name, t.rules); }
+      });
     });
-  });
+    options.push({ label: 'DELETE' });
+    live.templates.forEach(function (t) {
+      options.push({
+        label: 'Delete ' + t.name,
+        sub: 'for every account and profile',
+        cls: 'pick-danger',
+        fn: function () { deleteTemplateFlow(t); }
+      });
+    });
+  }
   if (!options.length) {
     toast('no templates yet: add rules, then save them as one', 'bad');
     return;
   }
   pickModal('Templates', options);
+}
+
+function deleteTemplateFlow(t) {
+  confirmModal(
+    'Delete template ' + t.name + '?',
+    'The template and its ' + t.rules + ' saved rule' + (t.rules === 1 ? '' : 's')
+      + ' are removed for every account and profile. Rules an account already took from it stay.',
+    'Delete template', true,
+    function () { gact(api().guard_delete_template(t.name)); }
+  );
 }
 
 function saveTemplateFlow() {
@@ -2959,7 +2981,25 @@ function saveTemplateFlow() {
     title: 'Save as a template',
     body: body,
     confirm: 'Save template',
-    onConfirm: function () { gact(api().guard_save_template(G.tid, input.value)); }
+    onConfirm: function () {
+      var name = input.value.trim();
+      var have = null;
+      (G.live ? G.live.templates : []).forEach(function (t) {
+        if (t.name === name) have = t;
+      });
+      if (!have) {
+        gact(api().guard_save_template(G.tid, name));
+        return;
+      }
+      // The name is taken: replacing is allowed, but asked about, like replacing rules is.
+      confirmModal(
+        'Replace template ' + name + '?',
+        'Its saved ' + have.rules + ' rule' + (have.rules === 1 ? '' : 's') + ' are replaced by '
+          + "this account's " + G.live.rules.length + ' as they stand.',
+        'Replace template', true,
+        function () { gact(api().guard_save_template(G.tid, name)); }
+      );
+    }
   });
   input.focus();
 }
