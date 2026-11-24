@@ -1,17 +1,19 @@
-"""The shared stores: the one-time migration, the overlays, and the merges that let two
-profile windows write one file without erasing each other's side of it."""
+"""The shared stores: the one-time migrations (profiles into the shared folder, its JSON
+into the database), the overlays, and the merges that let two profile windows write one
+store without erasing each other's side of it."""
 
 from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import time
 from pathlib import Path
 
 import pytest
 
 from mt5copier import config as config_mod
-from mt5copier import settings_edit, shared_data
+from mt5copier import settings_edit, shared_data, shared_db
 from mt5copier.config import AppConfig, TerminalConfig
 from mt5copier.guards import AccountGuards, GuardBook, GuardRule, GuardsDoc
 from mt5copier.guards import model as guards_model
@@ -28,8 +30,8 @@ from mt5copier.paths import (
 
 @pytest.fixture(autouse=True)
 def _fresh_stamp() -> None:
-    """The names-mtime cache is module state; a stamp left by one test's file could, by
-    coincidence of the clock, match another test's and make a refresh read as no change."""
+    """The names-stamp cache is module state; a stamp left by one test could otherwise
+    carry into another and make a refresh read as no change."""
     shared_data._names_stamp_seen = None
 
 
@@ -94,6 +96,44 @@ def test_migrate_with_nothing_still_marks() -> None:
     assert not account_names_path().exists()
 
 
+def test_the_database_imports_the_shared_json_once() -> None:
+    _write(account_names_path(), {"1@A": "Alpha"})
+    _write(
+        guards_path(), {"version": 1, "accounts": {"1@A": {"rules": []}}, "templates": {"t": []}}
+    )
+    _write(
+        shared_dir() / "guard_state.json",
+        {
+            "day_equity": {"1@A": {"r": {"day": "d"}}},
+            "opens": {"1@A": {"day": "d", "market": 2, "pending": 0}},
+        },
+    )
+    _write(
+        shared_dir() / "prop_accounts.json",
+        {"version": 1, "containers": {"abc12345": {"name": "FTMO", "stages": ["1@A"]}}},
+    )
+
+    assert shared_data.load_names() == {"1@A": "Alpha"}
+    doc = guards_model.load()
+    assert "1@A" in doc.accounts and set(doc.templates) == {"t"}
+    db = shared_db.get()
+    assert db.fetch("guard_state", "1@A") == {
+        "day_equity": {"r": {"day": "d"}},
+        "opens": {"day": "d", "market": 2, "pending": 0},
+    }
+    assert db.fetch("prop_containers", "abc12345") == {"name": "FTMO", "stages": ["1@A"]}
+    # Once only: the files are the rollback story, not a live source -- an edit to one
+    # after the import changes nothing.
+    _write(account_names_path(), {"1@A": "Changed"})
+    assert shared_data.load_names() == {"1@A": "Alpha"}
+
+
+def test_a_fresh_database_with_no_json_starts_empty() -> None:
+    assert shared_data.load_names() is None  # never written: the profile's own copy counts
+    assert guards_model.load().accounts == {}
+    assert shared_db.get().load("prop_containers") == {}
+
+
 # --- load overlays -----------------------------------------------------------------------------
 
 
@@ -132,27 +172,26 @@ def _cfg_with_account() -> AppConfig:
 def test_rename_writes_and_clears_the_shared_store() -> None:
     cfg = _cfg_with_account()
     assert settings_edit.rename(cfg, "t1", "Alpha") is None
-    assert json.loads(account_names_path().read_text(encoding="utf-8")) == {
-        "1001@Prop-Demo": "Alpha"
-    }
+    assert shared_data.load_names() == {"1001@Prop-Demo": "Alpha"}
     assert settings_edit.rename(cfg, "t1", "") is None
-    assert json.loads(account_names_path().read_text(encoding="utf-8")) == {}
+    assert shared_data.load_names() == {}
 
 
 def test_rename_keeps_another_windows_entry() -> None:
     shared_data.set_name("9@Elsewhere", "Theirs")
     cfg = _cfg_with_account()
     settings_edit.rename(cfg, "t1", "Mine")
-    names = json.loads(account_names_path().read_text(encoding="utf-8"))
-    assert names == {"9@Elsewhere": "Theirs", "1001@Prop-Demo": "Mine"}
+    assert shared_data.load_names() == {"9@Elsewhere": "Theirs", "1001@Prop-Demo": "Mine"}
 
 
 def test_refresh_names_picks_up_another_windows_rename() -> None:
     cfg = AppConfig()
     assert shared_data.refresh_names(cfg) is False
-    _write(account_names_path(), {"1@A": "FromElsewhere"})
-    then = time.time() + 2  # a plainly different mtime, whatever the clock's resolution
-    os.utime(account_names_path(), (then, then))
+    # Another window's write: straight into the store, not through set_name, which would
+    # also update this window's seen-stamp and so hide its own change.
+    db = shared_db.get()
+    with db.change(shared_db.NAMES):
+        db.put("account_names", "1@A", "FromElsewhere")
     assert shared_data.refresh_names(cfg) is True
     assert cfg.account_names == {"1@A": "FromElsewhere"}
     assert shared_data.refresh_names(cfg) is False
@@ -193,24 +232,24 @@ def test_delete_template_holds_through_a_later_save() -> None:
     assert set(guards_model.load().templates) == {"theirs"}
 
 
-def test_guard_state_save_merges_per_dirty_account() -> None:
-    path = shared_dir() / "guard_state.json"
-    _write(path, {"day_equity": {"theirs@X": {"r": {"day": "d", "equity": 1.0}}}, "latched": {}})
-    book = GuardBook(GuardsDoc(), state_path=path)
+def test_guard_state_save_writes_only_the_dirty_accounts() -> None:
+    db = shared_db.get()
+    with db.change(shared_db.GUARD_STATE):
+        db.put("guard_state", "theirs@X", {"day_equity": {"r": {"day": "d", "equity": 1.0}}})
+    book = GuardBook(GuardsDoc(), db)
     book._day_equity["mine@Y"] = {"r2": {"day": "d", "equity": 2.0}}
     book._dirty.add("mine@Y")
     book._save()
-    state = json.loads(path.read_text(encoding="utf-8"))
-    assert set(state["day_equity"]) == {"theirs@X", "mine@Y"}
+    rows = db.load("guard_state")
+    assert set(rows) == {"theirs@X", "mine@Y"}
+    assert rows["theirs@X"] == {"day_equity": {"r": {"day": "d", "equity": 1.0}}}
 
 
-def test_guard_book_adopts_an_account_from_disk() -> None:
-    path = shared_dir() / "guard_state.json"
-    book = GuardBook(GuardsDoc(), state_path=path)
-    _write(
-        path,
-        {"day_equity": {}, "latched": {"handed@X": {"r": {"until": "hand", "at": 1.0}}}},
-    )
+def test_guard_book_adopts_an_account_from_the_store() -> None:
+    db = shared_db.get()
+    book = GuardBook(GuardsDoc(), db)
+    with db.change(shared_db.GUARD_STATE):
+        db.put("guard_state", "handed@X", {"latched": {"r": {"until": "hand", "at": 1.0}}})
     book._adopt("handed@X")
     assert "handed@X" in book._latched
     # But never over this window's own changes: a dirty key is ours.
@@ -225,7 +264,7 @@ def test_guard_book_adopts_an_account_from_disk() -> None:
 
 def test_shared_lock_excludes_a_second_holder() -> None:
     with shared_data.shared_lock():
-        with pytest.raises(OSError):  # TimeoutError is one; the state save's catch relies on it
+        with pytest.raises(OSError):  # TimeoutError is one; the callers' catches rely on it
             with shared_data.shared_lock(timeout_s=0.05):
                 pass  # pragma: no cover -- acquiring twice is exactly what must not happen
     # Released: taking it again succeeds at once.
@@ -233,26 +272,26 @@ def test_shared_lock_excludes_a_second_holder() -> None:
         pass
 
 
-def test_lock_timeout_does_not_lose_a_guard_state_save(
+def test_a_wedged_database_does_not_lose_a_guard_state_save(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A save that cannot take the lock is logged and dropped -- but the keys stay dirty,
-    so the very next save writes them. The midnight race's worst case, in miniature."""
-    path = shared_dir() / "guard_state.json"
-    book = GuardBook(GuardsDoc(), state_path=path)
+    """A save the database refuses is logged and dropped -- but the keys stay dirty, so
+    the very next save writes them. The midnight race's worst case, in miniature."""
+    db = shared_db.get()
+    book = GuardBook(GuardsDoc(), db)
     book._day_equity["mine@Y"] = {"r": {"day": "d", "equity": 2.0}}
     book._dirty.add("mine@Y")
 
-    def wedged(timeout_s: float = 5.0) -> None:
-        raise TimeoutError("wedged")
+    def wedged(*stores: str) -> None:
+        raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(shared_data, "shared_lock", wedged)
+    monkeypatch.setattr(db, "change", wedged)
     book._save()  # swallowed and logged, never raised
-    assert not path.exists()
+    assert db.load("guard_state") == {}
     assert "mine@Y" in book._dirty
     monkeypatch.undo()
-    book._save()  # the lock is back: the dirty key lands
-    assert "mine@Y" in json.loads(path.read_text(encoding="utf-8"))["day_equity"]
+    book._save()  # the database is back: the dirty key lands
+    assert "mine@Y" in db.load("guard_state")
 
 
 def test_refresh_if_due_rereads_under_the_lock(monkeypatch: pytest.MonkeyPatch) -> None:

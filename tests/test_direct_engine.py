@@ -37,6 +37,7 @@ from mt5copier.protocol import (
     WatchCommand,
     WorkerState,
 )
+from mt5copier.shared_db import SharedDb
 
 SLAVE = "B" * 32
 OTHER = "D" * 32
@@ -75,7 +76,7 @@ def engine(cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> E
         cfg,
         state_path=tmp_path / "dryrun.db",
         mapping_path=tmp_path / "mapping.db",
-        guard_state_path=tmp_path / "guard_state.json",
+        shared_db=SharedDb(tmp_path / "guard_state.db"),
         history_path=tmp_path / "history.db",
         virtual_path=tmp_path / "virtual_master.json",
     )
@@ -470,7 +471,7 @@ def test_switching_to_trading_demotes_the_real_master(tmp_path: Path, exe: Path)
         cfg,
         state_path=tmp_path / "dryrun.db",
         mapping_path=tmp_path / "mapping.db",
-        guard_state_path=tmp_path / "guard_state.json",
+        shared_db=SharedDb(tmp_path / "guard_state.db"),
         history_path=tmp_path / "history.db",
         virtual_path=tmp_path / "virtual_master.json",
     )
@@ -491,7 +492,7 @@ def test_the_book_survives_a_restart_through_the_engine(
         cfg,
         state_path=tmp_path / "dryrun.db",
         mapping_path=tmp_path / "mapping.db",
-        guard_state_path=tmp_path / "guard_state.json",
+        shared_db=SharedDb(tmp_path / "guard_state.db"),
         history_path=tmp_path / "history2.db",
         virtual_path=tmp_path / "virtual_master.json",
     )

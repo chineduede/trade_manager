@@ -106,6 +106,7 @@ from .reconcile import (
 )
 from .settings_edit import copies_word
 from .setups import Setup
+from .shared_db import SharedDb
 from .sizing import risk_budget
 from .store import (
     MappingStore,
@@ -247,7 +248,7 @@ class Engine:
         state_path: Path | None = None,
         mapping_path: Path | None = None,
         guards: GuardsDoc | None = None,
-        guard_state_path: Path | None = None,
+        shared_db: SharedDb | None = None,
         history_path: Path | None = None,
         calendar: NewsCalendar | None = None,
         claims: ClaimBook | None = None,
@@ -335,12 +336,12 @@ class Engine:
         """The news calendar: fetched on its own thread, and only once a news rule asks."""
         self._catalog = CatalogStore()
         """The shared symbol catalog, for the rules that read asset classes."""
-        self._props = PropStore()
+        self._props = PropStore(shared_db)
         """The prop account containers: a linked account reads its rules under its
         container's identity."""
         self._guards = GuardBook(
             guards if guards is not None else GuardsDoc(),
-            guard_state_path,
+            shared_db,
             self._calendar,
             self._catalog,
             self._props,

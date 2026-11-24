@@ -7,7 +7,7 @@ accounts link into, as an ordered chain of stages, newest = current; old stages 
 never forgotten, so a cross-stage timeline stays possible later.
 
 The feature is an aliasing layer, not a copy. Rules for a linked account are read and
-written under the container's identity -- the key ``prop:<id>`` in ``guards.json`` -- so a
+written under the container's identity -- the key ``prop:<id>`` in the guards store -- so a
 new stage is held to *the same rules object* as the old one, not a snapshot of it. What
 resolves through the container is deliberately only what :class:`~mt5copier.guards.model.
 AccountGuards` holds: the rules and the initial balance. **Guard state never resolves**:
@@ -17,21 +17,20 @@ untouched -- ``rules_key`` returns the raw key unchanged -- and the standing def
 stands: a terminal logged into a new challenge starts with no guards; linking into a
 container is the explicit opt-in to inherit.
 
-Shared by every profile and instance (``shared\\prop_accounts.json``), like the guards the
-containers alias: writes are read-modify-write under :func:`mt5copier.shared_data.
-shared_lock` + atomic replace, and readers re-read on mtime, the catalog's way.
+Shared by every profile and instance, like the guards the containers alias: a table of
+:mod:`mt5copier.shared_db`, a row per container. Writes re-read the rows inside one
+``change``, and readers re-read on the store's stamp, the way the account names poll.
 """
 
 from __future__ import annotations
 
+import sqlite3
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 
-from . import shared_data
-from .json_store import read_json, write_json
+from . import shared_db
 from .logging_setup import get_logger
-from .paths import prop_accounts_path
+from .shared_db import SharedDb
 
 log = get_logger(__name__)
 
@@ -81,15 +80,6 @@ class PropDoc:
                 return cid, c
         return None
 
-    def payload(self) -> dict[str, object]:
-        return {
-            "version": 1,
-            "containers": {
-                cid: {"name": c.name, "stages": list(c.stages)}
-                for cid, c in self.containers.items()
-            },
-        }
-
 
 EMPTY = PropDoc(containers={})
 
@@ -131,88 +121,79 @@ def check_name(name: str, doc: PropDoc, but: str | None = None) -> str | None:
 
 
 class PropStore:
-    """The file-backed containers, re-read when another window saves them (told by mtime,
-    the way the catalog and the shared account names poll).
+    """The database-backed containers, re-read when another window saves them (told by
+    the store's stamp, the way the shared account names poll).
 
-    Every write re-reads the file inside the shared lock and applies one mutation to what
+    Every write re-reads the rows inside one ``change`` and applies one mutation to what
     is really there, so two windows editing containers in the same instant fold into each
     other rather than the second dropping the first. Methods return why the change was
     refused, or None when it took.
     """
 
-    def __init__(self, path: Path | None = None) -> None:
-        self._path = path if path is not None else prop_accounts_path()
-        self._stamp: float | None = None
+    def __init__(self, db: SharedDb | None = None) -> None:
+        self._db = db if db is not None else shared_db.get()
+        self._stamp: int | None = None
         self._cached: PropDoc = EMPTY
 
-    def _mtime(self) -> float | None:
-        try:
-            return self._path.stat().st_mtime
-        except OSError:
-            return None
+    def _read(self) -> PropDoc:
+        return _parse({"containers": self._db.load("prop_containers")})
 
     def current(self) -> PropDoc:
-        stamp = self._mtime()
-        if stamp is None:
-            self._stamp = None
-            self._cached = EMPTY
-            return EMPTY
-        if stamp == self._stamp:
-            return self._cached
-        raw = read_json(self._path, unreadable="starting with no prop accounts")
-        if raw is None:
+        try:
+            stamp = self._db.stamp(shared_db.PROPS)
+            if stamp == self._stamp:
+                return self._cached
+            doc = self._read()
+        except sqlite3.Error:
+            log.exception("could not read the prop accounts; keeping what is held")
             return self._cached
         self._stamp = stamp
-        self._cached = _parse(raw)
-        return self._cached
-
-    def _write(self, doc: PropDoc) -> None:
-        write_json(self._path, doc.payload())
-        self._stamp = self._mtime()
         self._cached = doc
+        return doc
+
+    @staticmethod
+    def _row(c: Container) -> dict[str, object]:
+        return {"name": c.name, "stages": list(c.stages)}
 
     def create(self, name: str) -> tuple[str | None, str | None]:
         """A new, empty container: ``(id, None)``, or ``(None, why not)``."""
         name = name.strip()
-        with shared_data.shared_lock():
-            doc = self.current()
+        with self._db.change(shared_db.PROPS):
+            doc = self._read()
             why = check_name(name, doc)
             if why is not None:
                 return None, why
             cid = uuid.uuid4().hex[:8]
-            containers = dict(doc.containers)
-            containers[cid] = Container(name=name, stages=())
-            self._write(PropDoc(containers=containers))
+            self._db.put("prop_containers", cid, self._row(Container(name=name, stages=())))
+        self._stamp = None
         log.info("prop account %r created (%s)", name, cid)
         return cid, None
 
     def rename(self, cid: str, name: str) -> str | None:
         name = name.strip()
-        with shared_data.shared_lock():
-            doc = self.current()
+        with self._db.change(shared_db.PROPS):
+            doc = self._read()
             c = doc.containers.get(cid)
             if c is None:
                 return "that prop account is gone"
             why = check_name(name, doc, but=cid)
             if why is not None:
                 return why
-            containers = dict(doc.containers)
-            containers[cid] = Container(name=name, stages=c.stages)
-            self._write(PropDoc(containers=containers))
+            self._db.put("prop_containers", cid, self._row(Container(name=name, stages=c.stages)))
+        self._stamp = None
         return None
 
     def delete(self, cid: str) -> str | None:
         """Forget a container and its chain. The rules kept under its identity stay in
-        ``guards.json`` -- nothing in the app ever deletes a guards entry -- but with no
+        the guards store -- nothing in the app ever deletes a guards entry -- but with no
         stage resolving to them they are dormant, exactly like an unlinked account's."""
-        with shared_data.shared_lock():
-            doc = self.current()
+        with self._db.change(shared_db.PROPS):
+            doc = self._read()
             c = doc.containers.get(cid)
             if c is None:
                 return "that prop account is gone"
-            containers = dict(doc.containers)
-            del containers[cid]
-            self._write(PropDoc(containers=containers))
+            self._db.drop("prop_containers", cid)
+        self._stamp = None
         log.info("prop account %r deleted; %d stage(s) released", c.name, len(c.stages))
         return None
 
@@ -223,8 +204,8 @@ class PropStore:
         key = key.strip()
         if not key or key.startswith(PROP_PREFIX):
             return "that is not an account"
-        with shared_data.shared_lock():
-            doc = self.current()
+        with self._db.change(shared_db.PROPS):
+            doc = self._read()
             c = doc.containers.get(cid)
             if c is None:
                 return "that prop account is gone"
@@ -235,25 +216,26 @@ class PropStore:
                     stage = other.stages.index(key) + 1
                     return f"already in this chain (stage {stage}); unlink it first to relink"
                 return f"already linked into {other.name!r}"
-            containers = dict(doc.containers)
-            containers[cid] = Container(name=c.name, stages=(*c.stages, key))
-            self._write(PropDoc(containers=containers))
+            self._db.put(
+                "prop_containers", cid, self._row(Container(name=c.name, stages=(*c.stages, key)))
+            )
+        self._stamp = None
         log.info("account %s linked into prop account %r as its current stage", key, c.name)
         return None
 
     def unlink(self, cid: str, key: str) -> str | None:
         """Take one account out of a chain. Its rules identity falls back to the raw key --
-        whatever ``guards.json`` still holds there -- and the container's chain closes up
+        whatever the guards store still holds there -- and the container's chain closes up
         around the gap."""
-        with shared_data.shared_lock():
-            doc = self.current()
+        with self._db.change(shared_db.PROPS):
+            doc = self._read()
             c = doc.containers.get(cid)
             if c is None:
                 return "that prop account is gone"
             if key not in c.stages:
                 return "that account is not in this chain"
-            containers = dict(doc.containers)
-            containers[cid] = Container(name=c.name, stages=tuple(s for s in c.stages if s != key))
-            self._write(PropDoc(containers=containers))
+            kept = Container(name=c.name, stages=tuple(s for s in c.stages if s != key))
+            self._db.put("prop_containers", cid, self._row(kept))
+        self._stamp = None
         log.info("account %s unlinked from prop account %r", key, c.name)
         return None

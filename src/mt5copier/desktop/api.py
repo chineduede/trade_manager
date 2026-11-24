@@ -12,6 +12,7 @@ the same contract the TUI's timer thread already exercises.
 from __future__ import annotations
 
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -19,7 +20,7 @@ import time
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
-from .. import __version__, account_switch, release_notes, role_actions, shared_data
+from .. import __version__, account_switch, release_notes, role_actions, shared_data, shared_db
 from .. import config as config_mod
 from .. import profiles as profiles_mod
 from .. import setups as setups_mod
@@ -64,7 +65,7 @@ from ..log_entries import (
 )
 from ..logging_setup import get_logger
 from ..news import HIGH, MEDIUM, symbol_currencies
-from ..paths import active_profile, guards_path, is_frozen, log_dir, setups_path
+from ..paths import active_profile, is_frozen, log_dir, setups_path
 from ..presentation import read_log_tail, row_info, slave_badge
 from ..prop_accounts import PROP_PREFIX, PropStore
 from ..protocol import (
@@ -233,9 +234,10 @@ class DesktopApi:
         Reading the account list walks the terminal's data folder; the cards poll every
         second, so the walk is paced here and dropped after a login changes the answer."""
         self._busy_lock = threading.Lock()
-        self._guards_stamp: float | None = None
-        """``guards.json``'s mtime as last read or written here. The file is shared by every
-        profile, so a poll can tell an edit made in another window from nothing by one stat."""
+        self._guards_stamp: int | None = None
+        """The guards store's stamp as last read here. The store is shared by every
+        profile, so a poll can tell an edit made in another window from nothing by one
+        SELECT."""
 
     def attach(self, window: webview.Window) -> None:
         self._window = window
@@ -247,13 +249,13 @@ class DesktopApi:
         Called from the polls that read them."""
         shared_data.refresh_names(self._cfg)
         try:
-            stamp = guards_path().stat().st_mtime
-        except OSError:
+            stamp = shared_db.get().stamp(shared_db.GUARDS)
+        except sqlite3.Error:
             return
         if stamp == self._guards_stamp:
             return
         self._guards_stamp = stamp
-        fresh = guards_model.load(guards_path())
+        fresh = guards_model.load()
         self._guards_doc.accounts.update(fresh.accounts)
         # Wholesale, not update(): a template edit always saves at once, so memory never
         # holds one the file lacks -- except one another window just deleted, which this
@@ -1347,13 +1349,13 @@ class DesktopApi:
         }
 
     def _save_guards(self, key: str, guards: Any) -> str | None:
-        """One assignment into the shared doc, then the file; the engine reads the doc live.
+        """One assignment into the shared doc, then the store; the engine reads the doc live.
         Returns why the write failed, or None -- the change then holds until the app closes,
         which is said, exactly as the TUI says it."""
         self._guards_doc.set_account(key, guards)
         try:
-            guards_model.save(self._guards_doc, guards_path())
-        except OSError as exc:
+            guards_model.save(self._guards_doc)
+        except (OSError, sqlite3.Error) as exc:
             log.exception("guards save failed")
             return f"could not save the guards: {exc}; the change holds until the copier closes"
         return None
@@ -1768,8 +1770,8 @@ class DesktopApi:
         replaced = name in self._guards_doc.templates
         self._guards_doc.templates[name] = guards.rules
         try:
-            guards_model.save(self._guards_doc, guards_path())
-        except OSError as exc:
+            guards_model.save(self._guards_doc)
+        except (OSError, sqlite3.Error) as exc:
             log.exception("guards save failed")
             return _no(f"could not save the guards: {exc}")
         return _ok(f"template {name!r} " + ("replaced" if replaced else "saved"))
@@ -1781,8 +1783,8 @@ class DesktopApi:
         if name not in self._guards_doc.templates:
             return _no("that template is already gone")
         try:
-            guards_model.delete_template(self._guards_doc, name, guards_path())
-        except OSError as exc:
+            guards_model.delete_template(self._guards_doc, name)
+        except (OSError, sqlite3.Error) as exc:
             log.exception("guards save failed")
             return _no(f"could not save the guards: {exc}")
         return _ok(f"template {name!r} deleted")

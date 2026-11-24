@@ -15,6 +15,7 @@ from mt5copier.guards import REGISTRY, AccountGuards, GuardBook, GuardRule, Guar
 from mt5copier.news import Calendar, NewsCalendar, parse_feed, symbol_currencies
 from mt5copier.protocol import ActionKind
 from mt5copier.reconcile import GuardGate, SkipReason, reconcile_slave
+from mt5copier.shared_db import SharedDb
 
 NEWS = REGISTRY["news"]
 
@@ -177,7 +178,7 @@ class FixedCalendar(NewsCalendar):
 def book(cal: Calendar, tmp: Path, **given: Any) -> GuardBook:
     rule = GuardRule(id="nw", type="news", params=given)
     doc = GuardsDoc(accounts={KEY: AccountGuards(rules=(rule,))})
-    return GuardBook(doc, state_path=tmp / "state.json", calendar=FixedCalendar(cal))
+    return GuardBook(doc, SharedDb(tmp / "state.db"), calendar=FixedCalendar(cal))
 
 
 def test_the_verdict_carries_the_held_currencies_and_never_holds_the_slave(tmp_path: Path) -> None:

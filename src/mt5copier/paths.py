@@ -157,11 +157,20 @@ def history_db_path() -> Path:
     return user_data_dir() / "history.db"
 
 
+def shared_db_path() -> Path:
+    """The one database every profile reads and writes together -- see
+    :mod:`mt5copier.shared_db`. It holds the mutable shared stores: account names, guard
+    rules and templates, the guards' recorded state, and the prop account containers.
+    SQLite rather than the JSON files those once were, so two windows writing in the same
+    instant are serialised by the database instead of a hand-rolled folder mutex, and a
+    change that touches two stores lands in one transaction."""
+    return shared_dir() / "shared.db"
+
+
 def guards_path() -> Path:
-    """Each account's guard rules, and the person's saved templates of them. Apart from
-    ``config.json`` so that a slip editing rules cannot disturb copy settings. Shared by
-    every profile: a rule belongs to the account, and the account is the same account no
-    matter which profile's terminal is logged into it."""
+    """Where each account's guard rules and the saved templates lived before they moved
+    into :func:`shared_db_path`. Written by the one-time profile gathering and read once by
+    the database import; afterwards nothing reads it, but it is the rollback story."""
     return shared_dir() / "guards.json"
 
 
@@ -186,16 +195,16 @@ def ctrader_path() -> Path:
 
 
 def guard_state_path() -> Path:
-    """What the guards have recorded from earlier snapshots, such as the equity at a reset.
-    Shared, as the rules are: a daily-loss anchor or a held breach belongs to the account,
-    and must not restart from zero because the account is watched from another profile."""
+    """Where the guards' recorded state (day-start equity, held breaches, trade counts)
+    lived before it moved into :func:`shared_db_path`. Kept for the one-time import, as
+    :func:`guards_path` is."""
     return shared_dir() / "guard_state.json"
 
 
 def account_names_path() -> Path:
-    """The friendly name per account (``login@server``), shared by every profile: the same
-    account must read as the same name in every window. The source of truth; the copy each
-    profile's ``config.json`` still carries is a cache this overlays on load."""
+    """Where the friendly name per account (``login@server``) lived before it moved into
+    :func:`shared_db_path`. Kept for the one-time import, as :func:`guards_path` is; the
+    copy each profile's ``config.json`` carries remains a cache the database overlays."""
     return shared_dir() / "account_names.json"
 
 
@@ -206,9 +215,8 @@ def catalog_path() -> Path:
 
 
 def prop_accounts_path() -> Path:
-    """The prop account containers: which raw accounts chain into which named container,
-    so a new challenge stage inherits the container's guard rules. Shared, as the guards
-    it aliases are: the chain is about the accounts, not about any profile's copying."""
+    """Where the prop account containers lived before they moved into
+    :func:`shared_db_path`. Kept for the one-time import, as :func:`guards_path` is."""
     return shared_dir() / "prop_accounts.json"
 
 

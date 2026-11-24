@@ -11,6 +11,7 @@ from mt5copier.engine import Engine
 from mt5copier.guards import AccountGuards, GuardBook, GuardRule, GuardsDoc, Level
 from mt5copier.guards.book import ClassLotsCap, Verdict
 from mt5copier.protocol import Position, PositionType, Snapshot, WorkerState
+from mt5copier.shared_db import SharedDb
 from mt5copier.sizing import SymbolFacts, fit_lots
 
 KEY = "1001@Prop-Demo"
@@ -46,7 +47,8 @@ def rule(scope: str = "each", on_breach: str = "shrink", **caps: float) -> Guard
 
 def book_with(r: GuardRule, tmp: Path) -> GuardBook:
     doc = GuardsDoc(accounts={KEY: AccountGuards(initial_balance=100_000.0, rules=(r,))})
-    return GuardBook(doc, state_path=tmp / "state.json", catalog=CatalogStore(tmp / "catalog.json"))
+    db = SharedDb(tmp / "state.db")
+    return GuardBook(doc, db, catalog=CatalogStore(tmp / "catalog.json"))
 
 
 FACTS = SymbolFacts(

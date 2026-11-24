@@ -18,6 +18,19 @@ from .paths import version_seen_path
 
 NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
+        "0.1.9",
+        "2026-11-24",
+        (
+            "The data every window shares — account names, guard rules and templates, the"
+            " guards' memory, and the prop account chains — now lives in one small database"
+            " file (shared\\shared.db) instead of four JSON files. Two windows saving in"
+            " the same instant can no longer catch each other mid-write, and a change that"
+            " touches two of these stores lands whole or not at all.",
+            "The move is automatic and one-time: the first start gathers what the JSON"
+            " files hold, and the files stay on disk untouched as a fallback copy.",
+        ),
+    ),
+    (
         "0.1.8",
         "2026-11-24",
         (
