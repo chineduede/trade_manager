@@ -1457,27 +1457,29 @@ function renderTerminals() {
       : 'none found yet — start your MT5 terminals and Rescan; a cTrader account joins through cTrader login…';
   $('detected-note').hidden = live.detected.length > 0;
 
-  // Parked terminals have no card — they are not even spawned — only a name in this
-  // strip and the way back.
+  // Parked terminals have no card — they are not even spawned — only a chip in a quiet
+  // zone and the way back.
   var parked = live.parked || [];
   $('parked-strip').hidden = !parked.length;
-  $('parked-word').textContent = parked.length
-    ? 'Parked — disconnected, settings kept:' : '';
   var pl = $('parked-list');
   pl.textContent = '';
   parked.forEach(function (p) {
-    var row = document.createElement('span');
-    row.className = 'parked-item';
+    var chip = document.createElement('span');
+    chip.className = 'parked-chip';
     var name = document.createElement('span');
-    name.textContent = p.name + (p.role === 'slave' ? '' : ' (' + p.role + ')');
+    name.textContent = p.name;
+    chip.appendChild(name);
+    var role = document.createElement('span');
+    role.className = 'muted';
+    role.textContent = p.role === 'slave' ? 'slave' : 'unassigned';
+    chip.appendChild(role);
     var back = document.createElement('button');
     back.type = 'button';
     back.className = 'linklike';
     back.textContent = 'Unhide';
     back.addEventListener('click', function () { tact(api().unhide_terminal(p.tid)); });
-    row.appendChild(name);
-    row.appendChild(back);
-    pl.appendChild(row);
+    chip.appendChild(back);
+    pl.appendChild(chip);
   });
 
   // A rebuild replaced the card the open popover was anchored to; hand it the new

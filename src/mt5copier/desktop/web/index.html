@@ -269,10 +269,13 @@
         <span class="zone-note" id="detected-note" hidden>every terminal found is assigned · Rescan looks again</span>
       </section>
 
-      <div id="parked-strip" class="parked-strip" hidden>
-        <span class="muted" id="parked-word"></span>
-        <span id="parked-list"></span>
-      </div>
+      <section aria-label="Parked terminals" class="zone zone-parked" id="parked-strip" hidden>
+        <div class="zone-head">
+          <h2>PARKED</h2>
+          <span class="zone-note">disconnected, settings kept · Unhide reconnects</span>
+        </div>
+        <div class="parked-chips" id="parked-list"></div>
+      </section>
     </div>
 
     <div class="page" id="page-guards" hidden>
