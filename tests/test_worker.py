@@ -24,6 +24,7 @@ from mt5copier.protocol import (
     RatesRequest,
     RatesResult,
     Snapshot,
+    WarmCommand,
     WatchCommand,
     WorkerState,
 )
@@ -1034,6 +1035,24 @@ def test_a_resolved_symbol_that_will_not_tick_is_absent(tmp_path: Path) -> None:
     session.watch = WatchCommand(symbols=("XAUUSD",), symbol_suffix="m")  # resolves, no tick
     snap = session.poll("TID", seq=1, attempts=0)
     assert snap.quotes == ()
+
+
+def test_a_warm_command_selects_the_symbol_and_quotes_nothing(tmp_path: Path) -> None:
+    """Warming puts the ticket's symbol into Market Watch so its first tick has started
+    before a trade asks for it -- acted on once per command, and never quoted back."""
+    mt5 = QuotingMT5(
+        names=("EURUSDm", "XAUUSDm"),
+        ticks={},
+        symbol_info_data={"XAUUSDm": FakeSymbolInfo(name="XAUUSDm", visible=False)},
+    )
+    session = _Session(mt5, Path("x.exe"))
+    session.connect()
+    session.warm = WarmCommand(symbols=("XAUUSD",), symbol_suffix="m")
+    snap = session.poll("TID", seq=1, attempts=0)
+    assert mt5.symbol_select_calls == ["XAUUSDm"]
+    assert snap.quotes == ()
+    session.poll("TID", seq=2, attempts=0)
+    assert mt5.symbol_select_calls == ["XAUUSDm"], "the same warm command is not re-acted on"
 
 
 def test_no_watch_means_no_quotes(tmp_path: Path) -> None:

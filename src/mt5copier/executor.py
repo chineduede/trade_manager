@@ -215,10 +215,12 @@ class Executor:
     # --- a guard's margin cap -------------------------------------------------------------
 
     def _new_margin(self, cmd: OrderCommand, symbol: str, lots: float) -> float | None:
-        """The margin ``lots`` of this new trade would take, asked of the terminal."""
-        price = (
-            cmd.entry if cmd.op is ActionKind.PLACE else self._market_price(symbol, cmd.direction)
-        )
+        """The margin ``lots`` of this new trade would take, asked of the terminal.
+
+        A market order's price is read tick-tolerantly (:meth:`_first_tick`): the guard runs
+        before the send, so on a symbol selected moments ago this is the first quote anyone
+        has asked for, and a strict margin rule turns "no tick yet" into a refused trade."""
+        price = cmd.entry if cmd.op is ActionKind.PLACE else self._first_tick(symbol, cmd.direction)
         return self._session.margin_for(cmd.direction, symbol, lots, price) if price else None
 
     def _fit(
@@ -888,10 +890,19 @@ class Executor:
         target out by (rr + 1) x commission restores the ratio exactly -- the extra distance
         earns (rr + 1) commissions, one pays the winning trade's own, and the other rr cover
         rr times the losing side's. Volume cancels out of the arithmetic, so the pad is the
-        same at any size. Done on every command that writes a target, or a later modify would
-        quietly rub the pad back off."""
+        same at any size.
+
+        The pad is computed exactly once, when the trade is first written. A modify that
+        moves only the stop re-sends the ``padded_tp`` already resting on the broker
+        verbatim -- re-deriving it would wiggle the level with every conversion-rate drift
+        and rub it off entirely in a moment the move cannot be priced. And a target the
+        person moved is their own exact price now: it goes out as written, never re-padded
+        (the diff cleared the pad, so belief forgets it below too)."""
         if not cmd.tp_net_rr or not cmd.tp or not cmd.sl or cmd.commission_per_lot <= 0:
-            return cmd
+            # Scrubbed so belief forgets a pad this command is about to write over.
+            return replace(cmd, padded_tp=0.0) if cmd.padded_tp else cmd
+        if cmd.op in (ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER):
+            return replace(cmd, tp=cmd.padded_tp) if cmd.padded_tp else cmd
         dist = abs(cmd.entry - cmd.sl)
         reward = abs(cmd.tp - cmd.entry)
         if dist <= 0 or reward <= 0:
@@ -918,7 +929,7 @@ class Executor:
             rr,
             cmd.commission_per_lot,
         )
-        return replace(cmd, tp=tp)
+        return replace(cmd, tp=tp, padded_tp=tp)
 
     def _send(
         self,
@@ -968,6 +979,7 @@ class Executor:
                     filled_volume=filled,
                     price=_float_or_none(getattr(last, "price", None)) or price,
                     attempts=attempts,
+                    padded_tp=cmd.padded_tp or None,
                     # A PLACE is included only when its request became a market deal -- the
                     # fallback's last resort -- whose fill has an opening deal like any
                     # OPEN's. A genuinely resting PLACE has been charged nothing yet.
@@ -1145,10 +1157,10 @@ class Executor:
         cheap insurance against exactly the gap :meth:`symbol_facts` already treats the same
         way for a select that cannot be acted on instantly.
 
-        Only called for the first price read of a fresh OPEN. Repricing mid-retry in
-        :meth:`_send` stays on the bare :meth:`_market_price` -- that path already has its own
-        attempt budget (``MAX_ATTEMPTS``, ``DEADLINE_S``), and a symbol already mid-flight has
-        necessarily ticked at least once already.
+        Only called for the first price reads of a fresh OPEN -- the margin guard's and the
+        send's. Repricing mid-retry in :meth:`_send` stays on the bare :meth:`_market_price`
+        -- that path already has its own attempt budget (``MAX_ATTEMPTS``, ``DEADLINE_S``),
+        and a symbol already mid-flight has necessarily ticked at least once already.
         """
         price = self._market_price(symbol, direction)
         if price is not None:

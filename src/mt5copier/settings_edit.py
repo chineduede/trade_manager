@@ -205,6 +205,17 @@ SECTIONS: tuple[Section, ...] = (
                 "if the master cancels the order, and managed normally once the order fills. "
                 "Off, a refused pending is simply not copied.",
             ),
+            EditableField(
+                "tp_net_rr",
+                "Keep direct targets' R:R net of costs",
+                Kind.FLAG,
+                "Direct trading only. Land this slave's target past the ticket's by (rr + 1) "
+                "of its own commissions, so a win pays the ticket's ratio after costs -- "
+                "worked out once when the trade is first written, and kept through every "
+                "later stop move. Off, the ticket's target is sent exactly as written and "
+                "commission comes out of the win. A real master's target is never touched "
+                "either way.",
+            ),
         ),
     ),
     Section(

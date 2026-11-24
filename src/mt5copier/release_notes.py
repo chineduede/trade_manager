@@ -18,6 +18,27 @@ from .paths import version_seen_path
 
 NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
+        "0.1.8",
+        "2026-11-24",
+        (
+            "A direct ticket's target stays commission-padded for the whole trade. The pad"
+            " is worked out once, when the trade is first written, and every later stop"
+            " move re-sends that exact target — moving the stop to breakeven used to"
+            " re-send the ticket's raw target and quietly rub the pad back off, so a 1:2"
+            " that ran to its target paid out short of 2R. And a target you move yourself"
+            " is yours: it goes out exactly as written, never padded again.",
+            "The pad is now also a per-terminal choice: “Keep direct targets' R:R net of"
+            " costs” in a slave's settings, on by default. Off, the ticket's target goes"
+            " out exactly as written and commission comes out of the win.",
+            "A margin rule no longer refuses a trade because its symbol's very first quote"
+            " was a beat late. The guard waits the quote out the same way the open itself"
+            " already did, instead of declining what it could not yet measure.",
+            "Choosing a symbol on the direct ticket now selects it on every connected MT5"
+            " slave straight away, so by the time the trade is placed the symbol is already"
+            " in Market Watch and ticking.",
+        ),
+    ),
+    (
         "0.1.7",
         "2026-11-23",
         (

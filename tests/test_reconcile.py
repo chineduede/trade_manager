@@ -288,6 +288,25 @@ def test_a_copy_whose_master_position_vanished_is_a_close() -> None:
     assert actions[0].executable, "a full close is never conditional"
 
 
+def test_a_stop_move_carries_the_copys_pad() -> None:
+    """A stop-only change hands the worker the resting padded target, so the pad is re-sent
+    verbatim rather than re-derived against a moved stop -- the breakeven move that re-wrote
+    a raw target over the padded one."""
+    c = replace(copied(sl=1.0800, tp=1.0950), padded_tp=1.0953)
+    moved = reconcile_slave([pos(sl=1.0810, tp=1.0950)], [c], slave())
+    assert [a.kind for a in moved] == [ActionKind.MODIFY_SLTP]
+    assert moved[0].padded_tp == pytest.approx(1.0953)
+
+
+def test_a_moved_target_clears_the_pad_for_good() -> None:
+    """Padding happens once, at the trade's first write: a target the person moved is their
+    exact price, so the action carries no pad and the worker sends the level as written."""
+    c = replace(copied(sl=1.0800, tp=1.0950), padded_tp=1.0953)
+    moved = reconcile_slave([pos(sl=1.0800, tp=1.0990)], [c], slave())
+    assert [a.kind for a in moved] == [ActionKind.MODIFY_SLTP]
+    assert moved[0].padded_tp == 0.0, "a moved target goes out as the person wrote it"
+
+
 def test_closes_are_emitted_before_opens() -> None:
     actions = reconcile_slave([pos(ticket=2)], [copied(ticket=1)], slave())
     assert [a.kind for a in actions] == [ActionKind.CLOSE, ActionKind.OPEN]

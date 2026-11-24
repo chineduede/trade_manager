@@ -89,6 +89,7 @@ from .protocol import (
     RatesResult,
     Snapshot,
     TradeConstraint,
+    WarmCommand,
     WatchCommand,
     WorkerState,
 )
@@ -387,6 +388,9 @@ class Engine:
         """The terminal whose quotes feed the book, as last picked: the pinned one when it is
         connected, else any connected MT5 slave. Remembered only to announce changes."""
         self._watch_extra: str | None = None
+        self._warm_sent: dict[str, str] = {}
+        """Per MT5 slave, the ticket symbol last sent to warm (select) there -- see
+        :meth:`_warm_slaves`."""
         """One symbol the order ticket is previewing beyond what the book holds, so its quote
         is live before anything is placed."""
         self._watch_sent: tuple[str, WatchCommand] | None = None
@@ -1113,9 +1117,41 @@ class Engine:
 
     def watch_direct(self, symbol: str | None) -> None:
         """Tell the feed to quote one extra symbol: the one on the ticket, before anything is
-        placed on it, so the person sees a live price while they type."""
+        placed on it, so the person sees a live price while they type -- and tell every
+        connected MT5 slave to select it, so its first tick has usually started by the time
+        an order lands on it."""
         with self._lock:
             self._watch_extra = self._feed_clean(symbol) if symbol else None
+            self._warm_slaves(self._watch_extra)
+
+    def _warm_slaves(self, symbol: str | None) -> None:
+        """Send the ticket's symbol to every enabled MT5 slave worker as a
+        :class:`WarmCommand`, once per symbol per worker: each resolves it with its own
+        decoration and selects it into Market Watch, quoting nothing back. An MT5 symbol
+        selected only at order time can sit tickless right when the margin guard and the
+        open ask for its first price; warming it as it is chosen on the ticket closes that
+        gap, with the executor's tick-tolerant first read as the fallback. cTrader slaves
+        subscribe on demand and need none of this. Caller holds the lock."""
+        if not symbol or self._virtual is None:
+            return
+        for tid, worker in self._workers.items():
+            tcfg = self._cfg.terminals.get(tid)
+            if tcfg is None or tcfg.is_ctrader or not tcfg.enabled:
+                continue
+            if self._warm_sent.get(tid) == symbol:
+                continue
+            cmd = WarmCommand(
+                symbols=(symbol,),
+                symbol_prefix=tcfg.symbol_prefix,
+                symbol_suffix=tcfg.symbol_suffix,
+                symbol_map=tuple(sorted(tcfg.symbol_map.items())),
+            )
+            try:
+                worker.cmd_q.put_nowait(cmd)
+            except Exception as exc:
+                log.debug("could not warm %s on %s: %r", symbol, tid[:8], exc)
+                continue
+            self._warm_sent[tid] = symbol
 
     def direct_quote(self, symbol: str) -> Quote | None:
         """The feed's current price for one clean symbol name, or None while unknown."""
@@ -2255,6 +2291,16 @@ class Engine:
                     )
 
         command_id = next(self._command_ids)
+        # Direct trades only, and only on a slave set to pad: the ticket's target is an rr
+        # intent, so each worker nudges its copy's target out by (rr + 1) x its own
+        # commission to keep the realized ratio. A real master's target is that trader's own
+        # level and goes untouched.
+        tp_net_rr = (
+            self._virtual is not None
+            and cfg.tp_net_rr
+            and action.kind
+            in (ActionKind.OPEN, ActionKind.PLACE, ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER)
+        )
         cmd = OrderCommand(
             command_id=command_id,
             op=action.kind,
@@ -2289,12 +2335,10 @@ class Engine:
             comment=f"c{action.master_ticket}",
             allow_live=cfg.allow_live_trading,
             constraints=constraints,
-            # Direct trades only: the ticket's target is an rr intent, so each worker nudges
-            # its copy's target out by (rr + 1) x its own commission to keep the realized
-            # ratio. A real master's target is that trader's own level and goes untouched.
-            tp_net_rr=self._virtual is not None
-            and action.kind
-            in (ActionKind.OPEN, ActionKind.PLACE, ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER),
+            tp_net_rr=tp_net_rr,
+            # Only while the pad is live: a slave switched to plain targets re-sends the
+            # ticket's own and belief forgets the pad with it.
+            padded_tp=action.padded_tp if tp_net_rr else 0.0,
         )
 
         # Before sending, because an order that cannot be sent is answered on the spot.

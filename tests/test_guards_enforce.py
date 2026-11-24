@@ -220,6 +220,22 @@ def test_a_warning_sends_as_sized() -> None:
     assert session.sent[-1]["volume"] == 2.0
 
 
+def test_a_margin_cap_waits_out_a_quote_that_has_not_started(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The guard's price read is as tick-tolerant as the open's own. It runs before the send,
+    so on a symbol selected moments ago it is the first quote anyone has asked for -- reading
+    None once and declining would refuse a trade the open itself was about to price fine."""
+    sleeps: list[float] = []
+    monkeypatch.setattr("mt5copier.executor.time.sleep", sleeps.append)
+    session = MarginSession()
+    session.quote_sequence = [None, (1.08500, 1.08510)]
+    result = run(session, cmd(constraints=_margin_cap(5_000.0, "decline")))
+    assert result.ok, result.error
+    assert sleeps == [2.0]
+    assert session.sent[-1]["volume"] == 2.0
+
+
 # --- the total margin cap ------------------------------------------------------------------------
 
 

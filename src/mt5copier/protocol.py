@@ -246,6 +246,23 @@ class WatchCommand:
     :attr:`OrderCommand.symbol_map`."""
 
 
+@dataclass(frozen=True, slots=True)
+class WarmCommand:
+    """Supervisor -> worker: select these symbols into Market Watch, quoting nothing back.
+
+    Direct trading previews a symbol on the ticket before any trade exists on it, and an
+    MT5 symbol selected only at order time can sit tickless for a stretch right when the
+    margin guard and the open ask for its first price. Warming every connected slave as the
+    ticket's symbol is chosen means the quote has usually started by the time an order
+    arrives; the executor's tick-tolerant first read stays as the fallback. Resolution is
+    the watch's own; a symbol that cannot be resolved warms nothing and is only logged."""
+
+    symbols: tuple[str, ...] = ()
+    symbol_prefix: str = ""
+    symbol_suffix: str = ""
+    symbol_map: tuple[tuple[str, str], ...] = ()
+
+
 CHART_TIMEFRAMES: tuple[tuple[str, int], ...] = (
     ("M1", 1),
     ("M5", 5),
@@ -555,7 +572,16 @@ class OrderCommand:
     costs risk plus one -- and that distance is exactly what keeps the realized reward:risk at
     the ticket's rr. Priced by the worker, like breakeven's buffer, because only the terminal
     can say what a price move is worth in its account's money; unpriceable means the target
-    goes unpadded, never guessed."""
+    goes unpadded, never guessed. Padding happens exactly once, when the trade is first
+    written: see ``padded_tp`` for what every later modify does."""
+    padded_tp: float = 0.0
+    """MODIFY_SLTP and MODIFY_ORDER with ``tp_net_rr`` only: the padded target already
+    resting on the broker, passed while the ticket's own target has not moved since the pad
+    was computed. The worker re-sends it verbatim -- the pad is worked out once, at the
+    trade's first write, not re-derived per modify against a drifting conversion rate or a
+    momentarily unpriceable move. 0 when the ticket's target changed -- the person's exact
+    price then goes out as written, never re-padded -- and on every command that opens or
+    places."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -615,6 +641,11 @@ class OrderResult:
     """On a filled OPEN: the commission charged on the opening deal, as a positive cost in the
     account currency. None when it could not be read or none was charged; the copy then falls
     back to the slave's ``commission_per_lot_round_turn``."""
+
+    padded_tp: float | None = None
+    """The cost-padded target this command actually wrote (or knowingly left resting), when
+    ``tp_net_rr`` padded one. None when the target went out as the ticket's own. Kept on the
+    copy record so a later stop move re-sends the same target instead of re-deriving it."""
 
     placed_type: OrderType | None = None
     """On a filled PLACE: the resting type actually placed, when the fallback flipped it away

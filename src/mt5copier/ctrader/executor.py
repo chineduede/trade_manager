@@ -320,6 +320,7 @@ class CTraderExecutor:
             digits=symbol.digits,
             price_value=cv.price_value(symbol, account.deposit_asset_id, price, conversion),
             commission=commission,
+            padded_tp=cmd.padded_tp or None,
         )
 
     # --- resting orders -------------------------------------------------------------------------
@@ -614,15 +615,23 @@ class CTraderExecutor:
     ) -> OrderCommand:
         """:meth:`mt5copier.executor.Executor._net_rr_target`, rule for rule: a direct
         ticket's target, landed (rr + 1) commissions further out so the realized reward:risk
-        survives commission. Valued the cTrader way, over the entry-to-stop move itself."""
+        survives commission. Valued the cTrader way, over the one-R move itself.
+
+        Computed exactly once, at the trade's first write: a stop-only modify re-sends the
+        resting ``padded_tp`` verbatim, and a target the person moved goes out as written,
+        never re-padded."""
         if not cmd.tp_net_rr or not cmd.tp or not cmd.sl or cmd.commission_per_lot <= 0:
-            return cmd
+            # Scrubbed so belief forgets a pad this command is about to write over.
+            return replace(cmd, padded_tp=0.0) if cmd.padded_tp else cmd
+        if cmd.op in (ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER):
+            return replace(cmd, tp=cmd.padded_tp) if cmd.padded_tp else cmd
+        way = 1.0 if cmd.direction is PositionType.BUY else -1.0
         dist = abs(cmd.entry - cmd.sl)
         reward = abs(cmd.tp - cmd.entry)
         if dist <= 0 or reward <= 0:
             return cmd
         loss = cv.loss_per_lot(
-            symbol, self._account.deposit_asset_id, cmd.entry, cmd.sl, conversion
+            symbol, self._account.deposit_asset_id, cmd.entry, cmd.entry - way * dist, conversion
         )
         if not loss:
             log.warning(
@@ -635,7 +644,6 @@ class CTraderExecutor:
         value = abs(loss) / dist
         rr = reward / dist
         pad = (rr + 1.0) * cmd.commission_per_lot / value
-        way = 1.0 if cmd.direction is PositionType.BUY else -1.0
         tp = round(cmd.tp + way * pad, symbol.digits)
         log.info(
             "#%s on %s: target %g -> %g, (rr %.2f + 1) commissions of %.2f kept net",
@@ -646,7 +654,7 @@ class CTraderExecutor:
             rr,
             cmd.commission_per_lot,
         )
-        return replace(cmd, tp=tp)
+        return replace(cmd, tp=tp, padded_tp=tp)
 
     async def _fit(
         self,

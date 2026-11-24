@@ -1214,20 +1214,87 @@ def test_a_sell_pads_its_target_downward() -> None:
     assert session.sent[0]["tp"] == pytest.approx(1.07470)
 
 
-def test_a_direct_stop_move_restates_the_padded_target() -> None:
-    """Every later modify re-pads, or it would quietly rub the pad back off."""
+def test_a_moved_target_goes_out_exactly_as_written() -> None:
+    """Padding happens once, at the trade's first write. A target the person moved afterward
+    is their own exact price: the diff cleared the pad, and the modify sends the level as
+    written -- never re-padded -- and records no pad for later stop moves to resurrect."""
     session = closing_session()
-    run(session, modify(sl=1.08000, tp=1.09500, tp_net_rr=True, commission_per_lot=5.0))
+    result = run(session, modify(sl=1.08000, tp=1.09600, tp_net_rr=True, commission_per_lot=5.0))
+    assert result.ok
+    assert session.sent[0]["tp"] == pytest.approx(1.09600)
+    assert result.padded_tp is None
+
+
+def test_a_stop_at_breakeven_keeps_the_padded_target() -> None:
+    """The regression that paid $517 on a $600 trade: a stop moved to entry exactly used to
+    re-send the ticket's raw target and quietly rub the pad back off. The stored pad is
+    re-sent verbatim wherever the stop sits."""
+    session = closing_session()
+    run(
+        session,
+        modify(sl=1.08500, tp=1.09500, tp_net_rr=True, commission_per_lot=5.0, padded_tp=1.09530),
+    )
     assert session.sent[0]["tp"] == pytest.approx(1.09530)
 
 
-def test_an_unpriceable_move_leaves_the_target_at_the_tickets_level() -> None:
-    """Unpadded beats guessed: the trade still goes on at the ticket's own geometry."""
+def test_a_stop_move_resends_the_resting_padded_target_verbatim() -> None:
+    """The pad is computed once, at the trade's first write: a stop-only modify re-sends the
+    exact target resting on the broker and prices nothing -- loss=None here proves it, where
+    re-deriving would have rubbed the pad off as unpriceable."""
     session = closing_session()
     session.loss = None
-    result = run(session, modify(sl=1.08000, tp=1.09500, tp_net_rr=True, commission_per_lot=5.0))
+    result = run(
+        session,
+        modify(sl=1.08000, tp=1.09500, tp_net_rr=True, commission_per_lot=5.0, padded_tp=1.09530),
+    )
+    assert result.ok
+    assert session.sent[0]["tp"] == pytest.approx(1.09530)
+    assert result.padded_tp == pytest.approx(1.09530), "belief keeps the resting pad"
+
+
+def test_a_fresh_pad_rides_the_result_so_belief_can_keep_it() -> None:
+    session = FakeSession()
+    result = run(session, cmd(tp=1.09500, tp_net_rr=True, commission_per_lot=5.0))
+    assert result.padded_tp == pytest.approx(1.09530)
+
+
+def test_an_unpadded_target_records_no_pad() -> None:
+    session = FakeSession()
+    result = run(session, cmd(tp=1.09500, commission_per_lot=5.0))
+    assert result.padded_tp is None
+
+
+def test_switching_the_pad_off_scrubs_the_recorded_pad() -> None:
+    """A modify sent with the feature off (tp cleared here makes the gate bail) must also
+    make belief forget the pad, or the next modify would resurrect a target the ticket no
+    longer means."""
+    session = closing_session()
+    result = run(
+        session,
+        modify(sl=1.08500, tp=0.0, tp_net_rr=True, commission_per_lot=5.0, padded_tp=1.09530),
+    )
+    assert result.ok
+    assert result.padded_tp is None
+
+
+def test_an_unpriceable_open_leaves_the_target_at_the_tickets_level() -> None:
+    """Unpadded beats guessed: the trade still goes on at the ticket's own geometry. Sized
+    by lot multiple here so the unpriceable move stops only the pad, not the sizing."""
+    session = FakeSession()
+    session.loss = None
+    result = run(
+        session,
+        cmd(
+            tp=1.09500,
+            tp_net_rr=True,
+            commission_per_lot=5.0,
+            sizing_basis=SizingBasis.MASTER_LOT_MULTIPLE,
+            lot_multiple=1.0,
+        ),
+    )
     assert result.ok
     assert session.sent[0]["tp"] == pytest.approx(1.09500)
+    assert result.padded_tp is None
 
 
 def test_a_target_free_ticket_has_nothing_to_pad() -> None:
