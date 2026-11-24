@@ -177,6 +177,47 @@ def infer_decoration(names: Iterable[str], known: Callable[[str], str | None]) -
     return pre, post
 
 
+def asserted_decoration(prefix: str, suffix: str, names: Collection[str]) -> tuple[str, str]:
+    """The configured decoration, honored on the side this broker's own names carry it.
+
+    A prefix/suffix is an assertion about the broker's naming, but which *field* it was typed
+    into is just a form -- ``.fx`` entered as a prefix while every name ends ``...GBPCAD.FX``
+    is unmistakably a suffix, and taken literally it strips nothing while the decorated name
+    sails on to every slave (which is exactly how it was found: a live trade refused
+    everywhere but the feed). So each configured value is placed on the side more of the
+    broker's own names carry it: kept where it was on a tie it appears on, moved across when
+    the other side clearly carries it, and dropped -- for stripping and resolving alike --
+    when no name carries it at all, which also lets the catalog reading take over for a value
+    that was never true. With no symbol list to check against, the configuration is taken at
+    its word.
+
+    Counting, not ``any``: a one-letter value like ``m`` is "carried" by accident wherever a
+    name happens to start or end with it (``MSFT``, ``PLATINUM``), and the side with the many
+    is the decoration.
+    """
+    if (not prefix and not suffix) or not names:
+        return prefix, suffix
+    upper = [n.strip().upper() for n in names]
+
+    def placed(value: str, configured_as_prefix: bool) -> tuple[str, str]:
+        v = value.upper()
+        as_pre = sum(1 for n in upper if n.startswith(v) and len(n) > len(v))
+        as_suf = sum(1 for n in upper if n.endswith(v) and len(n) > len(v))
+        if as_pre == 0 and as_suf == 0:
+            return "", ""
+        if as_pre > as_suf or (as_pre == as_suf and configured_as_prefix):
+            return value, ""
+        return "", value
+
+    pre_from_prefix, suf_from_prefix = placed(prefix, True) if prefix else ("", "")
+    pre_from_suffix, suf_from_suffix = placed(suffix, False) if suffix else ("", "")
+    # A side both values land on keeps the one that was configured for it.
+    return (
+        pre_from_prefix or pre_from_suffix,
+        suf_from_suffix or suf_from_prefix,
+    )
+
+
 def mapped_target(master_symbol: str, symbol_map: Mapping[str, str] | None) -> str | None:
     """The explicit override for this symbol, or None.
 

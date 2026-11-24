@@ -115,7 +115,7 @@ from .store import (
     find_missing_orders,
     find_orphans,
 )
-from .symbols import base_name, infer_decoration, undecorate
+from .symbols import asserted_decoration, base_name, infer_decoration, undecorate
 from .virtual import VirtualBook
 from .worker import run_worker
 
@@ -335,9 +335,12 @@ class Engine:
         """The news calendar: fetched on its own thread, and only once a news rule asks."""
         self._catalog = CatalogStore()
         """The shared symbol catalog, for the rules that read asset classes."""
-        self._decor_cache: dict[str, tuple[object, object, tuple[str, str]]] = {}
-        """Per terminal, the decoration inferred from its pushed symbol list, remembered with
-        the list and catalog it was read from so either changing is a recompute."""
+        self._decor_cache: dict[
+            str, tuple[object, object, tuple[str, str], tuple[str, str], tuple[str, str]]
+        ] = {}
+        """Per terminal: the symbol list, catalog and configured pair a reading was made
+        from, then the asserted and stripping decorations read -- any input changing is a
+        recompute."""
         self._props = PropStore()
         """The prop account containers: a linked account reads its rules under its
         container's identity."""
@@ -1036,38 +1039,64 @@ class Engine:
             self._feed_tid = chosen
         return chosen
 
-    def _decor_of(self, terminal_id: str) -> tuple[str, str]:
-        """This terminal's broker decoration: the configured prefix/suffix while either is
-        set -- an assertion, so it outranks everything -- else what its own pushed symbol
-        list says it uses (see :func:`mt5copier.symbols.infer_decoration`), else nothing.
+    def _decor_state(self, terminal_id: str) -> tuple[tuple[str, str], tuple[str, str]]:
+        """This terminal's broker decoration, read two ways: ``(asserted, stripping)``.
 
-        The inferred reading is spent only on taking decoration *off* a name and on finding
-        this same broker's name for a clean symbol again; what another broker trades stays
-        with its configured settings and :func:`mt5copier.symbols.resolve`'s refusals.
-        Caller must hold the lock."""
+        *Asserted* is the configured prefix/suffix, each value honored on the side this
+        broker's own names actually carry it and dropped when no name carries it at all
+        (:func:`mt5copier.symbols.asserted_decoration`) -- ``.fx`` typed into the prefix
+        field still strips and resolves as the suffix it plainly is. This is the decoration
+        safe for *choosing* this broker's name for a trade: every value in it came from the
+        person.
+
+        *Stripping* is asserted, or -- when that leaves nothing -- what the broker's own
+        symbol list says it decorates with (:func:`mt5copier.symbols.infer_decoration`).
+        The inferred reading is spent only on taking decoration *off* a name and on the feed
+        finding its own name for a clean symbol again; it never picks what another broker
+        trades, which stays with *asserted* and :func:`mt5copier.symbols.resolve`'s
+        refusals. Caller must hold the lock."""
         cfg = self._cfg.terminals.get(terminal_id)
         if cfg is None:
-            return "", ""
-        if cfg.symbol_prefix or cfg.symbol_suffix:
-            return cfg.symbol_prefix, cfg.symbol_suffix
+            return ("", ""), ("", "")
+        configured = (cfg.symbol_prefix, cfg.symbol_suffix)
         names = self._symbol_lists.get(terminal_id)
-        if not names:
-            return "", ""
         catalog = self._catalog.current()
         cached = self._decor_cache.get(terminal_id)
-        if cached is not None and cached[0] is names and cached[1] is catalog:
-            return cached[2]
-        decor = infer_decoration(names, catalog.base_of)
-        if decor != ("", ""):
-            log.info(
-                "%s's catalog reads as %s<symbol>%s; stripping that decoration where its "
-                "names stand in for the plain instrument",
+        if (
+            cached is not None
+            and cached[0] is names
+            and cached[1] is catalog
+            and cached[2] == configured
+        ):
+            return cached[3], cached[4]
+        asserted = asserted_decoration(*configured, names or ())
+        if asserted != configured:
+            log.warning(
+                "%s's configured decoration (prefix %r, suffix %r) is not how its own names "
+                "carry it; using prefix %r, suffix %r",
                 self._cfg.display_name(terminal_id),
-                decor[0],
-                decor[1],
+                configured[0],
+                configured[1],
+                asserted[0],
+                asserted[1],
             )
-        self._decor_cache[terminal_id] = (names, catalog, decor)
-        return decor
+        stripping = asserted
+        if stripping == ("", "") and names:
+            stripping = infer_decoration(names, catalog.base_of)
+            if stripping != ("", ""):
+                log.info(
+                    "%s's catalog reads as %s<symbol>%s; stripping that decoration where "
+                    "its names stand in for the plain instrument",
+                    self._cfg.display_name(terminal_id),
+                    stripping[0],
+                    stripping[1],
+                )
+        self._decor_cache[terminal_id] = (names, catalog, configured, asserted, stripping)
+        return asserted, stripping
+
+    def _decor_of(self, terminal_id: str) -> tuple[str, str]:
+        """The decoration to strip from this terminal's names. Caller must hold the lock."""
+        return self._decor_state(terminal_id)[1]
 
     def _feed_decor(self) -> tuple[str, str, dict[str, str]]:
         """The feed broker's decoration, for taking its own names back to clean ones:
@@ -1214,10 +1243,11 @@ class Engine:
                 continue
             if self._warm_sent.get(tid) == symbol:
                 continue
+            prefix, suffix = self._decor_state(tid)[0]
             cmd = WarmCommand(
                 symbols=(symbol,),
-                symbol_prefix=tcfg.symbol_prefix,
-                symbol_suffix=tcfg.symbol_suffix,
+                symbol_prefix=prefix,
+                symbol_suffix=suffix,
                 symbol_map=tuple(sorted(tcfg.symbol_map.items())),
             )
             try:
@@ -2251,10 +2281,12 @@ class Engine:
             kind,
         )
 
-    @staticmethod
-    def _decor(cfg: TerminalConfig) -> tuple[str, str, tuple[tuple[str, str], ...]]:
-        """This slave's symbol decoration as the guards take it: prefix, suffix, renames."""
-        return (cfg.symbol_prefix, cfg.symbol_suffix, tuple(sorted(cfg.symbol_map.items())))
+    def _decor(self, cfg: TerminalConfig) -> tuple[str, str, tuple[tuple[str, str], ...]]:
+        """This slave's symbol decoration as the guards take it: prefix, suffix, renames.
+        The stripping reading -- guards only ever translate this slave's own names back to
+        plain ones. Caller must hold the lock."""
+        prefix, suffix = self._decor_state(cfg.terminal_id)[1]
+        return (prefix, suffix, tuple(sorted(cfg.symbol_map.items())))
 
     def _class_lots_limit(
         self, cfg: TerminalConfig, verdict: Verdict, action: Action, snap: Snapshot | None
@@ -2360,6 +2392,7 @@ class Engine:
                     )
 
         command_id = next(self._command_ids)
+        slave_prefix, slave_suffix = self._decor_state(cfg.terminal_id)[0]
         # Direct trades only, and only on a slave set to pad: the ticket's target is an rr
         # intent, so each worker nudges its copy's target out by (rr + 1) x its own
         # commission to keep the realized ratio. A real master's target is that trader's own
@@ -2392,8 +2425,10 @@ class Engine:
             pending_fallback=cfg.pending_fallback,
             close_fraction=action.close_fraction,
             slave_ticket=action.slave_ticket,
-            symbol_prefix=cfg.symbol_prefix,
-            symbol_suffix=cfg.symbol_suffix,
+            # Asserted, not raw config: each configured value on the side this broker's own
+            # names carry it, so a suffix typed into the prefix field still resolves.
+            symbol_prefix=slave_prefix,
+            symbol_suffix=slave_suffix,
             # Sorted so an unchanged map produces an identical command. The worker reads no
             # config at all, so a mapping not copied here has no effect on what is placed --
             # only on what the log calls it.
