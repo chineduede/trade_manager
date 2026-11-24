@@ -48,6 +48,7 @@ from .config import (
     TerminalConfig,
     account_key,
     merge_discovery,
+    remember_policy,
 )
 from .config import (
     save as save_config,
@@ -3355,6 +3356,13 @@ class Engine:
             refusal = self._give_up_agreed(self._setup_stake(setup), orphan)
             if refusal is not None:
                 return refusal
+            # Before the setup's settings go on: bank each terminal's policy under the
+            # account it is on, while the two still correspond, so a later switch back to
+            # that account can restore what was tuned on it. The setup's own settings are
+            # never themselves overwritten by that memory -- only the app's account switch
+            # restores (see config.restore_policy).
+            for tcfg in self._cfg.terminals.values():
+                remember_policy(self._cfg, tcfg)
             setups_mod.apply_roles(setup, self._cfg, leave_out)
             setups_mod.restore_settings(setup, self._cfg)
         return None

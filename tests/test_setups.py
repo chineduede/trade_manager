@@ -231,6 +231,28 @@ def test_no_role_is_given_on_an_account_the_setup_does_not_name(
     assert eng.config.terminals[TID_SLAVE2].role is Role.SLAVE
 
 
+def test_loading_a_setup_first_banks_each_accounts_settings(
+    engine_cfg: AppConfig, tmp_path: Path
+) -> None:
+    slave = engine_cfg.terminals[TID_SLAVE]
+    slave.last_login = 222
+    slave.last_server = "B-Demo"
+    slave.risk_percent = 2.5
+    eng = live_engine(engine_cfg, tmp_path)
+
+    setup = Setup(
+        master=TID_MASTER,
+        slaves=(TID_SLAVE,),
+        settings={TID_SLAVE: {"risk_percent": 0.5}},
+    )
+    assert eng.load_setup(setup) is None
+    assert eng.config.terminals[TID_SLAVE].risk_percent == 0.5, "the setup's settings won"
+    assert eng.config.account_policies["222@B-Demo"]["risk_percent"] == 2.5, (
+        "banked before the setup's settings went on, so a later switch back to the "
+        "account can restore what was tuned on it"
+    )
+
+
 def test_a_slave_kept_under_the_same_master_keeps_its_copies(
     engine_cfg: AppConfig, tmp_path: Path
 ) -> None:

@@ -31,6 +31,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ValidationError,
     field_validator,
     model_validator,
 )
@@ -449,6 +450,87 @@ def record_login(tcfg: TerminalConfig, login: int | None, server: str | None) ->
     return tcfg.model_copy(update=update)
 
 
+POLICY_FIELDS: tuple[str, ...] = (
+    "sizing_mode",
+    "risk_percent",
+    "risk_cash",
+    "max_lot",
+    "commission_per_lot_round_turn",
+    "slippage_buffer_points",
+    "no_stop_policy",
+    "no_stop_lot_multiple",
+    "invert",
+    "management",
+    "master_manages",
+    "copy_pending",
+    "pending_fallback",
+    "tp_net_rr",
+    "breakeven_mode",
+    "breakeven_trigger_r",
+    "breakeven_book_percent",
+    "symbol_whitelist",
+    "symbol_blacklist",
+)
+"""The trader-policy fields of :class:`TerminalConfig`: what a person tunes for a particular
+account's money, as opposed to facts about the install. A 1% risk sized against a 100k
+account has no business following the terminal onto a 10k account, so these are remembered
+per account (:func:`remember_policy`) and brought back when a switch returns to it
+(:func:`restore_policy`).
+
+Deliberately absent: the broker facts (symbol decoration and map, ``max_deviation_points``),
+which describe the install's broker and must survive a switch exactly as they do today; the
+plumbing (role, paused, label, paths); and ``allow_live_trading``, whose typed consent is
+withdrawn on a switch (:func:`record_login`) and never restored by machinery -- the scary
+direction keeps its friction."""
+
+
+def snapshot_policy(tcfg: TerminalConfig) -> dict[str, object]:
+    """The terminal's policy block as a plain JSON-ready dict, for remembering per account."""
+    return tcfg.model_dump(mode="json", include=set(POLICY_FIELDS))
+
+
+def remember_policy(cfg: AppConfig, tcfg: TerminalConfig) -> None:
+    """Save the terminal's policy under the account it is on now, if that account is known.
+
+    Called wherever settings are about to stop being that account's active settings: the
+    app's own account switch, a discovery sweep that notices a login made in MT5 itself, and
+    a setup load about to replace settings wholesale. The call must come *before* the change,
+    while the settings and the account still correspond -- afterwards the terminal holds the
+    new settings, and remembering then would file them under an account they were never
+    tuned for. Saving is lossless and silent, so it never needs a question; the newest save
+    for an account simply wins, because the terminal's current settings are by construction
+    the last ones in force on it.
+    """
+    key = account_key(tcfg.last_login, tcfg.last_server)
+    if key is None:
+        return
+    cfg.account_policies[key] = snapshot_policy(tcfg)
+
+
+def restore_policy(cfg: AppConfig, tcfg: TerminalConfig) -> tuple[TerminalConfig, bool]:
+    """The terminal's config with the policy last used on its account, if one is remembered.
+
+    The counterpart of :func:`remember_policy`, applied on exactly one path: the app's own
+    account switch, after :func:`record_login` has recorded where the terminal landed. A
+    setup load never restores -- a setup's saved settings *are* the remembered intent, and
+    restoring over them would fight the load the person just asked for.
+
+    Keys the snapshot carries that the schema no longer has are ignored; a snapshot the
+    current schema rejects outright restores nothing rather than half of itself.
+    """
+    key = account_key(tcfg.last_login, tcfg.last_server)
+    saved = cfg.account_policies.get(key) if key is not None else None
+    if not saved:
+        return tcfg, False
+    merged = tcfg.model_dump(mode="json")
+    merged.update({k: v for k, v in saved.items() if k in POLICY_FIELDS})
+    try:
+        return TerminalConfig.model_validate(merged), True
+    except ValidationError:
+        log.warning("the settings remembered for %s no longer load; keeping the current ones", key)
+        return tcfg, False
+
+
 class AppConfig(BaseModel):
     """Root config document."""
 
@@ -520,6 +602,14 @@ class AppConfig(BaseModel):
     account_names: dict[str, str] = Field(default_factory=dict)
     """Names the person set, keyed by :func:`account_key` -- the *account*, not the terminal it
     happens to be logged into right now. See :func:`account_key`'s own docstring for why."""
+
+    account_policies: dict[str, dict[str, object]] = Field(default_factory=dict)
+    """The :data:`POLICY_FIELDS` last in force on each account, keyed by :func:`account_key`,
+    so switching a terminal back to an account brings back the settings tuned on it. Written
+    by :func:`remember_policy` at the moment settings stop being an account's own; read by
+    :func:`restore_policy` on the app's account switch. Per profile on purpose, like the
+    settings it snapshots: what an account risks may differ when it serves another profile's
+    master."""
 
     @model_validator(mode="after")
     def _validate_roles(self) -> Self:
@@ -737,6 +827,12 @@ def merge_discovery(cfg: AppConfig, discovered: list[DiscoveredTerminal]) -> App
                     )
                 existing.exe_path = d.exe_path
             if d.login is not None:
+                # A switch made in MT5 itself still banks the settings the account was
+                # last run with, so a later switch back can restore them.
+                now = account_key(d.login, d.server or existing.last_server)
+                was = account_key(existing.last_login, existing.last_server)
+                if was is not None and now != was:
+                    remember_policy(cfg, existing)
                 existing.last_login = d.login
             if d.server is not None:
                 existing.last_server = d.server

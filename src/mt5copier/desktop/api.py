@@ -1112,11 +1112,21 @@ class DesktopApi:
             return _no(f"{name} was not logged in to {called}: {result.said}")
         # Keep the account the login left the terminal on, as the one it was last on --
         # record_login also withdraws the live override when a known account was left.
+        # Around it, the policy settings swap with the account: the old account banks the
+        # settings tuned on it, and the new one gets back whatever was banked for it.
         tcfg = cfg.terminals[tid]
-        cfg.replace_terminal(record_login(tcfg, result.login, result.server or acct.server))
+        had_account = account_key(tcfg.last_login, tcfg.last_server) is not None
+        config_mod.remember_policy(cfg, tcfg)
+        tcfg = record_login(tcfg, result.login, result.server or acct.server)
+        tcfg, restored = config_mod.restore_policy(cfg, tcfg)
+        cfg.replace_terminal(tcfg)
         self._switchable.pop(tid, None)  # the account it is on changed; re-answer fresh
         why = self._persist()
         message = f"{name} is logged in to {called}"
+        if restored:
+            message += "; the settings last used on this account are back"
+        elif had_account:
+            message += "; its settings came along from the last account — worth a look"
         if why is not None:
             message += f" — {why}"
         return _ok(message)

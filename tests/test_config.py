@@ -13,6 +13,7 @@ import pytest
 from pydantic import ValidationError
 
 from mt5copier.config import (
+    POLICY_FIELDS,
     SCHEMA_VERSION,
     VIRTUAL_MASTER_ID,
     AppConfig,
@@ -25,6 +26,9 @@ from mt5copier.config import (
     account_key,
     load,
     merge_discovery,
+    record_login,
+    remember_policy,
+    restore_policy,
     save,
 )
 from mt5copier.discovery import DiscoveredTerminal
@@ -688,3 +692,135 @@ def test_set_role_refuses_a_master_while_trading() -> None:
 
 def test_display_name_knows_the_virtual_master() -> None:
     assert AppConfig().display_name(VIRTUAL_MASTER_ID) == "Direct trading"
+
+
+# --- the policy remembered per account ---------------------------------------------------------
+
+
+def _on_a(**kw: object) -> AppConfig:
+    tcfg = TerminalConfig(
+        terminal_id=TID_A,
+        last_login=111,
+        last_server="A-Demo",
+        **kw,  # type: ignore[arg-type]
+    )
+    return AppConfig(terminals={TID_A: tcfg})
+
+
+def test_every_policy_field_is_a_real_setting() -> None:
+    for field in POLICY_FIELDS:
+        assert field in TerminalConfig.model_fields, field
+
+
+def test_what_is_not_policy_stays_off_the_list() -> None:
+    # Broker facts survive a switch, plumbing is the install's, and the typed live consent
+    # must never ride back on the memory.
+    for field in (
+        "symbol_prefix",
+        "symbol_suffix",
+        "symbol_map",
+        "max_deviation_points",
+        "allow_live_trading",
+        "role",
+        "paused",
+        "label",
+        "exe_path",
+        "last_login",
+        "last_server",
+    ):
+        assert field not in POLICY_FIELDS, field
+
+
+def test_a_switch_back_restores_the_settings_tuned_on_the_account() -> None:
+    cfg = _on_a(risk_percent=2.5, invert=True)
+    tcfg = cfg.terminals[TID_A]
+
+    remember_policy(cfg, tcfg)  # leaving A
+    tcfg = record_login(tcfg, 222, "B-Demo")
+    tcfg = tcfg.model_copy(update={"risk_percent": 0.5, "invert": False})
+
+    remember_policy(cfg, tcfg)  # leaving B
+    tcfg = record_login(tcfg, 111, "A-Demo")
+    tcfg, restored = restore_policy(cfg, tcfg)
+    assert restored
+    assert (tcfg.risk_percent, tcfg.invert) == (2.5, True)
+
+    tcfg, restored = restore_policy(cfg, record_login(tcfg, 222, "B-Demo"))
+    assert restored
+    assert (tcfg.risk_percent, tcfg.invert) == (0.5, False)
+
+
+def test_with_nothing_remembered_a_switch_keeps_the_current_settings() -> None:
+    cfg = _on_a(risk_percent=2.5)
+    tcfg, restored = restore_policy(cfg, cfg.terminals[TID_A])
+    assert not restored
+    assert tcfg is cfg.terminals[TID_A]
+
+
+def test_remembering_with_no_known_account_is_a_no_op() -> None:
+    cfg = AppConfig(terminals={TID_A: TerminalConfig(terminal_id=TID_A)})
+    remember_policy(cfg, cfg.terminals[TID_A])
+    assert cfg.account_policies == {}
+
+
+def test_restore_takes_only_policy_keys_from_a_snapshot() -> None:
+    cfg = _on_a(symbol_suffix=".x")
+    cfg.account_policies["111@A-Demo"] = {
+        "risk_percent": 3.0,
+        "symbol_suffix": ".y",  # hand-edited in: not policy, must not apply
+        "from_the_future": 7,  # a later version's field: ignored, not fatal
+    }
+    tcfg, restored = restore_policy(cfg, cfg.terminals[TID_A])
+    assert restored
+    assert tcfg.risk_percent == 3.0
+    assert tcfg.symbol_suffix == ".x", "broker facts are not policy and stay put"
+
+
+def test_a_snapshot_the_schema_rejects_restores_nothing() -> None:
+    cfg = _on_a()
+    cfg.account_policies["111@A-Demo"] = {"risk_percent": -3}
+    tcfg, restored = restore_policy(cfg, cfg.terminals[TID_A])
+    assert not restored
+    assert tcfg.risk_percent == 1.0, "nothing half-applied"
+
+
+def test_live_consent_is_never_restored_by_the_memory() -> None:
+    cfg = _on_a(allow_live_trading=True, risk_percent=2.5)
+    tcfg = cfg.terminals[TID_A]
+    remember_policy(cfg, tcfg)
+    tcfg = record_login(tcfg, 222, "B-Demo")
+    assert not tcfg.allow_live_trading, "withdrawn by the switch, as before"
+    tcfg, restored = restore_policy(cfg, record_login(tcfg, 111, "A-Demo"))
+    assert restored
+    assert tcfg.risk_percent == 2.5
+    assert not tcfg.allow_live_trading, "the typed consent does not ride back"
+
+
+def test_an_external_switch_seen_by_discovery_banks_the_settings(tmp_path: Path) -> None:
+    exe = tmp_path / "terminal64.exe"
+    exe.write_bytes(b"MZ")
+    cfg = _on_a(risk_percent=2.5)
+    cfg.terminals[TID_A].exe_path = exe
+    merge_discovery(cfg, [disc(TID_A, "Spare", exe, login=222, server="B-Demo")])
+    assert cfg.account_policies["111@A-Demo"]["risk_percent"] == 2.5
+    assert cfg.terminals[TID_A].last_login == 222
+
+
+def test_a_sweep_reporting_the_same_account_banks_nothing(tmp_path: Path) -> None:
+    exe = tmp_path / "terminal64.exe"
+    exe.write_bytes(b"MZ")
+    cfg = _on_a(risk_percent=2.5)
+    cfg.terminals[TID_A].exe_path = exe
+    merge_discovery(cfg, [disc(TID_A, "Spare", exe, login=111, server="A-Demo")])
+    assert cfg.account_policies == {}
+
+
+def test_the_remembered_policies_survive_save_and_load(tmp_path: Path) -> None:
+    cfg = _on_a(risk_percent=2.5)
+    remember_policy(cfg, cfg.terminals[TID_A])
+    path = tmp_path / "config.json"
+    save(cfg, path)
+    back = load(path)
+    assert back.account_policies["111@A-Demo"]["risk_percent"] == 2.5
+    tcfg, restored = restore_policy(back, back.terminals[TID_A])
+    assert restored and tcfg.risk_percent == 2.5
