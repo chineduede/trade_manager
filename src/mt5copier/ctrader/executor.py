@@ -617,18 +617,16 @@ class CTraderExecutor:
         ticket's target, landed (rr + 1) commissions further out so the realized reward:risk
         survives commission. Valued the cTrader way, over the one-R move itself.
 
-        Computed once, at the trade's first write: a stop-only modify re-sends the resting
-        ``padded_tp`` verbatim. A changed target is padded afresh from the latched
-        ``risk_distance``, never the stop in hand -- a stop moved to or past entry measures
-        nothing -- and the move valued is the opening one, rebuilt from that distance, for
-        the same reason."""
+        Computed exactly once, at the trade's first write: a stop-only modify re-sends the
+        resting ``padded_tp`` verbatim, and a target the person moved goes out as written,
+        never re-padded."""
         if not cmd.tp_net_rr or not cmd.tp or not cmd.sl or cmd.commission_per_lot <= 0:
             # Scrubbed so belief forgets a pad this command is about to write over.
             return replace(cmd, padded_tp=0.0) if cmd.padded_tp else cmd
-        if cmd.padded_tp and cmd.op in (ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER):
-            return replace(cmd, tp=cmd.padded_tp)
+        if cmd.op in (ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER):
+            return replace(cmd, tp=cmd.padded_tp) if cmd.padded_tp else cmd
         way = 1.0 if cmd.direction is PositionType.BUY else -1.0
-        dist = cmd.risk_distance if cmd.op is ActionKind.MODIFY_SLTP else abs(cmd.entry - cmd.sl)
+        dist = abs(cmd.entry - cmd.sl)
         reward = abs(cmd.tp - cmd.entry)
         if dist <= 0 or reward <= 0:
             return cmd

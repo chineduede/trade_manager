@@ -2336,7 +2336,6 @@ class Engine:
             allow_live=cfg.allow_live_trading,
             constraints=constraints,
             tp_net_rr=tp_net_rr,
-            risk_distance=action.risk_distance,
             # Only while the pad is live: a slave switched to plain targets re-sends the
             # ticket's own and belief forgets the pad with it.
             padded_tp=action.padded_tp if tp_net_rr else 0.0,

@@ -572,20 +572,16 @@ class OrderCommand:
     costs risk plus one -- and that distance is exactly what keeps the realized reward:risk at
     the ticket's rr. Priced by the worker, like breakeven's buffer, because only the terminal
     can say what a price move is worth in its account's money; unpriceable means the target
-    goes unpadded, never guessed."""
-    risk_distance: float = 0.0
-    """MODIFY_SLTP with ``tp_net_rr`` only: the copy's latched one-R distance, from its fill
-    to the stop it opened with. The command's ``sl`` is the stop *now*, and a stop that has
-    moved -- to breakeven, past entry -- no longer measures the ticket's risk: measuring rr
-    against it would drop the pad at breakeven exactly (a zero distance) and blow it up just
-    past it. 0 when no copy latched one, and the target then stays at the ticket's level."""
+    goes unpadded, never guessed. Padding happens exactly once, when the trade is first
+    written: see ``padded_tp`` for what every later modify does."""
     padded_tp: float = 0.0
     """MODIFY_SLTP and MODIFY_ORDER with ``tp_net_rr`` only: the padded target already
     resting on the broker, passed while the ticket's own target has not moved since the pad
     was computed. The worker re-sends it verbatim -- the pad is worked out once, at the
     trade's first write, not re-derived per modify against a drifting conversion rate or a
-    momentarily unpriceable move. 0 when the ticket's target changed (the worker then pads
-    afresh from ``risk_distance``) and on every command that opens or places."""
+    momentarily unpriceable move. 0 when the ticket's target changed -- the person's exact
+    price then goes out as written, never re-padded -- and on every command that opens or
+    places."""
 
 
 @dataclass(frozen=True, slots=True)

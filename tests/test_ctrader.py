@@ -1213,27 +1213,29 @@ async def test_a_direct_open_lands_its_target_past_the_rr_by_the_commissions() -
     assert amend.stopLoss == pytest.approx(1.0990), "only the target moves"
 
 
-async def test_a_direct_stop_move_restates_the_padded_target() -> None:
+async def test_a_moved_target_goes_out_exactly_as_written() -> None:
+    """Padding happens once, at the trade's first write: a target the person moved afterward
+    is their exact price, sent as written and recorded with no pad."""
     api = FakeOpenApi()
     cmd = _command(
         ActionKind.MODIFY_SLTP,
         slave_ticket=77,
         entry=1.1000,
         sl=1.0990,
-        tp=1.1030,
+        tp=1.1040,
         tp_net_rr=True,
         commission_per_lot=5.0,
-        risk_distance=0.0010,
     )
     results = await _results(api, cmd)
     assert results[0].ok, results[0].error
     (amend,) = _sent(api, oa.ProtoOAAmendPositionSLTPReq)
-    assert amend.takeProfit == pytest.approx(1.1032)
+    assert amend.takeProfit == pytest.approx(1.1040)
+    assert results[0].padded_tp is None
 
 
 async def test_a_stop_at_breakeven_keeps_the_padded_target() -> None:
-    """A stop moved to entry measures zero risk; the latched one-R distance is what the pad
-    is measured and valued from, so the target stays past the ticket's level."""
+    """A stop moved to entry used to rub the pad off; the stored pad is re-sent verbatim
+    wherever the stop sits, so the target stays past the ticket's level."""
     api = FakeOpenApi()
     cmd = _command(
         ActionKind.MODIFY_SLTP,
@@ -1243,7 +1245,7 @@ async def test_a_stop_at_breakeven_keeps_the_padded_target() -> None:
         tp=1.1030,
         tp_net_rr=True,
         commission_per_lot=5.0,
-        risk_distance=0.0010,
+        padded_tp=1.1032,
     )
     results = await _results(api, cmd)
     assert results[0].ok, results[0].error
@@ -1270,7 +1272,9 @@ async def test_a_stop_move_resends_the_resting_padded_target_verbatim() -> None:
     assert results[0].padded_tp == pytest.approx(1.1032)
 
 
-async def test_a_stop_past_entry_with_no_latched_risk_pads_nothing() -> None:
+async def test_a_stop_move_with_no_resting_pad_sends_the_tickets_target() -> None:
+    """A copy that never had a pad recorded -- scrubbed, or written before pads were kept --
+    gets the ticket's own level, never a guess measured off wherever the stop sits now."""
     api = FakeOpenApi()
     cmd = _command(
         ActionKind.MODIFY_SLTP,

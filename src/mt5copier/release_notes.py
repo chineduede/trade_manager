@@ -25,8 +25,8 @@ NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             " is worked out once, when the trade is first written, and every later stop"
             " move re-sends that exact target — moving the stop to breakeven used to"
             " re-send the ticket's raw target and quietly rub the pad back off, so a 1:2"
-            " that ran to its target paid out short of 2R. Only moving the target itself"
-            " computes a fresh pad, measured from the risk the trade opened with.",
+            " that ran to its target paid out short of 2R. And a target you move yourself"
+            " is yours: it goes out exactly as written, never padded again.",
             "The pad is now also a per-terminal choice: “Keep direct targets' R:R net of"
             " costs” in a slave's settings, on by default. Off, the ticket's target goes"
             " out exactly as written and commission comes out of the win.",

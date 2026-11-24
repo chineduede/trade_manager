@@ -890,23 +890,20 @@ class Executor:
         target out by (rr + 1) x commission restores the ratio exactly -- the extra distance
         earns (rr + 1) commissions, one pays the winning trade's own, and the other rr cover
         rr times the losing side's. Volume cancels out of the arithmetic, so the pad is the
-        same at any size. Done on every command that writes a target, or a later modify would
-        quietly rub the pad back off.
+        same at any size.
 
-        The pad is computed once, at the trade's first write. A modify that moves only the
-        stop re-sends the ``padded_tp`` already resting on the broker verbatim -- re-deriving
-        it would wiggle the level with every conversion-rate drift and rub it off entirely in
-        a moment the move cannot be priced. Only a changed target (the diff clears the pad
-        then) is padded afresh, measured from the command's latched ``risk_distance``, never
-        from the stop in hand: a stop that has moved -- to breakeven, past entry -- says
-        nothing about the ticket's risk, and an rr taken against it loses the pad at
-        breakeven exactly (zero distance bails out below) and blows it up just past it."""
+        The pad is computed exactly once, when the trade is first written. A modify that
+        moves only the stop re-sends the ``padded_tp`` already resting on the broker
+        verbatim -- re-deriving it would wiggle the level with every conversion-rate drift
+        and rub it off entirely in a moment the move cannot be priced. And a target the
+        person moved is their own exact price now: it goes out as written, never re-padded
+        (the diff cleared the pad, so belief forgets it below too)."""
         if not cmd.tp_net_rr or not cmd.tp or not cmd.sl or cmd.commission_per_lot <= 0:
             # Scrubbed so belief forgets a pad this command is about to write over.
             return replace(cmd, padded_tp=0.0) if cmd.padded_tp else cmd
-        if cmd.padded_tp and cmd.op in (ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER):
-            return replace(cmd, tp=cmd.padded_tp)
-        dist = cmd.risk_distance if cmd.op is ActionKind.MODIFY_SLTP else abs(cmd.entry - cmd.sl)
+        if cmd.op in (ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER):
+            return replace(cmd, tp=cmd.padded_tp) if cmd.padded_tp else cmd
+        dist = abs(cmd.entry - cmd.sl)
         reward = abs(cmd.tp - cmd.entry)
         if dist <= 0 or reward <= 0:
             return cmd

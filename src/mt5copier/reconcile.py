@@ -150,15 +150,11 @@ class Action:
     """OPEN and PLACE: whether the master will manage the copy, fixed on it once it opens. See
     :meth:`mt5copier.config.AppConfig.manages`."""
 
-    risk_distance: float = 0.0
-    """MODIFY_SLTP: the copy's latched one-R distance (see :attr:`CopiedPosition.risk_distance`),
-    carried so a direct ticket's target can be re-padded from the risk the trade *opened* with
-    rather than from wherever its stop sits now. 0 when the copy latched none."""
-
     padded_tp: float = 0.0
     """MODIFY_SLTP and MODIFY_ORDER: the padded target the copy already rests at, passed only
-    while the ticket's own target (and, for an order, its entry) is unchanged -- the worker
-    then re-sends it verbatim. See :attr:`CopiedPosition.padded_tp`."""
+    while the ticket's own target is unchanged -- the worker then re-sends it verbatim. 0 when
+    the target moved: the person's exact price goes out as written, never re-padded. See
+    :attr:`CopiedPosition.padded_tp`."""
 
     skip_reason: SkipReason | None = None
     unprotected: bool = False
@@ -260,8 +256,8 @@ class CopiedPosition:
     padded_tp: float = 0.0
     """Direct trading only: the cost-padded target the copy actually rests at, written once
     when the ticket's target was first padded (:attr:`OrderCommand.padded_tp`). A stop move
-    re-sends this exact level; it is cleared, and the pad computed afresh, when the ticket's
-    own target changes. 0 for an unpadded copy."""
+    re-sends this exact level; it is cleared for good when the ticket's own target changes --
+    the person's moved target is sent as written, never re-padded. 0 for an unpadded copy."""
     breakeven_sl: float = 0.0
     """The breakeven floor, once triggered; 0 until then. The diff sends whichever of this
     and the master's stop is more protective -- see :func:`protective_sl`."""
@@ -738,9 +734,8 @@ def reconcile_slave(
                     sl=slave_sl,
                     tp=slave_tp,
                     slave_ticket=c.slave_ticket,
-                    risk_distance=c.risk_distance,
                     # The resting pad holds only while the ticket's target does: a target the
-                    # person moved is a new intent, padded afresh by the worker.
+                    # person moved is their exact price, sent as written by the worker.
                     padded_tp=c.padded_tp if _same(slave_tp, c.synced_tp, _PRICE_EPS) else 0.0,
                     skip_reason=None if follow else SkipReason.SLTP_SYNC_DISABLED,
                     # Mirroring is mirroring: a master that clears its stop leaves the copy
@@ -908,13 +903,9 @@ def reconcile_slave_orders(
                     tp=slave_tp,
                     expiration_utc=o.expiration_utc,
                     slave_ticket=c.slave_ticket,
-                    risk_distance=c.risk_distance,
-                    # Entry compared too: an order's reward is measured from its entry, so a
-                    # moved entry re-pads as much as a moved target does.
-                    padded_tp=c.padded_tp
-                    if _same(slave_tp, c.synced_tp, _PRICE_EPS)
-                    and _same(o.price_open, c.entry, _PRICE_EPS)
-                    else 0.0,
+                    # Same rule as a position: the pad rides the ticket's target alone. A
+                    # moved entry propagates exactly, with the resting padded target kept.
+                    padded_tp=c.padded_tp if _same(slave_tp, c.synced_tp, _PRICE_EPS) else 0.0,
                     skip_reason=None if cfg.copy_pending else SkipReason.PENDING_DISABLED,
                 )
             )
