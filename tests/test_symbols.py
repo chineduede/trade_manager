@@ -6,12 +6,14 @@ instrument and says nothing. So the interesting cases here are the refusals.
 
 from __future__ import annotations
 
+from mt5copier.catalog import DEFAULT
 from mt5copier.config import TerminalConfig
 from mt5copier.symbols import (
     Resolution,
     SymbolCache,
     base_name,
     configured_name,
+    infer_decoration,
     resolve,
     undecorate,
 )
@@ -275,3 +277,37 @@ def test_a_stripped_master_name_takes_the_slaves_own_decoration() -> None:
     plain = undecorate("EURUSDp", suffix="p")
     got = resolve(plain, ["EURUSD.r", "GBPUSD.r"], suffix=".r")
     assert got.name == "EURUSD.r"
+
+
+# --- reading a broker's decoration off its own catalog ----------------------------------------
+
+
+def test_a_dominant_suffix_is_inferred_from_the_catalog() -> None:
+    names = ["EURUSDp", "GBPUSDp", "USDJPYp", "XAUUSDp", "US30"]
+    assert infer_decoration(names, DEFAULT.base_of) == ("", "P")
+
+
+def test_a_dominant_prefix_is_inferred_too() -> None:
+    names = ["mEURUSD", "mGBPUSD", "mUSDJPY", "mXAUUSD"]
+    assert infer_decoration(names, DEFAULT.base_of) == ("M", "")
+
+
+def test_a_dotted_suffix_keeps_the_brokers_own_spelling() -> None:
+    names = ["EURUSD.r", "GBPUSD.r", "USDJPY.r", "AUDUSD.r"]
+    assert infer_decoration(names, DEFAULT.base_of) == ("", ".R")
+
+
+def test_bare_names_winning_is_not_an_inference() -> None:
+    names = ["EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "US30", "EURUSDp"]
+    assert infer_decoration(names, DEFAULT.base_of) == ("", "")
+
+
+def test_a_split_vote_infers_nothing() -> None:
+    """Bare beside decorated: which p-name is which product is not this function's call."""
+    names = ["EURUSD", "EURUSDp", "GBPUSD", "GBPUSDp", "USDJPY", "USDJPYp"]
+    assert infer_decoration(names, DEFAULT.base_of) == ("", "")
+
+
+def test_too_few_recognizable_names_are_not_believed() -> None:
+    assert infer_decoration(["EURUSDp", "GBPUSDp", "USDJPYp"], DEFAULT.base_of) == ("", "")
+    assert infer_decoration(["AAPL", "TSLA", "NVDA", "AMZN"], DEFAULT.base_of) == ("", "")

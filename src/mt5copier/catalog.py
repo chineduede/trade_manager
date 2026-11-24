@@ -130,6 +130,12 @@ def normal(symbol: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", symbol.upper())
 
 
+_DECOR_MOST = 5
+"""The most characters a broker decoration is believed to run to, measured on the matched
+name. ``.pro`` and ``.cash`` fit; a longer leftover means the known name is merely contained
+in a different instrument's name."""
+
+
 @dataclass(frozen=True, slots=True)
 class Catalog:
     """One reading of the catalog, immutable, safe to hand to guard rules."""
@@ -165,6 +171,38 @@ class Catalog:
             if first in self.currencies and second in self.currencies and first != second:
                 return "forex"
         return "other"
+
+    def base_of(self, symbol: str) -> str | None:
+        """The known instrument name this (possibly decorated) broker name reads as, in its
+        matched form -- upper case, letters and digits -- or None when nothing known is in it.
+
+        The companion of :meth:`classify`, answering *which* entry a name fell on rather than
+        which class: ``EURUSDp`` reads as ``EURUSD``, ``US500.cash`` as ``US500``, a bare
+        ``USTEC`` as itself. An explicit listing outranks the pair reading, the longest listed
+        entry wins, and -- unlike :meth:`classify` -- a hit buried in a much longer name does
+        not count: decoration runs to a few characters, so anything longer is a different name
+        that merely contains a known one, not a decorated spelling of it.
+        """
+        name = normal(symbol)
+        if not name:
+            return None
+        for clas in LISTED:
+            if name in self.normals.get(clas, ()):
+                return name
+        best: str | None = None
+        for clas in LISTED:
+            for entry in self.normals.get(clas, ()):
+                if entry and entry in name and len(name) - len(entry) <= _DECOR_MOST:
+                    if best is None or len(entry) > len(best):
+                        best = entry
+        if best is not None:
+            return best
+        if len(name) - 6 <= _DECOR_MOST:
+            for start in range(len(name) - 5):
+                first, second = name[start : start + 3], name[start + 3 : start + 6]
+                if first in self.currencies and second in self.currencies and first != second:
+                    return name[start : start + 6]
+        return None
 
     def payload(self) -> dict[str, object]:
         return {
