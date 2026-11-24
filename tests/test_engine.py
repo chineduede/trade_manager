@@ -892,3 +892,32 @@ def test_the_retry_tick_keeps_the_note_while_the_claim_is_still_held(
         assert view.claim_refused is not None and "funded" in view.claim_refused
     finally:
         other.release_all()
+
+
+# --- parking: a hidden terminal is not spawned at all -----------------------------------------
+
+
+def test_a_parked_terminal_is_not_spawned_and_its_worker_stops(
+    engine: Engine, cfg: AppConfig
+) -> None:
+    engine.sync()
+    assert TID_B in engine._workers
+    assert engine.hide_terminal(TID_B) is None
+    engine.sync()
+    assert TID_B not in engine._workers, "parked means no worker, no connection, no claim"
+    assert cfg.terminals[TID_B].hidden is True
+
+
+def test_unhiding_brings_the_terminal_back_with_its_role(engine: Engine, cfg: AppConfig) -> None:
+    assert engine.hide_terminal(TID_B) is None
+    engine.sync()
+    assert TID_B not in engine._workers
+    assert engine.unhide_terminal(TID_B) is None
+    engine.sync()
+    assert TID_B in engine._workers
+    assert cfg.terminals[TID_B].role is Role.SLAVE, "the role survived the park"
+
+
+def test_the_master_cannot_be_parked(engine: Engine) -> None:
+    why = engine.hide_terminal(TID_A)
+    assert why is not None and "unassign" in why

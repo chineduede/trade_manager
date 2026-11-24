@@ -414,6 +414,14 @@ body.dragging-terminals .zone-cue { display: inline-block; }
 }
 #master-cards { grid-template-columns: 1fr; }
 .zone-note { color: var(--muted); font-size: 12.5px; }
+
+/* Parked terminals: no card, just a quiet strip under the zones with the way back. */
+.parked-strip {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px;
+  margin: 10px 2px 0; font-size: 12.5px;
+}
+.parked-item { display: inline-flex; align-items: baseline; gap: 6px; }
+.parked-item .linklike { font-size: 12.5px; }
 .zone-actions { display: flex; gap: 8px; }
 #rescan-btn, #ctrader-btn {
   min-height: 44px; padding: 0 14px; border-radius: 8px;

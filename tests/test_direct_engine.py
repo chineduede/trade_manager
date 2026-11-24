@@ -749,3 +749,10 @@ def test_a_known_index_name_is_never_read_as_decorated(engine: Engine) -> None:
     engine._symbol_lists[SLAVE] = ("USTEC", "EURUSD")
     engine.virtual_tick()
     assert engine.feed_clean_names() == ("USTEC", "EURUSD")
+
+
+def test_a_parked_slave_is_never_the_feed(engine: Engine, cfg: AppConfig) -> None:
+    feed(engine, EURUSD_QUOTE)
+    cfg.terminals[SLAVE].hidden = True
+    engine.virtual_tick()
+    assert engine.direct_feed() is None

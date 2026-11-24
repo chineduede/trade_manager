@@ -1457,6 +1457,29 @@ function renderTerminals() {
       : 'none found yet — start your MT5 terminals and Rescan; a cTrader account joins through cTrader login…';
   $('detected-note').hidden = live.detected.length > 0;
 
+  // Parked terminals have no card — they are not even spawned — only a name in this
+  // strip and the way back.
+  var parked = live.parked || [];
+  $('parked-strip').hidden = !parked.length;
+  $('parked-word').textContent = parked.length
+    ? 'Parked — disconnected, settings kept:' : '';
+  var pl = $('parked-list');
+  pl.textContent = '';
+  parked.forEach(function (p) {
+    var row = document.createElement('span');
+    row.className = 'parked-item';
+    var name = document.createElement('span');
+    name.textContent = p.name + (p.role === 'slave' ? '' : ' (' + p.role + ')');
+    var back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'linklike';
+    back.textContent = 'Unhide';
+    back.addEventListener('click', function () { tact(api().unhide_terminal(p.tid)); });
+    row.appendChild(name);
+    row.appendChild(back);
+    pl.appendChild(row);
+  });
+
   // A rebuild replaced the card the open popover was anchored to; hand it the new
   // element and the fresh numbers, so it stays up and current under the pointer.
   if (P.tid) {
@@ -2083,6 +2106,8 @@ function menuItems(c, live) {
       does(c.accountName ? 'Rename this account…' : 'Name this account…',
         function () { accountNameFlow(c); });
     }
+    items.push({ sep: true });
+    does('Park: hide this terminal', function () { parkFlow(c); });
     return items;
   }
 
@@ -2111,6 +2136,10 @@ function menuItems(c, live) {
     does('Restart its worker process', function () { tact(api().restart_worker(c.tid)); });
   }
   items.push({ sep: true });
+  if (c.role === 'slave') {
+    // The master has no park: its slaves would sit copying nothing. Unassign it instead.
+    does('Park: hide and disconnect…', function () { parkFlow(c); });
+  }
   does(
     c.role === 'slave' ? 'Unassign: stop copying to it' : 'Unassign the master',
     function () { unassignFlow(c); },
@@ -2180,6 +2209,45 @@ function accountNameFlow(c) {
   });
   input.focus();
   input.select();
+}
+
+function parkFlow(c) {
+  // Parking strands open copies exactly as unassigning does — the terminal stops being
+  // managed entirely — so it reuses the same stake and the same asking; only the role
+  // and settings survive for the unhide.
+  api().unassign_stake(c.tid).then(function (r) {
+    if (!r.ok) { toast(r.message, 'bad'); return; }
+    var stake = r.stake || [];
+    if (!stake.length) { tact(api().hide_terminal(c.tid, null)); return; }
+
+    var agreed = {};
+    var total = 0;
+    var body = document.createElement('div');
+    var warn = document.createElement('p');
+    warn.textContent = 'Parking disconnects this terminal, so these copies stay open and '
+      + 'stop being managed — nothing will close them with the master, move their stops, '
+      + 'or mirror partials. They become yours to close by hand.';
+    body.appendChild(warn);
+    stake.forEach(function (s) {
+      agreed[s.tid] = s.copies.map(function (cp) { return cp.masterTicket; });
+      total += s.copies.length;
+      s.copies.forEach(function (cp) {
+        var line = document.createElement('div');
+        line.className = 'modal-line mono';
+        line.textContent = (cp.resting ? 'resting · ' : '') + cp.symbol
+          + (cp.volume ? ' · ' + cp.volume + ' lots' : '')
+          + (cp.slaveTicket ? ' · #' + cp.slaveTicket : '');
+        body.appendChild(line);
+      });
+    });
+    showModal({
+      title: 'Park ' + c.name + '?',
+      body: body,
+      confirm: 'Park it — orphan ' + total + (total === 1 ? ' copy' : ' copies'),
+      danger: true,
+      onConfirm: function () { tact(api().hide_terminal(c.tid, agreed)); }
+    });
+  });
 }
 
 function unassignFlow(c) {

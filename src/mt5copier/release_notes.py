@@ -27,6 +27,13 @@ NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             " strips GBPCAD.FX down to GBPCAD and still finds the broker's .FX name when"
             " placing there. A value no name carries at all is set aside (the log says so),"
             " and the automatic catalog reading takes over.",
+            "Terminals can be parked. Park (in a card's menu) hides the terminal and"
+            " disconnects it entirely — no copies, never the direct-trading price feed, and"
+            " its claim is released for other profiles — while its role and every setting"
+            " are kept. Parked terminals sit in a strip at the foot of the Terminals page"
+            " with an Unhide beside each. Parking a slave that holds open copies asks"
+            " first, exactly as unassigning does, because those copies stop being managed."
+            " The master cannot be parked — unassign it instead.",
         ),
     ),
     (

@@ -751,7 +751,21 @@ class DesktopApi:
         master: dict[str, Any] | None = None
         slaves: list[dict[str, Any]] = []
         detected: list[dict[str, Any]] = []
+        parked: list[dict[str, Any]] = []
         for view in engine.views():
+            if view.cfg.hidden:
+                # No card: a parked terminal is not spawned, so there is nothing live to
+                # draw. The strip at the foot of the page lists it by name to unhide.
+                key = account_key(view.cfg.last_login, view.cfg.last_server)
+                parked.append(
+                    {
+                        "tid": view.cfg.terminal_id,
+                        "name": cfg.display_name(view.cfg.terminal_id),
+                        "role": str(view.cfg.role),
+                        "account": key,
+                    }
+                )
+                continue
             card = self._card(view, holds)
             if view.cfg.role is Role.MASTER:
                 master = card
@@ -772,6 +786,7 @@ class DesktopApi:
             "virtual": virtual,
             "slaves": slaves,
             "detected": detected,
+            "parked": parked,
             "dryRun": cfg.dry_run,
             "copying": cfg.copying_enabled,
             "hasMaster": virtual is not None or master is not None,
@@ -856,6 +871,45 @@ class DesktopApi:
             total = sum(len(t) for t in orphan.values())
             message += f" {total} cop{'y' if total == 1 else 'ies'} orphaned: they stay open and are no longer managed."
         return _ok(message)
+
+    def hide_terminal(self, tid: str, agreed: dict[str, list[int]] | None = None) -> dict[str, Any]:
+        """Park this terminal: no connection, no copies, never the feed, no card -- its role
+        and settings kept for unhiding. The ask about stranded copies is the unassign's
+        (the page reuses :meth:`unassign_stake` for it), re-checked by the engine here."""
+        tid = str(tid)
+        if tid not in self._cfg.terminals:
+            return _no("that terminal is gone; rescan")
+        name = self._cfg.display_name(tid)
+        orphan = (
+            {str(t): [int(n) for n in tickets] for t, tickets in agreed.items()} if agreed else None
+        )
+        refusal = self._engine.hide_terminal(tid, orphan=orphan)
+        if refusal is not None:
+            return _no(f"{name} was not parked: {refusal}")
+        why = self._persist()
+        if why is not None:
+            return _no(why)
+        message = f"{name} parked: disconnected, settings kept. Unhide it at the foot of this page."
+        if orphan:
+            total = sum(len(t) for t in orphan.values())
+            message += (
+                f" {total} cop{'y' if total == 1 else 'ies'} orphaned: they stay open and "
+                "are no longer managed."
+            )
+        return _ok(message)
+
+    def unhide_terminal(self, tid: str) -> dict[str, Any]:
+        tid = str(tid)
+        if tid not in self._cfg.terminals:
+            return _no("that terminal is gone; rescan")
+        refusal = self._engine.unhide_terminal(tid)
+        if refusal is not None:
+            return _no(refusal)
+        why = self._persist()
+        if why is not None:
+            return _no(why)
+        name = self._cfg.display_name(tid)
+        return _ok(f"{name} is back; it connects on the next tick if it has a role.")
 
     def rename_account(self, tid: str, name: str) -> dict[str, Any]:
         """Name (or, given blank, unname) the account this terminal is last known to be logged

@@ -529,7 +529,7 @@ class Engine:
             self._claims_retry_at = time.monotonic() + 3.0
             for tid in list(self._claim_refused):
                 tcfg = self._cfg.terminals.get(tid)
-                if tcfg is None or tcfg.role is Role.UNASSIGNED or not tcfg.enabled:
+                if tcfg is None or tcfg.role is Role.UNASSIGNED or not tcfg.enabled or tcfg.hidden:
                     # Same rule as sync(): a terminal no longer wanted keeps no stale note.
                     del self._claim_refused[tid]
                     continue
@@ -1007,6 +1007,8 @@ class Engine:
         cfg = self._cfg.terminals.get(terminal_id)
         if cfg is None or cfg.is_ctrader or cfg.role is not Role.SLAVE or not cfg.enabled:
             return False
+        if cfg.hidden:
+            return False
         snap = self._snapshots.get(terminal_id)
         received = self._received_at.get(terminal_id)
         fresh = (
@@ -1239,7 +1241,7 @@ class Engine:
             return
         for tid, worker in self._workers.items():
             tcfg = self._cfg.terminals.get(tid)
-            if tcfg is None or tcfg.is_ctrader or not tcfg.enabled:
+            if tcfg is None or tcfg.is_ctrader or not tcfg.enabled or tcfg.hidden:
                 continue
             if self._warm_sent.get(tid) == symbol:
                 continue
@@ -3055,7 +3057,7 @@ class Engine:
         monotonic_now = time.monotonic()
         links: list[SlaveLink] = []
         for cfg in self._cfg.slaves:
-            if not cfg.enabled:
+            if not cfg.enabled or cfg.hidden:
                 continue
             snap = self._snapshots.get(cfg.terminal_id)
             received_at = self._received_at.get(cfg.terminal_id)
@@ -3307,6 +3309,39 @@ class Engine:
             if refusal is not None:
                 return refusal
             role_actions.unassign(self._cfg, terminal_id)
+        return None
+
+    def hide_terminal(
+        self, terminal_id: str, *, orphan: Mapping[str, Collection[int]] | None = None
+    ) -> str | None:
+        """Park this terminal: keep its role and settings, spawn nothing. None means done.
+
+        The copies it holds are stranded exactly as an unassign strands them, so the same
+        asking applies -- ``orphan`` is what the person was shown and agreed to give up.
+        A parked slave's records cannot be left behind live: while it is parked the master
+        moves on, and on unhiding, stale records would be reconciled against a book they no
+        longer match. The caller still saves the config and :meth:`sync`, which stops the
+        worker and releases the terminal's claim for other profiles.
+        """
+        with self._lock:
+            cfg = self._cfg.terminals.get(terminal_id)
+            if cfg is None:
+                return "that terminal is gone; rescan"
+            if cfg.role is Role.MASTER:
+                return "the master cannot be parked while its slaves copy it; unassign it instead"
+            refusal = self._give_up_agreed(self._stake(terminal_id, None), orphan)
+            if refusal is not None:
+                return refusal
+            cfg.hidden = True
+        return None
+
+    def unhide_terminal(self, terminal_id: str) -> str | None:
+        """Bring a parked terminal back; it reconnects on the caller's :meth:`sync`."""
+        with self._lock:
+            cfg = self._cfg.terminals.get(terminal_id)
+            if cfg is None:
+                return "that terminal is gone; rescan"
+            cfg.hidden = False
         return None
 
     def logins(self) -> dict[str, int | None]:

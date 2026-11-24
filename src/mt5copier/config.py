@@ -197,6 +197,13 @@ class TerminalConfig(BaseModel):
     target moves, order changes and cancels -- carries on, and it stays connected. Meaningless
     on anything but a slave."""
 
+    hidden: bool = False
+    """Parked: the terminal is not spawned at all -- no connection, no copies, never the
+    direct-trading feed, no card in the zones -- while its role and every setting are kept
+    for the day it is unhidden. Unlike :attr:`paused` this is a full stop, and unlike
+    unassigning it gives nothing up but the open copies it strands at the moment of hiding,
+    which the person is asked about exactly as an unassign asks."""
+
     # --- Stage 2: sizing -------------------------------------------------------------------
     sizing_mode: SizingMode = SizingMode.PERCENT_OF_BALANCE
 
@@ -559,8 +566,12 @@ class AppConfig(BaseModel):
         )
 
     def assigned(self) -> list[TerminalConfig]:
-        """Terminals we should hold a connection to: any with a role, and enabled."""
-        return [t for t in self.terminals.values() if t.role is not Role.UNASSIGNED and t.enabled]
+        """Terminals we should hold a connection to: any with a role, enabled, not parked."""
+        return [
+            t
+            for t in self.terminals.values()
+            if t.role is not Role.UNASSIGNED and t.enabled and not t.hidden
+        ]
 
     def display_name(self, terminal_id: str) -> str:
         """The name to show this terminal by right now: the name set for whichever account it's
