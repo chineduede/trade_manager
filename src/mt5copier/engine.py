@@ -2295,6 +2295,7 @@ class Engine:
             tp_net_rr=self._virtual is not None
             and action.kind
             in (ActionKind.OPEN, ActionKind.PLACE, ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER),
+            risk_distance=action.risk_distance,
         )
 
         # Before sending, because an order that cannot be sent is answered on the spot.

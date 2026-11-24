@@ -18,6 +18,20 @@ from .paths import version_seen_path
 
 NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
+        "0.1.8",
+        "2026-11-24",
+        (
+            "A direct ticket's target stays commission-padded for the whole trade. Moving"
+            " the stop — to breakeven especially — re-sent the ticket's raw target and"
+            " quietly rubbed the pad back off, so a 1:2 that ran to its target paid out"
+            " short of 2R. The pad is now measured from the risk the trade opened with,"
+            " wherever the stop sits since.",
+            "A margin rule no longer refuses a trade because its symbol's very first quote"
+            " was a beat late. The guard waits the quote out the same way the open itself"
+            " already did, instead of declining what it could not yet measure.",
+        ),
+    ),
+    (
         "0.1.7",
         "2026-11-23",
         (

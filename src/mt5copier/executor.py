@@ -215,10 +215,12 @@ class Executor:
     # --- a guard's margin cap -------------------------------------------------------------
 
     def _new_margin(self, cmd: OrderCommand, symbol: str, lots: float) -> float | None:
-        """The margin ``lots`` of this new trade would take, asked of the terminal."""
-        price = (
-            cmd.entry if cmd.op is ActionKind.PLACE else self._market_price(symbol, cmd.direction)
-        )
+        """The margin ``lots`` of this new trade would take, asked of the terminal.
+
+        A market order's price is read tick-tolerantly (:meth:`_first_tick`): the guard runs
+        before the send, so on a symbol selected moments ago this is the first quote anyone
+        has asked for, and a strict margin rule turns "no tick yet" into a refused trade."""
+        price = cmd.entry if cmd.op is ActionKind.PLACE else self._first_tick(symbol, cmd.direction)
         return self._session.margin_for(cmd.direction, symbol, lots, price) if price else None
 
     def _fit(
@@ -889,10 +891,15 @@ class Executor:
         earns (rr + 1) commissions, one pays the winning trade's own, and the other rr cover
         rr times the losing side's. Volume cancels out of the arithmetic, so the pad is the
         same at any size. Done on every command that writes a target, or a later modify would
-        quietly rub the pad back off."""
+        quietly rub the pad back off.
+
+        On a modify the risk is measured from the command's latched ``risk_distance``, never
+        from the stop in hand: a stop that has moved -- to breakeven, past entry -- says
+        nothing about the ticket's risk, and an rr taken against it loses the pad at
+        breakeven exactly (zero distance bails out below) and blows it up just past it."""
         if not cmd.tp_net_rr or not cmd.tp or not cmd.sl or cmd.commission_per_lot <= 0:
             return cmd
-        dist = abs(cmd.entry - cmd.sl)
+        dist = cmd.risk_distance if cmd.op is ActionKind.MODIFY_SLTP else abs(cmd.entry - cmd.sl)
         reward = abs(cmd.tp - cmd.entry)
         if dist <= 0 or reward <= 0:
             return cmd
@@ -1145,10 +1152,10 @@ class Executor:
         cheap insurance against exactly the gap :meth:`symbol_facts` already treats the same
         way for a select that cannot be acted on instantly.
 
-        Only called for the first price read of a fresh OPEN. Repricing mid-retry in
-        :meth:`_send` stays on the bare :meth:`_market_price` -- that path already has its own
-        attempt budget (``MAX_ATTEMPTS``, ``DEADLINE_S``), and a symbol already mid-flight has
-        necessarily ticked at least once already.
+        Only called for the first price reads of a fresh OPEN -- the margin guard's and the
+        send's. Repricing mid-retry in :meth:`_send` stays on the bare :meth:`_market_price`
+        -- that path already has its own attempt budget (``MAX_ATTEMPTS``, ``DEADLINE_S``),
+        and a symbol already mid-flight has necessarily ticked at least once already.
         """
         price = self._market_price(symbol, direction)
         if price is not None:

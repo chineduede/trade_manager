@@ -614,15 +614,20 @@ class CTraderExecutor:
     ) -> OrderCommand:
         """:meth:`mt5copier.executor.Executor._net_rr_target`, rule for rule: a direct
         ticket's target, landed (rr + 1) commissions further out so the realized reward:risk
-        survives commission. Valued the cTrader way, over the entry-to-stop move itself."""
+        survives commission. Valued the cTrader way, over the one-R move itself.
+
+        On a modify the risk is the command's latched ``risk_distance``, never the stop in
+        hand -- a stop moved to or past entry measures nothing -- and the move valued is the
+        opening one, rebuilt from that distance, for the same reason."""
         if not cmd.tp_net_rr or not cmd.tp or not cmd.sl or cmd.commission_per_lot <= 0:
             return cmd
-        dist = abs(cmd.entry - cmd.sl)
+        way = 1.0 if cmd.direction is PositionType.BUY else -1.0
+        dist = cmd.risk_distance if cmd.op is ActionKind.MODIFY_SLTP else abs(cmd.entry - cmd.sl)
         reward = abs(cmd.tp - cmd.entry)
         if dist <= 0 or reward <= 0:
             return cmd
         loss = cv.loss_per_lot(
-            symbol, self._account.deposit_asset_id, cmd.entry, cmd.sl, conversion
+            symbol, self._account.deposit_asset_id, cmd.entry, cmd.entry - way * dist, conversion
         )
         if not loss:
             log.warning(
@@ -635,7 +640,6 @@ class CTraderExecutor:
         value = abs(loss) / dist
         rr = reward / dist
         pad = (rr + 1.0) * cmd.commission_per_lot / value
-        way = 1.0 if cmd.direction is PositionType.BUY else -1.0
         tp = round(cmd.tp + way * pad, symbol.digits)
         log.info(
             "#%s on %s: target %g -> %g, (rr %.2f + 1) commissions of %.2f kept net",

@@ -150,6 +150,11 @@ class Action:
     """OPEN and PLACE: whether the master will manage the copy, fixed on it once it opens. See
     :meth:`mt5copier.config.AppConfig.manages`."""
 
+    risk_distance: float = 0.0
+    """MODIFY_SLTP: the copy's latched one-R distance (see :attr:`CopiedPosition.risk_distance`),
+    carried so a direct ticket's target can be re-padded from the risk the trade *opened* with
+    rather than from wherever its stop sits now. 0 when the copy latched none."""
+
     skip_reason: SkipReason | None = None
     unprotected: bool = False
     """True when this would leave the slave holding a position with no stop loss -- either by
@@ -721,6 +726,7 @@ def reconcile_slave(
                     sl=slave_sl,
                     tp=slave_tp,
                     slave_ticket=c.slave_ticket,
+                    risk_distance=c.risk_distance,
                     skip_reason=None if follow else SkipReason.SLTP_SYNC_DISABLED,
                     # Mirroring is mirroring: a master that clears its stop leaves the copy
                     # unprotected too, because the alternative is a copy that exits where the

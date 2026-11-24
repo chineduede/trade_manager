@@ -556,6 +556,12 @@ class OrderCommand:
     the ticket's rr. Priced by the worker, like breakeven's buffer, because only the terminal
     can say what a price move is worth in its account's money; unpriceable means the target
     goes unpadded, never guessed."""
+    risk_distance: float = 0.0
+    """MODIFY_SLTP with ``tp_net_rr`` only: the copy's latched one-R distance, from its fill
+    to the stop it opened with. The command's ``sl`` is the stop *now*, and a stop that has
+    moved -- to breakeven, past entry -- no longer measures the ticket's risk: measuring rr
+    against it would drop the pad at breakeven exactly (a zero distance) and blow it up just
+    past it. 0 when no copy latched one, and the target then stays at the ticket's level."""
 
 
 @dataclass(frozen=True, slots=True)

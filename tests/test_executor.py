@@ -1217,15 +1217,43 @@ def test_a_sell_pads_its_target_downward() -> None:
 def test_a_direct_stop_move_restates_the_padded_target() -> None:
     """Every later modify re-pads, or it would quietly rub the pad back off."""
     session = closing_session()
-    run(session, modify(sl=1.08000, tp=1.09500, tp_net_rr=True, commission_per_lot=5.0))
+    run(
+        session,
+        modify(sl=1.08000, tp=1.09500, tp_net_rr=True, commission_per_lot=5.0, risk_distance=0.005),
+    )
     assert session.sent[0]["tp"] == pytest.approx(1.09530)
+
+
+def test_a_stop_at_breakeven_keeps_the_padded_target() -> None:
+    """The regression that paid $517 on a $600 trade: a stop moved to entry exactly made the
+    stop-measured risk zero, and the modify re-wrote the ticket's raw target over the padded
+    one. The latched one-R distance is what rr is measured from, wherever the stop sits."""
+    session = closing_session()
+    run(
+        session,
+        modify(sl=1.08500, tp=1.09500, tp_net_rr=True, commission_per_lot=5.0, risk_distance=0.005),
+    )
+    assert session.sent[0]["tp"] == pytest.approx(1.09530)
+
+
+def test_a_stop_past_entry_with_no_latched_risk_pads_nothing() -> None:
+    """Without the opening distance there is no risk to measure: the target stays at the
+    ticket's level rather than being padded against a locked-in stop's sliver of distance,
+    which would fling it absurdly far."""
+    session = closing_session()
+    result = run(session, modify(sl=1.08600, tp=1.09500, tp_net_rr=True, commission_per_lot=5.0))
+    assert result.ok
+    assert session.sent[0]["tp"] == pytest.approx(1.09500)
 
 
 def test_an_unpriceable_move_leaves_the_target_at_the_tickets_level() -> None:
     """Unpadded beats guessed: the trade still goes on at the ticket's own geometry."""
     session = closing_session()
     session.loss = None
-    result = run(session, modify(sl=1.08000, tp=1.09500, tp_net_rr=True, commission_per_lot=5.0))
+    result = run(
+        session,
+        modify(sl=1.08000, tp=1.09500, tp_net_rr=True, commission_per_lot=5.0, risk_distance=0.005),
+    )
     assert result.ok
     assert session.sent[0]["tp"] == pytest.approx(1.09500)
 
