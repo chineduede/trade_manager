@@ -1251,6 +1251,25 @@ async def test_a_stop_at_breakeven_keeps_the_padded_target() -> None:
     assert amend.takeProfit == pytest.approx(1.1032)
 
 
+async def test_a_stop_move_resends_the_resting_padded_target_verbatim() -> None:
+    api = FakeOpenApi()
+    cmd = _command(
+        ActionKind.MODIFY_SLTP,
+        slave_ticket=77,
+        entry=1.1000,
+        sl=1.1000,
+        tp=1.1030,
+        tp_net_rr=True,
+        commission_per_lot=5.0,
+        padded_tp=1.1032,
+    )
+    results = await _results(api, cmd)
+    assert results[0].ok, results[0].error
+    (amend,) = _sent(api, oa.ProtoOAAmendPositionSLTPReq)
+    assert amend.takeProfit == pytest.approx(1.1032)
+    assert results[0].padded_tp == pytest.approx(1.1032)
+
+
 async def test_a_stop_past_entry_with_no_latched_risk_pads_nothing() -> None:
     api = FakeOpenApi()
     cmd = _command(

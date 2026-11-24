@@ -320,6 +320,7 @@ class CTraderExecutor:
             digits=symbol.digits,
             price_value=cv.price_value(symbol, account.deposit_asset_id, price, conversion),
             commission=commission,
+            padded_tp=cmd.padded_tp or None,
         )
 
     # --- resting orders -------------------------------------------------------------------------
@@ -616,11 +617,16 @@ class CTraderExecutor:
         ticket's target, landed (rr + 1) commissions further out so the realized reward:risk
         survives commission. Valued the cTrader way, over the one-R move itself.
 
-        On a modify the risk is the command's latched ``risk_distance``, never the stop in
-        hand -- a stop moved to or past entry measures nothing -- and the move valued is the
-        opening one, rebuilt from that distance, for the same reason."""
+        Computed once, at the trade's first write: a stop-only modify re-sends the resting
+        ``padded_tp`` verbatim. A changed target is padded afresh from the latched
+        ``risk_distance``, never the stop in hand -- a stop moved to or past entry measures
+        nothing -- and the move valued is the opening one, rebuilt from that distance, for
+        the same reason."""
         if not cmd.tp_net_rr or not cmd.tp or not cmd.sl or cmd.commission_per_lot <= 0:
-            return cmd
+            # Scrubbed so belief forgets a pad this command is about to write over.
+            return replace(cmd, padded_tp=0.0) if cmd.padded_tp else cmd
+        if cmd.padded_tp and cmd.op in (ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER):
+            return replace(cmd, tp=cmd.padded_tp)
         way = 1.0 if cmd.direction is PositionType.BUY else -1.0
         dist = cmd.risk_distance if cmd.op is ActionKind.MODIFY_SLTP else abs(cmd.entry - cmd.sl)
         reward = abs(cmd.tp - cmd.entry)
@@ -650,7 +656,7 @@ class CTraderExecutor:
             rr,
             cmd.commission_per_lot,
         )
-        return replace(cmd, tp=tp)
+        return replace(cmd, tp=tp, padded_tp=tp)
 
     async def _fit(
         self,

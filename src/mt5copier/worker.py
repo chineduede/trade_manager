@@ -52,6 +52,7 @@ from .protocol import (
     RatesResult,
     Snapshot,
     SymbolMeta,
+    WarmCommand,
     WatchCommand,
     WorkerState,
 )
@@ -98,6 +99,11 @@ class _Session:
         self._quote_names: dict[str, str | None] = {}
         """Clean name -> this broker's name, or None for one that cannot be resolved (said
         once, at resolution, rather than every poll)."""
+        self.warm: WarmCommand | None = None
+        """Symbols to select into Market Watch without quoting them back, as the supervisor
+        last asked. Latest wins; set from the command loop, consumed by :meth:`poll`."""
+        self._warmed: WarmCommand | None = None
+        """Which warm command has been acted on -- identity, like :attr:`_watch_resolved`."""
         self._symbols_pushed = False
         """Whether this connection's symbol catalog has ridden a snapshot yet; reset on
         connect, so every (re)connect pushes the broker's current list exactly once."""
@@ -500,6 +506,40 @@ class _Session:
         self._quote_names = resolved
         self._watch_resolved = watch
 
+    def _warm_symbols(self) -> None:
+        """Select the warm command's symbols into Market Watch, once per command.
+
+        Resolution is the watch's own (:meth:`_resolve_watch`'s), with this slave's own
+        decoration; ``symbol_facts`` does the selecting, exactly as it does for a watch. A
+        symbol that cannot be resolved warms nothing -- the trade that may follow will say
+        so properly -- and a symbol list that will not read leaves the command to try again
+        next poll.
+        """
+        warm = self.warm
+        if warm is None or self._warmed is warm:
+            return
+        if not warm.symbols:
+            self._warmed = warm
+            return
+        available = self.symbol_names()
+        if not available:
+            return  # tried again next poll
+        symbol_map = dict(warm.symbol_map)
+        for clean in warm.symbols:
+            answer = resolve_symbol(
+                clean,
+                available,
+                warm.symbol_prefix,
+                warm.symbol_suffix,
+                "this slave",
+                symbol_map,
+            )
+            if answer.name is None:
+                log.debug("cannot warm %r here: %s", clean, answer.how)
+                continue
+            self.symbol_facts(answer.name)
+        self._warmed = warm
+
     def read_rates(self, req: RatesRequest) -> tuple[tuple[Candle, ...], SymbolMeta | None] | str:
         """The last ``req.count`` bars of one clean symbol, oldest first, with the symbol's
         pricing facts read in the same pass -- or why they will not read. Resolution is the
@@ -600,6 +640,8 @@ class _Session:
             if names:
                 symbols_once = tuple(names)
                 self._symbols_pushed = True
+        if broker_up:
+            self._warm_symbols()
 
         return Snapshot(
             terminal_id=terminal_id,
@@ -1019,6 +1061,10 @@ def run_worker(
                     # Latest wins, connected or not: resolution happens lazily in poll(),
                     # once there is a symbol list to resolve against.
                     session.watch = cmd
+                    continue
+                if isinstance(cmd, WarmCommand):
+                    # Same shape as the watch: latest wins, acted on lazily in poll().
+                    session.warm = cmd
                     continue
                 if isinstance(cmd, RatesRequest):
                     if session.connected:

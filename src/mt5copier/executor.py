@@ -893,12 +893,19 @@ class Executor:
         same at any size. Done on every command that writes a target, or a later modify would
         quietly rub the pad back off.
 
-        On a modify the risk is measured from the command's latched ``risk_distance``, never
+        The pad is computed once, at the trade's first write. A modify that moves only the
+        stop re-sends the ``padded_tp`` already resting on the broker verbatim -- re-deriving
+        it would wiggle the level with every conversion-rate drift and rub it off entirely in
+        a moment the move cannot be priced. Only a changed target (the diff clears the pad
+        then) is padded afresh, measured from the command's latched ``risk_distance``, never
         from the stop in hand: a stop that has moved -- to breakeven, past entry -- says
         nothing about the ticket's risk, and an rr taken against it loses the pad at
         breakeven exactly (zero distance bails out below) and blows it up just past it."""
         if not cmd.tp_net_rr or not cmd.tp or not cmd.sl or cmd.commission_per_lot <= 0:
-            return cmd
+            # Scrubbed so belief forgets a pad this command is about to write over.
+            return replace(cmd, padded_tp=0.0) if cmd.padded_tp else cmd
+        if cmd.padded_tp and cmd.op in (ActionKind.MODIFY_SLTP, ActionKind.MODIFY_ORDER):
+            return replace(cmd, tp=cmd.padded_tp)
         dist = cmd.risk_distance if cmd.op is ActionKind.MODIFY_SLTP else abs(cmd.entry - cmd.sl)
         reward = abs(cmd.tp - cmd.entry)
         if dist <= 0 or reward <= 0:
@@ -925,7 +932,7 @@ class Executor:
             rr,
             cmd.commission_per_lot,
         )
-        return replace(cmd, tp=tp)
+        return replace(cmd, tp=tp, padded_tp=tp)
 
     def _send(
         self,
@@ -975,6 +982,7 @@ class Executor:
                     filled_volume=filled,
                     price=_float_or_none(getattr(last, "price", None)) or price,
                     attempts=attempts,
+                    padded_tp=cmd.padded_tp or None,
                     # A PLACE is included only when its request became a market deal -- the
                     # fallback's last resort -- whose fill has an opening deal like any
                     # OPEN's. A genuinely resting PLACE has been charged nothing yet.

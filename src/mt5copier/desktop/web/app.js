@@ -4685,7 +4685,7 @@ var TD_INPUTS = ['risk_percent', 'risk_cash', 'commission_per_lot_round_turn',
   'slippage_buffer_points', 'max_lot', 'max_deviation_points', 'no_stop_lot_multiple',
   'breakeven_trigger_r', 'breakeven_book_percent', 'symbol_prefix', 'symbol_suffix',
   'symbol_map', 'symbol_whitelist', 'symbol_blacklist'];
-var TD_TICKS = ['master_manages', 'copy_pending', 'pending_fallback'];
+var TD_TICKS = ['master_manages', 'copy_pending', 'pending_fallback', 'tp_net_rr'];
 var TD_SLIDERS = ['risk_percent', 'breakeven_trigger_r', 'breakeven_book_percent'];
 var TD_ERRS = TD_INPUTS.concat(TD_TICKS,
   ['sizing_mode', 'invert', 'no_stop_policy', 'breakeven_mode']);

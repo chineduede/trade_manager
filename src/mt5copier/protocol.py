@@ -246,6 +246,23 @@ class WatchCommand:
     :attr:`OrderCommand.symbol_map`."""
 
 
+@dataclass(frozen=True, slots=True)
+class WarmCommand:
+    """Supervisor -> worker: select these symbols into Market Watch, quoting nothing back.
+
+    Direct trading previews a symbol on the ticket before any trade exists on it, and an
+    MT5 symbol selected only at order time can sit tickless for a stretch right when the
+    margin guard and the open ask for its first price. Warming every connected slave as the
+    ticket's symbol is chosen means the quote has usually started by the time an order
+    arrives; the executor's tick-tolerant first read stays as the fallback. Resolution is
+    the watch's own; a symbol that cannot be resolved warms nothing and is only logged."""
+
+    symbols: tuple[str, ...] = ()
+    symbol_prefix: str = ""
+    symbol_suffix: str = ""
+    symbol_map: tuple[tuple[str, str], ...] = ()
+
+
 CHART_TIMEFRAMES: tuple[tuple[str, int], ...] = (
     ("M1", 1),
     ("M5", 5),
@@ -562,6 +579,13 @@ class OrderCommand:
     moved -- to breakeven, past entry -- no longer measures the ticket's risk: measuring rr
     against it would drop the pad at breakeven exactly (a zero distance) and blow it up just
     past it. 0 when no copy latched one, and the target then stays at the ticket's level."""
+    padded_tp: float = 0.0
+    """MODIFY_SLTP and MODIFY_ORDER with ``tp_net_rr`` only: the padded target already
+    resting on the broker, passed while the ticket's own target has not moved since the pad
+    was computed. The worker re-sends it verbatim -- the pad is worked out once, at the
+    trade's first write, not re-derived per modify against a drifting conversion rate or a
+    momentarily unpriceable move. 0 when the ticket's target changed (the worker then pads
+    afresh from ``risk_distance``) and on every command that opens or places."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,6 +645,11 @@ class OrderResult:
     """On a filled OPEN: the commission charged on the opening deal, as a positive cost in the
     account currency. None when it could not be read or none was charged; the copy then falls
     back to the slave's ``commission_per_lot_round_turn``."""
+
+    padded_tp: float | None = None
+    """The cost-padded target this command actually wrote (or knowingly left resting), when
+    ``tp_net_rr`` padded one. None when the target went out as the ticket's own. Kept on the
+    copy record so a later stop move re-sends the same target instead of re-deriving it."""
 
     placed_type: OrderType | None = None
     """On a filled PLACE: the resting type actually placed, when the fallback flipped it away

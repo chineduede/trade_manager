@@ -33,6 +33,7 @@ from mt5copier.protocol import (
     RatesRequest,
     RatesResult,
     Snapshot,
+    WarmCommand,
     WatchCommand,
     WorkerState,
 )
@@ -344,6 +345,18 @@ def test_the_ticket_preview_symbol_is_watched_too(engine: Engine) -> None:
     engine.virtual_tick()
     watches = [c for c in engine._workers[SLAVE].cmd_q.sent if isinstance(c, WatchCommand)]
     assert watches and watches[-1].symbols == ("XAUUSD",)
+
+
+def test_the_ticket_symbol_warms_every_slave_once(engine: Engine) -> None:
+    """Choosing a symbol on the ticket selects it on every connected MT5 slave right away,
+    so its first tick has usually started before an order lands on it."""
+    feed(engine, EURUSD_QUOTE)
+    engine.watch_direct("xauusd")
+    warms = [c for c in engine._workers[SLAVE].cmd_q.sent if isinstance(c, WarmCommand)]
+    assert warms and warms[-1].symbols == ("XAUUSD",)
+    engine.watch_direct("xauusd")
+    warms = [c for c in engine._workers[SLAVE].cmd_q.sent if isinstance(c, WarmCommand)]
+    assert len(warms) == 1, "the same symbol is not re-warmed"
 
 
 def test_an_unchanged_watch_is_not_resent(engine: Engine) -> None:

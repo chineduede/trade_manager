@@ -307,6 +307,9 @@ def command_result(cmd: OrderCommand, terminal_id: str, *, ok: bool, **kw: Any) 
     defaulted from ``ok``. Both brokers' ``_fail``/``_ok`` delegate here, so a result can
     never claim to answer a command it does not."""
     kw.setdefault("outcome", (Outcome.SUCCEEDED if ok else Outcome.FATAL).value)
+    # The pad travels on the command (set or scrubbed by _net_rr_target), so belief records
+    # the target the broker is really resting at -- or forgets one it no longer is.
+    kw.setdefault("padded_tp", cmd.padded_tp or None)
     return OrderResult(
         command_id=cmd.command_id,
         terminal_id=terminal_id,

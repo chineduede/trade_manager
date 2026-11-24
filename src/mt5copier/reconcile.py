@@ -155,6 +155,11 @@ class Action:
     carried so a direct ticket's target can be re-padded from the risk the trade *opened* with
     rather than from wherever its stop sits now. 0 when the copy latched none."""
 
+    padded_tp: float = 0.0
+    """MODIFY_SLTP and MODIFY_ORDER: the padded target the copy already rests at, passed only
+    while the ticket's own target (and, for an order, its entry) is unchanged -- the worker
+    then re-sends it verbatim. See :attr:`CopiedPosition.padded_tp`."""
+
     skip_reason: SkipReason | None = None
     unprotected: bool = False
     """True when this would leave the slave holding a position with no stop loss -- either by
@@ -252,6 +257,11 @@ class CopiedPosition:
     deal was charged, doubled for the way out, over the lots it filled. 0 when unknown -- a
     resting order's fill, a deal that showed none -- and the slave's setting is used instead.
     See :func:`round_turn_per_lot`."""
+    padded_tp: float = 0.0
+    """Direct trading only: the cost-padded target the copy actually rests at, written once
+    when the ticket's target was first padded (:attr:`OrderCommand.padded_tp`). A stop move
+    re-sends this exact level; it is cleared, and the pad computed afresh, when the ticket's
+    own target changes. 0 for an unpadded copy."""
     breakeven_sl: float = 0.0
     """The breakeven floor, once triggered; 0 until then. The diff sends whichever of this
     and the master's stop is more protective -- see :func:`protective_sl`."""
@@ -302,6 +312,8 @@ class CopiedOrder:
     digits: int = 0
     risk_distance: float = 0.0
     price_value: float = 0.0
+    """Carried over to the position on a fill; see :class:`CopiedPosition`."""
+    padded_tp: float = 0.0
     """Carried over to the position on a fill; see :class:`CopiedPosition`."""
     master_managed: bool = True
     """Carried over to the position on a fill. A resting order itself is always mirrored."""
@@ -727,6 +739,9 @@ def reconcile_slave(
                     tp=slave_tp,
                     slave_ticket=c.slave_ticket,
                     risk_distance=c.risk_distance,
+                    # The resting pad holds only while the ticket's target does: a target the
+                    # person moved is a new intent, padded afresh by the worker.
+                    padded_tp=c.padded_tp if _same(slave_tp, c.synced_tp, _PRICE_EPS) else 0.0,
                     skip_reason=None if follow else SkipReason.SLTP_SYNC_DISABLED,
                     # Mirroring is mirroring: a master that clears its stop leaves the copy
                     # unprotected too, because the alternative is a copy that exits where the
@@ -893,6 +908,13 @@ def reconcile_slave_orders(
                     tp=slave_tp,
                     expiration_utc=o.expiration_utc,
                     slave_ticket=c.slave_ticket,
+                    risk_distance=c.risk_distance,
+                    # Entry compared too: an order's reward is measured from its entry, so a
+                    # moved entry re-pads as much as a moved target does.
+                    padded_tp=c.padded_tp
+                    if _same(slave_tp, c.synced_tp, _PRICE_EPS)
+                    and _same(o.price_open, c.entry, _PRICE_EPS)
+                    else 0.0,
                     skip_reason=None if cfg.copy_pending else SkipReason.PENDING_DISABLED,
                 )
             )
@@ -962,6 +984,7 @@ class BeliefStore(Protocol):
         risk_distance: float = 0.0,
         price_value: float = 0.0,
         commission_per_lot: float = 0.0,
+        padded_tp: float = 0.0,
         master_managed: bool = True,
     ) -> object: ...
 
@@ -984,6 +1007,7 @@ class BeliefStore(Protocol):
         digits: int = 0,
         risk_distance: float = 0.0,
         price_value: float = 0.0,
+        padded_tp: float = 0.0,
         master_managed: bool = True,
     ) -> object: ...
 
@@ -1036,6 +1060,7 @@ class _MemoryBeliefs:
         risk_distance: float = 0.0,
         price_value: float = 0.0,
         commission_per_lot: float = 0.0,
+        padded_tp: float = 0.0,
         master_managed: bool = True,
     ) -> CopiedPosition:
         key = (terminal_id, master_ticket)
@@ -1055,6 +1080,7 @@ class _MemoryBeliefs:
             risk_distance=risk_distance,
             price_value=price_value,
             commission_per_lot=commission_per_lot,
+            padded_tp=padded_tp,
             master_managed=master_managed,
         )
         self._positions[key] = copy
@@ -1079,6 +1105,7 @@ class _MemoryBeliefs:
         digits: int = 0,
         risk_distance: float = 0.0,
         price_value: float = 0.0,
+        padded_tp: float = 0.0,
         master_managed: bool = True,
     ) -> CopiedOrder:
         copy = CopiedOrder(
@@ -1097,6 +1124,7 @@ class _MemoryBeliefs:
             digits=digits,
             risk_distance=risk_distance,
             price_value=price_value,
+            padded_tp=padded_tp,
             master_managed=master_managed,
         )
         self._orders[(terminal_id, master_ticket)] = copy
@@ -1666,6 +1694,7 @@ class CopyLedger:
             digits=order.digits,
             risk_distance=order.risk_distance,
             price_value=order.price_value,
+            padded_tp=order.padded_tp,
             master_managed=order.master_managed,
         )
 
@@ -1845,6 +1874,7 @@ class CopyLedger:
                 risk_distance=_risk_distance(result.price, last.sl),
                 price_value=result.price_value or 0.0,
                 commission_per_lot=round_turn_per_lot(result.commission, result.filled_volume),
+                padded_tp=result.padded_tp or 0.0,
                 master_managed=last.master_managed,
             )
         elif result.op is ActionKind.PLACE and result.filled_at_market:
@@ -1870,6 +1900,7 @@ class CopyLedger:
                 risk_distance=_risk_distance(result.price, last.sl),
                 price_value=result.price_value or 0.0,
                 commission_per_lot=round_turn_per_lot(result.commission, result.filled_volume),
+                padded_tp=result.padded_tp or 0.0,
                 master_managed=last.master_managed,
             )
             self._excluded_orders.setdefault(result.terminal_id, set()).add(result.master_ticket)
@@ -1894,6 +1925,7 @@ class CopyLedger:
                 # A resting order fills at its own price, give or take a stop order's slippage.
                 risk_distance=_risk_distance(last.entry, last.sl),
                 price_value=result.price_value or 0.0,
+                padded_tp=result.padded_tp or 0.0,
                 master_managed=last.master_managed,
             )
         elif result.op is ActionKind.REDUCE:
@@ -1922,7 +1954,13 @@ class CopyLedger:
                 # record a stop the slave never carried, and the diff never re-reads the
                 # slave, so nothing would ever notice.
                 return
-            changes: dict[str, Any] = {"synced_sl": last.sl, "synced_tp": last.tp}
+            changes: dict[str, Any] = {
+                "synced_sl": last.sl,
+                "synced_tp": last.tp,
+                # The pad the modify left resting: the one it re-sent or freshly computed,
+                # or 0 when the target went out as the ticket's own.
+                "padded_tp": result.padded_tp or 0.0,
+            }
             if result.op is ActionKind.MODIFY_ORDER:
                 changes["synced_expiration"] = last.expiration_utc
                 if not self._is_order(last.terminal_id, last.master_ticket):

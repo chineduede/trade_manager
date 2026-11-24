@@ -280,6 +280,13 @@ class TerminalConfig(BaseModel):
     fills. On by default, because the alternative is the trade silently not copying; turn it
     off on a slave that must only ever rest exactly what the master rests."""
 
+    tp_net_rr: bool = True
+    """Direct trading only: land this slave's target past the ticket's by (rr + 1) of its own
+    commissions, so a win pays the ticket's risk:reward after costs. The pad is computed once,
+    when the trade is first written, and survives every later stop move. Off, the ticket's
+    target is sent exactly as written and commission comes out of the win. Ignored when
+    copying a real master -- that trader's level is never touched either way."""
+
     # --- breakeven ---------------------------------------------------------------------------
     breakeven_mode: BreakevenMode = BreakevenMode.OFF
     breakeven_trigger_r: float = Field(default=1.0, gt=0)

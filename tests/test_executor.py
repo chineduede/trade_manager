@@ -1236,6 +1236,53 @@ def test_a_stop_at_breakeven_keeps_the_padded_target() -> None:
     assert session.sent[0]["tp"] == pytest.approx(1.09530)
 
 
+def test_a_stop_move_resends_the_resting_padded_target_verbatim() -> None:
+    """The pad is computed once, at the trade's first write: a stop-only modify re-sends the
+    exact target resting on the broker and prices nothing -- loss=None here proves it, where
+    re-deriving would have rubbed the pad off as unpriceable."""
+    session = closing_session()
+    session.loss = None
+    result = run(
+        session,
+        modify(
+            sl=1.08500,
+            tp=1.09500,
+            tp_net_rr=True,
+            commission_per_lot=5.0,
+            risk_distance=0.005,
+            padded_tp=1.09530,
+        ),
+    )
+    assert result.ok
+    assert session.sent[0]["tp"] == pytest.approx(1.09530)
+    assert result.padded_tp == pytest.approx(1.09530), "belief keeps the resting pad"
+
+
+def test_a_fresh_pad_rides_the_result_so_belief_can_keep_it() -> None:
+    session = FakeSession()
+    result = run(session, cmd(tp=1.09500, tp_net_rr=True, commission_per_lot=5.0))
+    assert result.padded_tp == pytest.approx(1.09530)
+
+
+def test_an_unpadded_target_records_no_pad() -> None:
+    session = FakeSession()
+    result = run(session, cmd(tp=1.09500, commission_per_lot=5.0))
+    assert result.padded_tp is None
+
+
+def test_switching_the_pad_off_scrubs_the_recorded_pad() -> None:
+    """A modify sent with the feature off (tp cleared here makes the gate bail) must also
+    make belief forget the pad, or the next modify would resurrect a target the ticket no
+    longer means."""
+    session = closing_session()
+    result = run(
+        session,
+        modify(sl=1.08500, tp=0.0, tp_net_rr=True, commission_per_lot=5.0, padded_tp=1.09530),
+    )
+    assert result.ok
+    assert result.padded_tp is None
+
+
 def test_a_stop_past_entry_with_no_latched_risk_pads_nothing() -> None:
     """Without the opening distance there is no risk to measure: the target stays at the
     ticket's level rather than being padded against a locked-in stop's sliver of distance,
