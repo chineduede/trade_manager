@@ -18,6 +18,22 @@ from .paths import version_seen_path
 
 NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
+        "0.1.9",
+        "2026-11-24",
+        (
+            "A feed broker that decorates its symbol names — EURUSDp, EURUSD.r, mEURUSD —"
+            " no longer needs its prefix or suffix typed into its settings for direct"
+            " trading. The app reads the decoration off the broker's own symbol list, the"
+            " ticket's search and anything typed into it land on the plain name, and every"
+            " slave is sent EURUSD instead of erroring on a name its broker does not list."
+            " A configured prefix or suffix still outranks the automatic reading, and a"
+            " broker listing both spellings of a name is left alone rather than guessed at.",
+            "The same reading covers a copied master: a master whose broker decorates its"
+            " names now has them stripped for the slaves even when its prefix/suffix"
+            " settings were never filled in.",
+        ),
+    ),
+    (
         "0.1.8",
         "2026-11-24",
         (
