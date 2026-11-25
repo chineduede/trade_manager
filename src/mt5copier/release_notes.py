@@ -77,7 +77,9 @@ NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             " into it. Using an account — assigning a terminal that holds it, or logging"
             " one in — takes ownership; unassigning or hiding that terminal releases it."
             " The same terminal is still free for other profiles with a different"
-            " account.",
+            " account. A card sitting on another profile's account shows it at a glance —"
+            " dimmed and dashed, with an OWNED pill naming the profile — and a drag that"
+            " could only be refused says so the moment it starts instead of at the drop.",
             "If a profile sits on an account you need, its card's ··· menu offers Take"
             " ownership, behind a confirmation that says exactly what it costs: the other"
             " profile's terminal stops, and any copies it held stay open there,"

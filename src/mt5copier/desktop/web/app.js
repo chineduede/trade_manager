@@ -1704,20 +1704,29 @@ function terminalCard(c, live) {
 
   if (c.role === 'unassigned') {
     // A detected terminal: what it is and whether it could connect, nothing more.
-    if (c.isCtrader) head.appendChild(pill('SLAVE ONLY', 'muted'));
+    if (c.ownedBy) {
+      // Another profile's account: the card says so up front, instead of letting a
+      // drag to a zone collect the refusal.
+      el.classList.add('tcard-owned');
+      head.appendChild(pill('OWNED · ' + c.ownedBy, 'yellow'));
+    } else if (c.isCtrader) head.appendChild(pill('SLAVE ONLY', 'muted'));
     else if (!c.hasExe) head.appendChild(pill('NOT INSTALLED', 'muted'));
     else if (!c.login) head.appendChild(pill('NO ACCOUNT', 'muted'));
     head.appendChild(cardActions(c));
     el.classList.add('has-acts');
     el.appendChild(head);
     el.appendChild(acctLine(c));
-    var said;
-    if (!c.hasExe && !c.isCtrader) said = 'found in config · cannot be launched from here';
+    var said, saidCls = 'tcard-info';
+    if (c.ownedBy) {
+      said = 'its account is profile ‘' + c.ownedBy + '’s — log in to another '
+        + 'account here, or take ownership under ···';
+      saidCls += ' yellow';
+    } else if (!c.hasExe && !c.isCtrader) said = 'found in config · cannot be launched from here';
     else {
       said = c.login ? 'logged in' : 'not logged in';
       if (c.isCtrader) said += ' · can copy, cannot feed';
     }
-    el.appendChild(cardLine('tcard-info', said));
+    el.appendChild(cardLine(saidCls, said));
     if (c.loggingIn) {
       el.appendChild(cardLine('tcard-login yellow', 'logging in…'));
     }
@@ -1730,6 +1739,7 @@ function terminalCard(c, live) {
   // fixed place, so cards line up with each other whatever their content.
   var word = stateWord(c, live);
   if (word.cls !== 'muted') el.classList.add('edge-' + word.cls);
+  if (c.ownedBy) el.classList.add('tcard-owned');
   head.appendChild(cardLine('tcard-word ' + word.cls, word.text));
   head.appendChild(cardActions(c));
   el.classList.add('has-acts');
@@ -1746,8 +1756,11 @@ function terminalCard(c, live) {
 
   var info, infoCls = 'tcard-info', infoTitle = '';
   if (c.claimRefused) {
-    // The whole story in one line: whose it is, and that no rescan is needed.
-    info = c.claimRefused + ' — frees itself when that app closes';
+    // The whole story in one line: whose it is, and what would change that. An owned
+    // account never frees itself -- ownership survives the other window closing.
+    info = c.ownedBy
+      ? c.claimRefused + ' — read-only here; take ownership under ···'
+      : c.claimRefused + ' — frees itself when that app closes';
     infoTitle = info;
     infoCls += ' yellow';
   } else if (c.role === 'slave') {
@@ -2047,6 +2060,14 @@ function wireCard(el, c) {
       if (!started) {
         if (Math.abs(e.clientX - startX) < 6 && Math.abs(e.clientY - startY) < 6) return;
         started = true;
+        if (c.role === 'unassigned' && c.ownedBy) {
+          // The drag could only end in a refusal: say it at the grab instead.
+          letGo();
+          toast('its account is owned by profile ‘' + c.ownedBy + '’ — it cannot '
+            + 'be assigned here; log it into another account, or take ownership from '
+            + 'its ··· menu', 'bad');
+          return;
+        }
         beginDrag(el, c, e);
       }
       moveDrag(e);

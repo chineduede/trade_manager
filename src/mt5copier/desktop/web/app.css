@@ -502,6 +502,11 @@ body.dragging-terminals .zone-cue { display: inline-block; }
 /* While its ··· menu is open the strip stays up and the ··· reads pressed (acts-open,
    set by the toggle and re-applied across the poll's rebuilds). */
 .tcard.acts-open .icon-dots { background: var(--hairline); color: var(--fg); }
+/* A card whose account another profile owns: present and legible, visibly not ours --
+   dimmed and dashed so nobody starts a drag that could only be refused. Hover restores
+   full clarity for reading it. */
+.tcard-owned { opacity: 0.72; border-style: dashed; }
+.tcard-owned:hover, .tcard-owned:focus-within { opacity: 1; }
 .icon-btn {
   width: 24px; height: 24px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
