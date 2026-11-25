@@ -2105,20 +2105,65 @@ function beginDrag(el, c, e) {
   document.body.appendChild(ghost);
   el.classList.add('drag-src');
   document.body.classList.add('dragging-terminals');
-  T.drag = { card: c, ghost: ghost, el: el };
+  T.drag = { card: c, ghost: ghost, el: el, x: e.clientX, y: e.clientY };
   moveDrag(e);
+  revealDrop(c);
+  requestAnimationFrame(dragEdgeScroll);
 }
 
-function zoneUnder(e) {
-  var at = document.elementFromPoint(e.clientX, e.clientY);
+// With enough terminals the DETECTED grid fills the window, and a grab can find MASTER
+// and SLAVES scrolled clean out of sight — nothing visible to drop on. The grab brings
+// the card's destination back: the zones row for a detected card, the DETECTED zone for
+// an assigned card on its way out.
+function revealDrop(c) {
+  var target = $(c.role === 'unassigned' ? 'zones-row' : 'zone-detected');
+  var main = $('main');
+  if (!target || !main) return;
+  var t = target.getBoundingClientRect(), m = main.getBoundingClientRect();
+  var shown = Math.min(t.bottom, m.bottom) - Math.max(t.top, m.top);
+  if (shown >= Math.min(t.height, 120)) return; // enough of it already on screen to hit
+  target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// While a card is held near the top or bottom edge the page keeps scrolling, so a drop
+// zone beyond the fold stays reachable without letting go. The loop lives exactly as
+// long as the drag does.
+function dragEdgeScroll() {
+  var drag = T.drag;
+  if (!drag) return;
+  var m = $('main').getBoundingClientRect();
+  var band = 70, dy = 0;
+  if (drag.y < m.top + band) dy = -Math.ceil((m.top + band - drag.y) / 4);
+  else if (drag.y > m.bottom - band) dy = Math.ceil((drag.y - (m.bottom - band)) / 4);
+  if (dy) $('main').scrollTop += dy;
+  // The reveal scroll and the edge scroll both move the page under a pointer that may
+  // be holding still — the highlight is re-aimed every frame so it stays true.
+  placeDrag();
+  requestAnimationFrame(dragEdgeScroll);
+}
+
+function zoneAt(x, y) {
+  var at = document.elementFromPoint(x, y);
   return at ? at.closest('.zone') : null;
 }
 
+function zoneUnder(e) { return zoneAt(e.clientX, e.clientY); }
+
 function moveDrag(e) {
   if (!T.drag) return;
-  T.drag.ghost.style.left = (e.clientX + 10) + 'px';
-  T.drag.ghost.style.top = (e.clientY - 20) + 'px';
-  var over = zoneUnder(e);
+  T.drag.x = e.clientX;
+  T.drag.y = e.clientY;
+  placeDrag();
+}
+
+// The ghost and the drop highlight follow whichever moved last — the pointer, or the
+// page scrolling underneath a pointer that is holding still.
+function placeDrag() {
+  var drag = T.drag;
+  if (!drag) return;
+  drag.ghost.style.left = (drag.x + 10) + 'px';
+  drag.ghost.style.top = (drag.y - 20) + 'px';
+  var over = zoneAt(drag.x, drag.y);
   document.querySelectorAll('.zone').forEach(function (z) {
     z.classList.toggle('drop-hot', z === over);
   });
