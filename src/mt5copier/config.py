@@ -505,14 +505,16 @@ def remember_policy(tcfg: TerminalConfig) -> None:
     owns its terminals; what an account runs with belongs to the account, wherever it is
     next logged in.
 
-    Called wherever settings are about to stop being that account's active settings: the
-    app's own account switch, a discovery sweep that notices a login made in MT5 itself, and
-    a setup load about to replace settings wholesale. The call must come *before* the change,
-    while the settings and the account still correspond -- afterwards the terminal holds the
-    new settings, and remembering then would file them under an account they were never
-    tuned for. Saving is lossless and silent, so it never needs a question; the newest save
-    for an account simply wins, because the terminal's current settings are by construction
-    the last ones in force on it.
+    Called in two situations. Where settings are about to stop being that account's active
+    settings -- the app's own account switch, and a discovery sweep that notices a login
+    made in MT5 itself -- the call must come *before* the change, while the settings and
+    the account still correspond: afterwards the terminal holds the new settings, and
+    remembering then would file them under an account they were never tuned for. And on
+    every deliberate settings save, where the saved config *is* the account's newest
+    settings -- banking it at once is what lets every other window's poll show the account
+    tuned the same way (``DesktopApi._refresh_policies``). Saving is lossless and silent,
+    so it never needs a question; the newest save for an account simply wins, because the
+    terminal's current settings are by construction the last ones in force on it.
     """
     key = account_key(tcfg.last_login, tcfg.last_server)
     if key is None:
@@ -528,9 +530,9 @@ def restore_policy(tcfg: TerminalConfig) -> tuple[TerminalConfig, bool]:
     The counterpart of :func:`remember_policy`, reading the same shared table, applied
     where a terminal starts holding an account: the app's own account switch, and the
     discovery paths in :func:`merge_discovery` -- a brand-new profile's first sweep finds
-    its terminals' accounts already tuned. A setup load never restores -- a setup's saved
-    settings *are* the remembered intent, and restoring over them would fight the load the
-    person just asked for.
+    its terminals' accounts already tuned. The desktop's poll also folds a newer bank onto
+    terminals already holding the account (``DesktopApi._refresh_policies``), so an account
+    reads as one live set of settings machine-wide, never a per-profile copy.
 
     Keys the snapshot carries that the schema no longer has are ignored; a snapshot the
     current schema rejects outright restores nothing rather than half of itself.

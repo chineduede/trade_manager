@@ -231,6 +231,10 @@ class DesktopApi:
         """The guards store's stamp as last read here. The store is shared by every
         profile, so a poll can tell an edit made in another window from nothing by one
         SELECT."""
+        self._policies_stamp: int | None = None
+        """The account-settings bank's stamp as last folded in here. A save in any window
+        bumps it, and every window's next poll adopts the account's new settings -- one
+        memory for the machine, never a per-profile copy."""
 
     def attach(self, window: webview.Window) -> None:
         self._window = window
@@ -241,6 +245,7 @@ class DesktopApi:
         every local edit saves at once, so memory never holds anything newer than the file).
         Called from the polls that read them."""
         shared_data.refresh_names(self._cfg)
+        self._refresh_policies()
         try:
             stamp = shared_db.get().stamp(shared_db.GUARDS)
         except sqlite3.Error:
@@ -254,6 +259,39 @@ class DesktopApi:
         # holds one the file lacks -- except one another window just deleted, which this
         # replacement is what lets go of.
         self._guards_doc.templates = dict(fresh.templates)
+
+    def _refresh_policies(self) -> None:
+        """Adopt account settings banked since the last poll -- by another window, or by
+        this one, whose own save then reads back as already current and changes nothing.
+
+        An account's settings are one memory for the whole machine, so a terminal here
+        holding that account takes the newest save. The swap goes through the engine like
+        any other settings edit, so open copies stay managed; only the policy block moves,
+        and the broker facts and the live-trading consent stay the terminal's own, exactly
+        as on an account switch."""
+        try:
+            stamp = shared_db.get().stamp(shared_db.POLICIES)
+        except sqlite3.Error:
+            return
+        if stamp == self._policies_stamp:
+            return
+        self._policies_stamp = stamp
+        changed = False
+        for tcfg in list(self._cfg.terminals.values()):
+            restored, hit = config_mod.restore_policy(tcfg)
+            if not hit:
+                continue
+            if config_mod.snapshot_policy(restored) == config_mod.snapshot_policy(tcfg):
+                continue
+            if self._engine.apply_settings(restored) is None:
+                log.info(
+                    "settings for %s (%s) caught up with the account's newest save",
+                    self._cfg.display_name(tcfg.terminal_id),
+                    tcfg.terminal_id[:8],
+                )
+                changed = True
+        if changed:
+            self._persist()
 
     # --- window chrome ----------------------------------------------------------------------
 
@@ -2118,6 +2156,7 @@ class DesktopApi:
             refusal = self._engine.apply_settings(new)
             if refusal is not None:
                 return {"text": f"Settings were not copied: {refusal}", "tone": "bad"}
+            config_mod.remember_policy(new)
             self._persist()
         return {"text": f"Settings copied from {offer['from']} to {offer['to']}.", "tone": "ok"}
 
@@ -2981,6 +3020,9 @@ class DesktopApi:
         refusal = self._engine.apply_settings(new)
         if refusal is not None:
             return {"ok": False, "errors": {}, "message": refusal}
+        # The save is the account's newest settings: banked at once, so every other
+        # profile holding this account adopts it on its next poll.
+        config_mod.remember_policy(new)
         log.info(
             "settings changed for %s (%s): %s",
             new.label,
