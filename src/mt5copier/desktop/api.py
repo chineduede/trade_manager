@@ -753,6 +753,9 @@ class DesktopApi:
         # different account remains the documented way out.
         assigned_by = ownership.assigned_elsewhere(tcfg)
         owned_by = assigned_by or ownership.owned_elsewhere_for(tcfg)
+        # Whether the owning profile's window is open decides what the card may offer:
+        # open means the change is made there, closed means Take ownership is the door.
+        owner_open = owned_by is not None and profiles_mod.is_running(owned_by)
         return {
             "tid": tid,
             "name": info.label,
@@ -764,6 +767,7 @@ class DesktopApi:
             "claimRefused": view.claim_refused,
             "ownedBy": owned_by,
             "assignedBy": assigned_by,
+            "ownerOpen": owner_open,
             "tier": info.tier,
             "login": info.login,
             "server": info.server,
@@ -965,14 +969,25 @@ class DesktopApi:
     def take_ownership(self, tid: str) -> dict[str, Any]:
         """The deliberate takeover: this profile becomes the owner of the terminal and
         the account it holds. The page asks first, in exactly these words -- the profile
-        that had them loses them, its worker there stops when it notices, and any copies
-        it held stay open, unmanaged."""
+        that had them loses them, and any copies it held stay open, unmanaged.
+
+        Only a *closed* profile can be taken from: while the owner's window is open, the
+        change belongs in that window -- unassign or hide it there -- never yanked from
+        this one. The owner check is live (an OS lock that dies with its process), so a
+        crashed window never blocks a takeover.
+        """
         tid = str(tid)
         tcfg = self._cfg.terminals.get(tid)
         if tcfg is None:
             return _no("that terminal is gone; rescan")
         if not ownership.keys_of(tcfg):
             return _no("this terminal has nothing to take; log it in first")
+        who = ownership.owned_elsewhere_for(tcfg)
+        if who is not None and profiles_mod.is_running(who):
+            return _no(
+                f"profile {who!r} is open right now; unassign or hide the terminal in "
+                "that window, or close it and take ownership then"
+            )
         name = self._cfg.display_name(tid)
         lost = ownership.force_take_for(tcfg)
         self._engine.sync()
@@ -1197,15 +1212,18 @@ class DesktopApi:
         for acct in accounts:
             key = account_key(acct.login, acct.server) or ""
             called = cfg.account_names.get(key)
+            owned = ownership.owned_elsewhere(key)
             rows.append(
                 {
                     "key": key,
                     "words": f"{called} · {key}" if called else key,
                     "now": key == now,
                     "usedBy": self._account_used_by(tid, key),
-                    # Another profile's account is still pickable: the pick asks to
-                    # take it over instead of flatly refusing (account_login's take).
-                    "ownedBy": ownership.owned_elsewhere(key),
+                    # Another profile's account is still pickable while that profile is
+                    # closed: the pick asks to take it over (account_login's take). With
+                    # the owner's window open it is simply held -- the change is theirs.
+                    "ownedBy": owned,
+                    "ownerOpen": owned is not None and profiles_mod.is_running(owned),
                 }
             )
         return {"ok": True, "name": name, "accounts": rows}
@@ -1246,6 +1264,15 @@ class DesktopApi:
                 "is used on one terminal at a time"
             )
         who = ownership.owned_elsewhere(key)
+        if who is not None and profiles_mod.is_running(who):
+            # Checked whether or not take was sent: the owner may have opened between
+            # the page's confirmation and this call, and an open profile is never taken
+            # from -- the change belongs in its window.
+            return _no(
+                f"{self._account_called(key)} is owned by profile {who!r}, whose window "
+                "is open right now; switch it there, or close that window and take it "
+                "over here"
+            )
         if who is not None and not take:
             return _no(
                 f"{self._account_called(key)} is owned by profile {who!r} and read-only "

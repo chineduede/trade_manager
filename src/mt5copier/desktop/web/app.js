@@ -1719,12 +1719,14 @@ function terminalCard(c, live) {
     el.appendChild(acctLine(c));
     var said, saidCls = 'tcard-info';
     if (c.assignedBy) {
-      said = 'assigned by profile ‘' + c.assignedBy + '’ — unassign or hide it there, '
-        + 'or take ownership under ···';
+      // Only a closed profile can be taken from; open, the change belongs there.
+      said = 'assigned by profile ‘' + c.assignedBy + '’ — ' + (c.ownerOpen
+        ? 'that window is open: unassign or hide it there'
+        : 'unassign or hide it there, or take ownership under ···');
       saidCls += ' yellow';
     } else if (c.ownedBy) {
       said = 'its account is profile ‘' + c.ownedBy + '’s — log in to another '
-        + 'account here, or take ownership under ···';
+        + 'account here' + (c.ownerOpen ? '' : ', or take ownership under ···');
       saidCls += ' yellow';
     } else if (!c.hasExe && !c.isCtrader) said = 'found in config · cannot be launched from here';
     else {
@@ -1762,9 +1764,12 @@ function terminalCard(c, live) {
   var info, infoCls = 'tcard-info', infoTitle = '';
   if (c.claimRefused) {
     // The whole story in one line: whose it is, and what would change that. An owned
-    // account never frees itself -- ownership survives the other window closing.
+    // account never frees itself -- ownership survives the other window closing --
+    // and taking it over is only on offer while the owner's window is closed.
     info = c.ownedBy
-      ? c.claimRefused + ' — read-only here; take ownership under ···'
+      ? c.claimRefused + ' — read-only here; ' + (c.ownerOpen
+        ? 'free it in that window'
+        : 'take ownership under ···')
       : c.claimRefused + ' — frees itself when that app closes';
     infoTitle = info;
     infoCls += ' yellow';
@@ -2068,13 +2073,14 @@ function wireCard(el, c) {
         if (c.role === 'unassigned' && c.ownedBy) {
           // The drag could only end in a refusal: say it at the grab instead.
           letGo();
+          var door = c.ownerOpen
+            ? 'that profile is open — free it in its window'
+            : 'take ownership from its ··· menu';
           toast(c.assignedBy
             ? 'this terminal is assigned by profile ‘' + c.assignedBy + '’ — it cannot '
-              + 'be used here; unassign or hide it there, or take ownership from '
-              + 'its ··· menu'
+              + 'be used here; unassign or hide it there, or ' + door
             : 'its account is owned by profile ‘' + c.ownedBy + '’ — it cannot '
-              + 'be assigned here; log it into another account, or take ownership from '
-              + 'its ··· menu', 'bad');
+              + 'be assigned here; log it into another account, or ' + door, 'bad');
           return;
         }
         beginDrag(el, c, e);
@@ -2270,6 +2276,11 @@ function menuItems(c, live) {
   // (cardActions); this menu, behind ··· and right-click alike, keeps the rare rest.
   function takeOwn() {
     if (!c.ownedBy) return;
+    if (c.ownerOpen) {
+      // An open profile is never taken from: the change belongs in its window.
+      says('profile ‘' + c.ownedBy + '’ has it and is open — unassign or hide it there');
+      return;
+    }
     var what = c.assignedBy ? 'it is assigned by' : 'its account is owned by';
     does('Take ownership: ' + what + ' profile ‘' + c.ownedBy + '’…', function () {
       confirmModal(
@@ -2278,8 +2289,9 @@ function menuItems(c, live) {
           ? 'This terminal is assigned by profile ‘' + c.assignedBy + '’, so nothing can '
             + 'be done with it here. '
           : 'This account is owned by profile ‘' + c.ownedBy + '’, so it is read-only here. ')
-        + 'Taking it makes it this profile’s: that profile’s worker on it stops, '
-        + 'and any copies it holds stay open there, unmanaged.',
+        + 'That profile’s window is closed, so nothing is interrupted now. Taking it '
+        + 'makes it this profile’s: when that profile next opens, it will not reconnect '
+        + 'to it, and any copies it left stay open there, unmanaged.',
         'Take ownership', true,
         function () { tact(api().take_ownership(c.tid)); }
       );
@@ -2510,15 +2522,17 @@ function accountLoginFlow(c) {
     pickModal('Log ' + a.name + ' in to', a.accounts.map(function (acct) {
       // One account on one terminal at a time: a row another terminal holds is kept
       // visible — so the list is the whole truth — but greyed and refused with the why.
-      // A row another PROFILE owns stays live instead: picking it asks to take it.
+      // A row another CLOSED profile owns stays live instead: picking it asks to take
+      // it. With the owner's window open it is held like any other — theirs to change.
       var sub = acct.now ? 'logged in now'
         : acct.usedBy ? 'in use by ' + acct.usedBy
-        : acct.ownedBy ? 'owned by profile ‘' + acct.ownedBy + '’ — picking it asks to take it'
+        : acct.ownedBy ? 'owned by profile ‘' + acct.ownedBy + '’' + (acct.ownerOpen
+          ? ' — open now: switch it there' : ' — picking it asks to take it')
         : '';
       return {
         label: acct.words,
         sub: sub || undefined,
-        cls: (acct.now || acct.usedBy) ? 'pick-off' : '',
+        cls: (acct.now || acct.usedBy || acct.ownerOpen) ? 'pick-off' : '',
         fn: function () {
           if (acct.now) {
             toast(a.name + ' is already logged in to ' + acct.words, '');
@@ -2527,6 +2541,12 @@ function accountLoginFlow(c) {
           if (acct.usedBy) {
             toast(acct.words + ' is in use by ' + acct.usedBy
               + ': an account is used on one terminal at a time', 'bad');
+            return;
+          }
+          if (acct.ownedBy && acct.ownerOpen) {
+            toast(acct.words + ' is owned by profile ‘' + acct.ownedBy + '’, whose '
+              + 'window is open — switch it there, or close that window and take it '
+              + 'over here', 'bad');
             return;
           }
           function go(take) {
@@ -2538,10 +2558,11 @@ function accountLoginFlow(c) {
           if (acct.ownedBy) {
             confirmModal(
               'Take ' + acct.words + ' from profile ‘' + acct.ownedBy + '’?',
-              'This account is owned by profile ‘' + acct.ownedBy + '’. Taking it makes '
-              + 'it this profile’s and logs ' + a.name + ' into it; if that profile is '
-              + 'running it anywhere, its worker stops and any copies it holds stay '
-              + 'open there, unmanaged.',
+              'This account is owned by profile ‘' + acct.ownedBy + '’, whose window is '
+              + 'closed, so nothing is interrupted now. Taking it makes it this '
+              + 'profile’s and logs ' + a.name + ' into it; when that profile next '
+              + 'opens, it will not reconnect to it, and any copies it left stay open '
+              + 'there, unmanaged.',
               'Take the account', true,
               function () { go(true); }
             );

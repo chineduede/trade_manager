@@ -80,6 +80,17 @@ def exists(name: str) -> bool:
     return name == DEFAULT_PROFILE or profile_dir(name).is_dir()
 
 
+def is_running(name: str) -> bool:
+    """Whether this profile's window is open right now: its single-instance lock is held.
+
+    The lock is an OS byte lock that dies with its process, so a crashed window never
+    reads as running. This is what gates taking ownership: a running profile's terminals
+    and accounts are never taken out from under it -- the change is made in that window
+    instead -- while a closed profile's can be, deliberately.
+    """
+    return holder_pid(profile_dir(name) / _LOCK_FILE) is not None
+
+
 def _inspect(name: str, path: Path) -> ProfileInfo:
     master = ""
     slaves = 0

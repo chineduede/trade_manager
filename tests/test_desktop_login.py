@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from mt5copier import account_switch, ownership, shared_db
+from mt5copier import account_switch, ownership, profiles, shared_db
 from mt5copier.account_switch import Account, LoginResult
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.desktop.api import DesktopApi
@@ -86,6 +86,7 @@ def test_the_ask_lists_the_saved_accounts_and_marks_the_current_one(
             "now": False,
             "usedBy": "ftmo eval",
             "ownedBy": None,
+            "ownerOpen": False,
         },
         {
             "key": "20481@E8-Demo",
@@ -93,6 +94,7 @@ def test_the_ask_lists_the_saved_accounts_and_marks_the_current_one(
             "now": True,
             "usedBy": None,
             "ownedBy": None,
+            "ownerOpen": False,
         },
         {
             "key": "60001@FTMO-Demo",
@@ -100,6 +102,7 @@ def test_the_ask_lists_the_saved_accounts_and_marks_the_current_one(
             "now": False,
             "usedBy": None,
             "ownedBy": None,
+            "ownerOpen": False,
         },
     ]
 
@@ -273,3 +276,46 @@ def test_an_account_owned_elsewhere_refuses_the_login_unless_taken(
     assert ownership.owner("60001@FTMO-Demo") == "default", "taken with the login"
     tcfg = api._cfg.terminals[T_FREE]
     assert (tcfg.last_login, tcfg.last_server) == (60001, "FTMO-Demo")
+
+
+def test_a_running_owner_is_never_taken_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user's rule: while the owning profile's window is open, the change belongs in
+    that window -- even ``take=True`` (a confirmation that raced the window opening) is
+    refused, and the ask marks the row as held rather than takeable."""
+    api, _ = _api(tmp_path, monkeypatch)
+    monkeypatch.setenv("MT5COPIER_PROFILE", "scalp")
+    ownership.take("60001@FTMO-Demo")
+    monkeypatch.delenv("MT5COPIER_PROFILE")
+    monkeypatch.setattr(profiles, "is_running", lambda name: name == "scalp")
+
+    row = next(
+        r for r in api.account_login_ask(T_FREE)["accounts"] if r["key"] == "60001@FTMO-Demo"
+    )
+    assert (row["ownedBy"], row["ownerOpen"]) == ("scalp", True)
+
+    out = api.account_login(T_FREE, "60001@FTMO-Demo", take=True)
+    assert out["ok"] is False
+    assert "whose window is open right now" in out["message"]
+    assert ownership.owner("60001@FTMO-Demo") == "scalp", "nothing was taken"
+
+
+def test_take_ownership_waits_for_the_owners_window_to_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, _ = _api(tmp_path, monkeypatch)
+    monkeypatch.setenv("MT5COPIER_PROFILE", "scalp")
+    ownership.take("20481@E8-Demo")  # the account T_FREE sits on
+    monkeypatch.delenv("MT5COPIER_PROFILE")
+
+    monkeypatch.setattr(profiles, "is_running", lambda name: True)
+    out = api.take_ownership(T_FREE)
+    assert out["ok"] is False
+    assert "is open right now" in out["message"]
+    assert ownership.owner("20481@E8-Demo") == "scalp"
+
+    monkeypatch.setattr(profiles, "is_running", lambda name: False)
+    out = api.take_ownership(T_FREE)
+    assert out["ok"] is True
+    assert ownership.owner("20481@E8-Demo") == "default"

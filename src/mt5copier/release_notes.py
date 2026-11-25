@@ -85,12 +85,16 @@ NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "An account owned by a profile whose terminal is not assigned right now"
             " still shows an OWNED pill instead: that terminal may be logged into a"
             " different account and used here freely — only the account is theirs.",
-            "If a profile sits on a terminal or account you need, its card's ··· menu"
-            " offers Take ownership, behind a confirmation that says exactly what it"
-            " costs: the other profile's worker on it stops, and any copies it held stay"
-            " open there, unmanaged. The account picker offers the same way through: an"
-            " account another profile owns is listed and says so, and picking it asks to"
-            " take it over before logging in, instead of a flat refusal.",
+            "If a closed profile sits on a terminal or account you need, its card's ···"
+            " menu offers Take ownership, behind a confirmation that says exactly what"
+            " it costs: nothing is interrupted now, but when that profile next opens it"
+            " will not reconnect, and any copies it left stay open there, unmanaged."
+            " The account picker offers the same way through: an account a closed"
+            " profile owns is listed and says so, and picking it asks to take it over"
+            " before logging in, instead of a flat refusal. While the owning profile's"
+            " window is open, nothing is ever taken from it — the card and the picker"
+            " both say so and point at that window, where the unassign, hide or switch"
+            " belongs.",
             "Ownership also tidies itself now. Every few seconds each open profile"
             " re-checks that what it owns is what it actually uses, so an account row"
             " left behind — say the terminal was switched to another account in MT5"
