@@ -1705,10 +1705,11 @@ function terminalCard(c, live) {
   if (c.role === 'unassigned') {
     // A detected terminal: what it is and whether it could connect, nothing more.
     if (c.ownedBy) {
-      // Another profile's account: the card says so up front, instead of letting a
-      // drag to a zone collect the refusal.
+      // Another profile's terminal or account: the card says so up front, instead of
+      // letting a drag to a zone collect the refusal. ASSIGNED is the harder word —
+      // the whole install is in use there, so even switching accounts is off.
       el.classList.add('tcard-owned');
-      head.appendChild(pill('OWNED · ' + c.ownedBy, 'yellow'));
+      head.appendChild(pill((c.assignedBy ? 'ASSIGNED · ' : 'OWNED · ') + c.ownedBy, 'yellow'));
     } else if (c.isCtrader) head.appendChild(pill('SLAVE ONLY', 'muted'));
     else if (!c.hasExe) head.appendChild(pill('NOT INSTALLED', 'muted'));
     else if (!c.login) head.appendChild(pill('NO ACCOUNT', 'muted'));
@@ -1717,7 +1718,11 @@ function terminalCard(c, live) {
     el.appendChild(head);
     el.appendChild(acctLine(c));
     var said, saidCls = 'tcard-info';
-    if (c.ownedBy) {
+    if (c.assignedBy) {
+      said = 'assigned by profile ‘' + c.assignedBy + '’ — unassign or hide it there, '
+        + 'or take ownership under ···';
+      saidCls += ' yellow';
+    } else if (c.ownedBy) {
       said = 'its account is profile ‘' + c.ownedBy + '’s — log in to another '
         + 'account here, or take ownership under ···';
       saidCls += ' yellow';
@@ -2063,9 +2068,13 @@ function wireCard(el, c) {
         if (c.role === 'unassigned' && c.ownedBy) {
           // The drag could only end in a refusal: say it at the grab instead.
           letGo();
-          toast('its account is owned by profile ‘' + c.ownedBy + '’ — it cannot '
-            + 'be assigned here; log it into another account, or take ownership from '
-            + 'its ··· menu', 'bad');
+          toast(c.assignedBy
+            ? 'this terminal is assigned by profile ‘' + c.assignedBy + '’ — it cannot '
+              + 'be used here; unassign or hide it there, or take ownership from '
+              + 'its ··· menu'
+            : 'its account is owned by profile ‘' + c.ownedBy + '’ — it cannot '
+              + 'be assigned here; log it into another account, or take ownership from '
+              + 'its ··· menu', 'bad');
           return;
         }
         beginDrag(el, c, e);
@@ -2261,11 +2270,15 @@ function menuItems(c, live) {
   // (cardActions); this menu, behind ··· and right-click alike, keeps the rare rest.
   function takeOwn() {
     if (!c.ownedBy) return;
-    does('Take ownership: its account is profile ‘' + c.ownedBy + '’s…', function () {
+    var what = c.assignedBy ? 'it is assigned by' : 'its account is owned by';
+    does('Take ownership: ' + what + ' profile ‘' + c.ownedBy + '’…', function () {
       confirmModal(
         'Take ownership of ' + (c.accountName || c.name),
-        'This account is owned by profile ‘' + c.ownedBy + '’, so it is read-only here. '
-        + 'Taking it makes it this profile’s: that profile’s terminal stops copying it, '
+        (c.assignedBy
+          ? 'This terminal is assigned by profile ‘' + c.assignedBy + '’, so nothing can '
+            + 'be done with it here. '
+          : 'This account is owned by profile ‘' + c.ownedBy + '’, so it is read-only here. ')
+        + 'Taking it makes it this profile’s: that profile’s worker on it stops, '
         + 'and any copies it holds stay open there, unmanaged.',
         'Take ownership', true,
         function () { tact(api().take_ownership(c.tid)); }
@@ -2273,7 +2286,12 @@ function menuItems(c, live) {
     }, 'danger');
   }
   if (c.role === 'unassigned') {
-    if (c.isCtrader) {
+    if (c.ownedBy) {
+      // Theirs, so no assign verbs: the only honest offers are the name and the takeover.
+      says(c.assignedBy
+        ? 'assigned by profile ‘' + c.assignedBy + '’ — nothing can be done with it here'
+        : 'its account is profile ‘' + c.ownedBy + '’s — log it into another account first');
+    } else if (c.isCtrader) {
       if (live.hasMaster) does('Make it a slave', function () { tact(api().assign_slave(c.tid)); });
       else says('a cTrader account can only be a slave: make an MT5 master first');
     } else if (!c.hasExe) {

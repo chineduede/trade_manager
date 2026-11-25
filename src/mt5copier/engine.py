@@ -570,28 +570,30 @@ class Engine:
                 log.debug("could not send reconnect to %s: %r", terminal_id[:8], exc)
 
     def _stop_disowned(self) -> None:
-        """Stop any worker whose account another profile now owns. Caller holds the lock."""
+        """Stop any worker whose account or install another profile now owns. Caller
+        holds the lock."""
         if self._claims is None:  # a claimless engine (the tests') owns nothing either
             return
         for tid in list(self._workers):
             tcfg = self._cfg.terminals.get(tid)
             if tcfg is None:
                 continue
-            who = ownership.owned_elsewhere(ownership.key_of(tcfg))
+            who = ownership.owned_elsewhere_for(tcfg)
             if who is None:
                 continue
             log.warning(
-                "%s: its account was taken over by profile %r; the worker is stopped and "
+                "%s: it was taken over by profile %r; the worker is stopped and "
                 "its copies stay open, unmanaged",
                 tcfg.label,
                 who,
             )
             self._stop_worker(tid)
-            self._claim_refused[tid] = f"the account is owned by profile {who!r}"
+            self._claim_refused[tid] = f"it was taken over by profile {who!r}"
 
     def _spawn_worker(self, tcfg: TerminalConfig) -> None:
         if self._claims is not None:
-            # Spawning is using: the account becomes this profile's if it is free. The
+            # Spawning is using: the install and its account become this profile's if
+            # they are free. The
             # backstop take -- assignment and the app's login already took it with better
             # words -- that also covers a login made in MT5 itself and the first start
             # after an update. Gated with the claims, so the tests' claimless engines
@@ -1621,7 +1623,7 @@ class Engine:
                 # Demote the master alone -- not role_actions.unassign, which sweeps every
                 # slave along with it. Here the virtual master takes its place in the same
                 # breath, so the slaves keep their roles and copy it instead.
-                ownership.release(ownership.key_of(self._cfg.master))
+                ownership.release_for(self._cfg.master)
                 self._cfg.set_role(self._cfg.master.terminal_id, Role.UNASSIGNED)
             self._cfg.mode = mode
             if mode is AppMode.TRADING:
@@ -3370,7 +3372,7 @@ class Engine:
             cfg.hidden = True
             # Hiding is the release valve: the terminal and its account are freed for
             # other profiles, while the role and settings here wait for an unhide.
-            ownership.release(ownership.key_of(cfg))
+            ownership.release_for(cfg)
         return None
 
     def unhide_terminal(self, terminal_id: str) -> str | None:

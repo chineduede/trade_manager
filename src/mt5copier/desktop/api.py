@@ -747,6 +747,12 @@ class DesktopApi:
             else:
                 risk = f"risk {tcfg.risk_percent:g}%"
         key = account_key(tcfg.last_login, tcfg.last_server)
+        # Two depths of "not ours": assignedBy means another profile's assignment holds
+        # the install itself -- nothing can be done with it here, switching included --
+        # while ownedBy alone means only the account is foreign, and logging into a
+        # different account remains the documented way out.
+        assigned_by = ownership.assigned_elsewhere(tcfg)
+        owned_by = assigned_by or ownership.owned_elsewhere_for(tcfg)
         return {
             "tid": tid,
             "name": info.label,
@@ -756,7 +762,8 @@ class DesktopApi:
             # The full sentence rides separately: the card's state word stays short and the
             # info line carries the story ("the terminal is in use by profile 'x'").
             "claimRefused": view.claim_refused,
-            "ownedBy": ownership.owned_elsewhere(ownership.key_of(tcfg)),
+            "ownedBy": owned_by,
+            "assignedBy": assigned_by,
             "tier": info.tier,
             "login": info.login,
             "server": info.server,
@@ -773,7 +780,7 @@ class DesktopApi:
             "isCtrader": tcfg.is_ctrader,
             "hasExe": tcfg.exe_path is not None,
             "loggingIn": tid in self._logging_in,
-            "canSwitch": self._can_switch_account(tcfg),
+            "canSwitch": assigned_by is None and self._can_switch_account(tcfg),
             "usable": tcfg.usable,
             "enabled": tcfg.enabled,
             "allowLive": tcfg.allow_live_trading,
@@ -956,23 +963,23 @@ class DesktopApi:
         return _ok(f"{name} is back; it connects on the next tick if it has a role.")
 
     def take_ownership(self, tid: str) -> dict[str, Any]:
-        """The deliberate takeover: this profile becomes the account's owner. The page asks
-        first, in exactly these words -- the profile that had it loses it, its worker there
-        stops when it notices, and any copies it held stay open, unmanaged."""
+        """The deliberate takeover: this profile becomes the owner of the terminal and
+        the account it holds. The page asks first, in exactly these words -- the profile
+        that had them loses them, its worker there stops when it notices, and any copies
+        it held stay open, unmanaged."""
         tid = str(tid)
         tcfg = self._cfg.terminals.get(tid)
         if tcfg is None:
             return _no("that terminal is gone; rescan")
-        key = ownership.key_of(tcfg)
-        if key is None:
-            return _no("this terminal has no account to take; log it in first")
+        if not ownership.keys_of(tcfg):
+            return _no("this terminal has nothing to take; log it in first")
         name = self._cfg.display_name(tid)
-        lost = ownership.force_take(key)
+        lost = ownership.force_take_for(tcfg)
         self._engine.sync()
         if lost is None:
-            return _ok(f"{name}: the account is this profile's now.")
+            return _ok(f"{name} is this profile's now.")
         return _ok(
-            f"{name}: the account is this profile's now. Profile {lost!r} lost it; "
+            f"{name} is this profile's now. Profile {lost!r} lost it; "
             "any copies it held stay open there, unmanaged."
         )
 
@@ -1052,9 +1059,9 @@ class DesktopApi:
         if tid not in self._cfg.terminals:
             return _no("that terminal is gone; rescan")
         old = self._cfg.terminals[tid]
-        who = ownership.owned_elsewhere(ownership.key_of(old))
+        who = ownership.owned_elsewhere_for(old)
         if who is not None:
-            return _no(f"read-only: the account is owned by profile {who!r}")
+            return _no(f"read-only: it is owned by profile {who!r}")
         allow = bool(allow)
         name = self._cfg.display_name(tid)
         if old.allow_live_trading == allow:
@@ -1142,6 +1149,14 @@ class DesktopApi:
             return (
                 f"unassign {name} first, then change the account: its settings and copies "
                 "belong to the account it is logged into, and unassigning asks about them"
+            )
+        # Assigned in another profile: switching accounts would yank the terminal out
+        # from under the profile running it, so nothing here may touch it at all.
+        who = ownership.assigned_elsewhere(tcfg)
+        if who is not None:
+            return (
+                f"{name} is assigned by profile {who!r}; unassign or hide it there, "
+                "or take ownership from its ··· menu"
             )
         if tcfg.is_ctrader:
             return f"{name} is a cTrader account: its login is the cTrader login on Terminals"
@@ -2863,7 +2878,7 @@ class DesktopApi:
             "card": card,
             "dryRun": cfg.dry_run,
             "accountKind": self._account_kind(tcfg),
-            "lockedBy": ownership.owned_elsewhere(ownership.key_of(tcfg)),
+            "lockedBy": ownership.owned_elsewhere_for(tcfg),
         }
         if tcfg.role is Role.SLAVE:
             values = initial_values(tcfg)
@@ -3067,12 +3082,12 @@ class DesktopApi:
         tcfg = cfg.terminals.get(tid)
         if tcfg is None:
             return _no("that terminal is gone; rescan")
-        who = ownership.owned_elsewhere(ownership.key_of(tcfg))
+        who = ownership.owned_elsewhere_for(tcfg)
         if who is not None:
             return {
                 "ok": False,
                 "errors": {},
-                "message": f"read-only: the account is owned by profile {who!r}",
+                "message": f"read-only: it is owned by profile {who!r}",
             }
         outcome = apply_edits(tcfg, self._terminal_raw(raw))
         if not outcome.ok:

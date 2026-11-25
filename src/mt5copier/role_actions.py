@@ -95,19 +95,19 @@ def unassign(cfg: AppConfig, terminal_id: str) -> tuple[str, ...]:
     losing their role with no explanation.
     """
     was_master = cfg.terminals[terminal_id].role is Role.MASTER
-    ownership.release(ownership.key_of(cfg.terminals[terminal_id]))
+    ownership.release_for(cfg.terminals[terminal_id])
     cfg.set_role(terminal_id, Role.UNASSIGNED)
     if not was_master:
         return ()
     swept = tuple(t.terminal_id for t in cfg.terminals.values() if t.role is Role.SLAVE)
     for tid in swept:
-        ownership.release(ownership.key_of(cfg.terminals[tid]))
+        ownership.release_for(cfg.terminals[tid])
         cfg.set_role(tid, Role.UNASSIGNED)
     return swept
 
 
 def _own(cfg: AppConfig, terminal_id: str) -> str | None:
-    """Assigning is using: take the account's ownership for this profile, or say whose it
-    is. A terminal never seen logged in has nothing to own yet -- the worker's spawn takes
-    it the moment the account is known."""
+    """Assigning is using: take the install and its account for this profile, or say
+    whose they are. The install is owned at once, even never seen logged in; the account
+    joins the moment a login is known -- the worker's spawn takes it then."""
     return ownership.take_for(cfg.terminals[terminal_id])

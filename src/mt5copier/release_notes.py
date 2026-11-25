@@ -70,20 +70,25 @@ NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             " whole or not at all.",
             "The move is automatic and one-time: the first start gathers what the JSON"
             " files hold, and the files stay on disk untouched as a fallback copy.",
-            "One rule now governs accounts across profiles: the profile using an account"
-            " owns it, and owns it even while its window is closed. Everywhere else the"
-            " account is read-only — its settings, guard rules, name and prop link can be"
-            " seen but not changed, and no terminal there can be assigned to it or logged"
-            " into it. Using an account — assigning a terminal that holds it, or logging"
-            " one in — takes ownership; unassigning or hiding that terminal releases it."
-            " The same terminal is still free for other profiles with a different"
-            " account. A card sitting on another profile's account shows it at a glance —"
-            " dimmed and dashed, with an OWNED pill naming the profile — and a drag that"
-            " could only be refused says so the moment it starts instead of at the drop.",
-            "If a profile sits on an account you need, its card's ··· menu offers Take"
-            " ownership, behind a confirmation that says exactly what it costs: the other"
-            " profile's terminal stops, and any copies it held stay open there,"
-            " unmanaged.",
+            "One rule now governs accounts and terminals across profiles: the profile"
+            " using them owns them, and owns them even while its window is closed."
+            " Assigning a terminal takes the terminal itself and the account it holds;"
+            " unassigning or hiding it releases both. Everywhere else the account is"
+            " read-only — its settings, guard rules, name and prop link can be seen but"
+            " not changed, and no terminal there can be assigned to it or logged into it"
+            " — and the assigned terminal is out of reach entirely: another profile"
+            " cannot assign it, nor even switch it to a different account, because that"
+            " would pull the terminal out from under the profile running it. Its card"
+            " says so at a glance — dimmed and dashed, with an ASSIGNED pill naming the"
+            " profile — and a drag that could only be refused says so the moment it"
+            " starts instead of at the drop.",
+            "An account owned by a profile whose terminal is not assigned right now"
+            " still shows an OWNED pill instead: that terminal may be logged into a"
+            " different account and used here freely — only the account is theirs.",
+            "If a profile sits on a terminal or account you need, its card's ··· menu"
+            " offers Take ownership, behind a confirmation that says exactly what it"
+            " costs: the other profile's worker on it stops, and any copies it held stay"
+            " open there, unmanaged.",
         ),
     ),
     (

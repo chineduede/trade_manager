@@ -1,13 +1,15 @@
-"""Account ownership: the profile that uses an account owns it, until it lets go.
+"""Ownership: the profile that uses an account or a terminal owns it, until it lets go.
 
-This is the multi-profile model's one rule about accounts. The moment a profile starts
-using an account -- assigning a terminal that holds it, logging an assigned terminal into
-it, or a worker spawning on it -- the account becomes that profile's, and it *stays* that
-profile's whether or not its window is open: ownership is a row in ``shared.db``
-(the ``account_owners`` table), not a runtime lock. Every other profile sees the account
-read-only -- its settings, guard rules, name and prop link cannot be edited there, and no
-terminal there can be assigned to it or logged into it -- so an edit made in the wrong
-window is impossible rather than merely discouraged.
+This is the multi-profile model's one rule. The moment a profile starts using a terminal
+-- assigning it, logging it into an account, or a worker spawning on it -- *everything it
+uses* becomes that profile's: the broker account it holds **and the install itself**, each
+a row in ``shared.db`` (the ``account_owners`` table), not a runtime lock, so ownership
+stays whether or not the window is open. Every other profile sees the account read-only --
+its settings, guard rules, name and prop link cannot be edited there, and no terminal
+there can be assigned to it or logged into it -- and sees the assigned install as taken:
+it cannot be assigned there, nor even switched to a different account, because switching
+would physically yank the terminal out from under the profile running it. An edit or a
+grab made in the wrong window is impossible rather than merely discouraged.
 
 Ownership ends three ways: the owner unassigns the terminal holding the account, the owner
 hides that terminal (hiding is the release valve: role and settings are kept, but the
@@ -48,11 +50,33 @@ def key_of(tcfg: TerminalConfig) -> str | None:
     return account_key(tcfg.last_login, tcfg.last_server)
 
 
+def terminal_key(tcfg: TerminalConfig) -> str | None:
+    """The install's own identity, owned alongside whatever account it holds.
+
+    None for a cTrader row: there is no install to fight over, the account key *is* its
+    whole identity. The spelling matches :func:`mt5copier.claims.claim_keys` on purpose --
+    the same physical thing, one named lock and one persistent owner.
+    """
+    if tcfg.is_ctrader:
+        return None
+    return f"terminal:{tcfg.terminal_id}"
+
+
+def keys_of(tcfg: TerminalConfig) -> tuple[str, ...]:
+    """Everything using this terminal stakes out: the install and the account it holds.
+
+    The install is owned even before the account is known -- assigning a never-logged-in
+    terminal already makes it this profile's -- and the account joins the moment a login
+    is seen.
+    """
+    return tuple(k for k in (terminal_key(tcfg), key_of(tcfg)) if k is not None)
+
+
 def take_for(tcfg: TerminalConfig) -> str | None:
-    """Take ownership of the account this terminal holds, or say why not. A terminal with
-    no known account owns nothing yet, and that is not a refusal."""
-    key = key_of(tcfg)
-    return take(key) if key is not None else None
+    """Own everything this terminal uses -- the install and its account -- or say why
+    not. All or nothing: a half-taken terminal would block the rightful owner while
+    still refusing us."""
+    return _take_keys(keys_of(tcfg))
 
 
 def owner(key: str) -> str | None:
@@ -71,23 +95,77 @@ def owned_elsewhere(key: str | None) -> str | None:
     return who if who is not None and who != active_profile() else None
 
 
-def take(key: str) -> str | None:
-    """Own the account, or return why not. Idempotent: taking what is ours is a no-op.
+def owned_elsewhere_for(tcfg: TerminalConfig) -> str | None:
+    """The foreign profile holding *anything* this terminal uses -- its install or its
+    account -- or None when every key is free or ours. The one question a card, a drag
+    and a settings save all ask."""
+    for key in keys_of(tcfg):
+        who = owned_elsewhere(key)
+        if who is not None:
+            return who
+    return None
 
-    The read and the write sit in one :meth:`~mt5copier.shared_db.SharedDb.change`, so two
-    profiles racing for a free account cannot both win.
+
+def assigned_elsewhere(tcfg: TerminalConfig) -> str | None:
+    """The foreign profile whose assignment holds this *install*, or None.
+
+    Narrower than :func:`owned_elsewhere_for` on purpose: an account owned by a closed
+    profile still allows this terminal to be logged into a *different* account -- that is
+    the documented escape -- but an install assigned in another profile allows nothing at
+    all, switching included.
     """
+    return owned_elsewhere(terminal_key(tcfg))
+
+
+def take(key: str) -> str | None:
+    """Own one key, or return why not. Idempotent: taking what is ours is a no-op."""
+    return _take_keys((key,))
+
+
+def _blame(key: str, who: str) -> str:
+    if key.startswith("terminal:"):
+        return f"the terminal is assigned by profile {who!r}"
+    return f"the account is owned by profile {who!r}"
+
+
+def _take_keys(keys: tuple[str, ...]) -> str | None:
+    """Own every key or none, in one :meth:`~mt5copier.shared_db.SharedDb.change`, so two
+    profiles racing for the same free terminal cannot both win -- and a key already owned
+    elsewhere refuses the lot before anything is written."""
+    if not keys:
+        return None
     me = active_profile()
     db = shared_db.get()
     with db.change(shared_db.OWNERS):
-        row = db.fetch(TABLE, key)
-        who = row.get("profile") if isinstance(row, dict) else None
-        if isinstance(who, str) and who != me:
-            return f"the account is owned by profile {who!r}"
-        if who != me:
-            db.put(TABLE, key, {"profile": me, "taken": time.time()})
-            log.info("account %s is now owned by profile %r", key, me)
+        rows = {key: db.fetch(TABLE, key) for key in keys}
+        for key, row in rows.items():
+            who = row.get("profile") if isinstance(row, dict) else None
+            if isinstance(who, str) and who != me:
+                return _blame(key, who)
+        for key, row in rows.items():
+            who = row.get("profile") if isinstance(row, dict) else None
+            if who != me:
+                db.put(TABLE, key, {"profile": me, "taken": time.time()})
+                log.info("%s is now owned by profile %r", key, me)
     return None
+
+
+def release_for(tcfg: TerminalConfig) -> None:
+    """Let go of everything this terminal uses -- its install and its account."""
+    for key in keys_of(tcfg):
+        release(key)
+
+
+def force_take_for(tcfg: TerminalConfig) -> str | None:
+    """Take over everything this terminal uses; returns who lost any of it, if anyone.
+
+    The deliberate escape hatch behind the UI's confirmation, like :func:`force_take`,
+    which it calls per key.
+    """
+    lost: str | None = None
+    for key in keys_of(tcfg):
+        lost = force_take(key) or lost
+    return lost
 
 
 def release(key: str | None) -> None:
@@ -103,7 +181,7 @@ def release(key: str | None) -> None:
         who = row.get("profile") if isinstance(row, dict) else None
         if who == me:
             db.drop(TABLE, key)
-            log.info("account %s released by profile %r", key, me)
+            log.info("%s released by profile %r", key, me)
 
 
 def force_take(key: str) -> str | None:
@@ -122,12 +200,12 @@ def force_take(key: str) -> str | None:
         if isinstance(who, str) and who != me:
             lost = who
         db.put(TABLE, key, {"profile": me, "taken": time.time()})
-    log.warning("account %s taken over by profile %r (was %r)", key, me, lost)
+    log.warning("%s taken over by profile %r (was %r)", key, me, lost)
     return lost
 
 
 def release_all_of(profile: str) -> None:
-    """Drop every account this profile owns -- the profile is being deleted."""
+    """Drop everything this profile owns -- the profile is being deleted."""
     db = shared_db.get()
     with db.change(shared_db.OWNERS):
         for key, row in db.load(TABLE).items():
