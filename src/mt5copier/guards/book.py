@@ -391,6 +391,31 @@ class GuardBook:
         self._dirty.add(key)
         self._save()
 
+    def record_fill(self, key: str | None, *, now: float) -> None:
+        """A resting copy became a position at its broker: move it from the pending column
+        to the market one, so a rule that ignores pendings still counts the trade it became.
+
+        Counted on the fill's own day. An order placed yesterday that fills today rolls the
+        entry over and counts as today's market trade -- its placement spent yesterday's
+        column, but the trade the firm sees happened today. Same-day, the totals are
+        unchanged for a rule that counts pendings, so nothing is ever counted twice.
+        """
+        if key is None:
+            return
+        self._adopt(key)
+        day = local_day(now)
+        entry = self._opens.get(key)
+        if entry is None or entry.get("day") != day:
+            entry = {"day": day, "market": 0, "pending": 0}
+            self._opens[key] = entry
+        pending = entry.get("pending")
+        if isinstance(pending, int) and pending > 0:
+            entry["pending"] = pending - 1
+        market = entry.get("market")
+        entry["market"] = (market if isinstance(market, int) else 0) + 1
+        self._dirty.add(key)
+        self._save()
+
     # --- latches ---------------------------------------------------------------------------
 
     def _latch_until(self, key: str, given: GuardRule, now: float) -> str | None:

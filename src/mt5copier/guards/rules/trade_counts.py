@@ -4,7 +4,9 @@ These two are about discipline rather than a firm's rulebook: the person asks th
 stop them overtrading with the app. So the day is this computer's day -- it ends at the
 midnight on the wall, not on a broker's clock -- and the daily count is what the copier
 itself placed: a filled market order, or a pending order that rested (a pending-fallback
-chain counts once however it ends, and a refused trade counts nothing). What was traded by
+chain counts once however it ends, and a refused trade counts nothing). A resting order
+that fills moves from the pending column to the market one on the fill's day, so a rule
+set to ignore pendings still counts the trade it became. What was traded by
 hand the copier cannot stop, so the daily rule does not pretend to see it -- but how many
 trades are *open* is a fact the snapshot already knows whole, so that rule counts every
 position on the account, hand-opened ones included.
@@ -36,7 +38,7 @@ class DailyTrades(Rule):
             "A pending order placed",
             ParamKind.CHOICE,
             "counts",
-            choices=(("counts", "counts as a trade"), ("ignored", "does not count")),
+            choices=(("counts", "counts as a trade"), ("ignored", "counts when it fills")),
         ),
         on_breach("block_new", "warn", "block_new"),
     )
@@ -48,7 +50,7 @@ class DailyTrades(Rule):
         pendings = (
             "a pending order counts when it is placed"
             if p["pendings"] == "counts"
-            else "pending orders are not counted"
+            else "a pending order counts only when it fills"
         )
         return (
             f"Place at most {p['limit']:g} trades a day ({pendings}); the day ends at "

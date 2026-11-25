@@ -18,6 +18,17 @@ from .paths import version_seen_path
 
 NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
+        "0.1.10",
+        "2026-11-25",
+        (
+            "The Max trades a day guard now counts a pending order's fill. A resting order"
+            " set to not count at placement moves into the day's count the moment it fills"
+            " — on the day it fills — so a trade entered through a limit order no longer"
+            " slips past the daily cap. A rule set to count pendings at placement is"
+            " unchanged: the fill moves the count, it never adds a second one.",
+        ),
+    ),
+    (
         "0.1.9",
         "2026-11-24",
         (
