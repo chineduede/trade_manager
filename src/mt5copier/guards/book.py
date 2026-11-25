@@ -8,18 +8,18 @@ new trade's risk or margin, close the worst copy or every copy.
 
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from pathlib import Path
 from typing import Any
 
-from .. import shared_data
+from .. import shared_db
 from ..catalog import CLASSES, CatalogStore
-from ..json_store import read_json, write_json
 from ..logging_setup import get_logger
 from ..news import NewsCalendar
-from ..paths import guard_state_path
 from ..prop_accounts import PropStore
 from ..protocol import Snapshot
+from ..shared_db import SharedDb
 from .account import AccountView, last_reset, local_day
 from .base import REGISTRY, SEVERITY, Level, Measure
 from .model import GuardRule, GuardsDoc
@@ -239,7 +239,7 @@ class GuardBook:
     def __init__(
         self,
         doc: GuardsDoc,
-        state_path: Path | None = None,
+        db: SharedDb | None = None,
         calendar: NewsCalendar | None = None,
         catalog: CatalogStore | None = None,
         props: PropStore | None = None,
@@ -254,7 +254,7 @@ class GuardBook:
         the container's identity (:meth:`_rules_key`); everything stateful in this book --
         latches, day-start equity, trade counts -- stays keyed by the raw account, so a
         closed stage's breach can never hold back the stage that replaced it."""
-        self._path = state_path if state_path is not None else guard_state_path()
+        self._db = db if db is not None else shared_db.get()
         state = self._load()
         self._day_equity: dict[str, dict[str, dict[str, object]]] = _section(state, "day_equity")
         self._latched: dict[str, dict[str, dict[str, object]]] = _section(state, "latched")
@@ -269,14 +269,26 @@ class GuardBook:
         """Per account, when its previous snapshot arrived: what tells a reset that was watched
         from one that happened while the copier was off."""
         self._dirty: set[str] = set()
-        """The accounts whose state THIS process has changed. The file is shared by every
-        profile, and claims mean no two profiles guard one account at once -- so a save folds
-        only these keys into whatever the file holds, leaving every other account's entries
-        exactly as the profile that owns them wrote them."""
+        """The accounts whose state THIS process has changed. The store is shared by every
+        profile, and claims mean no two profiles guard one account at once -- so a save
+        writes only these keys' rows, leaving every other account's exactly as the profile
+        that owns them wrote them."""
 
-    def _load(self) -> dict[str, object]:
-        raw = read_json(self._path, unreadable="starting empty")
-        return raw if isinstance(raw, dict) else {}
+    def _load(self) -> dict[str, dict[str, Any]]:
+        """The whole store regrouped into sections keyed by account -- the shape this book
+        works in; on disk it is a row per account holding that account's sections."""
+        try:
+            rows = self._db.load("guard_state")
+        except sqlite3.Error:
+            log.exception("could not read the guard state; starting empty")
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        for key, row in rows.items():
+            if not isinstance(row, dict):
+                continue
+            for name, held in row.items():
+                out.setdefault(name, {})[key] = held
+        return out
 
     def _rules_key(self, key: str | None) -> str | None:
         """The identity this account's *rules* are read under: its prop container's, when
@@ -295,43 +307,40 @@ class GuardBook:
         )
 
     def _save(self) -> None:
-        """Read-modify-write under the shared-folder lock, merged per dirty account (see
-        ``_dirty``), so two profiles each guarding their own accounts never erase one
-        another's anchors or held breaches -- not even at midnight, when both engines cross
-        the same daily reset and save within the same second. A lock timeout lands in the
-        ``OSError`` catch like any failed write; the keys stay dirty, so the next save
-        carries them."""
+        """One transaction writing only the dirty accounts' rows (see ``_dirty``), so two
+        profiles each guarding their own accounts never erase one another's anchors or held
+        breaches -- not even at midnight, when both engines cross the same daily reset and
+        save within the same second. A database error lands in the catch like any failed
+        write; the keys stay dirty, so the next save carries them."""
         try:
-            with shared_data.shared_lock():
-                self._save_locked()
-        except OSError:
-            log.exception("could not save guard state to %s", self._path)
-
-    def _save_locked(self) -> None:
-        disk = self._load()
-        merged: dict[str, dict[str, Any]] = {
-            name: _section(disk, name) for name, _ in self._sections()
-        }
-        for key in self._dirty:
-            for name, ours in self._sections():
-                if key in ours:
-                    merged[name][key] = ours[key]
-                else:
-                    merged[name].pop(key, None)
-        write_json(self._path, merged)
+            with self._db.change(shared_db.GUARD_STATE):
+                for key in self._dirty:
+                    row = {name: ours[key] for name, ours in self._sections() if key in ours}
+                    if row:
+                        self._db.put("guard_state", key, row)
+                    else:
+                        self._db.drop("guard_state", key)
+        except (OSError, sqlite3.Error):
+            log.exception("could not save the guard state")
 
     def _adopt(self, key: str) -> None:
-        """Take one account's state from disk, the first time this process sees the account.
+        """Take one account's state from the store, the first time this process sees the
+        account.
 
         The account may have been guarded from another profile until moments ago (a claim
         released, and this profile picked the terminal up): its anchors and held breaches are
-        on disk, newer than what this book loaded at start. Never over our own changes --
+        in the store, newer than what this book loaded at start. Never over our own changes --
         a dirty key is ours, and claims say nobody else has written it since."""
         if key in self._dirty:
             return
-        disk = self._load()
+        try:
+            row = self._db.fetch("guard_state", key)
+        except sqlite3.Error:
+            log.exception("could not read the guard state for %s; keeping what is held", key)
+            return
+        row = row if isinstance(row, dict) else {}
         for name, ours in self._sections():
-            theirs = _section(disk, name).get(key)
+            theirs = row.get(name)
             if theirs is not None:
                 ours[key] = theirs
             else:
@@ -648,7 +657,7 @@ def _why(status: RuleStatus) -> str:
     return f"{status.title} {standing}" if standing else status.title
 
 
-def _section(state: dict[str, object], name: str) -> dict[str, dict[str, Any]]:
+def _section(state: Mapping[str, object], name: str) -> dict[str, dict[str, Any]]:
     value = state.get(name, {})
     return value if isinstance(value, dict) else {}
 

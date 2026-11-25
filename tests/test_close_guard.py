@@ -40,6 +40,7 @@ from mt5copier.protocol import (
     Snapshot,
     WorkerState,
 )
+from mt5copier.shared_db import SharedDb
 from mt5copier.store import Copy, CopyKind, MappingStore
 
 # --- the verdict ---------------------------------------------------------------------------------
@@ -48,7 +49,7 @@ from mt5copier.store import Copy, CopyKind, MappingStore
 def _book(tmp: Path, **given: Any) -> GuardBook:
     rule = GuardRule(id="fl", type="floating_loss", params=given)
     doc = GuardsDoc(accounts={KEY: AccountGuards(initial_balance=100_000.0, rules=(rule,))})
-    return GuardBook(doc, state_path=tmp / "state.json")
+    return GuardBook(doc, SharedDb(tmp / "state.db"))
 
 
 def test_past_its_buffer_it_closes_the_worst_and_holds_new_trades(tmp_path: Path) -> None:

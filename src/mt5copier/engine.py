@@ -104,6 +104,7 @@ from .reconcile import (
     protective_sl,
 )
 from .settings_edit import copies_word
+from .shared_db import SharedDb
 from .sizing import risk_budget
 from .store import (
     MappingStore,
@@ -245,7 +246,7 @@ class Engine:
         state_path: Path | None = None,
         mapping_path: Path | None = None,
         guards: GuardsDoc | None = None,
-        guard_state_path: Path | None = None,
+        shared_db: SharedDb | None = None,
         history_path: Path | None = None,
         calendar: NewsCalendar | None = None,
         claims: ClaimBook | None = None,
@@ -339,12 +340,12 @@ class Engine:
         """Per terminal: the symbol list, catalog and configured pair a reading was made
         from, then the asserted and stripping decorations read -- any input changing is a
         recompute."""
-        self._props = PropStore()
+        self._props = PropStore(shared_db)
         """The prop account containers: a linked account reads its rules under its
         container's identity."""
         self._guards = GuardBook(
             guards if guards is not None else GuardsDoc(),
-            guard_state_path,
+            shared_db,
             self._calendar,
             self._catalog,
             self._props,

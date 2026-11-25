@@ -31,7 +31,6 @@ from ..paths import (
     active_profile,
     claims_dir,
     config_path,
-    guards_path,
     is_frozen,
     user_data_dir,
 )
@@ -185,9 +184,9 @@ def run() -> None:
     from .api import DesktopApi
 
     profile = active_profile()
-    shared_data.migrate()  # before anything reads a shared path: it builds the shared folder
+    shared_data.migrate()  # before anything reads a shared store: it builds the shared folder
     cfg = config_mod.load()
-    guards = guards_mod.load(guards_path())
+    guards = guards_mod.load()
     try:
         config_mod.merge_discovery(cfg, discover_terminals())
         config_mod.save(cfg)

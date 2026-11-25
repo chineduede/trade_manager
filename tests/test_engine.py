@@ -20,6 +20,7 @@ from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.engine import Engine, TerminalView
 from mt5copier.guards import AccountGuards, GuardRule
 from mt5copier.protocol import ActionKind, OrderResult, PositionType, Snapshot, WorkerState
+from mt5copier.shared_db import SharedDb
 
 TID_A = "A" * 32
 TID_B = "B" * 32
@@ -645,7 +646,7 @@ def test_guard_report_follows_the_account_logged_in(cfg: AppConfig, tmp_path: Pa
             )
         }
     )
-    eng = Engine(cfg, guards=doc, guard_state_path=tmp_path / "state.json")
+    eng = Engine(cfg, guards=doc, shared_db=SharedDb(tmp_path / "state.db"))
     assert eng.guard_report(TID_B).rules == (), "no account known yet"
 
     cfg.terminals[TID_B].last_login, cfg.terminals[TID_B].last_server = 7, "Prop"
@@ -682,7 +683,7 @@ def test_a_guard_holds_a_slave_back_and_caps_its_risk(cfg: AppConfig, tmp_path: 
             )
         }
     )
-    eng = Engine(cfg, guards=doc, guard_state_path=tmp_path / "state.json")
+    eng = Engine(cfg, guards=doc, shared_db=SharedDb(tmp_path / "state.db"))
     snap = Snapshot(
         terminal_id=TID_B,
         state=WorkerState.CONNECTED,
@@ -725,7 +726,7 @@ def test_a_stop_rule_set_to_warn_says_so_on_a_bare_trade(cfg: AppConfig, tmp_pat
 
     rule = GuardRule(id="st", type="stop_required", params={"on_breach": "warn"})
     doc = GuardsDoc(accounts={"7@Prop": AccountGuards(initial_balance=10_000.0, rules=(rule,))})
-    eng = Engine(cfg, guards=doc, guard_state_path=tmp_path / "state.json")
+    eng = Engine(cfg, guards=doc, shared_db=SharedDb(tmp_path / "state.db"))
     snap = Snapshot(
         terminal_id=TID_B,
         state=WorkerState.CONNECTED,
@@ -781,7 +782,7 @@ def test_a_moving_loss_is_announced_once(
             )
         }
     )
-    eng = Engine(cfg, guards=doc, guard_state_path=tmp_path / "state.json")
+    eng = Engine(cfg, guards=doc, shared_db=SharedDb(tmp_path / "state.db"))
     snap = Snapshot(
         terminal_id=TID_B,
         state=WorkerState.CONNECTED,

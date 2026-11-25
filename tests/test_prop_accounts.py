@@ -9,13 +9,13 @@ two stages linked into one chain.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
+from mt5copier import shared_db
 from mt5copier.guards import AccountGuards, GuardBook, GuardRule, GuardsDoc
-from mt5copier.paths import prop_accounts_path
 from mt5copier.prop_accounts import PROP_PREFIX, PropStore, check_name
 from mt5copier.protocol import Snapshot, WorkerState
+from mt5copier.shared_db import SharedDb
 
 STAGE1 = "1001@Prop-Demo"
 STAGE2 = "2002@Prop-Live"
@@ -23,7 +23,7 @@ LOOSE = "3003@Elsewhere"
 
 
 def store() -> PropStore:
-    return PropStore()  # the suite isolates APPDATA, so the default path is a tmp dir
+    return PropStore()  # the suite isolates APPDATA, so the default database is a tmp one
 
 
 # --- the store ---------------------------------------------------------------------------------
@@ -121,28 +121,17 @@ def test_two_windows_fold_into_each_other() -> None:
     a, b = store(), store()
     cid, _ = a.create("Shared")
     assert cid is not None
-    assert cid in b.current().containers  # b re-reads on mtime
+    assert cid in b.current().containers  # b re-reads on the store's stamp
     b.link(cid, STAGE1)
     assert a.current().containers[cid].current == STAGE1
 
 
-def test_a_bad_file_reads_as_empty(tmp_path: Path) -> None:
-    target = prop_accounts_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(json.dumps({"containers": "what"}), encoding="utf-8")
-    assert store().current().containers == {}
-    target.write_text(
-        json.dumps(
-            {
-                "containers": {
-                    "good1234": {"name": "Kept", "stages": [STAGE1, "", 7, STAGE1]},
-                    "bad": {"name": "", "stages": []},
-                    "worse": "not a dict",
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
+def test_bad_rows_read_as_empty() -> None:
+    db = shared_db.get()
+    with db.change(shared_db.PROPS):
+        db.put("prop_containers", "good1234", {"name": "Kept", "stages": [STAGE1, "", 7, STAGE1]})
+        db.put("prop_containers", "bad", {"name": "", "stages": []})
+        db.put("prop_containers", "worse", "not a dict")
     doc = store().current()
     assert list(doc.containers) == ["good1234"]
     assert doc.containers["good1234"].stages == (STAGE1,)  # blanks and repeats dropped
@@ -183,7 +172,7 @@ def chained_book(tmp: Path) -> tuple[GuardBook, str]:
     doc = GuardsDoc(
         accounts={PROP_PREFIX + cid: AccountGuards(initial_balance=100_000.0, rules=(rule,))}
     )
-    return GuardBook(doc, state_path=tmp / "state.json", props=s), rule.id
+    return GuardBook(doc, SharedDb(tmp / "state.db"), props=s), rule.id
 
 
 def test_every_stage_reads_the_containers_rules(tmp_path: Path) -> None:
@@ -208,5 +197,5 @@ def test_guard_state_stays_each_stages_own(tmp_path: Path) -> None:
 
 def test_without_a_store_nothing_resolves(tmp_path: Path) -> None:
     doc = GuardsDoc(accounts={STAGE1: AccountGuards(rules=(GuardRule(type="daily_trades"),))})
-    book = GuardBook(doc, state_path=tmp_path / "state.json")
+    book = GuardBook(doc, SharedDb(tmp_path / "state.db"))
     assert len(book.report(STAGE1, snap(), now=1000.0).rules) == 1

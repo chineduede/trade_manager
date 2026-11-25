@@ -15,6 +15,7 @@ from test_guards import KEY, NOW, book_with, only, snap
 from mt5copier.guards import GuardBook, GuardRule
 from mt5copier.guards.base import Level
 from mt5copier.protocol import OrderType, PendingOrder
+from mt5copier.shared_db import SharedDb
 
 DAY = 86_400.0
 
@@ -83,7 +84,7 @@ def test_the_count_survives_a_restart(tmp_path: Path) -> None:
     b = book_with(daily(limit=2), tmp=tmp_path)
     b.record_open(KEY, pending=False, now=NOW)
     b.record_open(KEY, pending=False, now=NOW)
-    again = GuardBook(b.doc, state_path=tmp_path / "state.json")
+    again = GuardBook(b.doc, SharedDb(tmp_path / "state.db"))
     assert again.verdict(KEY, snap(), NOW).hold is not None
 
 

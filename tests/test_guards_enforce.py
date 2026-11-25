@@ -15,11 +15,12 @@ from mt5copier.config import NoStopPolicy
 from mt5copier.guards import AccountGuards, GuardBook, GuardRule, GuardsDoc
 from mt5copier.protocol import ActionKind, TradeConstraint
 from mt5copier.reconcile import GuardGate, SkipReason, reconcile_slave
+from mt5copier.shared_db import SharedDb
 
 
 def book(*rules: GuardRule, tmp: Path, initial: float = 100_000.0) -> GuardBook:
     doc = GuardsDoc(accounts={KEY: AccountGuards(initial_balance=initial, rules=rules)})
-    return GuardBook(doc, state_path=tmp / "state.json")
+    return GuardBook(doc, SharedDb(tmp / "state.db"))
 
 
 # --- the verdict -------------------------------------------------------------------------------
@@ -43,7 +44,7 @@ def test_a_daily_breach_holds_after_recovery_until_the_reset(tmp_path: Path) -> 
     assert v.hold is not None and "held until the reset" in v.hold
 
     # Held across a restart, from disk.
-    again = GuardBook(b.doc, state_path=tmp_path / "state.json")
+    again = GuardBook(b.doc, SharedDb(tmp_path / "state.db"))
     assert again.verdict(KEY, snap(), NOW + 120).hold is not None
 
     tomorrow = at(2026, 10, 6, 9)
@@ -97,7 +98,7 @@ def test_a_switched_off_set_does_nothing(tmp_path: Path) -> None:
     doc = GuardsDoc(
         accounts={KEY: AccountGuards(enabled=False, rules=(daily(limit=1000, unit="money"),))}
     )
-    v = GuardBook(doc, tmp_path / "s.json").verdict(KEY, snap(equity=90_000.0), NOW)
+    v = GuardBook(doc, SharedDb(tmp_path / "s.db")).verdict(KEY, snap(equity=90_000.0), NOW)
     assert v.hold is None
 
 

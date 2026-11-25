@@ -573,8 +573,8 @@ def rename(cfg: AppConfig, terminal_id: str, name: str) -> str | None:
         cfg.account_names[key] = stripped
     else:
         cfg.account_names.pop(key, None)
-    # The shared store (``paths.account_names_path``) is the source of truth: written per
-    # edit, read-modify-write, so a rename in another profile's window is kept, not clobbered.
+    # The shared store (``shared_db``) is the source of truth: written per edit, one row
+    # per account, so a rename in another profile's window is kept, not clobbered.
     from . import shared_data
 
     shared_data.set_name(key, stripped or None)

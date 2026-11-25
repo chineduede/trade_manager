@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from mt5copier import account_switch
+from mt5copier import account_switch, shared_db
 from mt5copier.account_switch import Account, LoginResult
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.desktop.api import DesktopApi
@@ -141,11 +141,52 @@ def test_a_login_records_the_account_the_terminal_landed_on(
     monkeypatch.setattr(account_switch, "log_in", fake_log_in)
     out = api.account_login(T_FREE, "60001@FTMO-Demo")
     assert out["ok"] is True
-    assert out["message"] == "Spare is logged in to 60001@FTMO-Demo"
+    assert out["message"] == (
+        "Spare is logged in to 60001@FTMO-Demo"
+        "; its settings came along from the last account — worth a look"
+    )
     assert seen == [(api._cfg.terminals[T_FREE].exe_path, Account(60001, "FTMO-Demo"))]
     tcfg = api._cfg.terminals[T_FREE]
     assert (tcfg.last_login, tcfg.last_server) == (60001, "FTMO-Demo")
     assert "sync" in engine.calls
+
+
+def test_a_switch_banks_the_old_accounts_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, _ = _api(tmp_path, monkeypatch)
+    cfg = api._cfg
+    cfg.replace_terminal(cfg.terminals[T_FREE].model_copy(update={"risk_percent": 2.5}))
+    monkeypatch.setattr(
+        account_switch,
+        "log_in",
+        lambda exe, acct, log_file: LoginResult(True, "logged in", acct.login, acct.server),
+    )
+    out = api.account_login(T_FREE, "60001@FTMO-Demo")
+    assert out["ok"] is True
+    banked = shared_db.get().fetch("account_policies", "20481@E8-Demo")
+    assert banked is not None and banked["risk_percent"] == 2.5
+    assert cfg.terminals[T_FREE].risk_percent == 2.5, "nothing remembered for the new one yet"
+
+
+def test_a_switch_back_brings_the_settings_last_used_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, _ = _api(tmp_path, monkeypatch)
+    cfg = api._cfg
+    db = shared_db.get()
+    with db.change(shared_db.POLICIES):
+        db.put("account_policies", "60001@FTMO-Demo", {"risk_percent": 0.25, "invert": True})
+    monkeypatch.setattr(
+        account_switch,
+        "log_in",
+        lambda exe, acct, log_file: LoginResult(True, "logged in", acct.login, acct.server),
+    )
+    out = api.account_login(T_FREE, "60001@FTMO-Demo")
+    assert out["ok"] is True
+    assert out["message"].endswith("; the settings last used on this account are back")
+    tcfg = cfg.terminals[T_FREE]
+    assert (tcfg.risk_percent, tcfg.invert) == (0.25, True)
 
 
 def test_an_account_another_terminal_holds_is_refused(
