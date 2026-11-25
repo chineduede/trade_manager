@@ -1439,6 +1439,9 @@ function renderTerminals() {
     : (live.master
       ? 'Only one terminal can be master. Dropping a second one here bounces back with the reason.'
       : 'none yet — drag a detected terminal here to make it the master');
+  // With a master card up, the note would pad the zone's foot and push the card out of
+  // line with the slave cards beside it; dropping a second terminal explains itself.
+  $('master-note').hidden = !!live.master;
 
   var sc = $('slave-cards');
   sc.textContent = '';
@@ -1676,15 +1679,19 @@ function cardActions(c) {
     acts.appendChild(actBtn('unlink', 'Unassign the master',
       function () { unassignFlow(c); }, 'danger'));
   }
-  acts.appendChild(actBtn('dots', 'More actions', function (btn) { toggleMenuAt(c, btn); }));
+  acts.appendChild(actBtn('dots', 'More actions', function (btn) { toggleMenuAt(c, btn); }, 'icon-dots'));
   return acts;
 }
 
 function toggleMenuAt(c, btn) {
   var menu = $('ctx-menu');
   if (!menu.hidden && menu.dataset.owner === 'card:' + c.tid) { closeMenu(); return; }
+  // Hang the menu off the icon itself — right edges flush, just below — and keep the
+  // card's strip up while it is open, so the two read as one control.
   var at = btn.getBoundingClientRect();
-  openMenu(c, at.left, at.bottom + 6);
+  openMenu(c, at.right, at.bottom + 4, true);
+  var card = btn.closest('.tcard');
+  if (card) card.classList.add('acts-open');
 }
 
 function terminalCard(c, live) {
@@ -2010,7 +2017,13 @@ window.addEventListener('scroll', function () {
 
 // --- dragging a card between zones ---------------------------------------------------------
 function wireCard(el, c) {
-  wirePop(el, c);
+  // Only an assigned card earns the hover readout: it holds equity, the exact margin
+  // and the guard's word. An unassigned card's popover would only repeat the card.
+  if (c.role !== 'unassigned') wirePop(el, c);
+  // The ··· menu belongs to this card: while it is open the icon strip stays up and
+  // the ··· reads pressed, across the rebuilds the poll causes.
+  var menu = $('ctx-menu');
+  if (!menu.hidden && menu.dataset.owner === 'card:' + c.tid) el.classList.add('acts-open');
   el.addEventListener('contextmenu', function (ev) {
     ev.preventDefault();
     openMenu(c, ev.clientX, ev.clientY);
@@ -2118,12 +2131,16 @@ function closeMenu() {
   var menu = $('ctx-menu');
   menu.hidden = true;
   menu.dataset.owner = '';
+  document.querySelectorAll('.tcard.acts-open').forEach(function (el) {
+    el.classList.remove('acts-open');
+  });
 }
 
-function openMenu(c, x, y) {
+function openMenu(c, x, y, alignRight) {
   var live = T.live;
   if (!live) return;
   hidePop();
+  $('tip').hidden = true; // the ··· tooltip would sit right on the opening menu
   var menu = $('ctx-menu');
   menu.dataset.owner = 'card:' + c.tid;
   menu.textContent = '';
@@ -2161,8 +2178,10 @@ function openMenu(c, x, y) {
   });
 
   menu.hidden = false;
-  // Clamp to the window once its size is real.
+  // Clamp to the window once its size is real; alignRight hangs the menu's right edge
+  // on x — the ··· icon's — the way every dropdown on the page opens.
   var w = menu.offsetWidth, h = menu.offsetHeight;
+  if (alignRight) x -= w;
   menu.style.left = Math.max(8, Math.min(x, window.innerWidth - w - 8)) + 'px';
   menu.style.top = Math.max(8, Math.min(y, window.innerHeight - h - 8)) + 'px';
 }

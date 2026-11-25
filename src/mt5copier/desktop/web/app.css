@@ -405,13 +405,18 @@ td .row-btn.more { padding: 0 12px; font-weight: 700; letter-spacing: 1px; }
 body.dragging-terminals .zone-cue { display: inline-block; }
 .zone.drop-hot { border-color: var(--blue); background: rgba(126, 166, 224, 0.10); }
 /* A grid, not a wrap: every card the same width from the track, and the same height
-   from the 1fr rows, so a zone reads as one even set rather than a ragged shelf. */
+   from the 1fr rows, so a zone reads as one even set rather than a ragged shelf.
+   flex: 1 lets the grid fill its zone — the zones row stretches both zones to one
+   height, so the master card bottom-aligns with the slave cards beside it. */
 .zone-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
   grid-auto-rows: 1fr;
   gap: 14px;
+  flex: 1 1 auto;
 }
+/* An empty grid must not grow, or the zone's note is pushed to its foot. */
+.zone-cards:empty { flex: 0 0 auto; }
 #master-cards { grid-template-columns: 1fr; }
 .zone-note { color: var(--muted); font-size: 12.5px; }
 
@@ -488,9 +493,15 @@ body.dragging-terminals .zone-cue { display: inline-block; }
    hover or keyboard focus in the word's place. Only cards that have actions (has-acts)
    swap, so the virtual master's corner never blanks. */
 .tcard-acts { display: none; gap: 2px; flex: 0 0 auto; }
-.tcard.has-acts:hover .tcard-acts, .tcard.has-acts:focus-within .tcard-acts { display: inline-flex; }
+.tcard.has-acts:hover .tcard-acts, .tcard.has-acts:focus-within .tcard-acts,
+.tcard.acts-open .tcard-acts { display: inline-flex; }
 .tcard.has-acts:hover .tcard-word, .tcard.has-acts:focus-within .tcard-word,
-.tcard.has-acts:hover .tcard-head .pill, .tcard.has-acts:focus-within .tcard-head .pill { display: none; }
+.tcard.acts-open .tcard-word,
+.tcard.has-acts:hover .tcard-head .pill, .tcard.has-acts:focus-within .tcard-head .pill,
+.tcard.acts-open .tcard-head .pill { display: none; }
+/* While its ··· menu is open the strip stays up and the ··· reads pressed (acts-open,
+   set by the toggle and re-applied across the poll's rebuilds). */
+.tcard.acts-open .icon-dots { background: var(--hairline); color: var(--fg); }
 .icon-btn {
   width: 24px; height: 24px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
