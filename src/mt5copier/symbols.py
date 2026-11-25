@@ -33,7 +33,8 @@ no prefix support at all.
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Mapping
+from collections import Counter
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -119,6 +120,61 @@ def undecorate(symbol: str, prefix: str = "", suffix: str = "") -> str:
     if suffix and name.upper().endswith(suffix.upper()) and len(name) > len(suffix):
         name = name[: -len(suffix)]
     return name
+
+
+_INFER_LEAST = 4
+"""How many recognizable names a catalog must hold before its decoration is believed at all:
+below this, one oddly named instrument decides the vote."""
+
+_INFER_SHARE = 2 / 3
+"""The share of recognizable names the winning decoration must cover. A broker that lists both
+``EURUSD`` and ``EURUSDp`` splits its own vote and nothing is inferred, which is right: its
+bare names already match exactly, and guessing between its products is not this function's
+call."""
+
+_INFER_DECOR_MOST = 5
+"""The longest leftover believed to be decoration, mirroring the catalog's own bound."""
+
+
+def infer_decoration(names: Iterable[str], known: Callable[[str], str | None]) -> tuple[str, str]:
+    """The decoration a broker's own catalog says it uses, or ``("", "")`` when it is not
+    telling: the prefix and suffix that dominate its recognizably named instruments.
+
+    ``known`` maps a (possibly decorated) name to the known instrument inside it --
+    :meth:`mt5copier.catalog.Catalog.base_of` -- and compares in letters and digits only, so
+    the leftover is read off the broker's own spelling (``EURUSD.r`` votes ``("", ".R")``).
+    Every recognizable name votes with whatever surrounds its known base, undecorated names
+    voting for nothing; only a clear winner -- most of the vote, enough voters -- is believed,
+    and "no decoration" winning is not an inference.
+
+    This exists for direct trading's feed, whose decoration the person has usually never had a
+    reason to configure: the configured value, being an assertion, still outranks whatever this
+    reads. And it is used only to take decoration *off* a name, or to find the feed's own name
+    for a symbol again -- never to pick what another broker trades, which stays with
+    :func:`resolve`'s refusal-based rungs.
+    """
+    votes: Counter[tuple[str, str]] = Counter()
+    for name in names:
+        upper = name.strip().upper()
+        base = known(upper)
+        if base is None:
+            continue
+        at = upper.find(base)
+        if at < 0:
+            # The known base is not contiguous in the broker's spelling ("EUR/USD"), so what
+            # surrounds it cannot be read off.
+            continue
+        pre, post = upper[:at], upper[at + len(base) :]
+        if len(pre) > _INFER_DECOR_MOST or len(post) > _INFER_DECOR_MOST:
+            continue
+        votes[(pre, post)] += 1
+    total = sum(votes.values())
+    if total < _INFER_LEAST:
+        return "", ""
+    (pre, post), count = votes.most_common(1)[0]
+    if (pre, post) == ("", "") or count / total < _INFER_SHARE:
+        return "", ""
+    return pre, post
 
 
 def mapped_target(master_symbol: str, symbol_map: Mapping[str, str] | None) -> str | None:

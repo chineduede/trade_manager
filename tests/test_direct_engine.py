@@ -638,3 +638,81 @@ def test_an_explicit_feed_mapping_is_reversed_at_the_ticket(engine: Engine, cfg:
     engine.virtual_tick()
     quote = engine.direct_quote("GOLD")
     assert quote is not None and quote.bid == 2400.0
+
+
+# --- a decorated feed the person never configured: its catalog says what it decorates with ----
+
+PSUFFIXED = ("EURUSDp", "GBPUSDp", "USDJPYp", "XAUUSDp", "US30")
+"""A BlackBull-shaped catalog: everything takes p, indices go bare, and p is not on
+base_name's common list, so only the catalog's own reading can take it off."""
+
+
+def test_the_feeds_decoration_is_read_off_its_own_catalog(engine: Engine) -> None:
+    feed(engine, EURUSD_QUOTE)
+    engine._symbol_lists[SLAVE] = PSUFFIXED
+    engine.virtual_tick()  # the feed is picked
+    assert engine.feed_clean_names() == ("EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "US30")
+
+
+def test_an_unconfigured_suffix_never_reaches_the_slaves(engine: Engine) -> None:
+    """The reported bug: with the feed's p unconfigured, EURUSDp went out as the master
+    symbol and every other slave refused it as a name it does not list."""
+    feed(engine, EURUSD_QUOTE)
+    engine._symbol_lists[SLAVE] = PSUFFIXED
+    engine.virtual_tick()  # baseline, and the feed is picked
+    assert engine.place_direct_market("EURUSDp", PositionType.BUY, 1.0, 1.08000, 0.0) is None
+    (position,) = engine.direct_positions()
+    assert position.symbol == "EURUSD"
+    engine.virtual_tick()
+    opened = [r.action for r in engine.recent_actions() if r.action.kind is ActionKind.OPEN]
+    assert opened and opened[-1].master_symbol == "EURUSD"
+
+
+def test_the_feeds_own_watch_carries_the_inferred_suffix(engine: Engine) -> None:
+    """Stripping alone is not enough: the feed must find its own p-name again to quote the
+    clean symbol, so the watch goes out with the inferred decoration."""
+    feed(engine, EURUSD_QUOTE)
+    engine._symbol_lists[SLAVE] = PSUFFIXED
+    engine.virtual_tick()
+    engine.place_direct_market("EURUSD", PositionType.BUY, 1.0, 1.08000, 0.0)
+    engine.virtual_tick()
+    watches = [c for c in engine._workers[SLAVE].cmd_q.sent if isinstance(c, WatchCommand)]
+    assert watches and watches[-1].symbol_suffix.upper() == "P"
+
+
+def test_a_configured_decoration_outranks_the_catalogs_reading(
+    engine: Engine, cfg: AppConfig
+) -> None:
+    cfg.terminals[SLAVE].symbol_suffix = "x"
+    feed(engine, EURUSD_QUOTE)
+    engine._symbol_lists[SLAVE] = PSUFFIXED
+    engine.virtual_tick()
+    with engine._lock:
+        assert engine._decor_of(SLAVE) == ("", "x")
+
+
+def test_a_broker_listing_both_spellings_is_not_guessed_between(engine: Engine) -> None:
+    """Bare and decorated side by side split the catalog's own vote, so nothing is inferred:
+    the bare names already match exactly, and which p-name is which product is not ours to
+    guess. The decorated spellings stay listed as themselves."""
+    feed(engine, EURUSD_QUOTE)
+    engine._symbol_lists[SLAVE] = (
+        "EURUSD",
+        "EURUSDp",
+        "GBPUSD",
+        "GBPUSDp",
+        "USDJPY",
+        "USDJPYp",
+    )
+    engine.virtual_tick()
+    names = engine.feed_clean_names()
+    assert "EURUSD" in names and "EURUSDP" in names
+
+
+def test_a_known_index_name_is_never_read_as_decorated(engine: Engine) -> None:
+    """USTEC ends in base_name's common c, but the catalog lists it whole: it must survive
+    the cleaning as itself, not as USTE."""
+    feed(engine, EURUSD_QUOTE)
+    engine._symbol_lists[SLAVE] = ("USTEC", "EURUSD")
+    engine.virtual_tick()
+    assert engine.feed_clean_names() == ("USTEC", "EURUSD")

@@ -91,7 +91,7 @@ from ..settings_edit import (
 )
 from ..settings_example import MasterTrade, PriceValue, pick, work
 from ..setups import Setup, SetupsDoc
-from ..symbols import base_name, undecorate
+from ..symbols import undecorate
 from ..terminal_detail import (
     PositionRow,
     breakeven_rule,
@@ -540,18 +540,11 @@ class DesktopApi:
     def symbol_search(self, query: str) -> dict[str, Any]:
         """Symbols matching what is typed, from the feed broker's own catalog (pushed once
         per connection by its worker), as clean base names: what every slave resolves from.
-        Prefix matches first, then anywhere-in-the-name; a dozen at most."""
+        Prefix matches first, then anywhere-in-the-name; a dozen at most. The engine does
+        the cleaning, with the same pipeline the ticket's own names go through, so a pick
+        here and a typed name land on the same book key."""
         q = str(query).strip().upper()
-        # The feed's configured decoration comes off first -- ".FX" and its kind are not on
-        # base_name's common list, and a name left decorated places on the feed alone while
-        # every other slave refuses it as not found.
-        prefix, suffix, back = self._engine.feed_decor()
-        names: list[str] = []
-        for raw in self._engine.feed_symbols():
-            undecorated = back.get(raw.upper()) or undecorate(raw, prefix, suffix)
-            clean = base_name(undecorated).upper()
-            if clean not in names:
-                names.append(clean)
+        names = list(self._engine.feed_clean_names())
         if not q:
             return {"symbols": names[:12], "known": len(names)}
         starts = [n for n in names if n.startswith(q)]

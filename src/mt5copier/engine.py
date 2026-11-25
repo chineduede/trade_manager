@@ -35,7 +35,7 @@ from .breakeven import (
     master_breakeven_due,
     stop_past_entry,
 )
-from .catalog import CLASS_WORDS, Catalog, CatalogStore
+from .catalog import CLASS_WORDS, Catalog, CatalogStore, normal
 from .claims import ClaimBook, ClaimRefusedError, claim_keys
 from .config import (
     VIRTUAL_MASTER_ID,
@@ -116,7 +116,7 @@ from .store import (
     find_missing_orders,
     find_orphans,
 )
-from .symbols import undecorate
+from .symbols import base_name, infer_decoration, undecorate
 from .virtual import VirtualBook
 from .worker import run_worker
 
@@ -217,16 +217,16 @@ refusing is asked a handful of times as the trade runs, never once per tick."""
 
 
 def _undecorated(
-    positions: Sequence[Position], orders: Sequence[PendingOrder], master: TerminalConfig
+    positions: Sequence[Position], orders: Sequence[PendingOrder], prefix: str, suffix: str
 ) -> tuple[Sequence[Position], Sequence[PendingOrder]]:
     """The master's lists with its broker's prefix/suffix taken off every symbol.
 
     Done once, here, before anything else reads a symbol, so that the slaves' filters, renames,
     decorations and resolution, the news guard and the history all see one name -- the plain
     one -- instead of each having to know about the master's broker. Only the copier's view
-    changes: the master's own page still shows what its terminal calls the instrument.
+    changes: the master's own page still shows what its terminal calls the instrument. The
+    decoration is the master's effective one -- configured, or read off its own catalog.
     """
-    prefix, suffix = master.symbol_prefix, master.symbol_suffix
     if not prefix and not suffix:
         return positions, orders
     return (
@@ -336,6 +336,9 @@ class Engine:
         """The news calendar: fetched on its own thread, and only once a news rule asks."""
         self._catalog = CatalogStore()
         """The shared symbol catalog, for the rules that read asset classes."""
+        self._decor_cache: dict[str, tuple[object, object, tuple[str, str]]] = {}
+        """Per terminal, the decoration inferred from its pushed symbol list, remembered with
+        the list and catalog it was read from so either changing is a recompute."""
         self._props = PropStore(shared_db)
         """The prop account containers: a linked account reads its rules under its
         container's identity."""
@@ -1034,21 +1037,71 @@ class Engine:
             self._feed_tid = chosen
         return chosen
 
-    def _feed_decor(self) -> tuple[str, str, dict[str, str]]:
-        """The feed broker's configured decoration, for taking its own names back to clean
-        ones: prefix, suffix, and its symbol map reversed (broker name -> clean name).
+    def _decor_of(self, terminal_id: str) -> tuple[str, str]:
+        """This terminal's broker decoration: the configured prefix/suffix while either is
+        set -- an assertion, so it outranks everything -- else what its own pushed symbol
+        list says it uses (see :func:`mt5copier.symbols.infer_decoration`), else nothing.
+
+        The inferred reading is spent only on taking decoration *off* a name and on finding
+        this same broker's name for a clean symbol again; what another broker trades stays
+        with its configured settings and :func:`mt5copier.symbols.resolve`'s refusals.
         Caller must hold the lock."""
+        cfg = self._cfg.terminals.get(terminal_id)
+        if cfg is None:
+            return "", ""
+        if cfg.symbol_prefix or cfg.symbol_suffix:
+            return cfg.symbol_prefix, cfg.symbol_suffix
+        names = self._symbol_lists.get(terminal_id)
+        if not names:
+            return "", ""
+        catalog = self._catalog.current()
+        cached = self._decor_cache.get(terminal_id)
+        if cached is not None and cached[0] is names and cached[1] is catalog:
+            return cached[2]
+        decor = infer_decoration(names, catalog.base_of)
+        if decor != ("", ""):
+            log.info(
+                "%s's catalog reads as %s<symbol>%s; stripping that decoration where its "
+                "names stand in for the plain instrument",
+                self._cfg.display_name(terminal_id),
+                decor[0],
+                decor[1],
+            )
+        self._decor_cache[terminal_id] = (names, catalog, decor)
+        return decor
+
+    def _feed_decor(self) -> tuple[str, str, dict[str, str]]:
+        """The feed broker's decoration, for taking its own names back to clean ones:
+        prefix, suffix (configured or read off its catalog -- :meth:`_decor_of`), and its
+        symbol map reversed (broker name -> clean name). Caller must hold the lock."""
         tid = self._feed_tid
         cfg = self._cfg.terminals.get(tid) if tid is not None else None
-        if cfg is None:
+        if cfg is None or tid is None:
             return "", "", {}
         back = {v.upper(): k for k, v in cfg.symbol_map.items()}
-        return cfg.symbol_prefix, cfg.symbol_suffix, back
+        prefix, suffix = self._decor_of(tid)
+        return prefix, suffix, back
 
-    def feed_decor(self) -> tuple[str, str, dict[str, str]]:
-        """The feed's decoration for callers cleaning its catalog, like the ticket's search."""
-        with self._lock:
-            return self._feed_decor()
+    def _clean_name(
+        self,
+        symbol: str,
+        prefix: str,
+        suffix: str,
+        back: Mapping[str, str],
+        catalog: Catalog,
+    ) -> str:
+        """One name taken back to the plain instrument: the reversed rename, then the feed's
+        decoration off, then -- only for a name the catalog does not already know whole --
+        the common-suffix strip. The catalog check is what keeps ``USTEC`` from being read
+        as ``USTE`` with a ``c`` bolted on."""
+        name = symbol.strip()
+        mapped = back.get(name.upper())
+        if mapped is not None:
+            return mapped.upper()
+        clean = undecorate(name, prefix, suffix).upper()
+        if catalog.base_of(clean) == normal(clean):
+            return clean
+        return base_name(clean)
 
     def _feed_clean(self, symbol: str) -> str:
         """A symbol as the book keys it: upper-cased, the feed broker's decoration taken off.
@@ -1058,8 +1111,26 @@ class Engine:
         search cleaned them -- would quote and fill on the feed alone while every other slave
         refuses it as not found. Caller must hold the lock, after the feed is picked."""
         prefix, suffix, back = self._feed_decor()
-        name = symbol.strip()
-        return (back.get(name.upper()) or undecorate(name, prefix, suffix)).upper()
+        return self._clean_name(symbol, prefix, suffix, back, self._catalog.current())
+
+    def feed_clean_names(self) -> tuple[str, ...]:
+        """The feed broker's catalog as clean instrument names, deduped in catalog order:
+        what the ticket's search offers, and exactly what :meth:`_feed_clean` would make of
+        each listed name, so a pick and a typed name land on the same key."""
+        with self._lock:
+            tid = self._feed_tid
+            if tid is None:
+                return ()
+            prefix, suffix, back = self._feed_decor()
+            catalog = self._catalog.current()
+            out: list[str] = []
+            seen: set[str] = set()
+            for raw in self._symbol_lists.get(tid, ()):
+                clean = self._clean_name(raw, prefix, suffix, back, catalog)
+                if clean not in seen:
+                    seen.add(clean)
+                    out.append(clean)
+            return tuple(out)
 
     def _feed_quotes(self) -> tuple[str | None, dict[str, tuple[float, float]]]:
         """The feed's latest prices by clean symbol name. Caller must hold the lock."""
@@ -1083,10 +1154,13 @@ class Engine:
         needed = book.symbols()
         if self._watch_extra:
             needed = needed | {self._watch_extra}
+        # The effective decoration, not the raw config: the feed must find its own name for
+        # each clean symbol again, and an inferred suffix is part of how it was taken off.
+        prefix, suffix = self._decor_of(feed_tid)
         cmd = WatchCommand(
             symbols=tuple(sorted(needed)),
-            symbol_prefix=cfg.symbol_prefix,
-            symbol_suffix=cfg.symbol_suffix,
+            symbol_prefix=prefix,
+            symbol_suffix=suffix,
             symbol_map=tuple(sorted(cfg.symbol_map.items())),
         )
         if self._watch_sent == (feed_tid, cmd):
@@ -1169,14 +1243,6 @@ class Engine:
         with self._lock:
             return self._feed_tid
 
-    def feed_symbols(self) -> tuple[str, ...]:
-        """The feed broker's symbol catalog, as its worker pushed it; empty while unknown."""
-        with self._lock:
-            tid = self._feed_tid
-            if tid is None:
-                return ()
-            return self._symbol_lists.get(tid, ())
-
     _RATES_REFRESH_S = 5.0
     """How often the minichart's bars are re-read. Between refreshes the last candle moves
     live off the quotes, so this only paces when a *closed* bar can appear."""
@@ -1209,12 +1275,13 @@ class Engine:
         worker = self._workers.get(tid)
         if cfg is None or worker is None:
             return
+        prefix, suffix = self._decor_of(tid)
         req = RatesRequest(
             symbol=symbol,
             timeframe=timeframe,
             count=count,
-            symbol_prefix=cfg.symbol_prefix,
-            symbol_suffix=cfg.symbol_suffix,
+            symbol_prefix=prefix,
+            symbol_suffix=suffix,
             symbol_map=tuple(sorted(cfg.symbol_map.items())),
         )
         try:
@@ -1545,7 +1612,9 @@ class Engine:
             self._set_blocked("the master's pending orders cannot be read")
             return
         self._set_blocked(None)
-        positions, orders = _undecorated(snap.open_positions, snap.pending_orders, master)
+        positions, orders = _undecorated(
+            snap.open_positions, snap.pending_orders, *self._decor_of(master.terminal_id)
+        )
 
         # Before the links, not after: deciding whether a slave may be copied to now includes
         # reconciling it against the store, so the store has to exist first.

@@ -295,3 +295,26 @@ def test_a_cap_below_one_step_declines_even_when_shrinking() -> None:
     fit = fit_lots(lots=1.0, cap=0.0, mode="shrink", symbol="US30", facts=FACTS)
     assert fit.lots is None
     assert fit.note is not None and fit.note.action == "declined"
+
+
+# --- base_of: the known instrument inside a decorated broker name -----------------------------
+
+
+def test_base_of_reads_through_decoration() -> None:
+    assert DEFAULT.base_of("EURUSDp") == "EURUSD"
+    assert DEFAULT.base_of("mGBPJPY") == "GBPJPY"
+    assert DEFAULT.base_of("EURUSD.r") == "EURUSD"
+    assert DEFAULT.base_of("US500.cash") == "US500"
+    assert DEFAULT.base_of("XAUUSD+") == "XAUUSD"
+
+
+def test_base_of_takes_a_listed_name_whole() -> None:
+    assert DEFAULT.base_of("USTEC") == "USTEC", "not USTE with a c bolted on"
+    assert DEFAULT.base_of("GOLD") == "GOLD"
+    assert DEFAULT.base_of("EURUSD") == "EURUSD"
+
+
+def test_base_of_refuses_what_it_does_not_know() -> None:
+    assert DEFAULT.base_of("AAPL") is None
+    assert DEFAULT.base_of("") is None
+    assert DEFAULT.base_of("EURUSDQUARTERLY") is None, "too much leftover to be decoration"
