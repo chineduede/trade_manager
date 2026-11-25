@@ -1116,9 +1116,9 @@ class DesktopApi:
         # settings tuned on it, and the new one gets back whatever was banked for it.
         tcfg = cfg.terminals[tid]
         had_account = account_key(tcfg.last_login, tcfg.last_server) is not None
-        config_mod.remember_policy(cfg, tcfg)
+        config_mod.remember_policy(tcfg)
         tcfg = record_login(tcfg, result.login, result.server or acct.server)
-        tcfg, restored = config_mod.restore_policy(cfg, tcfg)
+        tcfg, restored = config_mod.restore_policy(tcfg)
         cfg.replace_terminal(tcfg)
         self._switchable.pop(tid, None)  # the account it is on changed; re-answer fresh
         why = self._persist()

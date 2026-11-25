@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from mt5copier import shared_db
 from mt5copier.config import (
     POLICY_FIELDS,
     SCHEMA_VERSION,
@@ -731,46 +732,60 @@ def test_what_is_not_policy_stays_off_the_list() -> None:
         assert field not in POLICY_FIELDS, field
 
 
+def _banked(key: str) -> dict[str, object] | None:
+    got = shared_db.get().fetch("account_policies", key)
+    return got if isinstance(got, dict) else None
+
+
+def _seed(key: str, snapshot: dict[str, object]) -> None:
+    db = shared_db.get()
+    with db.change(shared_db.POLICIES):
+        db.put("account_policies", key, snapshot)
+
+
 def test_a_switch_back_restores_the_settings_tuned_on_the_account() -> None:
     cfg = _on_a(risk_percent=2.5, invert=True)
     tcfg = cfg.terminals[TID_A]
 
-    remember_policy(cfg, tcfg)  # leaving A
+    remember_policy(tcfg)  # leaving A
     tcfg = record_login(tcfg, 222, "B-Demo")
     tcfg = tcfg.model_copy(update={"risk_percent": 0.5, "invert": False})
 
-    remember_policy(cfg, tcfg)  # leaving B
+    remember_policy(tcfg)  # leaving B
     tcfg = record_login(tcfg, 111, "A-Demo")
-    tcfg, restored = restore_policy(cfg, tcfg)
+    tcfg, restored = restore_policy(tcfg)
     assert restored
     assert (tcfg.risk_percent, tcfg.invert) == (2.5, True)
 
-    tcfg, restored = restore_policy(cfg, record_login(tcfg, 222, "B-Demo"))
+    tcfg, restored = restore_policy(record_login(tcfg, 222, "B-Demo"))
     assert restored
     assert (tcfg.risk_percent, tcfg.invert) == (0.5, False)
 
 
 def test_with_nothing_remembered_a_switch_keeps_the_current_settings() -> None:
     cfg = _on_a(risk_percent=2.5)
-    tcfg, restored = restore_policy(cfg, cfg.terminals[TID_A])
+    tcfg, restored = restore_policy(cfg.terminals[TID_A])
     assert not restored
     assert tcfg is cfg.terminals[TID_A]
 
 
 def test_remembering_with_no_known_account_is_a_no_op() -> None:
     cfg = AppConfig(terminals={TID_A: TerminalConfig(terminal_id=TID_A)})
-    remember_policy(cfg, cfg.terminals[TID_A])
-    assert cfg.account_policies == {}
+    remember_policy(cfg.terminals[TID_A])
+    assert shared_db.get().load("account_policies") == {}
 
 
 def test_restore_takes_only_policy_keys_from_a_snapshot() -> None:
     cfg = _on_a(symbol_suffix=".x")
-    cfg.account_policies["111@A-Demo"] = {
-        "risk_percent": 3.0,
-        "symbol_suffix": ".y",  # hand-edited in: not policy, must not apply
-        "from_the_future": 7,  # a later version's field: ignored, not fatal
-    }
-    tcfg, restored = restore_policy(cfg, cfg.terminals[TID_A])
+    _seed(
+        "111@A-Demo",
+        {
+            "risk_percent": 3.0,
+            "symbol_suffix": ".y",  # hand-edited in: not policy, must not apply
+            "from_the_future": 7,  # a later version's field: ignored, not fatal
+        },
+    )
+    tcfg, restored = restore_policy(cfg.terminals[TID_A])
     assert restored
     assert tcfg.risk_percent == 3.0
     assert tcfg.symbol_suffix == ".x", "broker facts are not policy and stay put"
@@ -778,8 +793,8 @@ def test_restore_takes_only_policy_keys_from_a_snapshot() -> None:
 
 def test_a_snapshot_the_schema_rejects_restores_nothing() -> None:
     cfg = _on_a()
-    cfg.account_policies["111@A-Demo"] = {"risk_percent": -3}
-    tcfg, restored = restore_policy(cfg, cfg.terminals[TID_A])
+    _seed("111@A-Demo", {"risk_percent": -3})
+    tcfg, restored = restore_policy(cfg.terminals[TID_A])
     assert not restored
     assert tcfg.risk_percent == 1.0, "nothing half-applied"
 
@@ -787,40 +802,61 @@ def test_a_snapshot_the_schema_rejects_restores_nothing() -> None:
 def test_live_consent_is_never_restored_by_the_memory() -> None:
     cfg = _on_a(allow_live_trading=True, risk_percent=2.5)
     tcfg = cfg.terminals[TID_A]
-    remember_policy(cfg, tcfg)
+    remember_policy(tcfg)
     tcfg = record_login(tcfg, 222, "B-Demo")
     assert not tcfg.allow_live_trading, "withdrawn by the switch, as before"
-    tcfg, restored = restore_policy(cfg, record_login(tcfg, 111, "A-Demo"))
+    tcfg, restored = restore_policy(record_login(tcfg, 111, "A-Demo"))
     assert restored
     assert tcfg.risk_percent == 2.5
     assert not tcfg.allow_live_trading, "the typed consent does not ride back"
 
 
-def test_an_external_switch_seen_by_discovery_banks_the_settings(tmp_path: Path) -> None:
+def test_an_external_switch_seen_by_discovery_swaps_the_settings(tmp_path: Path) -> None:
     exe = tmp_path / "terminal64.exe"
     exe.write_bytes(b"MZ")
+    _seed("222@B-Demo", {"risk_percent": 0.25, "invert": True})
     cfg = _on_a(risk_percent=2.5)
     cfg.terminals[TID_A].exe_path = exe
     merge_discovery(cfg, [disc(TID_A, "Spare", exe, login=222, server="B-Demo")])
-    assert cfg.account_policies["111@A-Demo"]["risk_percent"] == 2.5
-    assert cfg.terminals[TID_A].last_login == 222
+    banked = _banked("111@A-Demo")
+    assert banked is not None and banked["risk_percent"] == 2.5, "the account it left banked"
+    tcfg = cfg.terminals[TID_A]
+    assert tcfg.last_login == 222
+    assert (tcfg.risk_percent, tcfg.invert) == (0.25, True), "the account it landed on restored"
 
 
-def test_a_sweep_reporting_the_same_account_banks_nothing(tmp_path: Path) -> None:
+def test_a_sweep_reporting_the_same_account_banks_and_restores_nothing(tmp_path: Path) -> None:
     exe = tmp_path / "terminal64.exe"
     exe.write_bytes(b"MZ")
+    _seed("111@A-Demo", {"risk_percent": 0.25})
     cfg = _on_a(risk_percent=2.5)
     cfg.terminals[TID_A].exe_path = exe
     merge_discovery(cfg, [disc(TID_A, "Spare", exe, login=111, server="A-Demo")])
-    assert cfg.account_policies == {}
+    assert cfg.terminals[TID_A].risk_percent == 2.5, (
+        "an unchanged login is not a switch: this profile's edits stand"
+    )
 
 
-def test_the_remembered_policies_survive_save_and_load(tmp_path: Path) -> None:
+def test_a_new_profile_sees_a_known_account_already_tuned(tmp_path: Path) -> None:
+    # Profile one tunes the account and banks it (here: seeded straight into the shared
+    # memory). A brand-new profile -- an empty AppConfig -- discovers a terminal already
+    # logged in to that account, and the first sweep brings the tuning with it.
+    exe = tmp_path / "terminal64.exe"
+    exe.write_bytes(b"MZ")
+    _seed("111@A-Demo", {"risk_percent": 0.75, "invert": True})
+    cfg = merge_discovery(AppConfig(), [disc(TID_A, "Fresh", exe, login=111, server="A-Demo")])
+    tcfg = cfg.terminals[TID_A]
+    assert (tcfg.risk_percent, tcfg.invert) == (0.75, True)
+    assert tcfg.role is Role.UNASSIGNED, "the tuning travels; the profile's roles do not"
+
+
+def test_the_memory_lives_outside_the_profiles_config(tmp_path: Path) -> None:
     cfg = _on_a(risk_percent=2.5)
-    remember_policy(cfg, cfg.terminals[TID_A])
+    remember_policy(cfg.terminals[TID_A])
     path = tmp_path / "config.json"
     save(cfg, path)
-    back = load(path)
-    assert back.account_policies["111@A-Demo"]["risk_percent"] == 2.5
-    tcfg, restored = restore_policy(back, back.terminals[TID_A])
+    assert "account_policies" not in json.loads(path.read_text(encoding="utf-8")), (
+        "the bank is machine-wide shared data, not profile config"
+    )
+    tcfg, restored = restore_policy(load(path).terminals[TID_A])
     assert restored and tcfg.risk_percent == 2.5

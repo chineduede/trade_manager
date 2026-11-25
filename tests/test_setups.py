@@ -11,6 +11,7 @@ from test_reconcile import TID_SLAVE2, held_by, live_engine, seed_live_store, st
 
 from mt5copier import account_switch as account_mod
 from mt5copier import setups as setups_mod
+from mt5copier import shared_db
 from mt5copier.account_switch import Account
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.setups import Setup, SetupsDoc
@@ -247,7 +248,8 @@ def test_loading_a_setup_first_banks_each_accounts_settings(
     )
     assert eng.load_setup(setup) is None
     assert eng.config.terminals[TID_SLAVE].risk_percent == 0.5, "the setup's settings won"
-    assert eng.config.account_policies["222@B-Demo"]["risk_percent"] == 2.5, (
+    banked = shared_db.get().fetch("account_policies", "222@B-Demo")
+    assert banked is not None and banked["risk_percent"] == 2.5, (
         "banked before the setup's settings went on, so a later switch back to the "
         "account can restore what was tuned on it"
     )

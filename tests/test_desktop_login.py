@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from mt5copier import account_switch
+from mt5copier import account_switch, shared_db
 from mt5copier.account_switch import Account, LoginResult
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.desktop.api import DesktopApi
@@ -164,7 +164,8 @@ def test_a_switch_banks_the_old_accounts_settings(
     )
     out = api.account_login(T_FREE, "60001@FTMO-Demo")
     assert out["ok"] is True
-    assert cfg.account_policies["20481@E8-Demo"]["risk_percent"] == 2.5
+    banked = shared_db.get().fetch("account_policies", "20481@E8-Demo")
+    assert banked is not None and banked["risk_percent"] == 2.5
     assert cfg.terminals[T_FREE].risk_percent == 2.5, "nothing remembered for the new one yet"
 
 
@@ -173,7 +174,9 @@ def test_a_switch_back_brings_the_settings_last_used_there(
 ) -> None:
     api, _ = _api(tmp_path, monkeypatch)
     cfg = api._cfg
-    cfg.account_policies["60001@FTMO-Demo"] = {"risk_percent": 0.25, "invert": True}
+    db = shared_db.get()
+    with db.change(shared_db.POLICIES):
+        db.put("account_policies", "60001@FTMO-Demo", {"risk_percent": 0.25, "invert": True})
     monkeypatch.setattr(
         account_switch,
         "log_in",

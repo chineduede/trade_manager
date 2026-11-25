@@ -3362,7 +3362,7 @@ class Engine:
             # never themselves overwritten by that memory -- only the app's account switch
             # restores (see config.restore_policy).
             for tcfg in self._cfg.terminals.values():
-                remember_policy(self._cfg, tcfg)
+                remember_policy(tcfg)
             setups_mod.apply_roles(setup, self._cfg, leave_out)
             setups_mod.restore_settings(setup, self._cfg)
         return None

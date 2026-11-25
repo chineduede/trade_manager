@@ -57,6 +57,11 @@ GUARDS = "guards"
 """One stamp for the rules and the templates together: every save writes both."""
 GUARD_STATE = "guard_state"
 PROPS = "props"
+POLICIES = "policies"
+"""Each account's remembered trader-policy settings (:data:`mt5copier.config.POLICY_FIELDS`),
+keyed by account. Machine-wide on purpose: a profile owns terminals, never an account's
+tuning, so a new profile sees every known account already tuned. Born in the database --
+there was never a JSON file to import."""
 
 _IMPORTED = "json_imported"
 """The ``meta`` store name whose presence says the one-time JSON import has run."""
@@ -64,6 +69,7 @@ _IMPORTED = "json_imported"
 _TABLES = frozenset(
     {
         "account_names",
+        "account_policies",
         "guard_accounts",
         "guard_templates",
         "guard_state",
@@ -74,7 +80,7 @@ _TABLES = frozenset(
 
 def _table(name: str) -> str:
     """The table name, vouched for -- every query interpolates through here, so a table
-    name can never be anything but one of the five literals above."""
+    name can never be anything but one of the literals above."""
     if name not in _TABLES:
         raise ValueError(f"no shared table called {name!r}")
     return name
@@ -91,6 +97,7 @@ class SharedDb(SqliteStore):
     SCHEMA: ClassVar[str] = """
         CREATE TABLE IF NOT EXISTS meta(store TEXT PRIMARY KEY, stamp INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS account_names(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS account_policies(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS guard_accounts(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS guard_templates(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS guard_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
