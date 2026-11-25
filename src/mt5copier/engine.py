@@ -3326,7 +3326,7 @@ class Engine:
             if cfg is None:
                 return "that terminal is gone; rescan"
             if cfg.role is Role.MASTER:
-                return "the master cannot be parked while its slaves copy it; unassign it instead"
+                return "the master cannot be hidden while its slaves copy it; unassign it instead"
             refusal = self._give_up_agreed(self._stake(terminal_id, None), orphan)
             if refusal is not None:
                 return refusal

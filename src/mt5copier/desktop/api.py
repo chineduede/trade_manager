@@ -747,8 +747,8 @@ class DesktopApi:
         parked: list[dict[str, Any]] = []
         for view in engine.views():
             if view.cfg.hidden:
-                # No card: a parked terminal is not spawned, so there is nothing live to
-                # draw. The strip at the foot of the page lists it by name to unhide.
+                # No card: a hidden terminal is not spawned, so there is nothing live to
+                # draw. The Hidden flyout in the DETECTED zone's header lists it to unhide.
                 key = account_key(view.cfg.last_login, view.cfg.last_server)
                 parked.append(
                     {
@@ -878,11 +878,13 @@ class DesktopApi:
         )
         refusal = self._engine.hide_terminal(tid, orphan=orphan)
         if refusal is not None:
-            return _no(f"{name} was not parked: {refusal}")
+            return _no(f"{name} was not hidden: {refusal}")
         why = self._persist()
         if why is not None:
             return _no(why)
-        message = f"{name} parked: disconnected, settings kept. Unhide it at the foot of this page."
+        message = (
+            f"{name} hidden: disconnected, settings kept. Find it under Hidden, next to Rescan."
+        )
         if orphan:
             total = sum(len(t) for t in orphan.values())
             message += (

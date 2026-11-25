@@ -232,7 +232,7 @@
     <div class="page" id="page-terminals" hidden>
       <div class="page-head">
         <h1>Terminals</h1>
-        <span class="muted">drag a card between zones to assign it · right-click a card for actions</span>
+        <span class="muted">drag a card between zones to assign it · hover a card for its actions · click it for its page</span>
       </div>
 
       <div id="zones-row">
@@ -260,6 +260,19 @@
           <h2>DETECTED · DRAG UP TO CONNECT</h2>
           <span class="zone-cue">Release to unassign</span>
           <span class="zone-actions">
+            <div class="dd" id="hidden-dd" hidden>
+              <button type="button" id="hidden-btn" class="dd-btn" aria-haspopup="true" aria-expanded="false" data-tip="Hidden terminals — disconnected, settings kept">
+                <svg aria-hidden="true" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"></path><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"></path><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"></path><path d="M1 1l22 22"></path></svg>
+                <span id="hidden-count">Hidden</span>
+              </button>
+              <div class="dd-menu" id="hidden-menu" role="dialog" aria-label="Hidden terminals" hidden>
+                <span class="hmenu-head">hidden — disconnected, role and settings kept</span>
+                <div class="hmenu-hr" aria-hidden="true"></div>
+                <div id="hidden-rows"></div>
+                <div class="hmenu-hr" aria-hidden="true"></div>
+                <span class="hmenu-foot">hiding frees the terminal’s claim for other profiles · Unhide reconnects it as it was</span>
+              </div>
+            </div>
             <button type="button" id="ctrader-btn">cTrader login…</button>
             <button type="button" id="rescan-btn">Rescan</button>
           </span>
@@ -268,13 +281,6 @@
         <span class="zone-note" id="detected-note" hidden>every terminal found is assigned · Rescan looks again</span>
       </section>
 
-      <section aria-label="Parked terminals" class="zone zone-parked" id="parked-strip" hidden>
-        <div class="zone-head">
-          <h2>PARKED</h2>
-          <span class="zone-note">disconnected, settings kept · Unhide reconnects</span>
-        </div>
-        <div class="parked-chips" id="parked-list"></div>
-      </section>
     </div>
 
     <div class="page" id="page-guards" hidden>
@@ -979,7 +985,7 @@
       <section aria-label="The pages" class="panel">
         <div class="panel-head"><h2>The pages</h2></div>
         <dl class="help-dl">
-          <dt>Terminals</dt><dd>every terminal as a card in three zones — the master, the slaves, and the detected ones not yet used. Drag to assign, right-click for actions, click a card for its own page.</dd>
+          <dt>Terminals</dt><dd>every terminal as a card in three zones — the master, the slaves, and the detected ones not yet used. Drag to assign; hover a card for its action icons, with the rare ones under ··· (right-click opens the same menu); click a card for its own page. A hidden terminal leaves the dashboard entirely and waits behind the Hidden button in the DETECTED zone's header.</dd>
           <dt>Trading</dt><dd>the direct-trading ticket: place, modify, partly close or flatten — and every enabled slave copies it. Greyed out unless the profile trades directly.</dd>
           <dt>Guards</dt><dd>rules that watch an account — daily loss, drawdown, lot caps and the rest — and decline, shrink or stop trades before a limit is reached. Rules belong to the account, and follow it to any terminal, in any profile.</dd>
           <dt>Prop accounts</dt><dd>one named chain per prop account. When the firm closes a stage and issues a new login, link it into the chain and it reads the chain's guard rules and initial balance — the same rules, not a copy. Breaches and day counts stay each login's own, and old stages are kept for the record.</dd>

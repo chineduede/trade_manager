@@ -27,13 +27,21 @@ NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             " strips GBPCAD.FX down to GBPCAD and still finds the broker's .FX name when"
             " placing there. A value no name carries at all is set aside (the log says so),"
             " and the automatic catalog reading takes over.",
-            "Terminals can be parked. Park (in a card's menu) hides the terminal and"
-            " disconnects it entirely — no copies, never the direct-trading price feed, and"
-            " its claim is released for other profiles — while its role and every setting"
-            " are kept. Parked terminals sit in a strip at the foot of the Terminals page"
-            " with an Unhide beside each. Parking a slave that holds open copies asks"
-            " first, exactly as unassigning does, because those copies stop being managed."
-            " The master cannot be parked — unassign it instead.",
+            "Terminals can be hidden. The eye icon on a card disconnects the terminal"
+            " entirely — no copies, never the direct-trading price feed, and its claim is"
+            " released for other profiles — while its role and every setting are kept. A"
+            " hidden terminal leaves the dashboard completely: its one home is the Hidden"
+            " button in the DETECTED zone's header, which carries the count, lists each"
+            " one with an Unhide, and only shows while something is hidden. Hiding a"
+            " slave that holds open copies asks first, exactly as unassigning does,"
+            " because those copies stop being managed. The master cannot be hidden —"
+            " unassign it instead.",
+            "A card's everyday actions are icons now, not a right-click menu. Hover a"
+            " card (or tab to it) and the corner's state word gives way to pause, hide"
+            " and unassign — on a detected terminal, log in and hide. The rare actions"
+            " (rename the account, reconnect, restart the worker, allow live trading,"
+            " acknowledge orphans) sit under the ··· icon, and right-click still opens"
+            " that same menu.",
             "The Setups page is gone. Profiles already keep an arrangement — every"
             " terminal's role, account and settings — so saved setups were a second copy"
             " of the same thing. A setups.json left on disk is no longer read; make a"
