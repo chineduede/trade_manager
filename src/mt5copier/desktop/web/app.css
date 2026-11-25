@@ -790,39 +790,6 @@ body.dragging-terminals .zone-cue { display: inline-block; }
 }
 .pill.green { color: var(--green); }
 
-/* --- the setups page -----------------------------------------------------------------------
-   The TUI w page as a desktop table: the roles in place now against the saved setups. */
-#setups-now-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 14px; }
-.now-k {
-  font-size: 12px; letter-spacing: 0.14em; font-weight: 600; color: var(--muted);
-  flex: 0 0 auto;
-}
-#setups-now-roles { font-size: 13.5px; min-width: 0; }
-#setups-now-state { white-space: nowrap; }
-#setups-now-state .strow-dot { margin-right: 4px; }
-#setups-table { min-width: 960px; }
-.strow-head, .strow {
-  display: grid;
-  grid-template-columns: 1.1fr 1.1fr 1.8fr 0.7fr 0.9fr;
-  gap: 0 14px; align-items: baseline;
-  padding: 10px 12px;
-}
-.strow-head {
-  color: var(--muted); font-size: 12.5px; font-weight: 600;
-  border-bottom: 1px solid var(--hairline);
-  padding-top: 2px; padding-bottom: 6px;
-}
-.strow { border-bottom: 1px solid var(--hairline-soft); cursor: pointer; font-size: 13.5px; }
-.strow:last-child { border-bottom: 0; }
-.strow:hover { background: rgba(236, 228, 208, 0.03); }
-.strow.selected { background: var(--panel-raise); box-shadow: inset 3px 0 0 var(--blue); }
-.strow span[role="cell"] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.strow-name { font-weight: 600; }
-.strow-dot { color: var(--green); }
-.strow-note { grid-column: 1 / -1; color: var(--red); font-size: 12.5px; padding-top: 2px; white-space: normal; }
-#setups-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-#setups-foot > .muted { flex: 0 1 auto; max-width: 620px; }
-
 /* --- the prop accounts page --- */
 #prop-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 14px; }
 #prop-list { display: flex; flex-direction: column; gap: 16px; }

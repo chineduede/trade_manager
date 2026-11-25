@@ -26,7 +26,6 @@ from pathlib import Path
 from typing import Any
 
 from . import role_actions
-from . import setups as setups_mod
 from .breakeven import (
     breakeven_level,
     buffer_distance,
@@ -105,7 +104,6 @@ from .reconcile import (
     protective_sl,
 )
 from .settings_edit import copies_word
-from .setups import Setup
 from .sizing import risk_budget
 from .store import (
     MappingStore,
@@ -3342,90 +3340,6 @@ class Engine:
             if cfg is None:
                 return "that terminal is gone; rescan"
             cfg.hidden = False
-        return None
-
-    def logins(self) -> dict[str, int | None]:
-        """The account each terminal is logged into: the one its latest snapshot names, else the
-        one it was last known to be logged into. The login alone, as a setup keeps it."""
-        with self._lock:
-            return self._logins()
-
-    def _logins(self) -> dict[str, int | None]:
-        """Caller must hold the lock."""
-        found = setups_mod.logins_of(self._cfg)
-        for tid, snap in self._snapshots.items():
-            if tid in found and snap.login is not None:
-                found[tid] = snap.login
-        return found
-
-    def setup_stake(self, setup: Setup) -> dict[str, list[OpenCopy]] | None:
-        """The open copies loading this setup would give up, by slave, or None if any of them
-        cannot be read. An empty dict means there is nothing to ask."""
-        with self._lock:
-            return self._setup_stake(setup)
-
-    def _setup_stake(self, setup: Setup) -> dict[str, list[OpenCopy]] | None:
-        """Caller must hold the lock."""
-        stake: dict[str, list[OpenCopy]] = {}
-        for tid in setups_mod.losing(setup, self._cfg, self._logins()):
-            held = self._open_copies(tid)
-            if held is None:
-                return None
-            if held:
-                stake[tid] = held
-        return stake
-
-    def load_setup(
-        self,
-        setup: Setup,
-        *,
-        orphan: Mapping[str, Collection[int]] | None = None,
-        leave_out: Collection[str] = (),
-        go_live: bool = False,
-    ) -> str | None:
-        """Put a saved setup back: its roles, every terminal's settings, copying on or off and
-        the dry run or live mode, as it was saved. None means done; otherwise why not, with
-        nothing changed.
-
-        **Going live takes** ``go_live``, given only once the person has typed ``LIVE``, as the
-        copier's own settings ask; a setup that would turn a dry run into live copying without
-        it is refused. Nor is the mode switched while commands are out, whose answers would be
-        matched against the other set of beliefs. The live-trading override is never turned on
-        (see :func:`setups.restore_settings`).
-
-        The same rule as :meth:`unassign`, for the same reason: a slave taken off its master --
-        or left on while the master changes under it, or logged into another account -- has its
-        copies given up, and only if the person agreed to exactly those. One that keeps its
-        master and its account keeps its copies.
-
-        **A terminal is never given a role on an account the setup does not name.** One that has
-        to be logged into its account first must be in ``leave_out``, and is left unassigned:
-        the app logs it in and then loads the setup again (see :func:`setups.apply_roles`).
-
-        The caller still has to save the config and :meth:`sync`.
-        """
-        with self._lock:
-            logins = self._logins()
-            found = setups_mod.problems(setup, self._cfg, logins)
-            if found:
-                return "; ".join(found)
-            unswitched = [
-                self._cfg.display_name(tid)
-                for tid in setups_mod.switches(setup, logins)
-                if tid not in leave_out
-            ]
-            if unswitched:
-                return f"{', '.join(unswitched)} is not logged into the setup's account"
-            if setups_mod.goes_live(setup, self._cfg) and not go_live:
-                return "it copies live, which needs LIVE typed to switch from the dry run"
-            switching = setup.dry_run is not None and setup.dry_run != self._cfg.dry_run
-            if switching and self._ledger.inflight_count:
-                return "commands are still in flight; try again in a moment"
-            refusal = self._give_up_agreed(self._setup_stake(setup), orphan)
-            if refusal is not None:
-                return refusal
-            setups_mod.apply_roles(setup, self._cfg, leave_out)
-            setups_mod.restore_settings(setup, self._cfg)
         return None
 
     def _give_up_copies(self, terminal_id: str) -> None:

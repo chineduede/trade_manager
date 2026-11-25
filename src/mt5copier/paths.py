@@ -165,12 +165,6 @@ def guards_path() -> Path:
     return shared_dir() / "guards.json"
 
 
-def setups_path() -> Path:
-    """The person's saved setups: which terminal is the master, which are slaves, and whether
-    copying was on. Apart from ``config.json``, as the guards are."""
-    return user_data_dir() / "setups.json"
-
-
 def news_path() -> Path:
     """The last news calendar fetched, kept so a restart without the internet still knows it.
     Shared: the week's releases are the same for every profile, so one fetch serves all."""

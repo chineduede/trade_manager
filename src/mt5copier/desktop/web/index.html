@@ -36,7 +36,6 @@
       <a href="#" class="nav-item" data-page="prop" data-tip="Prop accounts"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg><span class="nav-label">Prop accounts</span></a>
       <a href="#" class="nav-item" data-page="news" data-tip="News"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M16 2v4M8 2v4M3 10h18"></path></svg><span class="nav-label">News</span></a>
       <a href="#" class="nav-item" data-page="history" data-tip="History"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg><span class="nav-label">History</span></a>
-      <a href="#" class="nav-item" data-page="setups" data-tip="Setups"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"></path></svg><span class="nav-label">Setups</span></a>
       <a href="#" class="nav-item" data-page="settings" data-tip="Settings"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"></path></svg><span class="nav-label">Settings</span></a>
       <span class="sidebar-space"></span>
       <a href="#" class="nav-item" data-page="help" data-tip="Help — F1"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><path d="M12 17h.01"></path></svg><span class="nav-label">Help</span></a>
@@ -431,52 +430,6 @@
       <div id="hist-cards"></div>
       <div id="hist-empty" class="muted" hidden></div>
       <div id="hist-more" class="muted small" hidden></div>
-    </div>
-
-    <div class="page" id="page-setups" hidden>
-      <div class="page-head">
-        <h1>Setups</h1>
-        <span class="muted">who copies from whom, each terminal's account and settings — saved, to put back later</span>
-      </div>
-
-      <section aria-label="The roles in place now" class="panel" id="setups-now-panel">
-        <div id="setups-now-row">
-          <span class="now-k">NOW</span>
-          <span id="setups-now-roles"></span>
-          <span id="setups-now-state" class="small"></span>
-          <span class="toolbar-space"></span>
-          <button type="button" id="st-save" class="primary-btn">Save current as…</button>
-        </div>
-        <div id="setups-now-note" class="yellow small" hidden></div>
-      </section>
-
-      <section aria-label="Saved setups" class="panel" id="setups-panel">
-        <div class="panel-head">
-          <h2>Saved setups</h2>
-          <span class="muted small" id="setups-count"></span>
-        </div>
-        <div class="table-scroll">
-          <div role="table" aria-label="Saved setups" id="setups-table">
-            <div role="row" class="strow-head">
-              <span role="columnheader">SETUP</span>
-              <span role="columnheader">MASTER</span>
-              <span role="columnheader">SLAVES</span>
-              <span role="columnheader">COPYING</span>
-              <span role="columnheader">SAVED</span>
-            </div>
-            <div id="setups-rows"></div>
-          </div>
-        </div>
-        <div id="setups-empty" class="muted" hidden>No setups saved yet — Save current as… keeps the roles in place now, to put back later.</div>
-        <div id="setups-foot">
-          <span class="muted small">loading puts the saved state back, logging terminals into their accounts — live trading is never turned on by a setup, and going from a dry run to live asks for LIVE typed</span>
-          <span class="toolbar-space"></span>
-          <button type="button" id="st-load" class="primary-btn" disabled>Load</button>
-          <button type="button" id="st-update" class="plain-btn" disabled>Update with current</button>
-          <button type="button" id="st-rename" class="plain-btn" disabled>Rename</button>
-          <button type="button" id="st-delete" class="danger-btn" disabled>Delete</button>
-        </div>
-      </section>
     </div>
 
     <div class="page" id="page-settings" hidden>
@@ -895,7 +848,7 @@
           <div class="panel-head"><h2>Live trading</h2></div>
           <div class="small" id="td-live-said"></div>
           <button type="button" id="td-live-btn" class="plain-btn" hidden></button>
-          <span class="field-note muted">The demo-only guard stands between every slave and a real-money account. A loaded setup can turn the override off, never on.</span>
+          <span class="field-note muted">The demo-only guard stands between every slave and a real-money account. The override is only ever turned on here, by hand.</span>
         </section>
 
         <section aria-label="Example" class="panel cfg-card" id="td-example">
@@ -1019,7 +972,7 @@
           <li><strong>Put accounts on them.</strong> A card's log in link signs a terminal into a saved account; a terminal already logged in inside MT5 is picked up as it is. One account runs on one terminal at a time.</li>
           <li><strong>Tune each terminal on its own page.</strong> Click a card: risk sizing, breakeven, symbol decoration and the rest live there — each terminal keeps its own.</li>
           <li><strong>Check the copier's switches on Settings.</strong> What the profile is, dry run or live, timings. Stay in the dry run until the Log and History show the copies you expect.</li>
-          <li><strong>Then go live — and keep the arrangement.</strong> Save it on Setups under a name, so this exact wiring can be put back later with one click.</li>
+          <li><strong>Then go live.</strong> On Settings, switch the mode to Live — it asks for LIVE typed. The arrangement needs no saving: the profile keeps its roles, accounts and settings as they stand.</li>
         </ol>
       </section>
 
@@ -1032,7 +985,6 @@
           <dt>Prop accounts</dt><dd>one named chain per prop account. When the firm closes a stage and issues a new login, link it into the chain and it reads the chain's guard rules and initial balance — the same rules, not a copy. Breaches and day counts stay each login's own, and old stages are kept for the record.</dd>
           <dt>News</dt><dd>the week's Forex Factory releases, and what the news rule will do about each one — close or breakeven copies minutes before the release, if the rule is on.</dd>
           <dt>History</dt><dd>one card per copied trade with every step under it: placed, filled, changed, closed, and anything a guard did along the way. Money stays in the terminal — no P/L here, on purpose.</dd>
-          <dt>Setups</dt><dd>saved arrangements: who copies from whom — or, in a direct-trading profile, which slaves trade — each terminal's account and settings. A setup loads into a profile of the mode it was saved in, and loading never turns live trading on by itself.</dd>
           <dt>Settings</dt><dd>the copier's own switches, for every terminal: what the profile is, dry run or live, connection timings. A save lands whole or not at all. The timings are the machine's and shared by every profile; the rest is the profile's own. The symbol catalog — which asset class each symbol is, for guard rules that care — also lives here, shared by every profile.</dd>
         </dl>
       </section>
@@ -1055,7 +1007,6 @@
           <dt>given up</dt><dd>a copy left open but no longer managed — nothing will close or change it. Only unassigning or disabling a slave gives copies up; editing settings never does.</dd>
           <dt>breakeven</dt><dd>the stop moved to the entry plus costs once a trade is far enough ahead, so it can no longer lose.</dd>
           <dt>buffer</dt><dd>a guard acts at its buffer, deliberately short of the firm's hard limit — the tick mark on each rule's bar.</dd>
-          <dt>setup vs profile</dt><dd>a setup is a saved arrangement inside this profile; a profile is a whole separate copier with a window of its own.</dd>
         </dl>
       </section>
     </div>

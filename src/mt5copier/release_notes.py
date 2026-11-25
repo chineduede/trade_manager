@@ -34,6 +34,10 @@ NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             " with an Unhide beside each. Parking a slave that holds open copies asks"
             " first, exactly as unassigning does, because those copies stop being managed."
             " The master cannot be parked — unassign it instead.",
+            "The Setups page is gone. Profiles already keep an arrangement — every"
+            " terminal's role, account and settings — so saved setups were a second copy"
+            " of the same thing. A setups.json left on disk is no longer read; make a"
+            " profile per arrangement instead.",
         ),
     ),
     (

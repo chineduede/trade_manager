@@ -1,7 +1,7 @@
 """Profiles: independent copies of the whole app, one data directory each.
 
 A profile is nothing but a directory -- its own ``config.json``, ``mapping.db``, guards,
-setups, logs and single-instance lock -- so two running profiles share no file and cannot
+logs and single-instance lock -- so two running profiles share no file and cannot
 race each other. The *default* profile is the base directory itself, the layout from before
 profiles existed; the rest live under ``profiles/<name>``.
 

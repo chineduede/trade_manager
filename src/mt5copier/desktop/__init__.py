@@ -35,7 +35,6 @@ from ..paths import (
     is_frozen,
     user_data_dir,
 )
-from ..setups import load as load_setups
 
 log = get_logger(__name__)
 
@@ -202,7 +201,7 @@ def run() -> None:
     log.info("config at %s (profile %s, desktop)", config_path(), profile)
 
     engine = Engine(cfg, guards=guards, claims=ClaimBook(claims_dir(), profile))
-    api = DesktopApi(cfg, engine, guards, load_setups())
+    api = DesktopApi(cfg, engine, guards)
     title = "Copier" if profile == DEFAULT_PROFILE else f"Copier — {profile}"
     if not is_frozen():
         # A source run works against MT5Copier-Dev data (see paths.base_data_dir); say so in
