@@ -1,11 +1,15 @@
-"""Cross-profile claims: no two running profiles may hold the same terminal or account.
+"""Cross-profile claims: no two running profiles may attach the same terminal install.
 
-Profiles isolate *files*; they do nothing about the world outside them. The dangerous overlap
-is two instances attaching one MT5 terminal, or copying to one broker account through two
-different terminal installs -- double copies, with each instance then fighting to "correct"
-the other's positions. So before the engine spawns a worker it claims the terminal's identity
-and the account's, and a claim another running profile holds refuses the spawn with a message
-naming the holder.
+Profiles isolate *files*; they do nothing about the world outside them. Two instances
+attaching one MT5 terminal is a physical conflict that lasts exactly as long as both
+processes do, so it is guarded by a runtime lock: before the engine spawns a worker it
+claims the terminal's identity, and a claim another running profile holds refuses the
+spawn with a message naming the holder.
+
+Accounts are deliberately *not* claimed here any more. Which profile may use an account is
+persistent data, not a runtime fact -- an account stays its profile's while that window is
+closed -- so it lives in :mod:`mt5copier.ownership` (the ``account_owners`` table in
+``shared.db``), checked at the same spawn seam.
 
 Same locking as :mod:`mt5copier.single_instance`, for the same reason: an OS byte lock dies
 with its process, so a crashed instance never leaves a stale claim behind. The claim files
@@ -24,7 +28,7 @@ import re
 from pathlib import Path
 from typing import TextIO
 
-from .config import TerminalConfig, account_key
+from .config import TerminalConfig
 from .logging_setup import get_logger
 from .single_instance import open_lockable
 
@@ -38,28 +42,20 @@ class ClaimRefusedError(Exception):
         self.key = key
         self.owner_profile = owner_profile
         self.owner_pid = owner_pid
-        what = "the account" if key.startswith(("account:", "ctrader:")) else "the terminal"
         if owner_profile:
-            msg = f"{what} is in use by profile {owner_profile!r}"
+            msg = f"the terminal is in use by profile {owner_profile!r}"
         else:
-            msg = f"{what} is in use by another instance"
+            msg = "the terminal is in use by another instance"
         super().__init__(msg)
 
 
 def claim_keys(tcfg: TerminalConfig) -> list[str]:
-    """The identities one terminal config stakes out: the install, and the account in it.
+    """The identity one terminal config stakes out: the install itself.
 
-    Both, deliberately. The terminal alone is not enough -- the same account logged into two
-    installs is the double-copy case -- and the account alone is not enough either, because a
-    terminal whose login is not yet known must still be claimed before a worker launches it.
+    The account it holds is not a claim -- which profile may use an account is persistent
+    ownership (:mod:`mt5copier.ownership`), not a lock that dies with the window.
     """
-    keys = [f"terminal:{tcfg.terminal_id}"]
-    if tcfg.ctrader_account_id is not None:
-        keys.append(f"ctrader:{tcfg.ctrader_account_id}")
-    key = account_key(tcfg.last_login, tcfg.last_server)
-    if key is not None:
-        keys.append(f"account:{key}")
-    return keys
+    return [f"terminal:{tcfg.terminal_id}"]
 
 
 def _claim_file(directory: Path, key: str) -> Path:

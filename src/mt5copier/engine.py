@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from . import role_actions
+from . import ownership, role_actions
 from .breakeven import (
     breakeven_level,
     buffer_distance,
@@ -166,9 +166,10 @@ class TerminalView:
     supervised: bool = False
     """Whether the engine currently has a worker for this terminal."""
     claim_refused: str | None = None
-    """Why no worker was spawned: another running profile holds this terminal or its
-    account. The engine retries every few seconds, so this clears by itself once the
-    other instance lets go -- its locks die with its process, close included."""
+    """Why no worker was spawned: another running profile holds this terminal, or another
+    profile owns this account. The engine retries every few seconds, so the terminal case
+    clears by itself when the other window closes, and the account case the moment its
+    owner lets the account go."""
 
     def is_stale(self, timeout_s: float) -> bool:
         """True when a supervised worker has stopped reporting.
@@ -513,19 +514,22 @@ class Engine:
                 self._spawn_worker(tcfg)
 
     def _retry_refused_claims(self) -> None:
-        """Re-attempt claims another profile refused us, on a slow tick.
+        """Re-attempt refused spawns, and notice lost ownership, on a slow tick.
 
-        The locks behind a claim die with the process that holds them, so the moment the
-        other window closes -- X button, crash, anything -- the terminal is free. But
-        nothing used to try again until the person forced a sync (a rescan, a role
-        change), and the card said "in use" long after it wasn't. The drain loop calls
-        this every pass; it costs nothing unless a refusal is on record and a few
-        seconds have gone by since the last try.
+        Two directions, same cadence. Outward: a terminal claim dies with the window that
+        held it, and an account's owner may let it go at any moment, so a refused spawn is
+        retried every few seconds and the card clears by itself. Inward: another profile
+        may have deliberately taken an account this profile was running
+        (:func:`mt5copier.ownership.force_take`), and the worker on it must stop -- its
+        copies stay open, unmanaged, exactly as the takeover's confirmation warned.
         """
-        if not self._claim_refused or time.monotonic() < self._claims_retry_at:
+        if time.monotonic() < self._claims_retry_at:
             return
         with self._lock:
             self._claims_retry_at = time.monotonic() + 3.0
+            self._stop_disowned()
+            if not self._claim_refused:
+                return
             for tid in list(self._claim_refused):
                 tcfg = self._cfg.terminals.get(tid)
                 if tcfg is None or tcfg.role is Role.UNASSIGNED or not tcfg.enabled or tcfg.hidden:
@@ -565,8 +569,39 @@ class Engine:
             except Exception as exc:
                 log.debug("could not send reconnect to %s: %r", terminal_id[:8], exc)
 
+    def _stop_disowned(self) -> None:
+        """Stop any worker whose account another profile now owns. Caller holds the lock."""
+        if self._claims is None:  # a claimless engine (the tests') owns nothing either
+            return
+        for tid in list(self._workers):
+            tcfg = self._cfg.terminals.get(tid)
+            if tcfg is None:
+                continue
+            who = ownership.owned_elsewhere(ownership.key_of(tcfg))
+            if who is None:
+                continue
+            log.warning(
+                "%s: its account was taken over by profile %r; the worker is stopped and "
+                "its copies stay open, unmanaged",
+                tcfg.label,
+                who,
+            )
+            self._stop_worker(tid)
+            self._claim_refused[tid] = f"the account is owned by profile {who!r}"
+
     def _spawn_worker(self, tcfg: TerminalConfig) -> None:
         if self._claims is not None:
+            # Spawning is using: the account becomes this profile's if it is free. The
+            # backstop take -- assignment and the app's login already took it with better
+            # words -- that also covers a login made in MT5 itself and the first start
+            # after an update. Gated with the claims, so the tests' claimless engines
+            # stay free of the shared database.
+            refused = ownership.take_for(tcfg)
+            if refused is not None:
+                if self._claim_refused.get(tcfg.terminal_id) != refused:
+                    log.warning("not connecting %s: %s", tcfg.label, refused)
+                self._claim_refused[tcfg.terminal_id] = refused
+                return
             keys = claim_keys(tcfg)
             try:
                 self._claims.acquire(keys)
@@ -1586,6 +1621,7 @@ class Engine:
                 # Demote the master alone -- not role_actions.unassign, which sweeps every
                 # slave along with it. Here the virtual master takes its place in the same
                 # breath, so the slaves keep their roles and copy it instead.
+                ownership.release(ownership.key_of(self._cfg.master))
                 self._cfg.set_role(self._cfg.master.terminal_id, Role.UNASSIGNED)
             self._cfg.mode = mode
             if mode is AppMode.TRADING:
@@ -3332,14 +3368,25 @@ class Engine:
             if refusal is not None:
                 return refusal
             cfg.hidden = True
+            # Hiding is the release valve: the terminal and its account are freed for
+            # other profiles, while the role and settings here wait for an unhide.
+            ownership.release(ownership.key_of(cfg))
         return None
 
     def unhide_terminal(self, terminal_id: str) -> str | None:
-        """Bring a parked terminal back; it reconnects on the caller's :meth:`sync`."""
+        """Bring a parked terminal back; it reconnects on the caller's :meth:`sync`.
+
+        Hiding released the account, so coming back means taking it again -- and another
+        profile may own it by now, which refuses the unhide rather than silently parking
+        an assigned terminal on an account it may not use."""
         with self._lock:
             cfg = self._cfg.terminals.get(terminal_id)
             if cfg is None:
                 return "that terminal is gone; rescan"
+            if cfg.role is not Role.UNASSIGNED:
+                refused = ownership.take_for(cfg)
+                if refused is not None:
+                    return f"it stays hidden: {refused}"
             cfg.hidden = False
         return None
 

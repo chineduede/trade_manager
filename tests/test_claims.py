@@ -1,4 +1,5 @@
-"""Cross-profile claims on terminals and accounts.
+"""Cross-profile claims on terminal installs. Accounts are not claims any more: which
+profile may use an account is persistent ownership (tests/test_ownership.py).
 
 Like the single-instance lock's tests: ``msvcrt`` locks are per file handle, so two
 :class:`ClaimBook`\\ s in this one process contend exactly as two real instances would.
@@ -14,26 +15,20 @@ from mt5copier.claims import ClaimBook, ClaimRefusedError, claim_keys
 from mt5copier.config import TerminalConfig, ctrader_server_name, ctrader_terminal_id
 
 
-def test_what_one_terminal_claims_covers_both_the_install_and_the_account() -> None:
+def test_a_terminal_claims_only_the_install_never_the_account() -> None:
     tcfg = TerminalConfig(terminal_id="abc123", last_login=555, last_server="Broker-Demo")
-    assert claim_keys(tcfg) == ["terminal:abc123", "account:555@Broker-Demo"]
-
-
-def test_a_terminal_with_no_known_login_still_claims_the_install() -> None:
-    tcfg = TerminalConfig(terminal_id="abc123")
     assert claim_keys(tcfg) == ["terminal:abc123"]
+    assert claim_keys(TerminalConfig(terminal_id="abc123")) == ["terminal:abc123"]
 
 
-def test_a_ctrader_account_claims_its_account_id_too() -> None:
+def test_a_ctrader_entry_claims_its_row_id_the_account_is_ownerships() -> None:
     tcfg = TerminalConfig(
         terminal_id=ctrader_terminal_id(42),
         ctrader_account_id=42,
         last_login=999,
         last_server=ctrader_server_name("IC Markets", False),
     )
-    keys = claim_keys(tcfg)
-    assert f"terminal:{ctrader_terminal_id(42)}" in keys
-    assert "ctrader:42" in keys
+    assert claim_keys(tcfg) == [f"terminal:{ctrader_terminal_id(42)}"]
 
 
 def test_a_claim_held_by_one_book_is_refused_to_another(tmp_path: Path) -> None:
@@ -51,32 +46,14 @@ def test_a_claim_held_by_one_book_is_refused_to_another(tmp_path: Path) -> None:
     theirs.release_all()
 
 
-def test_the_same_account_through_two_different_terminals_is_still_refused(
-    tmp_path: Path,
-) -> None:
-    """The double-copy case: one broker account logged into two installs."""
-    a = TerminalConfig(terminal_id="install-1", last_login=777, last_server="FTMO-Server")
-    b = TerminalConfig(terminal_id="install-2", last_login=777, last_server="FTMO-Server")
-    ours = ClaimBook(tmp_path, "funded")
-    theirs = ClaimBook(tmp_path, "scalp")
-    ours.acquire(claim_keys(a))
-    try:
-        with pytest.raises(ClaimRefusedError) as err:
-            theirs.acquire(claim_keys(b))
-        assert err.value.key == "account:777@FTMO-Server"
-        assert "account" in str(err.value)
-    finally:
-        ours.release_all()
-
-
 def test_a_refused_acquire_keeps_none_of_what_it_took(tmp_path: Path) -> None:
     """All or nothing: a half-claim would block the holder's own respawn for nothing."""
     ours = ClaimBook(tmp_path, "funded")
     theirs = ClaimBook(tmp_path, "scalp")
-    ours.acquire(["account:1@x"])
+    ours.acquire(["terminal:held"])
     try:
         with pytest.raises(ClaimRefusedError):
-            theirs.acquire(["terminal:fresh", "account:1@x"])
+            theirs.acquire(["terminal:fresh", "terminal:held"])
         # The terminal key it briefly took must be free again.
         ours.acquire(["terminal:fresh"])
     finally:
@@ -86,8 +63,8 @@ def test_a_refused_acquire_keeps_none_of_what_it_took(tmp_path: Path) -> None:
 def test_reacquiring_what_this_book_already_holds_is_fine(tmp_path: Path) -> None:
     """A worker restart re-claims its keys without ever having released them."""
     book = ClaimBook(tmp_path, "funded")
-    book.acquire(["terminal:abc", "account:1@x"])
-    book.acquire(["terminal:abc", "account:1@x"])  # must not raise
+    book.acquire(["terminal:abc"])
+    book.acquire(["terminal:abc"])  # must not raise
     book.release_all()
 
 

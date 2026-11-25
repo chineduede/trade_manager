@@ -175,3 +175,7 @@ def delete(name: str) -> None:
     if pid is not None:
         raise ProfileError(f"{name!r} is running (pid {pid}); close it first")
     shutil.rmtree(profile_dir(name))
+    # A gone profile owns nothing: its accounts are freed for the profiles that remain.
+    from . import ownership  # here, not at the top: profiles is imported by entry points
+
+    ownership.release_all_of(name)

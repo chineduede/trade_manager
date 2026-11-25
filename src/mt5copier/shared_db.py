@@ -62,6 +62,10 @@ POLICIES = "policies"
 keyed by account. Machine-wide on purpose: a profile owns terminals, never an account's
 tuning, so a new profile sees every known account already tuned. Born in the database --
 there was never a JSON file to import."""
+OWNERS = "owners"
+"""Which profile owns each account -- see :mod:`mt5copier.ownership`. Persistent data, not
+a runtime lock: ownership survives the owning window closing, and every other profile sees
+the account read-only until the owner lets go. Born in the database too."""
 
 _IMPORTED = "json_imported"
 """The ``meta`` store name whose presence says the one-time JSON import has run."""
@@ -74,6 +78,7 @@ _TABLES = frozenset(
         "guard_templates",
         "guard_state",
         "prop_containers",
+        "account_owners",
     }
 )
 
@@ -102,6 +107,7 @@ class SharedDb(SqliteStore):
         CREATE TABLE IF NOT EXISTS guard_templates(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS guard_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS prop_containers(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS account_owners(key TEXT PRIMARY KEY, value TEXT NOT NULL);
     """
 
     @property

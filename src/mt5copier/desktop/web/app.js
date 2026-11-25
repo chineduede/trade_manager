@@ -2193,6 +2193,19 @@ function menuItems(c, live) {
 
   // The everyday verbs — pause, hide, unassign, log in — are the card's icons now
   // (cardActions); this menu, behind ··· and right-click alike, keeps the rare rest.
+  function takeOwn() {
+    if (!c.ownedBy) return;
+    does('Take ownership: its account is profile ‘' + c.ownedBy + '’s…', function () {
+      confirmModal(
+        'Take ownership of ' + (c.accountName || c.name),
+        'This account is owned by profile ‘' + c.ownedBy + '’, so it is read-only here. '
+        + 'Taking it makes it this profile’s: that profile’s terminal stops copying it, '
+        + 'and any copies it holds stay open there, unmanaged.',
+        'Take ownership', true,
+        function () { tact(api().take_ownership(c.tid)); }
+      );
+    }, 'danger');
+  }
   if (c.role === 'unassigned') {
     if (c.isCtrader) {
       if (live.hasMaster) does('Make it a slave', function () { tact(api().assign_slave(c.tid)); });
@@ -2208,6 +2221,7 @@ function menuItems(c, live) {
       does(c.accountName ? 'Rename this account…' : 'Name this account…',
         function () { accountNameFlow(c); });
     }
+    takeOwn();
     return items;
   }
 
@@ -2231,6 +2245,7 @@ function menuItems(c, live) {
     does('Reconnect to the terminal', function () { tact(api().reconnect(c.tid)); });
     does('Restart its worker process', function () { tact(api().restart_worker(c.tid)); });
   }
+  takeOwn();
   return items;
 }
 
@@ -2742,9 +2757,13 @@ function renderGuards() {
     initial.value = live.initialBalance === null || live.initialBalance === undefined
       ? '' : String(live.initialBalance);
   }
-  initial.disabled = !live.hasAccount;
+  initial.disabled = !live.hasAccount || !!live.ownedBy;
   $('g-all').checked = !!live.enabled;
   var notes = [];
+  if (live.ownedBy) {
+    notes.push('owned by profile ‘' + live.ownedBy + '’ — read-only here: '
+      + 'its rules can be read, not changed');
+  }
   if (!live.hasAccount) {
     notes.push("this terminal's account is not known yet: connect it once, then its rules can be set");
   } else {
@@ -2768,9 +2787,12 @@ function renderGuards() {
   live.rules.forEach(function (r) { rows.appendChild(guardRow(r)); });
   $('guard-empty').hidden = live.rules.length > 0;
   var picked = live.rules.filter(function (r) { return r.id === G.selected; })[0] || null;
-  $('g-change').disabled = !picked;
-  $('g-toggle').disabled = !picked;
-  $('g-remove').disabled = !picked;
+  var readOnly = !!live.ownedBy;
+  $('g-add').disabled = readOnly;
+  $('g-all').disabled = readOnly;
+  $('g-change').disabled = !picked || readOnly;
+  $('g-toggle').disabled = !picked || readOnly;
+  $('g-remove').disabled = !picked || readOnly;
   $('g-toggle').textContent = picked && !picked.enabled ? 'Rule on' : picked ? 'Rule off' : 'Rule on/off';
   $('g-clear').hidden = !(picked && picked.latched);
   $('g-clear').disabled = !(picked && picked.latched);
@@ -5186,9 +5208,17 @@ function renderTdetail() {
   }
 
   var save = live.role === 'master' ? $('td-m-save') : $('td-save');
-  save.textContent = D.saving ? 'Saving…' : 'Save';
-  save.disabled = D.saving;
-  (live.role === 'master' ? $('td-m-revert') : $('td-revert')).disabled = D.saving;
+  var revert = live.role === 'master' ? $('td-m-revert') : $('td-revert');
+  if (live.lockedBy) {
+    // Owned by another profile: the form shows the account's settings, nothing saves.
+    save.textContent = 'Read-only — owned by profile ‘' + live.lockedBy + '’';
+    save.disabled = true;
+    revert.disabled = true;
+  } else {
+    save.textContent = D.saving ? 'Saving…' : 'Save';
+    save.disabled = D.saving;
+    revert.disabled = D.saving;
+  }
 }
 
 function tdLiveCard(live) {

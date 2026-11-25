@@ -20,7 +20,15 @@ import time
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
-from .. import __version__, account_switch, release_notes, role_actions, shared_data, shared_db
+from .. import (
+    __version__,
+    account_switch,
+    ownership,
+    release_notes,
+    role_actions,
+    shared_data,
+    shared_db,
+)
 from .. import config as config_mod
 from .. import profiles as profiles_mod
 from ..catalog import LISTED, CatalogStore
@@ -748,6 +756,7 @@ class DesktopApi:
             # The full sentence rides separately: the card's state word stays short and the
             # info line carries the story ("the terminal is in use by profile 'x'").
             "claimRefused": view.claim_refused,
+            "ownedBy": ownership.owned_elsewhere(ownership.key_of(tcfg)),
             "tier": info.tier,
             "login": info.login,
             "server": info.server,
@@ -946,6 +955,27 @@ class DesktopApi:
         name = self._cfg.display_name(tid)
         return _ok(f"{name} is back; it connects on the next tick if it has a role.")
 
+    def take_ownership(self, tid: str) -> dict[str, Any]:
+        """The deliberate takeover: this profile becomes the account's owner. The page asks
+        first, in exactly these words -- the profile that had it loses it, its worker there
+        stops when it notices, and any copies it held stay open, unmanaged."""
+        tid = str(tid)
+        tcfg = self._cfg.terminals.get(tid)
+        if tcfg is None:
+            return _no("that terminal is gone; rescan")
+        key = ownership.key_of(tcfg)
+        if key is None:
+            return _no("this terminal has no account to take; log it in first")
+        name = self._cfg.display_name(tid)
+        lost = ownership.force_take(key)
+        self._engine.sync()
+        if lost is None:
+            return _ok(f"{name}: the account is this profile's now.")
+        return _ok(
+            f"{name}: the account is this profile's now. Profile {lost!r} lost it; "
+            "any copies it held stay open there, unmanaged."
+        )
+
     def rename_account(self, tid: str, name: str) -> dict[str, Any]:
         """Name (or, given blank, unname) the account this terminal is last known to be logged
         into. Cosmetic and immediate -- no copies are at stake, as
@@ -956,6 +986,9 @@ class DesktopApi:
             return _no("that terminal is gone; rescan")
         tcfg = self._cfg.terminals[tid]
         key = account_key(tcfg.last_login, tcfg.last_server)
+        who = ownership.owned_elsewhere(key)
+        if who is not None:
+            return _no(f"read-only: {key} is owned by profile {who!r}")
         refusal = rename(self._cfg, tid, str(name or ""))
         if refusal is not None:
             return _no(refusal)
@@ -1019,6 +1052,9 @@ class DesktopApi:
         if tid not in self._cfg.terminals:
             return _no("that terminal is gone; rescan")
         old = self._cfg.terminals[tid]
+        who = ownership.owned_elsewhere(ownership.key_of(old))
+        if who is not None:
+            return _no(f"read-only: the account is owned by profile {who!r}")
         allow = bool(allow)
         name = self._cfg.display_name(tid)
         if old.allow_live_trading == allow:
@@ -1185,6 +1221,12 @@ class DesktopApi:
                 f"{self._account_called(key)} is in use by {used_by}: an account "
                 "is used on one terminal at a time"
             )
+        who = ownership.owned_elsewhere(key)
+        if who is not None:
+            return _no(
+                f"{self._account_called(key)} is owned by profile {who!r} and read-only "
+                "here; its owner can unassign or hide it, or you can take ownership"
+            )
         with self._busy_lock:
             if tid in self._logging_in:
                 return _no(f"{name} is already logging in")
@@ -1204,9 +1246,15 @@ class DesktopApi:
         tcfg = cfg.terminals[tid]
         had_account = account_key(tcfg.last_login, tcfg.last_server) is not None
         config_mod.remember_policy(tcfg)
+        # Ownership swaps with the account too: the one it leaves is let go, the one it
+        # lands on is taken when the terminal has a role that will use it.
+        old_key = ownership.key_of(tcfg)
         tcfg = record_login(tcfg, result.login, result.server or acct.server)
         tcfg, restored = config_mod.restore_policy(tcfg)
         cfg.replace_terminal(tcfg)
+        ownership.release(old_key)
+        if tcfg.role is not Role.UNASSIGNED:
+            ownership.take_for(tcfg)  # checked above; a lost race surfaces on the card
         self._switchable.pop(tid, None)  # the account it is on changed; re-answer fresh
         why = self._persist()
         message = f"{name} is logged in to {called}"
@@ -1442,6 +1490,9 @@ class DesktopApi:
         """One assignment into the shared doc, then the store; the engine reads the doc live.
         Returns why the write failed, or None -- the change then holds until the app closes,
         which is said, exactly as the TUI says it."""
+        who = ownership.owned_elsewhere(key)
+        if who is not None:
+            return f"read-only: {key} is owned by profile {who!r}"
         self._guards_doc.set_account(key, guards)
         try:
             guards_model.save(self._guards_doc)
@@ -1646,6 +1697,7 @@ class DesktopApi:
             "accounts": chips,
             "selected": tid,
             "hasAccount": key is not None,
+            "ownedBy": ownership.owned_elsewhere(key),
             "prop": self._prop_of(key),
             "isSlave": chosen.cfg.role is Role.SLAVE,
             "currency": report.currency,
@@ -1841,6 +1893,11 @@ class DesktopApi:
         return _ok(f"initial balance {money(value)}")
 
     def guard_clear_latch(self, tid: str, rule_id: str) -> dict[str, Any]:
+        picked = self._account_and_guards(str(tid))
+        if not isinstance(picked, str):
+            who = ownership.owned_elsewhere(picked[0])
+            if who is not None:
+                return _no(f"read-only: the account is owned by profile {who!r}")
         if self._engine.clear_guard_latch(str(tid), str(rule_id)):
             return _ok(
                 "Breach cleared; new trades go through again once the rule is back under the point it acts at."
@@ -2061,6 +2118,9 @@ class DesktopApi:
         that is what makes a container out of an already guarded account -- and any balance
         typed in the dialog lands on the container, where every stage reads it."""
         cid, key = str(cid), str(key)
+        who = ownership.owned_elsewhere(key)
+        if who is not None:
+            return _no(f"read-only: {key} is owned by profile {who!r}")
         text = str(initial_text or "").replace(",", "").replace(" ", "").strip()
         balance: float | None = None
         if text:
@@ -2163,6 +2223,9 @@ class DesktopApi:
     def prop_unlink(self, cid: str, key: str) -> dict[str, Any]:
         """Take an account out of a chain. Its rules identity falls back to whatever
         guards.json still holds under its raw key -- usually nothing."""
+        who = ownership.owned_elsewhere(str(key))
+        if who is not None:
+            return _no(f"read-only: {key} is owned by profile {who!r}")
         why = self._prop_store.unlink(str(cid), str(key))
         if why is not None:
             return _no(why)
@@ -2800,6 +2863,7 @@ class DesktopApi:
             "card": card,
             "dryRun": cfg.dry_run,
             "accountKind": self._account_kind(tcfg),
+            "lockedBy": ownership.owned_elsewhere(ownership.key_of(tcfg)),
         }
         if tcfg.role is Role.SLAVE:
             values = initial_values(tcfg)
@@ -3003,6 +3067,13 @@ class DesktopApi:
         tcfg = cfg.terminals.get(tid)
         if tcfg is None:
             return _no("that terminal is gone; rescan")
+        who = ownership.owned_elsewhere(ownership.key_of(tcfg))
+        if who is not None:
+            return {
+                "ok": False,
+                "errors": {},
+                "message": f"read-only: the account is owned by profile {who!r}",
+            }
         outcome = apply_edits(tcfg, self._terminal_raw(raw))
         if not outcome.ok:
             return {

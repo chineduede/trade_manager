@@ -28,8 +28,9 @@ NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             " placing there. A value no name carries at all is set aside (the log says so),"
             " and the automatic catalog reading takes over.",
             "Terminals can be hidden. The eye icon on a card disconnects the terminal"
-            " entirely — no copies, never the direct-trading price feed, and its claim is"
-            " released for other profiles — while its role and every setting are kept. A"
+            " entirely — no copies, never the direct-trading price feed, and the terminal"
+            " and its account are freed for other profiles — while its role and every"
+            " setting are kept. A"
             " hidden terminal leaves the dashboard completely: its one home is the Hidden"
             " button in the DETECTED zone's header, which carries the count, lists each"
             " one with an Unhide, and only shows while something is hidden. Hiding a"
@@ -69,6 +70,18 @@ NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             " whole or not at all.",
             "The move is automatic and one-time: the first start gathers what the JSON"
             " files hold, and the files stay on disk untouched as a fallback copy.",
+            "One rule now governs accounts across profiles: the profile using an account"
+            " owns it, and owns it even while its window is closed. Everywhere else the"
+            " account is read-only — its settings, guard rules, name and prop link can be"
+            " seen but not changed, and no terminal there can be assigned to it or logged"
+            " into it. Using an account — assigning a terminal that holds it, or logging"
+            " one in — takes ownership; unassigning or hiding that terminal releases it."
+            " The same terminal is still free for other profiles with a different"
+            " account.",
+            "If a profile sits on an account you need, its card's ··· menu offers Take"
+            " ownership, behind a confirmation that says exactly what it costs: the other"
+            " profile's terminal stops, and any copies it held stay open there,"
+            " unmanaged.",
         ),
     ),
     (
