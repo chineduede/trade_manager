@@ -204,6 +204,30 @@ def force_take(key: str) -> str | None:
     return lost
 
 
+def prune(keep: set[str], older_than: float = 60.0) -> None:
+    """Release every row of this profile's that is not in ``keep`` -- the janitor's half
+    of :meth:`mt5copier.engine.Engine._reconcile_ownership`.
+
+    Only rows that have stood at least ``older_than`` seconds go: the age guard keeps the
+    janitor from racing the very flows that write a row moments before the state backing
+    it lands -- an assignment on its way into the config, a takeover whose login is still
+    running -- while still clearing anything genuinely stale, like an account row left
+    behind when a terminal's recorded login moved under it.
+    """
+    me = active_profile()
+    db = shared_db.get()
+    cutoff = time.time() - older_than
+    with db.change(shared_db.OWNERS):
+        for key, row in db.load(TABLE).items():
+            if not isinstance(row, dict) or row.get("profile") != me or key in keep:
+                continue
+            taken = row.get("taken")
+            if isinstance(taken, (int, float)) and taken > cutoff:
+                continue
+            db.drop(TABLE, key)
+            log.info("%s released by profile %r: nothing here uses it any more", key, me)
+
+
 def release_all_of(profile: str) -> None:
     """Drop everything this profile owns -- the profile is being deleted."""
     db = shared_db.get()

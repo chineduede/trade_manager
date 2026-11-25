@@ -173,6 +173,25 @@ def test_assigned_elsewhere_is_narrower_than_owned_elsewhere(
     assert ownership.assigned_elsewhere(mt5) is None
 
 
+def test_prune_releases_only_our_stale_unbacked_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The janitor's half: rows nothing here uses any more are let go -- but never
+    another profile's rows, never a kept key, and never a row too fresh to judge
+    (it may be a takeover whose login is still running)."""
+    ownership.take(KEY)
+    _other_profile(monkeypatch, "scalp")
+    ownership.take("888@E8-Demo")
+
+    ownership.prune(set())
+    assert ownership.owner("888@E8-Demo") == "scalp", "fresh rows are age-guarded"
+
+    ownership.prune({"888@E8-Demo"}, older_than=0.0)
+    assert ownership.owner("888@E8-Demo") == "scalp", "a kept key stays, whatever its age"
+
+    ownership.prune(set(), older_than=0.0)
+    assert ownership.owner("888@E8-Demo") is None, "stale and unbacked: released"
+    assert ownership.owner(KEY) == "funded", "another profile's row is never ours to prune"
+
+
 def test_unassigning_releases_the_master_and_every_swept_slave(tmp_path: Path) -> None:
     cfg = _cfg(tmp_path)
     role_actions.set_master(cfg, "t-m")

@@ -1203,15 +1203,24 @@ class DesktopApi:
                     "words": f"{called} · {key}" if called else key,
                     "now": key == now,
                     "usedBy": self._account_used_by(tid, key),
+                    # Another profile's account is still pickable: the pick asks to
+                    # take it over instead of flatly refusing (account_login's take).
+                    "ownedBy": ownership.owned_elsewhere(key),
                 }
             )
         return {"ok": True, "name": name, "accounts": rows}
 
-    def account_login(self, tid: str, key: str) -> dict[str, Any]:
+    def account_login(self, tid: str, key: str, take: bool = False) -> dict[str, Any]:
         """Log the terminal into the picked account, blocking this bridge thread -- the
         page's promise narrates while the other polls keep arriving. MT5 uses the password
-        saved in the terminal; none is handled here."""
-        tid, key = str(tid), str(key)
+        saved in the terminal; none is handled here.
+
+        ``take`` is the deliberate takeover of an account another profile owns, sent only
+        after the page's confirmation: the account is force-taken first, so the switch
+        that follows is into something that is now this profile's -- the other profile's
+        worker on it, if any, stops when it notices, and its copies stay open, unmanaged.
+        """
+        tid, key, take = str(tid), str(key), bool(take)
         cfg = self._cfg
         why = self._account_login_refused(tid)
         if why is not None:
@@ -1237,11 +1246,13 @@ class DesktopApi:
                 "is used on one terminal at a time"
             )
         who = ownership.owned_elsewhere(key)
-        if who is not None:
+        if who is not None and not take:
             return _no(
                 f"{self._account_called(key)} is owned by profile {who!r} and read-only "
                 "here; its owner can unassign or hide it, or you can take ownership"
             )
+        if who is not None:
+            ownership.force_take(key)  # confirmed on the page; force_take logs the loser
         with self._busy_lock:
             if tid in self._logging_in:
                 return _no(f"{name} is already logging in")

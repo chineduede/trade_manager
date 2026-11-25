@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from mt5copier import account_switch, shared_db
+from mt5copier import account_switch, ownership, shared_db
 from mt5copier.account_switch import Account, LoginResult
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.desktop.api import DesktopApi
@@ -85,9 +85,22 @@ def test_the_ask_lists_the_saved_accounts_and_marks_the_current_one(
             "words": "ftmo eval · 51234@FTMO-Demo",
             "now": False,
             "usedBy": "ftmo eval",
+            "ownedBy": None,
         },
-        {"key": "20481@E8-Demo", "words": "20481@E8-Demo", "now": True, "usedBy": None},
-        {"key": "60001@FTMO-Demo", "words": "60001@FTMO-Demo", "now": False, "usedBy": None},
+        {
+            "key": "20481@E8-Demo",
+            "words": "20481@E8-Demo",
+            "now": True,
+            "usedBy": None,
+            "ownedBy": None,
+        },
+        {
+            "key": "60001@FTMO-Demo",
+            "words": "60001@FTMO-Demo",
+            "now": False,
+            "usedBy": None,
+            "ownedBy": None,
+        },
     ]
 
 
@@ -227,3 +240,36 @@ def test_a_failed_login_changes_nothing_and_says_why(
     already = api.account_login(T_FREE, "20481@E8-Demo")
     assert already["ok"] is False
     assert "already logged in" in already["message"]
+
+
+def test_an_account_owned_elsewhere_refuses_the_login_unless_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The forceful way through: a pick another profile owns is refused plainly, and
+    ``take=True`` -- sent only after the page's confirmation -- takes the account over
+    and logs in, in one call. The ask labels the row so the page knows to ask."""
+    api, _ = _api(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        account_switch,
+        "log_in",
+        lambda exe, acct, log_file: LoginResult(True, "logged in", acct.login, acct.server),
+    )
+    monkeypatch.setenv("MT5COPIER_PROFILE", "scalp")
+    ownership.take("60001@FTMO-Demo")
+    monkeypatch.delenv("MT5COPIER_PROFILE")
+
+    row = next(
+        r for r in api.account_login_ask(T_FREE)["accounts"] if r["key"] == "60001@FTMO-Demo"
+    )
+    assert row["ownedBy"] == "scalp"
+
+    out = api.account_login(T_FREE, "60001@FTMO-Demo")
+    assert out["ok"] is False
+    assert "owned by profile 'scalp'" in out["message"]
+    assert "take ownership" in out["message"]
+
+    out = api.account_login(T_FREE, "60001@FTMO-Demo", take=True)
+    assert out["ok"] is True
+    assert ownership.owner("60001@FTMO-Demo") == "default", "taken with the login"
+    tcfg = api._cfg.terminals[T_FREE]
+    assert (tcfg.last_login, tcfg.last_server) == (60001, "FTMO-Demo")

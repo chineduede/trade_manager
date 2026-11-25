@@ -2510,8 +2510,11 @@ function accountLoginFlow(c) {
     pickModal('Log ' + a.name + ' in to', a.accounts.map(function (acct) {
       // One account on one terminal at a time: a row another terminal holds is kept
       // visible — so the list is the whole truth — but greyed and refused with the why.
+      // A row another PROFILE owns stays live instead: picking it asks to take it.
       var sub = acct.now ? 'logged in now'
-        : acct.usedBy ? 'in use by ' + acct.usedBy : '';
+        : acct.usedBy ? 'in use by ' + acct.usedBy
+        : acct.ownedBy ? 'owned by profile ‘' + acct.ownedBy + '’ — picking it asks to take it'
+        : '';
       return {
         label: acct.words,
         sub: sub || undefined,
@@ -2526,10 +2529,25 @@ function accountLoginFlow(c) {
               + ': an account is used on one terminal at a time', 'bad');
             return;
           }
-          toast(a.name + ': logging in to ' + acct.words + '…', '');
-          T.drawn = '';
-          pollTerminals();
-          tact(api().account_login(c.tid, acct.key));
+          function go(take) {
+            toast(a.name + ': logging in to ' + acct.words + '…', '');
+            T.drawn = '';
+            pollTerminals();
+            tact(api().account_login(c.tid, acct.key, !!take));
+          }
+          if (acct.ownedBy) {
+            confirmModal(
+              'Take ' + acct.words + ' from profile ‘' + acct.ownedBy + '’?',
+              'This account is owned by profile ‘' + acct.ownedBy + '’. Taking it makes '
+              + 'it this profile’s and logs ' + a.name + ' into it; if that profile is '
+              + 'running it anywhere, its worker stops and any copies it holds stay '
+              + 'open there, unmanaged.',
+              'Take the account', true,
+              function () { go(true); }
+            );
+            return;
+          }
+          go(false);
         }
       };
     }));

@@ -528,6 +528,7 @@ class Engine:
         with self._lock:
             self._claims_retry_at = time.monotonic() + 3.0
             self._stop_disowned()
+            self._reconcile_ownership()
             if not self._claim_refused:
                 return
             for tid in list(self._claim_refused):
@@ -589,6 +590,30 @@ class Engine:
             )
             self._stop_worker(tid)
             self._claim_refused[tid] = f"it was taken over by profile {who!r}"
+
+    def _reconcile_ownership(self) -> None:
+        """Keep this profile's shared ownership rows matching what it actually uses.
+
+        Using is holding a role and not being hidden: those terminals' installs and
+        accounts are (re)taken -- idempotent, and a refusal is the spawn seam's to
+        surface -- and every other row of this profile's is let go. A disabled terminal
+        keeps its claim: it is still this profile's setup, only switched off. The one
+        janitor for every way the recorded account can drift past the explicit release
+        seams: a switch made in MT5 itself under a running worker, a rescan folding a
+        fresher login in, a crash between a release and its save. Without it, a profile
+        could sit on an account row for an account none of its terminals holds any
+        more, locking every other profile out of it for no one's benefit. Caller holds
+        the lock.
+        """
+        if self._claims is None:  # a claimless engine (the tests') owns nothing either
+            return
+        keep: set[str] = set()
+        for tcfg in self._cfg.terminals.values():
+            if tcfg.role is Role.UNASSIGNED or tcfg.hidden:
+                continue
+            ownership.take_for(tcfg)
+            keep.update(ownership.keys_of(tcfg))
+        ownership.prune(keep)
 
     def _spawn_worker(self, tcfg: TerminalConfig) -> None:
         if self._claims is not None:
