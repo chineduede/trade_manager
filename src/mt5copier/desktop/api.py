@@ -1123,6 +1123,7 @@ class DesktopApi:
             return _no(f"discovery failed: {exc}")
         before = set(self._cfg.terminals)
         config_mod.merge_discovery(self._cfg, found)
+        config_mod.fold_ctrader_accounts(self._cfg)
         new = set(self._cfg.terminals) - before
         why = self._persist()
         if why is not None:

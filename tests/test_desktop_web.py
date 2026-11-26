@@ -76,6 +76,19 @@ def test_disk_mode_never_leaves_the_web_folder(served) -> None:
     conn.close()
 
 
+def test_a_foreign_host_header_is_turned_away(served) -> None:
+    # DNS rebinding: a web page's request reaches 127.0.0.1 but carries the attacker's
+    # hostname in Host. The window itself always asks by the literal loopback address.
+    port = served(_load_web(), None)
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    conn.request("GET", "/index.html", headers={"Host": f"evil.example:{port}"})
+    assert conn.getresponse().status == 403
+    conn.close()
+    with get(port, "/index.html") as r:  # the real address still answers
+        assert r.status == 200
+        assert r.headers["X-Content-Type-Options"] == "nosniff"
+
+
 def test_a_held_port_refuses_the_second_bind() -> None:
     first = _WebServer(("127.0.0.1", 0), {}, _WEB)
     port = first.server_address[1]

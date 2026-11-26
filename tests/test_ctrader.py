@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from mt5copier import config as config_mod
-from mt5copier import role_actions
+from mt5copier import role_actions, shared_db
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.ctrader import auth
 from mt5copier.ctrader import convert as cv
@@ -403,6 +403,48 @@ def test_allowed_accounts_become_terminals_once() -> None:
     assert tcfg.last_login == 9001
     assert tcfg.last_server == "Pepperstone-cTrader-Demo"
     assert config_mod.merge_ctrader_accounts(cfg, [(ACCOUNT, False, 9001, "Pepperstone")]) == []
+
+
+def test_a_new_ctrader_account_arrives_with_its_remembered_settings() -> None:
+    db = shared_db.get()
+    with db.change(shared_db.POLICIES):
+        db.put(
+            "account_policies",
+            "9001@Pepperstone-cTrader-Demo",
+            {"risk_percent": 0.25, "invert": True},
+        )
+    cfg = AppConfig()
+    config_mod.merge_ctrader_accounts(cfg, [(ACCOUNT, False, 9001, "Pepperstone")])
+    tcfg = cfg.terminals[config_mod.ctrader_terminal_id(ACCOUNT)]
+    assert tcfg.risk_percent == 0.25
+    assert tcfg.invert is True
+    assert tcfg.ctrader_account_id == ACCOUNT
+    # A later sweep of the same account is a refresh, never a re-restore over edits.
+    tcfg.risk_percent = 1.5
+    config_mod.merge_ctrader_accounts(cfg, [(ACCOUNT, False, 9001, "Pepperstone")])
+    assert cfg.terminals[config_mod.ctrader_terminal_id(ACCOUNT)].risk_percent == 1.5
+
+
+def test_the_shared_login_folds_its_accounts_into_any_profile() -> None:
+    cfg = AppConfig()
+    assert config_mod.fold_ctrader_accounts(cfg) == []  # no file saved at all
+
+    creds = auth.CTraderCredentials(
+        client_id="id",
+        client_secret="shh",
+        accounts=[auth.CTraderAccount(account_id=ACCOUNT, is_live=False, login=9001, broker="P")],
+    )
+    auth.save(creds)  # app saved, but logged out: nothing to fold
+    assert config_mod.fold_ctrader_accounts(cfg) == []
+    assert cfg.terminals == {}
+
+    creds.access_token = "tok"
+    auth.save(creds)
+    tid = config_mod.ctrader_terminal_id(ACCOUNT)
+    assert config_mod.fold_ctrader_accounts(cfg) == [tid]
+    assert cfg.terminals[tid].last_login == 9001
+    # Repeat-safe, exactly as the merge it wraps.
+    assert config_mod.fold_ctrader_accounts(cfg) == []
 
 
 def test_a_ctrader_account_can_be_a_slave_but_never_the_master() -> None:

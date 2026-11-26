@@ -18,6 +18,22 @@ from .paths import version_seen_path
 
 NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
+        "0.1.11",
+        "2026-11-26",
+        (
+            "A cTrader login now reaches every profile, not just the one that ran it. The"
+            " accounts the login allows appear under DETECTED at startup and on every"
+            " rescan, in any profile — and a brand-new profile sees each one arrive with"
+            " the settings last used on that account, exactly as MT5 terminals already"
+            " did. Logging in again from a new profile is no longer needed.",
+            "Two quiet hardenings of the window's local file server and the test tooling:"
+            " the server now refuses requests that do not come addressed to the machine"
+            " itself (closing the DNS-rebinding read), and a window started with a"
+            " remote-debugging port open says so in its title bar — that flag is for test"
+            " sessions, and such a window should never be trading.",
+        ),
+    ),
+    (
         "0.1.10",
         "2026-11-26",
         (
