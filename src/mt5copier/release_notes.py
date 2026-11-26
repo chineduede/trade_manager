@@ -19,7 +19,7 @@ from .paths import version_seen_path
 NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
         "0.1.10",
-        "2026-11-25",
+        "2026-11-26",
         (
             "A symbol prefix or suffix typed into the wrong field no longer breaks direct"
             " trading. The value is checked against the broker's own symbol list and honored"
