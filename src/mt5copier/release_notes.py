@@ -43,6 +43,12 @@ NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             " (rename the account, reconnect, restart the worker, allow live trading,"
             " acknowledge orphans) sit under the ··· icon, and right-click still opens"
             " that same menu.",
+            "The Max open trades guard can now look past risk-free trades. A new option,"
+            " off by default, stops counting a trade once its stop loss sits at or past"
+            " its entry — the cap is there to limit risk, and a trade that can no longer"
+            " lose has none left to limit — so moving a stop to breakeven frees that"
+            " place for another trade. A trade with no stop is always counted, and the"
+            " rule's readout says how many risk-free trades it is looking past.",
             "The Setups page is gone. Profiles already keep an arrangement — every"
             " terminal's role, account and settings — so saved setups were a second copy"
             " of the same thing. A setups.json left on disk is no longer read; make a"

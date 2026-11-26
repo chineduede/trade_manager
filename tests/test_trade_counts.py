@@ -14,7 +14,7 @@ from test_guards import KEY, NOW, book_with, only, snap
 
 from mt5copier.guards import GuardBook, GuardRule
 from mt5copier.guards.base import Level
-from mt5copier.protocol import OrderType, PendingOrder
+from mt5copier.protocol import OrderType, PendingOrder, Position, PositionType
 from mt5copier.shared_db import SharedDb
 
 DAY = 86_400.0
@@ -27,8 +27,11 @@ def daily(limit: float = 5, pendings: str = "counts", on_breach: str = "block_ne
     )
 
 
-def open_rule(limit: float = 3, pendings: str = "ignored") -> GuardRule:
-    return GuardRule(type="open_trades", params={"limit": limit, "pendings": pendings})
+def open_rule(limit: float = 3, pendings: str = "ignored", risk_free: str = "counts") -> GuardRule:
+    return GuardRule(
+        type="open_trades",
+        params={"limit": limit, "pendings": pendings, "risk_free": risk_free},
+    )
 
 
 def resting(n: int = 1) -> tuple[PendingOrder, ...]:
@@ -118,6 +121,47 @@ def test_resting_orders_follow_the_toggle(tmp_path: Path) -> None:
     assert only(book_with(open_rule(), tmp=tmp_path), held).used == 1.0
     status = only(book_with(open_rule(pendings="counts"), tmp=tmp_path / "b"), held)
     assert status.used == 3.0 and "1 open + 2 resting" in status.detail
+
+
+def test_risk_free_trades_follow_the_toggle(tmp_path: Path) -> None:
+    held = snap(positions=((1.15, 0.0), (1.1, 0.0), (1.05, 0.0), (0.0, 0.0)))
+    assert only(book_with(open_rule(limit=4), tmp=tmp_path), held).used == 4.0, (
+        "counted like any other trade unless told otherwise"
+    )
+    status = only(book_with(open_rule(limit=4, risk_free="ignored"), tmp=tmp_path / "b"), held)
+    assert status.used == 2.0, "a stop at or past entry frees its place; no stop never does"
+    assert "2 risk-free not counted" in status.detail
+
+
+def test_a_rule_saved_before_the_option_existed_counts_everything(tmp_path: Path) -> None:
+    old = GuardRule(type="open_trades", params={"limit": 2, "pendings": "ignored"})
+    held = snap(positions=((1.15, 0.0), (1.1, 0.0)))
+    assert only(book_with(old, tmp=tmp_path), held).used == 2.0
+
+
+def test_a_breakeven_stop_lets_another_trade_through(tmp_path: Path) -> None:
+    b = book_with(open_rule(limit=2, risk_free="ignored"), tmp=tmp_path)
+    at_risk = snap(positions=((1.05, 0.0), (1.08, 0.0)))
+    assert b.verdict(KEY, at_risk, NOW).hold is not None, "two still at risk is the cap"
+    one_safe = snap(positions=((1.1, 0.0), (1.08, 0.0)))
+    assert b.verdict(KEY, one_safe, NOW).hold is None, "a stop moved to entry frees its place"
+
+
+def test_a_sell_is_risk_free_on_the_other_side(tmp_path: Path) -> None:
+    sells = tuple(
+        Position(
+            ticket=20 + i,
+            symbol="EURUSD",
+            type=PositionType.SELL,
+            volume=1.0,
+            price_open=1.1,
+            sl=sl,
+        )
+        for i, sl in enumerate((1.1, 1.05, 1.15))
+    )
+    held = replace(snap(), open_positions=sells)
+    status = only(book_with(open_rule(risk_free="ignored"), tmp=tmp_path), held)
+    assert status.used == 1.0, "a sell's stop protects at or below its entry, never above"
 
 
 def test_unread_positions_or_orders_cannot_be_measured(tmp_path: Path) -> None:

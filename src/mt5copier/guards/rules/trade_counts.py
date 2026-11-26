@@ -12,10 +12,18 @@ position on the account, hand-opened ones included.
 The counts are exact -- the copier does the counting, so no gap can jump them the way equity
 jumps a money limit -- which is why neither rule takes a buffer: each acts at its cap, never
 before, and lets go by itself, at midnight or when a trade closes.
+
+The open-trades rule can be told not to count a risk-free trade: one whose stop loss sits at
+or past its entry, so the market can no longer take the entry price back. The cap is there to
+limit risk, and such a trade has none left to limit -- moving a stop to breakeven frees its
+place for another trade. "At entry" is taken at face value: the commission a breakeven exit
+still pays is not the kind of risk this cap is for, and the guard cannot know each broker's
+costs anyway. A trade with no stop at all is never risk-free.
 """
 
 from __future__ import annotations
 
+from ...protocol import Position, PositionType
 from ..account import AccountView, local_day
 from ..base import Measure, Memory, Rule, register
 from ..params import Param, ParamKind, ParamValue, on_breach
@@ -66,6 +74,16 @@ class DailyTrades(Rule):
         return Measure(used=float(count), limit=limit, detail=f"{count} placed today · {standing}")
 
 
+def _risk_free(pos: Position) -> bool:
+    """Whether this position can no longer lose: its stop sits at or past its entry -- at or
+    above for a buy, at or below for a sell. No stop, no safety."""
+    if not pos.has_stop:
+        return False
+    if pos.type == PositionType.BUY:
+        return pos.sl >= pos.price_open
+    return pos.sl <= pos.price_open
+
+
 @register
 class OpenTrades(Rule):
     type = "open_trades"
@@ -83,10 +101,19 @@ class OpenTrades(Rule):
             "ignored",
             choices=(("ignored", "does not count"), ("counts", "counts as a trade")),
         ),
+        Param(
+            "risk_free",
+            "A risk-free trade (stop at or past entry)",
+            ParamKind.CHOICE,
+            "counts",
+            choices=(("counts", "counts as a trade"), ("ignored", "does not count")),
+        ),
         on_breach("block_new", "warn", "block_new"),
     )
 
     def basis(self, p: dict[str, ParamValue]) -> str:
+        if p["risk_free"] == "ignored":
+            return "every position still able to lose, hand-opened ones included"
         return "every position open on the account, hand-opened ones included"
 
     def sentence(self, p: dict[str, ParamValue], currency: str) -> str:
@@ -95,19 +122,35 @@ class OpenTrades(Rule):
             if p["pendings"] == "counts"
             else "positions"
         )
-        return f"Hold at most {p['limit']:g} open {what} at once, hand-opened ones included."
+        risk_free = (
+            "; a trade whose stop sits at or past its entry is risk-free and not counted"
+            if p["risk_free"] == "ignored"
+            else ""
+        )
+        return (
+            f"Hold at most {p['limit']:g} open {what} at once, "
+            f"hand-opened ones included{risk_free}."
+        )
 
     def measure(
         self, view: AccountView, p: dict[str, ParamValue], rule_id: str, memory: Memory
     ) -> Measure:
         if view.positions is None:
             return Measure(unknown="the open positions have not been read yet")
-        count = len(view.positions)
+        safe = (
+            sum(1 for pos in view.positions if _risk_free(pos))
+            if p["risk_free"] == "ignored"
+            else 0
+        )
+        count = len(view.positions) - safe
         detail = f"{count} open"
         if p["pendings"] == "counts":
             if view.pendings is None:
                 return Measure(unknown="the resting orders have not been read yet")
             count += len(view.pendings)
-            detail = f"{len(view.positions)} open + {len(view.pendings)} resting"
+            detail += f" + {len(view.pendings)} resting"
         limit = float(p["limit"])
-        return Measure(used=float(count), limit=limit, detail=f"{detail} of {limit:g} allowed")
+        detail = f"{detail} of {limit:g} allowed"
+        if safe:
+            detail += f" · {safe} risk-free not counted"
+        return Measure(used=float(count), limit=limit, detail=detail)
