@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from mt5copier import account_switch
+from mt5copier import account_switch, ownership, profiles, shared_db
 from mt5copier.account_switch import Account, LoginResult
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.desktop.api import DesktopApi
@@ -85,9 +85,25 @@ def test_the_ask_lists_the_saved_accounts_and_marks_the_current_one(
             "words": "ftmo eval · 51234@FTMO-Demo",
             "now": False,
             "usedBy": "ftmo eval",
+            "ownedBy": None,
+            "ownerOpen": False,
         },
-        {"key": "20481@E8-Demo", "words": "20481@E8-Demo", "now": True, "usedBy": None},
-        {"key": "60001@FTMO-Demo", "words": "60001@FTMO-Demo", "now": False, "usedBy": None},
+        {
+            "key": "20481@E8-Demo",
+            "words": "20481@E8-Demo",
+            "now": True,
+            "usedBy": None,
+            "ownedBy": None,
+            "ownerOpen": False,
+        },
+        {
+            "key": "60001@FTMO-Demo",
+            "words": "60001@FTMO-Demo",
+            "now": False,
+            "usedBy": None,
+            "ownedBy": None,
+            "ownerOpen": False,
+        },
     ]
 
 
@@ -141,11 +157,52 @@ def test_a_login_records_the_account_the_terminal_landed_on(
     monkeypatch.setattr(account_switch, "log_in", fake_log_in)
     out = api.account_login(T_FREE, "60001@FTMO-Demo")
     assert out["ok"] is True
-    assert out["message"] == "Spare is logged in to 60001@FTMO-Demo"
+    assert out["message"] == (
+        "Spare is logged in to 60001@FTMO-Demo"
+        "; its settings came along from the last account — worth a look"
+    )
     assert seen == [(api._cfg.terminals[T_FREE].exe_path, Account(60001, "FTMO-Demo"))]
     tcfg = api._cfg.terminals[T_FREE]
     assert (tcfg.last_login, tcfg.last_server) == (60001, "FTMO-Demo")
     assert "sync" in engine.calls
+
+
+def test_a_switch_banks_the_old_accounts_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, _ = _api(tmp_path, monkeypatch)
+    cfg = api._cfg
+    cfg.replace_terminal(cfg.terminals[T_FREE].model_copy(update={"risk_percent": 2.5}))
+    monkeypatch.setattr(
+        account_switch,
+        "log_in",
+        lambda exe, acct, log_file: LoginResult(True, "logged in", acct.login, acct.server),
+    )
+    out = api.account_login(T_FREE, "60001@FTMO-Demo")
+    assert out["ok"] is True
+    banked = shared_db.get().fetch("account_policies", "20481@E8-Demo")
+    assert banked is not None and banked["risk_percent"] == 2.5
+    assert cfg.terminals[T_FREE].risk_percent == 2.5, "nothing remembered for the new one yet"
+
+
+def test_a_switch_back_brings_the_settings_last_used_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, _ = _api(tmp_path, monkeypatch)
+    cfg = api._cfg
+    db = shared_db.get()
+    with db.change(shared_db.POLICIES):
+        db.put("account_policies", "60001@FTMO-Demo", {"risk_percent": 0.25, "invert": True})
+    monkeypatch.setattr(
+        account_switch,
+        "log_in",
+        lambda exe, acct, log_file: LoginResult(True, "logged in", acct.login, acct.server),
+    )
+    out = api.account_login(T_FREE, "60001@FTMO-Demo")
+    assert out["ok"] is True
+    assert out["message"].endswith("; the settings last used on this account are back")
+    tcfg = cfg.terminals[T_FREE]
+    assert (tcfg.risk_percent, tcfg.invert) == (0.25, True)
 
 
 def test_an_account_another_terminal_holds_is_refused(
@@ -186,3 +243,79 @@ def test_a_failed_login_changes_nothing_and_says_why(
     already = api.account_login(T_FREE, "20481@E8-Demo")
     assert already["ok"] is False
     assert "already logged in" in already["message"]
+
+
+def test_an_account_owned_elsewhere_refuses_the_login_unless_taken(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The forceful way through: a pick another profile owns is refused plainly, and
+    ``take=True`` -- sent only after the page's confirmation -- takes the account over
+    and logs in, in one call. The ask labels the row so the page knows to ask."""
+    api, _ = _api(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        account_switch,
+        "log_in",
+        lambda exe, acct, log_file: LoginResult(True, "logged in", acct.login, acct.server),
+    )
+    monkeypatch.setenv("MT5COPIER_PROFILE", "scalp")
+    ownership.take("60001@FTMO-Demo")
+    monkeypatch.delenv("MT5COPIER_PROFILE")
+
+    row = next(
+        r for r in api.account_login_ask(T_FREE)["accounts"] if r["key"] == "60001@FTMO-Demo"
+    )
+    assert row["ownedBy"] == "scalp"
+
+    out = api.account_login(T_FREE, "60001@FTMO-Demo")
+    assert out["ok"] is False
+    assert "owned by profile 'scalp'" in out["message"]
+    assert "take ownership" in out["message"]
+
+    out = api.account_login(T_FREE, "60001@FTMO-Demo", take=True)
+    assert out["ok"] is True
+    assert ownership.owner("60001@FTMO-Demo") == "default", "taken with the login"
+    tcfg = api._cfg.terminals[T_FREE]
+    assert (tcfg.last_login, tcfg.last_server) == (60001, "FTMO-Demo")
+
+
+def test_a_running_owner_is_never_taken_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The user's rule: while the owning profile's window is open, the change belongs in
+    that window -- even ``take=True`` (a confirmation that raced the window opening) is
+    refused, and the ask marks the row as held rather than takeable."""
+    api, _ = _api(tmp_path, monkeypatch)
+    monkeypatch.setenv("MT5COPIER_PROFILE", "scalp")
+    ownership.take("60001@FTMO-Demo")
+    monkeypatch.delenv("MT5COPIER_PROFILE")
+    monkeypatch.setattr(profiles, "is_running", lambda name: name == "scalp")
+
+    row = next(
+        r for r in api.account_login_ask(T_FREE)["accounts"] if r["key"] == "60001@FTMO-Demo"
+    )
+    assert (row["ownedBy"], row["ownerOpen"]) == ("scalp", True)
+
+    out = api.account_login(T_FREE, "60001@FTMO-Demo", take=True)
+    assert out["ok"] is False
+    assert "whose window is open right now" in out["message"]
+    assert ownership.owner("60001@FTMO-Demo") == "scalp", "nothing was taken"
+
+
+def test_take_ownership_waits_for_the_owners_window_to_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, _ = _api(tmp_path, monkeypatch)
+    monkeypatch.setenv("MT5COPIER_PROFILE", "scalp")
+    ownership.take("20481@E8-Demo")  # the account T_FREE sits on
+    monkeypatch.delenv("MT5COPIER_PROFILE")
+
+    monkeypatch.setattr(profiles, "is_running", lambda name: True)
+    out = api.take_ownership(T_FREE)
+    assert out["ok"] is False
+    assert "is open right now" in out["message"]
+    assert ownership.owner("20481@E8-Demo") == "scalp"
+
+    monkeypatch.setattr(profiles, "is_running", lambda name: False)
+    out = api.take_ownership(T_FREE)
+    assert out["ok"] is True
+    assert ownership.owner("20481@E8-Demo") == "default"

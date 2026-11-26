@@ -1,6 +1,6 @@
 """One JSON document on disk: written atomically, read with caution.
 
-Every JSON file the app keeps -- the config, the guards, the setups, the virtual book, the
+Every JSON file the app keeps -- the config, the guards, the virtual book, the
 shared stores -- holds one document that is rewritten whole. How such a file is written, and
 what happens when one cannot be read, used to be said in half a dozen places, each its own
 copy of the same temp-file dance; this module says it once, as :mod:`mt5copier.sqlite_store`

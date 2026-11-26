@@ -30,10 +30,12 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    ValidationError,
     field_validator,
     model_validator,
 )
 
+from . import shared_db
 from .discovery import DiscoveredTerminal
 from .json_store import quarantine, write_json
 from .logging_setup import get_logger
@@ -195,6 +197,13 @@ class TerminalConfig(BaseModel):
     opened in the meantime. Everything on copies it already holds -- closes, partials, stop and
     target moves, order changes and cancels -- carries on, and it stays connected. Meaningless
     on anything but a slave."""
+
+    hidden: bool = False
+    """Parked: the terminal is not spawned at all -- no connection, no copies, never the
+    direct-trading feed, no card in the zones -- while its role and every setting are kept
+    for the day it is unhidden. Unlike :attr:`paused` this is a full stop, and unlike
+    unassigning it gives nothing up but the open copies it strands at the moment of hiding,
+    which the person is asked about exactly as an unassign asks."""
 
     # --- Stage 2: sizing -------------------------------------------------------------------
     sizing_mode: SizingMode = SizingMode.PERCENT_OF_BALANCE
@@ -448,6 +457,98 @@ def record_login(tcfg: TerminalConfig, login: int | None, server: str | None) ->
     return tcfg.model_copy(update=update)
 
 
+POLICY_FIELDS: tuple[str, ...] = (
+    "sizing_mode",
+    "risk_percent",
+    "risk_cash",
+    "max_lot",
+    "commission_per_lot_round_turn",
+    "slippage_buffer_points",
+    "no_stop_policy",
+    "no_stop_lot_multiple",
+    "invert",
+    "management",
+    "master_manages",
+    "copy_pending",
+    "pending_fallback",
+    "tp_net_rr",
+    "breakeven_mode",
+    "breakeven_trigger_r",
+    "breakeven_book_percent",
+    "symbol_whitelist",
+    "symbol_blacklist",
+)
+"""The trader-policy fields of :class:`TerminalConfig`: what a person tunes for a particular
+account's money, as opposed to facts about the install. A 1% risk sized against a 100k
+account has no business following the terminal onto a 10k account, so these are remembered
+per account (:func:`remember_policy`) and brought back when a switch returns to it
+(:func:`restore_policy`).
+
+Deliberately absent: the broker facts (symbol decoration and map, ``max_deviation_points``),
+which describe the install's broker and must survive a switch exactly as they do today; the
+plumbing (role, paused, label, paths); and ``allow_live_trading``, whose typed consent is
+withdrawn on a switch (:func:`record_login`) and never restored by machinery -- the scary
+direction keeps its friction."""
+
+
+def snapshot_policy(tcfg: TerminalConfig) -> dict[str, object]:
+    """The terminal's policy block as a plain JSON-ready dict, for remembering per account."""
+    return tcfg.model_dump(mode="json", include=set(POLICY_FIELDS))
+
+
+def remember_policy(tcfg: TerminalConfig) -> None:
+    """Save the terminal's policy under the account it is on now, if that account is known.
+
+    The memory lives in ``shared.db`` (the ``account_policies`` table), keyed by the
+    account alone -- so it is one memory for the whole machine, every profile. A profile
+    owns its terminals; what an account runs with belongs to the account, wherever it is
+    next logged in.
+
+    Called in two situations. Where settings are about to stop being that account's active
+    settings -- the app's own account switch, and a discovery sweep that notices a login
+    made in MT5 itself -- the call must come *before* the change, while the settings and
+    the account still correspond: afterwards the terminal holds the new settings, and
+    remembering then would file them under an account they were never tuned for. And on
+    every deliberate settings save, where the saved config *is* the account's newest
+    settings -- banking it at once is what lets every other window's poll show the account
+    tuned the same way (``DesktopApi._refresh_policies``). Saving is lossless and silent,
+    so it never needs a question; the newest save for an account simply wins, because the
+    terminal's current settings are by construction the last ones in force on it.
+    """
+    key = account_key(tcfg.last_login, tcfg.last_server)
+    if key is None:
+        return
+    db = shared_db.get()
+    with db.change(shared_db.POLICIES):
+        db.put("account_policies", key, snapshot_policy(tcfg))
+
+
+def restore_policy(tcfg: TerminalConfig) -> tuple[TerminalConfig, bool]:
+    """The terminal's config with the policy last used on its account, if one is remembered.
+
+    The counterpart of :func:`remember_policy`, reading the same shared table, applied
+    where a terminal starts holding an account: the app's own account switch, and the
+    discovery paths in :func:`merge_discovery` -- a brand-new profile's first sweep finds
+    its terminals' accounts already tuned. The desktop's poll also folds a newer bank onto
+    terminals already holding the account (``DesktopApi._refresh_policies``), so an account
+    reads as one live set of settings machine-wide, never a per-profile copy.
+
+    Keys the snapshot carries that the schema no longer has are ignored; a snapshot the
+    current schema rejects outright restores nothing rather than half of itself.
+    """
+    key = account_key(tcfg.last_login, tcfg.last_server)
+    saved = shared_db.get().fetch("account_policies", key) if key is not None else None
+    if not isinstance(saved, dict) or not saved:
+        return tcfg, False
+    merged = tcfg.model_dump(mode="json")
+    merged.update({k: v for k, v in saved.items() if k in POLICY_FIELDS})
+    try:
+        return TerminalConfig.model_validate(merged), True
+    except ValidationError:
+        log.warning("the settings remembered for %s no longer load; keeping the current ones", key)
+        return tcfg, False
+
+
 class AppConfig(BaseModel):
     """Root config document."""
 
@@ -558,8 +659,12 @@ class AppConfig(BaseModel):
         )
 
     def assigned(self) -> list[TerminalConfig]:
-        """Terminals we should hold a connection to: any with a role, and enabled."""
-        return [t for t in self.terminals.values() if t.role is not Role.UNASSIGNED and t.enabled]
+        """Terminals we should hold a connection to: any with a role, enabled, not parked."""
+        return [
+            t
+            for t in self.terminals.values()
+            if t.role is not Role.UNASSIGNED and t.enabled and not t.hidden
+        ]
 
     def display_name(self, terminal_id: str) -> str:
         """The name to show this terminal by right now: the name set for whichever account it's
@@ -716,14 +821,24 @@ def merge_discovery(cfg: AppConfig, discovered: list[DiscoveredTerminal]) -> App
     for d in discovered:
         existing = cfg.terminals.get(d.terminal_id)
         if existing is None:
-            cfg.terminals[d.terminal_id] = TerminalConfig(
+            fresh = TerminalConfig(
                 terminal_id=d.terminal_id,
                 label=d.label,
                 exe_path=d.exe_path,
                 last_login=d.login,
                 last_server=d.server,
             )
-            log.info("new terminal discovered: %s (%s)", d.label, d.terminal_id[:8])
+            # A terminal this profile has never configured carries no choices to protect,
+            # so the account's remembered settings go straight on -- this is how a brand
+            # new profile shows every known account already tuned.
+            fresh, restored = restore_policy(fresh)
+            cfg.terminals[d.terminal_id] = fresh
+            log.info(
+                "new terminal discovered: %s (%s)%s",
+                d.label,
+                d.terminal_id[:8],
+                "; its account's remembered settings applied" if restored else "",
+            )
         else:
             existing.label = d.label
             if d.exe_path is not None:
@@ -735,10 +850,32 @@ def merge_discovery(cfg: AppConfig, discovered: list[DiscoveredTerminal]) -> App
                         d.exe_path,
                     )
                 existing.exe_path = d.exe_path
+            # A switch made in MT5 itself still swaps the policy settings with the
+            # account: the one it leaves banks what was tuned on it, the one it lands on
+            # gets back whatever is remembered for it. An unchanged login touches
+            # nothing, so the person's edits in this profile are never overwritten by a
+            # mere sweep.
+            now = account_key(
+                d.login if d.login is not None else existing.last_login,
+                d.server if d.server is not None else existing.last_server,
+            )
+            was = account_key(existing.last_login, existing.last_server)
+            if was is not None and now != was:
+                remember_policy(existing)
             if d.login is not None:
                 existing.last_login = d.login
             if d.server is not None:
                 existing.last_server = d.server
+            if now is not None and now != was:
+                swapped, restored = restore_policy(existing)
+                if restored:
+                    cfg.terminals[d.terminal_id] = swapped
+                    log.info(
+                        "terminal %s switched to %s in MT5; the settings last used on "
+                        "that account are back",
+                        d.terminal_id[:8],
+                        now,
+                    )
     return cfg
 
 

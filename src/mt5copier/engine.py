@@ -25,8 +25,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from . import role_actions
-from . import setups as setups_mod
+from . import ownership, role_actions
 from .breakeven import (
     breakeven_level,
     buffer_distance,
@@ -105,7 +104,7 @@ from .reconcile import (
     protective_sl,
 )
 from .settings_edit import copies_word
-from .setups import Setup
+from .shared_db import SharedDb
 from .sizing import risk_budget
 from .store import (
     MappingStore,
@@ -115,7 +114,7 @@ from .store import (
     find_missing_orders,
     find_orphans,
 )
-from .symbols import base_name, infer_decoration, undecorate
+from .symbols import asserted_decoration, base_name, infer_decoration, undecorate
 from .virtual import VirtualBook
 from .worker import run_worker
 
@@ -167,9 +166,10 @@ class TerminalView:
     supervised: bool = False
     """Whether the engine currently has a worker for this terminal."""
     claim_refused: str | None = None
-    """Why no worker was spawned: another running profile holds this terminal or its
-    account. The engine retries every few seconds, so this clears by itself once the
-    other instance lets go -- its locks die with its process, close included."""
+    """Why no worker was spawned: another running profile holds this terminal, or another
+    profile owns this account. The engine retries every few seconds, so the terminal case
+    clears by itself when the other window closes, and the account case the moment its
+    owner lets the account go."""
 
     def is_stale(self, timeout_s: float) -> bool:
         """True when a supervised worker has stopped reporting.
@@ -247,7 +247,7 @@ class Engine:
         state_path: Path | None = None,
         mapping_path: Path | None = None,
         guards: GuardsDoc | None = None,
-        guard_state_path: Path | None = None,
+        shared_db: SharedDb | None = None,
         history_path: Path | None = None,
         calendar: NewsCalendar | None = None,
         claims: ClaimBook | None = None,
@@ -335,15 +335,18 @@ class Engine:
         """The news calendar: fetched on its own thread, and only once a news rule asks."""
         self._catalog = CatalogStore()
         """The shared symbol catalog, for the rules that read asset classes."""
-        self._decor_cache: dict[str, tuple[object, object, tuple[str, str]]] = {}
-        """Per terminal, the decoration inferred from its pushed symbol list, remembered with
-        the list and catalog it was read from so either changing is a recompute."""
-        self._props = PropStore()
+        self._decor_cache: dict[
+            str, tuple[object, object, tuple[str, str], tuple[str, str], tuple[str, str]]
+        ] = {}
+        """Per terminal: the symbol list, catalog and configured pair a reading was made
+        from, then the asserted and stripping decorations read -- any input changing is a
+        recompute."""
+        self._props = PropStore(shared_db)
         """The prop account containers: a linked account reads its rules under its
         container's identity."""
         self._guards = GuardBook(
             guards if guards is not None else GuardsDoc(),
-            guard_state_path,
+            shared_db,
             self._calendar,
             self._catalog,
             self._props,
@@ -511,22 +514,26 @@ class Engine:
                 self._spawn_worker(tcfg)
 
     def _retry_refused_claims(self) -> None:
-        """Re-attempt claims another profile refused us, on a slow tick.
+        """Re-attempt refused spawns, and notice lost ownership, on a slow tick.
 
-        The locks behind a claim die with the process that holds them, so the moment the
-        other window closes -- X button, crash, anything -- the terminal is free. But
-        nothing used to try again until the person forced a sync (a rescan, a role
-        change), and the card said "in use" long after it wasn't. The drain loop calls
-        this every pass; it costs nothing unless a refusal is on record and a few
-        seconds have gone by since the last try.
+        Two directions, same cadence. Outward: a terminal claim dies with the window that
+        held it, and an account's owner may let it go at any moment, so a refused spawn is
+        retried every few seconds and the card clears by itself. Inward: another profile
+        may have deliberately taken an account this profile was running
+        (:func:`mt5copier.ownership.force_take`), and the worker on it must stop -- its
+        copies stay open, unmanaged, exactly as the takeover's confirmation warned.
         """
-        if not self._claim_refused or time.monotonic() < self._claims_retry_at:
+        if time.monotonic() < self._claims_retry_at:
             return
         with self._lock:
             self._claims_retry_at = time.monotonic() + 3.0
+            self._stop_disowned()
+            self._reconcile_ownership()
+            if not self._claim_refused:
+                return
             for tid in list(self._claim_refused):
                 tcfg = self._cfg.terminals.get(tid)
-                if tcfg is None or tcfg.role is Role.UNASSIGNED or not tcfg.enabled:
+                if tcfg is None or tcfg.role is Role.UNASSIGNED or not tcfg.enabled or tcfg.hidden:
                     # Same rule as sync(): a terminal no longer wanted keeps no stale note.
                     del self._claim_refused[tid]
                     continue
@@ -563,8 +570,65 @@ class Engine:
             except Exception as exc:
                 log.debug("could not send reconnect to %s: %r", terminal_id[:8], exc)
 
+    def _stop_disowned(self) -> None:
+        """Stop any worker whose account or install another profile now owns. Caller
+        holds the lock."""
+        if self._claims is None:  # a claimless engine (the tests') owns nothing either
+            return
+        for tid in list(self._workers):
+            tcfg = self._cfg.terminals.get(tid)
+            if tcfg is None:
+                continue
+            who = ownership.owned_elsewhere_for(tcfg)
+            if who is None:
+                continue
+            log.warning(
+                "%s: it was taken over by profile %r; the worker is stopped and "
+                "its copies stay open, unmanaged",
+                tcfg.label,
+                who,
+            )
+            self._stop_worker(tid)
+            self._claim_refused[tid] = f"it was taken over by profile {who!r}"
+
+    def _reconcile_ownership(self) -> None:
+        """Keep this profile's shared ownership rows matching what it actually uses.
+
+        Using is holding a role and not being hidden: those terminals' installs and
+        accounts are (re)taken -- idempotent, and a refusal is the spawn seam's to
+        surface -- and every other row of this profile's is let go. A disabled terminal
+        keeps its claim: it is still this profile's setup, only switched off. The one
+        janitor for every way the recorded account can drift past the explicit release
+        seams: a switch made in MT5 itself under a running worker, a rescan folding a
+        fresher login in, a crash between a release and its save. Without it, a profile
+        could sit on an account row for an account none of its terminals holds any
+        more, locking every other profile out of it for no one's benefit. Caller holds
+        the lock.
+        """
+        if self._claims is None:  # a claimless engine (the tests') owns nothing either
+            return
+        keep: set[str] = set()
+        for tcfg in self._cfg.terminals.values():
+            if tcfg.role is Role.UNASSIGNED or tcfg.hidden:
+                continue
+            ownership.take_for(tcfg)
+            keep.update(ownership.keys_of(tcfg))
+        ownership.prune(keep)
+
     def _spawn_worker(self, tcfg: TerminalConfig) -> None:
         if self._claims is not None:
+            # Spawning is using: the install and its account become this profile's if
+            # they are free. The
+            # backstop take -- assignment and the app's login already took it with better
+            # words -- that also covers a login made in MT5 itself and the first start
+            # after an update. Gated with the claims, so the tests' claimless engines
+            # stay free of the shared database.
+            refused = ownership.take_for(tcfg)
+            if refused is not None:
+                if self._claim_refused.get(tcfg.terminal_id) != refused:
+                    log.warning("not connecting %s: %s", tcfg.label, refused)
+                self._claim_refused[tcfg.terminal_id] = refused
+                return
             keys = claim_keys(tcfg)
             try:
                 self._claims.acquire(keys)
@@ -1003,6 +1067,8 @@ class Engine:
         cfg = self._cfg.terminals.get(terminal_id)
         if cfg is None or cfg.is_ctrader or cfg.role is not Role.SLAVE or not cfg.enabled:
             return False
+        if cfg.hidden:
+            return False
         snap = self._snapshots.get(terminal_id)
         received = self._received_at.get(terminal_id)
         fresh = (
@@ -1035,38 +1101,64 @@ class Engine:
             self._feed_tid = chosen
         return chosen
 
-    def _decor_of(self, terminal_id: str) -> tuple[str, str]:
-        """This terminal's broker decoration: the configured prefix/suffix while either is
-        set -- an assertion, so it outranks everything -- else what its own pushed symbol
-        list says it uses (see :func:`mt5copier.symbols.infer_decoration`), else nothing.
+    def _decor_state(self, terminal_id: str) -> tuple[tuple[str, str], tuple[str, str]]:
+        """This terminal's broker decoration, read two ways: ``(asserted, stripping)``.
 
-        The inferred reading is spent only on taking decoration *off* a name and on finding
-        this same broker's name for a clean symbol again; what another broker trades stays
-        with its configured settings and :func:`mt5copier.symbols.resolve`'s refusals.
-        Caller must hold the lock."""
+        *Asserted* is the configured prefix/suffix, each value honored on the side this
+        broker's own names actually carry it and dropped when no name carries it at all
+        (:func:`mt5copier.symbols.asserted_decoration`) -- ``.fx`` typed into the prefix
+        field still strips and resolves as the suffix it plainly is. This is the decoration
+        safe for *choosing* this broker's name for a trade: every value in it came from the
+        person.
+
+        *Stripping* is asserted, or -- when that leaves nothing -- what the broker's own
+        symbol list says it decorates with (:func:`mt5copier.symbols.infer_decoration`).
+        The inferred reading is spent only on taking decoration *off* a name and on the feed
+        finding its own name for a clean symbol again; it never picks what another broker
+        trades, which stays with *asserted* and :func:`mt5copier.symbols.resolve`'s
+        refusals. Caller must hold the lock."""
         cfg = self._cfg.terminals.get(terminal_id)
         if cfg is None:
-            return "", ""
-        if cfg.symbol_prefix or cfg.symbol_suffix:
-            return cfg.symbol_prefix, cfg.symbol_suffix
+            return ("", ""), ("", "")
+        configured = (cfg.symbol_prefix, cfg.symbol_suffix)
         names = self._symbol_lists.get(terminal_id)
-        if not names:
-            return "", ""
         catalog = self._catalog.current()
         cached = self._decor_cache.get(terminal_id)
-        if cached is not None and cached[0] is names and cached[1] is catalog:
-            return cached[2]
-        decor = infer_decoration(names, catalog.base_of)
-        if decor != ("", ""):
-            log.info(
-                "%s's catalog reads as %s<symbol>%s; stripping that decoration where its "
-                "names stand in for the plain instrument",
+        if (
+            cached is not None
+            and cached[0] is names
+            and cached[1] is catalog
+            and cached[2] == configured
+        ):
+            return cached[3], cached[4]
+        asserted = asserted_decoration(*configured, names or ())
+        if asserted != configured:
+            log.warning(
+                "%s's configured decoration (prefix %r, suffix %r) is not how its own names "
+                "carry it; using prefix %r, suffix %r",
                 self._cfg.display_name(terminal_id),
-                decor[0],
-                decor[1],
+                configured[0],
+                configured[1],
+                asserted[0],
+                asserted[1],
             )
-        self._decor_cache[terminal_id] = (names, catalog, decor)
-        return decor
+        stripping = asserted
+        if stripping == ("", "") and names:
+            stripping = infer_decoration(names, catalog.base_of)
+            if stripping != ("", ""):
+                log.info(
+                    "%s's catalog reads as %s<symbol>%s; stripping that decoration where "
+                    "its names stand in for the plain instrument",
+                    self._cfg.display_name(terminal_id),
+                    stripping[0],
+                    stripping[1],
+                )
+        self._decor_cache[terminal_id] = (names, catalog, configured, asserted, stripping)
+        return asserted, stripping
+
+    def _decor_of(self, terminal_id: str) -> tuple[str, str]:
+        """The decoration to strip from this terminal's names. Caller must hold the lock."""
+        return self._decor_state(terminal_id)[1]
 
     def _feed_decor(self) -> tuple[str, str, dict[str, str]]:
         """The feed broker's decoration, for taking its own names back to clean ones:
@@ -1209,14 +1301,15 @@ class Engine:
             return
         for tid, worker in self._workers.items():
             tcfg = self._cfg.terminals.get(tid)
-            if tcfg is None or tcfg.is_ctrader or not tcfg.enabled:
+            if tcfg is None or tcfg.is_ctrader or not tcfg.enabled or tcfg.hidden:
                 continue
             if self._warm_sent.get(tid) == symbol:
                 continue
+            prefix, suffix = self._decor_state(tid)[0]
             cmd = WarmCommand(
                 symbols=(symbol,),
-                symbol_prefix=tcfg.symbol_prefix,
-                symbol_suffix=tcfg.symbol_suffix,
+                symbol_prefix=prefix,
+                symbol_suffix=suffix,
                 symbol_map=tuple(sorted(tcfg.symbol_map.items())),
             )
             try:
@@ -1554,6 +1647,7 @@ class Engine:
                 # Demote the master alone -- not role_actions.unassign, which sweeps every
                 # slave along with it. Here the virtual master takes its place in the same
                 # breath, so the slaves keep their roles and copy it instead.
+                ownership.release_for(self._cfg.master)
                 self._cfg.set_role(self._cfg.master.terminal_id, Role.UNASSIGNED)
             self._cfg.mode = mode
             if mode is AppMode.TRADING:
@@ -1668,6 +1762,15 @@ class Engine:
             self._action_total += 1
             if action.skip_reason is not None:
                 self._stats.on_skipped(action.terminal_id, action.skip_reason.value)
+            if (
+                not dry
+                and action.kind is ActionKind.ORDER_FILLED
+                and action.skip_reason is SkipReason.NOTHING_TO_SEND
+            ):
+                # The resting copy became a position at its broker. The day's count moves
+                # it from the pending column to the market one, so a trade-count rule set
+                # to ignore pendings still sees the trade the order became.
+                self._guards.record_fill(self._account_of(action.terminal_id), now=now)
             cfg = cfgs.get(action.terminal_id)
             log.info(
                 "%s %s: %s",
@@ -2250,10 +2353,12 @@ class Engine:
             kind,
         )
 
-    @staticmethod
-    def _decor(cfg: TerminalConfig) -> tuple[str, str, tuple[tuple[str, str], ...]]:
-        """This slave's symbol decoration as the guards take it: prefix, suffix, renames."""
-        return (cfg.symbol_prefix, cfg.symbol_suffix, tuple(sorted(cfg.symbol_map.items())))
+    def _decor(self, cfg: TerminalConfig) -> tuple[str, str, tuple[tuple[str, str], ...]]:
+        """This slave's symbol decoration as the guards take it: prefix, suffix, renames.
+        The stripping reading -- guards only ever translate this slave's own names back to
+        plain ones. Caller must hold the lock."""
+        prefix, suffix = self._decor_state(cfg.terminal_id)[1]
+        return (prefix, suffix, tuple(sorted(cfg.symbol_map.items())))
 
     def _class_lots_limit(
         self, cfg: TerminalConfig, verdict: Verdict, action: Action, snap: Snapshot | None
@@ -2359,6 +2464,7 @@ class Engine:
                     )
 
         command_id = next(self._command_ids)
+        slave_prefix, slave_suffix = self._decor_state(cfg.terminal_id)[0]
         # Direct trades only, and only on a slave set to pad: the ticket's target is an rr
         # intent, so each worker nudges its copy's target out by (rr + 1) x its own
         # commission to keep the realized ratio. A real master's target is that trader's own
@@ -2391,8 +2497,10 @@ class Engine:
             pending_fallback=cfg.pending_fallback,
             close_fraction=action.close_fraction,
             slave_ticket=action.slave_ticket,
-            symbol_prefix=cfg.symbol_prefix,
-            symbol_suffix=cfg.symbol_suffix,
+            # Asserted, not raw config: each configured value on the side this broker's own
+            # names carry it, so a suffix typed into the prefix field still resolves.
+            symbol_prefix=slave_prefix,
+            symbol_suffix=slave_suffix,
             # Sorted so an unchanged map produces an identical command. The worker reads no
             # config at all, so a mapping not copied here has no effect on what is placed --
             # only on what the log calls it.
@@ -3019,7 +3127,7 @@ class Engine:
         monotonic_now = time.monotonic()
         links: list[SlaveLink] = []
         for cfg in self._cfg.slaves:
-            if not cfg.enabled:
+            if not cfg.enabled or cfg.hidden:
                 continue
             snap = self._snapshots.get(cfg.terminal_id)
             received_at = self._received_at.get(cfg.terminal_id)
@@ -3273,88 +3381,48 @@ class Engine:
             role_actions.unassign(self._cfg, terminal_id)
         return None
 
-    def logins(self) -> dict[str, int | None]:
-        """The account each terminal is logged into: the one its latest snapshot names, else the
-        one it was last known to be logged into. The login alone, as a setup keeps it."""
-        with self._lock:
-            return self._logins()
-
-    def _logins(self) -> dict[str, int | None]:
-        """Caller must hold the lock."""
-        found = setups_mod.logins_of(self._cfg)
-        for tid, snap in self._snapshots.items():
-            if tid in found and snap.login is not None:
-                found[tid] = snap.login
-        return found
-
-    def setup_stake(self, setup: Setup) -> dict[str, list[OpenCopy]] | None:
-        """The open copies loading this setup would give up, by slave, or None if any of them
-        cannot be read. An empty dict means there is nothing to ask."""
-        with self._lock:
-            return self._setup_stake(setup)
-
-    def _setup_stake(self, setup: Setup) -> dict[str, list[OpenCopy]] | None:
-        """Caller must hold the lock."""
-        stake: dict[str, list[OpenCopy]] = {}
-        for tid in setups_mod.losing(setup, self._cfg, self._logins()):
-            held = self._open_copies(tid)
-            if held is None:
-                return None
-            if held:
-                stake[tid] = held
-        return stake
-
-    def load_setup(
-        self,
-        setup: Setup,
-        *,
-        orphan: Mapping[str, Collection[int]] | None = None,
-        leave_out: Collection[str] = (),
-        go_live: bool = False,
+    def hide_terminal(
+        self, terminal_id: str, *, orphan: Mapping[str, Collection[int]] | None = None
     ) -> str | None:
-        """Put a saved setup back: its roles, every terminal's settings, copying on or off and
-        the dry run or live mode, as it was saved. None means done; otherwise why not, with
-        nothing changed.
+        """Park this terminal: keep its role and settings, spawn nothing. None means done.
 
-        **Going live takes** ``go_live``, given only once the person has typed ``LIVE``, as the
-        copier's own settings ask; a setup that would turn a dry run into live copying without
-        it is refused. Nor is the mode switched while commands are out, whose answers would be
-        matched against the other set of beliefs. The live-trading override is never turned on
-        (see :func:`setups.restore_settings`).
-
-        The same rule as :meth:`unassign`, for the same reason: a slave taken off its master --
-        or left on while the master changes under it, or logged into another account -- has its
-        copies given up, and only if the person agreed to exactly those. One that keeps its
-        master and its account keeps its copies.
-
-        **A terminal is never given a role on an account the setup does not name.** One that has
-        to be logged into its account first must be in ``leave_out``, and is left unassigned:
-        the app logs it in and then loads the setup again (see :func:`setups.apply_roles`).
-
-        The caller still has to save the config and :meth:`sync`.
+        The copies it holds are stranded exactly as an unassign strands them, so the same
+        asking applies -- ``orphan`` is what the person was shown and agreed to give up.
+        A parked slave's records cannot be left behind live: while it is parked the master
+        moves on, and on unhiding, stale records would be reconciled against a book they no
+        longer match. The caller still saves the config and :meth:`sync`, which stops the
+        worker and releases the terminal's claim for other profiles.
         """
         with self._lock:
-            logins = self._logins()
-            found = setups_mod.problems(setup, self._cfg, logins)
-            if found:
-                return "; ".join(found)
-            unswitched = [
-                self._cfg.display_name(tid)
-                for tid in setups_mod.switches(setup, logins)
-                if tid not in leave_out
-            ]
-            if unswitched:
-                return f"{', '.join(unswitched)} is not logged into the setup's account"
-            if setups_mod.goes_live(setup, self._cfg) and not go_live:
-                return "it copies live, which needs LIVE typed to switch from the dry run"
-            switching = setup.dry_run is not None and setup.dry_run != self._cfg.dry_run
-            if switching and self._ledger.inflight_count:
-                return "commands are still in flight; try again in a moment"
-            refusal = self._give_up_agreed(self._setup_stake(setup), orphan)
+            cfg = self._cfg.terminals.get(terminal_id)
+            if cfg is None:
+                return "that terminal is gone; rescan"
+            if cfg.role is Role.MASTER:
+                return "the master cannot be hidden while its slaves copy it; unassign it instead"
+            refusal = self._give_up_agreed(self._stake(terminal_id, None), orphan)
             if refusal is not None:
                 return refusal
-            setups_mod.apply_roles(setup, self._cfg, leave_out)
-            setups_mod.restore_settings(setup, self._cfg)
+            cfg.hidden = True
+            # Hiding is the release valve: the terminal and its account are freed for
+            # other profiles, while the role and settings here wait for an unhide.
+            ownership.release_for(cfg)
+        return None
+
+    def unhide_terminal(self, terminal_id: str) -> str | None:
+        """Bring a parked terminal back; it reconnects on the caller's :meth:`sync`.
+
+        Hiding released the account, so coming back means taking it again -- and another
+        profile may own it by now, which refuses the unhide rather than silently parking
+        an assigned terminal on an account it may not use."""
+        with self._lock:
+            cfg = self._cfg.terminals.get(terminal_id)
+            if cfg is None:
+                return "that terminal is gone; rescan"
+            if cfg.role is not Role.UNASSIGNED:
+                refused = ownership.take_for(cfg)
+                if refused is not None:
+                    return f"it stays hidden: {refused}"
+            cfg.hidden = False
         return None
 
     def _give_up_copies(self, terminal_id: str) -> None:

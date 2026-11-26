@@ -11,6 +11,7 @@ from mt5copier.config import TerminalConfig
 from mt5copier.symbols import (
     Resolution,
     SymbolCache,
+    asserted_decoration,
     base_name,
     configured_name,
     infer_decoration,
@@ -311,3 +312,38 @@ def test_a_split_vote_infers_nothing() -> None:
 def test_too_few_recognizable_names_are_not_believed() -> None:
     assert infer_decoration(["EURUSDp", "GBPUSDp", "USDJPYp"], DEFAULT.base_of) == ("", "")
     assert infer_decoration(["AAPL", "TSLA", "NVDA", "AMZN"], DEFAULT.base_of) == ("", "")
+
+
+# --- the configured decoration, honored on the side the broker's names carry it ---------------
+
+FX_NAMES = ["EURUSD.FX", "GBPUSD.FX", "USDJPY.FX", "GBPCAD.FX"]
+
+
+def test_a_misplaced_suffix_is_moved_to_the_suffix_side() -> None:
+    assert asserted_decoration(".fx", "", FX_NAMES) == ("", ".fx")
+
+
+def test_a_correctly_placed_decoration_stays_where_it_is() -> None:
+    assert asserted_decoration("", ".fx", FX_NAMES) == ("", ".fx")
+    assert asserted_decoration("m", "", ["mEURUSD", "mGBPUSD", "mUSDJPY"]) == ("m", "")
+
+
+def test_a_decoration_no_name_carries_is_dropped() -> None:
+    assert asserted_decoration("", ".q", FX_NAMES) == ("", "")
+    assert asserted_decoration(".q", ".r", FX_NAMES) == ("", "")
+
+
+def test_counting_beats_an_accidental_one_letter_hit() -> None:
+    """m typed into the prefix field: MSFT starts with it by accident, but the many names
+    ending in m are the decoration."""
+    names = ["EURUSDm", "GBPUSDm", "USDJPYm", "XAUUSDm", "MSFT"]
+    assert asserted_decoration("m", "", names) == ("", "m")
+
+
+def test_without_a_symbol_list_the_configuration_is_taken_at_its_word() -> None:
+    assert asserted_decoration(".fx", "", []) == (".fx", "")
+    assert asserted_decoration("", "p", []) == ("", "p")
+
+
+def test_both_values_landing_on_one_side_keep_the_one_configured_for_it() -> None:
+    assert asserted_decoration(".fx", ".FX", FX_NAMES) == ("", ".FX")

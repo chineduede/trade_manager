@@ -30,6 +30,7 @@ from mt5copier.guards.book import NewsAct
 from mt5copier.guards.rules.news import acting
 from mt5copier.protocol import ActionKind, OrderResult, OrderType
 from mt5copier.reconcile import CopiedOrder, CopyLedger, SlaveLink, reconcile_slave_orders
+from mt5copier.shared_db import SharedDb
 from mt5copier.store import Copy, CopyKind, MappingStore
 
 NEWS = REGISTRY["news"]
@@ -70,7 +71,7 @@ def _book(tmp: Path, **given: Any) -> GuardBook:
     rule = GuardRule(id="nw", type="news", params=given)
     doc = GuardsDoc(accounts={KEY: AccountGuards(rules=(rule,))})
     return GuardBook(
-        doc, state_path=tmp / "state.json", calendar=FixedCalendar(calendar(feed_item(3, "USD")))
+        doc, SharedDb(tmp / "state.db"), calendar=FixedCalendar(calendar(feed_item(3, "USD")))
     )
 
 

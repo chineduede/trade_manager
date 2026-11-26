@@ -1,7 +1,7 @@
 """Profiles: independent copies of the whole app, one data directory each.
 
 A profile is nothing but a directory -- its own ``config.json``, ``mapping.db``, guards,
-setups, logs and single-instance lock -- so two running profiles share no file and cannot
+logs and single-instance lock -- so two running profiles share no file and cannot
 race each other. The *default* profile is the base directory itself, the layout from before
 profiles existed; the rest live under ``profiles/<name>``.
 
@@ -78,6 +78,17 @@ def profile_dir(name: str) -> Path:
 
 def exists(name: str) -> bool:
     return name == DEFAULT_PROFILE or profile_dir(name).is_dir()
+
+
+def is_running(name: str) -> bool:
+    """Whether this profile's window is open right now: its single-instance lock is held.
+
+    The lock is an OS byte lock that dies with its process, so a crashed window never
+    reads as running. This is what gates taking ownership: a running profile's terminals
+    and accounts are never taken out from under it -- the change is made in that window
+    instead -- while a closed profile's can be, deliberately.
+    """
+    return holder_pid(profile_dir(name) / _LOCK_FILE) is not None
 
 
 def _inspect(name: str, path: Path) -> ProfileInfo:
@@ -175,3 +186,7 @@ def delete(name: str) -> None:
     if pid is not None:
         raise ProfileError(f"{name!r} is running (pid {pid}); close it first")
     shutil.rmtree(profile_dir(name))
+    # A gone profile owns nothing: its accounts are freed for the profiles that remain.
+    from . import ownership  # here, not at the top: profiles is imported by entry points
+
+    ownership.release_all_of(name)

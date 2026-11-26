@@ -12,6 +12,7 @@ the same contract the TUI's timer thread already exercises.
 from __future__ import annotations
 
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -19,10 +20,17 @@ import time
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any
 
-from .. import __version__, account_switch, release_notes, role_actions, shared_data
+from .. import (
+    __version__,
+    account_switch,
+    ownership,
+    release_notes,
+    role_actions,
+    shared_data,
+    shared_db,
+)
 from .. import config as config_mod
 from .. import profiles as profiles_mod
-from .. import setups as setups_mod
 from ..catalog import LISTED, CatalogStore
 from ..config import (
     AppMode,
@@ -64,7 +72,7 @@ from ..log_entries import (
 )
 from ..logging_setup import get_logger
 from ..news import HIGH, MEDIUM, symbol_currencies
-from ..paths import active_profile, guards_path, is_frozen, log_dir, setups_path
+from ..paths import active_profile, is_frozen, log_dir
 from ..presentation import read_log_tail, row_info, slave_badge
 from ..prop_accounts import PROP_PREFIX, PropStore
 from ..protocol import (
@@ -89,7 +97,6 @@ from ..settings_edit import (
     rename,
 )
 from ..settings_example import MasterTrade, PriceValue, pick, work
-from ..setups import Setup, SetupsDoc
 from ..symbols import undecorate
 from ..terminal_detail import (
     PositionRow,
@@ -199,14 +206,12 @@ class DesktopApi:
         cfg: AppConfig,
         engine: Engine,
         guards: GuardsDoc | None = None,
-        setups: SetupsDoc | None = None,
     ) -> None:
         self._cfg = cfg
         self._engine = engine
         # The same document the engine enforces from (see desktop.run): edits here are one
         # assignment into it, and the file is written after.
         self._guards_doc = guards if guards is not None else GuardsDoc()
-        self._setups = setups if setups is not None else SetupsDoc()
         self._catalog_store = CatalogStore()
         """The shared symbol catalog, for the settings card. Its own instance beside the
         engine's: both read the same file, and an mtime check folds either's save into the
@@ -217,9 +222,6 @@ class DesktopApi:
         catalog's: same file, mtime folds the saves together."""
         self._window: webview.Window | None = None
         self._maximized = False
-        self._setup_busy = False
-        """Whether a setup is being loaded right now; its logins block that bridge thread
-        for a while, and a second load started under it would race the first."""
         self._logging_in: set[str] = set()
         """Terminals an account login is running for, each blocking its own bridge thread;
         asking for a second login on one is refused while the first still runs."""
@@ -233,9 +235,14 @@ class DesktopApi:
         Reading the account list walks the terminal's data folder; the cards poll every
         second, so the walk is paced here and dropped after a login changes the answer."""
         self._busy_lock = threading.Lock()
-        self._guards_stamp: float | None = None
-        """``guards.json``'s mtime as last read or written here. The file is shared by every
-        profile, so a poll can tell an edit made in another window from nothing by one stat."""
+        self._guards_stamp: int | None = None
+        """The guards store's stamp as last read here. The store is shared by every
+        profile, so a poll can tell an edit made in another window from nothing by one
+        SELECT."""
+        self._policies_stamp: int | None = None
+        """The account-settings bank's stamp as last folded in here. A save in any window
+        bumps it, and every window's next poll adopts the account's new settings -- one
+        memory for the machine, never a per-profile copy."""
 
     def attach(self, window: webview.Window) -> None:
         self._window = window
@@ -246,19 +253,53 @@ class DesktopApi:
         every local edit saves at once, so memory never holds anything newer than the file).
         Called from the polls that read them."""
         shared_data.refresh_names(self._cfg)
+        self._refresh_policies()
         try:
-            stamp = guards_path().stat().st_mtime
-        except OSError:
+            stamp = shared_db.get().stamp(shared_db.GUARDS)
+        except sqlite3.Error:
             return
         if stamp == self._guards_stamp:
             return
         self._guards_stamp = stamp
-        fresh = guards_model.load(guards_path())
+        fresh = guards_model.load()
         self._guards_doc.accounts.update(fresh.accounts)
         # Wholesale, not update(): a template edit always saves at once, so memory never
         # holds one the file lacks -- except one another window just deleted, which this
         # replacement is what lets go of.
         self._guards_doc.templates = dict(fresh.templates)
+
+    def _refresh_policies(self) -> None:
+        """Adopt account settings banked since the last poll -- by another window, or by
+        this one, whose own save then reads back as already current and changes nothing.
+
+        An account's settings are one memory for the whole machine, so a terminal here
+        holding that account takes the newest save. The swap goes through the engine like
+        any other settings edit, so open copies stay managed; only the policy block moves,
+        and the broker facts and the live-trading consent stay the terminal's own, exactly
+        as on an account switch."""
+        try:
+            stamp = shared_db.get().stamp(shared_db.POLICIES)
+        except sqlite3.Error:
+            return
+        if stamp == self._policies_stamp:
+            return
+        self._policies_stamp = stamp
+        changed = False
+        for tcfg in list(self._cfg.terminals.values()):
+            restored, hit = config_mod.restore_policy(tcfg)
+            if not hit:
+                continue
+            if config_mod.snapshot_policy(restored) == config_mod.snapshot_policy(tcfg):
+                continue
+            if self._engine.apply_settings(restored) is None:
+                log.info(
+                    "settings for %s (%s) caught up with the account's newest save",
+                    self._cfg.display_name(tcfg.terminal_id),
+                    tcfg.terminal_id[:8],
+                )
+                changed = True
+        if changed:
+            self._persist()
 
     # --- window chrome ----------------------------------------------------------------------
 
@@ -706,6 +747,15 @@ class DesktopApi:
             else:
                 risk = f"risk {tcfg.risk_percent:g}%"
         key = account_key(tcfg.last_login, tcfg.last_server)
+        # Two depths of "not ours": assignedBy means another profile's assignment holds
+        # the install itself -- nothing can be done with it here, switching included --
+        # while ownedBy alone means only the account is foreign, and logging into a
+        # different account remains the documented way out.
+        assigned_by = ownership.assigned_elsewhere(tcfg)
+        owned_by = assigned_by or ownership.owned_elsewhere_for(tcfg)
+        # Whether the owning profile's window is open decides what the card may offer:
+        # open means the change is made there, closed means Take ownership is the door.
+        owner_open = owned_by is not None and profiles_mod.is_running(owned_by)
         return {
             "tid": tid,
             "name": info.label,
@@ -715,6 +765,9 @@ class DesktopApi:
             # The full sentence rides separately: the card's state word stays short and the
             # info line carries the story ("the terminal is in use by profile 'x'").
             "claimRefused": view.claim_refused,
+            "ownedBy": owned_by,
+            "assignedBy": assigned_by,
+            "ownerOpen": owner_open,
             "tier": info.tier,
             "login": info.login,
             "server": info.server,
@@ -731,7 +784,7 @@ class DesktopApi:
             "isCtrader": tcfg.is_ctrader,
             "hasExe": tcfg.exe_path is not None,
             "loggingIn": tid in self._logging_in,
-            "canSwitch": self._can_switch_account(tcfg),
+            "canSwitch": assigned_by is None and self._can_switch_account(tcfg),
             "usable": tcfg.usable,
             "enabled": tcfg.enabled,
             "allowLive": tcfg.allow_live_trading,
@@ -751,7 +804,21 @@ class DesktopApi:
         master: dict[str, Any] | None = None
         slaves: list[dict[str, Any]] = []
         detected: list[dict[str, Any]] = []
+        parked: list[dict[str, Any]] = []
         for view in engine.views():
+            if view.cfg.hidden:
+                # No card: a hidden terminal is not spawned, so there is nothing live to
+                # draw. The Hidden flyout in the DETECTED zone's header lists it to unhide.
+                key = account_key(view.cfg.last_login, view.cfg.last_server)
+                parked.append(
+                    {
+                        "tid": view.cfg.terminal_id,
+                        "name": cfg.display_name(view.cfg.terminal_id),
+                        "role": str(view.cfg.role),
+                        "account": key,
+                    }
+                )
+                continue
             card = self._card(view, holds)
             if view.cfg.role is Role.MASTER:
                 master = card
@@ -772,6 +839,7 @@ class DesktopApi:
             "virtual": virtual,
             "slaves": slaves,
             "detected": detected,
+            "parked": parked,
             "dryRun": cfg.dry_run,
             "copying": cfg.copying_enabled,
             "hasMaster": virtual is not None or master is not None,
@@ -857,6 +925,79 @@ class DesktopApi:
             message += f" {total} cop{'y' if total == 1 else 'ies'} orphaned: they stay open and are no longer managed."
         return _ok(message)
 
+    def hide_terminal(self, tid: str, agreed: dict[str, list[int]] | None = None) -> dict[str, Any]:
+        """Park this terminal: no connection, no copies, never the feed, no card -- its role
+        and settings kept for unhiding. The ask about stranded copies is the unassign's
+        (the page reuses :meth:`unassign_stake` for it), re-checked by the engine here."""
+        tid = str(tid)
+        if tid not in self._cfg.terminals:
+            return _no("that terminal is gone; rescan")
+        name = self._cfg.display_name(tid)
+        orphan = (
+            {str(t): [int(n) for n in tickets] for t, tickets in agreed.items()} if agreed else None
+        )
+        refusal = self._engine.hide_terminal(tid, orphan=orphan)
+        if refusal is not None:
+            return _no(f"{name} was not hidden: {refusal}")
+        why = self._persist()
+        if why is not None:
+            return _no(why)
+        message = (
+            f"{name} hidden: disconnected, settings kept. Find it under Hidden, next to Rescan."
+        )
+        if orphan:
+            total = sum(len(t) for t in orphan.values())
+            message += (
+                f" {total} cop{'y' if total == 1 else 'ies'} orphaned: they stay open and "
+                "are no longer managed."
+            )
+        return _ok(message)
+
+    def unhide_terminal(self, tid: str) -> dict[str, Any]:
+        tid = str(tid)
+        if tid not in self._cfg.terminals:
+            return _no("that terminal is gone; rescan")
+        refusal = self._engine.unhide_terminal(tid)
+        if refusal is not None:
+            return _no(refusal)
+        why = self._persist()
+        if why is not None:
+            return _no(why)
+        name = self._cfg.display_name(tid)
+        return _ok(f"{name} is back; it connects on the next tick if it has a role.")
+
+    def take_ownership(self, tid: str) -> dict[str, Any]:
+        """The deliberate takeover: this profile becomes the owner of the terminal and
+        the account it holds. The page asks first, in exactly these words -- the profile
+        that had them loses them, and any copies it held stay open, unmanaged.
+
+        Only a *closed* profile can be taken from: while the owner's window is open, the
+        change belongs in that window -- unassign or hide it there -- never yanked from
+        this one. The owner check is live (an OS lock that dies with its process), so a
+        crashed window never blocks a takeover.
+        """
+        tid = str(tid)
+        tcfg = self._cfg.terminals.get(tid)
+        if tcfg is None:
+            return _no("that terminal is gone; rescan")
+        if not ownership.keys_of(tcfg):
+            return _no("this terminal has nothing to take; log it in first")
+        who = ownership.owned_elsewhere_for(tcfg)
+        if who is not None and profiles_mod.is_running(who):
+            return _no(
+                f"profile {who!r} is open right now; unassign or hide the terminal in "
+                "that window, or close it and take ownership then"
+            )
+        name = self._cfg.display_name(tid)
+        lost = ownership.force_take_for(tcfg)
+        self._engine.sync()
+        if lost is None:
+            return _ok(f"{name} is this profile's now.")
+        return _ok(
+            f"{name} is this profile's now. Profile {lost!r} lost it; "
+            "any copies it held stay open there, unmanaged."
+        )
+
     def rename_account(self, tid: str, name: str) -> dict[str, Any]:
         """Name (or, given blank, unname) the account this terminal is last known to be logged
         into. Cosmetic and immediate -- no copies are at stake, as
@@ -867,6 +1008,9 @@ class DesktopApi:
             return _no("that terminal is gone; rescan")
         tcfg = self._cfg.terminals[tid]
         key = account_key(tcfg.last_login, tcfg.last_server)
+        who = ownership.owned_elsewhere(key)
+        if who is not None:
+            return _no(f"read-only: {key} is owned by profile {who!r}")
         refusal = rename(self._cfg, tid, str(name or ""))
         if refusal is not None:
             return _no(refusal)
@@ -930,6 +1074,9 @@ class DesktopApi:
         if tid not in self._cfg.terminals:
             return _no("that terminal is gone; rescan")
         old = self._cfg.terminals[tid]
+        who = ownership.owned_elsewhere_for(old)
+        if who is not None:
+            return _no(f"read-only: it is owned by profile {who!r}")
         allow = bool(allow)
         name = self._cfg.display_name(tid)
         if old.allow_live_trading == allow:
@@ -1018,6 +1165,14 @@ class DesktopApi:
                 f"unassign {name} first, then change the account: its settings and copies "
                 "belong to the account it is logged into, and unassigning asks about them"
             )
+        # Assigned in another profile: switching accounts would yank the terminal out
+        # from under the profile running it, so nothing here may touch it at all.
+        who = ownership.assigned_elsewhere(tcfg)
+        if who is not None:
+            return (
+                f"{name} is assigned by profile {who!r}; unassign or hide it there, "
+                "or take ownership from its ··· menu"
+            )
         if tcfg.is_ctrader:
             return f"{name} is a cTrader account: its login is the cTrader login on Terminals"
         if tcfg.exe_path is None:
@@ -1057,21 +1212,33 @@ class DesktopApi:
         for acct in accounts:
             key = account_key(acct.login, acct.server) or ""
             called = cfg.account_names.get(key)
+            owned = ownership.owned_elsewhere(key)
             rows.append(
                 {
                     "key": key,
                     "words": f"{called} · {key}" if called else key,
                     "now": key == now,
                     "usedBy": self._account_used_by(tid, key),
+                    # Another profile's account is still pickable while that profile is
+                    # closed: the pick asks to take it over (account_login's take). With
+                    # the owner's window open it is simply held -- the change is theirs.
+                    "ownedBy": owned,
+                    "ownerOpen": owned is not None and profiles_mod.is_running(owned),
                 }
             )
         return {"ok": True, "name": name, "accounts": rows}
 
-    def account_login(self, tid: str, key: str) -> dict[str, Any]:
-        """Log the terminal into the picked account, blocking this bridge thread as a setup
-        load's logins do -- the page's promise narrates while the other polls keep arriving.
-        MT5 uses the password saved in the terminal; none is handled here."""
-        tid, key = str(tid), str(key)
+    def account_login(self, tid: str, key: str, take: bool = False) -> dict[str, Any]:
+        """Log the terminal into the picked account, blocking this bridge thread -- the
+        page's promise narrates while the other polls keep arriving. MT5 uses the password
+        saved in the terminal; none is handled here.
+
+        ``take`` is the deliberate takeover of an account another profile owns, sent only
+        after the page's confirmation: the account is force-taken first, so the switch
+        that follows is into something that is now this profile's -- the other profile's
+        worker on it, if any, stops when it notices, and its copies stay open, unmanaged.
+        """
+        tid, key, take = str(tid), str(key), bool(take)
         cfg = self._cfg
         why = self._account_login_refused(tid)
         if why is not None:
@@ -1096,6 +1263,23 @@ class DesktopApi:
                 f"{self._account_called(key)} is in use by {used_by}: an account "
                 "is used on one terminal at a time"
             )
+        who = ownership.owned_elsewhere(key)
+        if who is not None and profiles_mod.is_running(who):
+            # Checked whether or not take was sent: the owner may have opened between
+            # the page's confirmation and this call, and an open profile is never taken
+            # from -- the change belongs in its window.
+            return _no(
+                f"{self._account_called(key)} is owned by profile {who!r}, whose window "
+                "is open right now; switch it there, or close that window and take it "
+                "over here"
+            )
+        if who is not None and not take:
+            return _no(
+                f"{self._account_called(key)} is owned by profile {who!r} and read-only "
+                "here; its owner can unassign or hide it, or you can take ownership"
+            )
+        if who is not None:
+            ownership.force_take(key)  # confirmed on the page; force_take logs the loser
         with self._busy_lock:
             if tid in self._logging_in:
                 return _no(f"{name} is already logging in")
@@ -1110,11 +1294,27 @@ class DesktopApi:
             return _no(f"{name} was not logged in to {called}: {result.said}")
         # Keep the account the login left the terminal on, as the one it was last on --
         # record_login also withdraws the live override when a known account was left.
+        # Around it, the policy settings swap with the account: the old account banks the
+        # settings tuned on it, and the new one gets back whatever was banked for it.
         tcfg = cfg.terminals[tid]
-        cfg.replace_terminal(record_login(tcfg, result.login, result.server or acct.server))
+        had_account = account_key(tcfg.last_login, tcfg.last_server) is not None
+        config_mod.remember_policy(tcfg)
+        # Ownership swaps with the account too: the one it leaves is let go, the one it
+        # lands on is taken when the terminal has a role that will use it.
+        old_key = ownership.key_of(tcfg)
+        tcfg = record_login(tcfg, result.login, result.server or acct.server)
+        tcfg, restored = config_mod.restore_policy(tcfg)
+        cfg.replace_terminal(tcfg)
+        ownership.release(old_key)
+        if tcfg.role is not Role.UNASSIGNED:
+            ownership.take_for(tcfg)  # checked above; a lost race surfaces on the card
         self._switchable.pop(tid, None)  # the account it is on changed; re-answer fresh
         why = self._persist()
         message = f"{name} is logged in to {called}"
+        if restored:
+            message += "; the settings last used on this account are back"
+        elif had_account:
+            message += "; its settings came along from the last account — worth a look"
         if why is not None:
             message += f" — {why}"
         return _ok(message)
@@ -1340,13 +1540,16 @@ class DesktopApi:
         }
 
     def _save_guards(self, key: str, guards: Any) -> str | None:
-        """One assignment into the shared doc, then the file; the engine reads the doc live.
+        """One assignment into the shared doc, then the store; the engine reads the doc live.
         Returns why the write failed, or None -- the change then holds until the app closes,
         which is said, exactly as the TUI says it."""
+        who = ownership.owned_elsewhere(key)
+        if who is not None:
+            return f"read-only: {key} is owned by profile {who!r}"
         self._guards_doc.set_account(key, guards)
         try:
-            guards_model.save(self._guards_doc, guards_path())
-        except OSError as exc:
+            guards_model.save(self._guards_doc)
+        except (OSError, sqlite3.Error) as exc:
             log.exception("guards save failed")
             return f"could not save the guards: {exc}; the change holds until the copier closes"
         return None
@@ -1547,6 +1750,7 @@ class DesktopApi:
             "accounts": chips,
             "selected": tid,
             "hasAccount": key is not None,
+            "ownedBy": ownership.owned_elsewhere(key),
             "prop": self._prop_of(key),
             "isSlave": chosen.cfg.role is Role.SLAVE,
             "currency": report.currency,
@@ -1742,6 +1946,11 @@ class DesktopApi:
         return _ok(f"initial balance {money(value)}")
 
     def guard_clear_latch(self, tid: str, rule_id: str) -> dict[str, Any]:
+        picked = self._account_and_guards(str(tid))
+        if not isinstance(picked, str):
+            who = ownership.owned_elsewhere(picked[0])
+            if who is not None:
+                return _no(f"read-only: the account is owned by profile {who!r}")
         if self._engine.clear_guard_latch(str(tid), str(rule_id)):
             return _ok(
                 "Breach cleared; new trades go through again once the rule is back under the point it acts at."
@@ -1761,8 +1970,8 @@ class DesktopApi:
         replaced = name in self._guards_doc.templates
         self._guards_doc.templates[name] = guards.rules
         try:
-            guards_model.save(self._guards_doc, guards_path())
-        except OSError as exc:
+            guards_model.save(self._guards_doc)
+        except (OSError, sqlite3.Error) as exc:
             log.exception("guards save failed")
             return _no(f"could not save the guards: {exc}")
         return _ok(f"template {name!r} " + ("replaced" if replaced else "saved"))
@@ -1774,8 +1983,8 @@ class DesktopApi:
         if name not in self._guards_doc.templates:
             return _no("that template is already gone")
         try:
-            guards_model.delete_template(self._guards_doc, name, guards_path())
-        except OSError as exc:
+            guards_model.delete_template(self._guards_doc, name)
+        except (OSError, sqlite3.Error) as exc:
             log.exception("guards save failed")
             return _no(f"could not save the guards: {exc}")
         return _ok(f"template {name!r} deleted")
@@ -1962,6 +2171,9 @@ class DesktopApi:
         that is what makes a container out of an already guarded account -- and any balance
         typed in the dialog lands on the container, where every stage reads it."""
         cid, key = str(cid), str(key)
+        who = ownership.owned_elsewhere(key)
+        if who is not None:
+            return _no(f"read-only: {key} is owned by profile {who!r}")
         text = str(initial_text or "").replace(",", "").replace(" ", "").strip()
         balance: float | None = None
         if text:
@@ -2057,12 +2269,16 @@ class DesktopApi:
             refusal = self._engine.apply_settings(new)
             if refusal is not None:
                 return {"text": f"Settings were not copied: {refusal}", "tone": "bad"}
+            config_mod.remember_policy(new)
             self._persist()
         return {"text": f"Settings copied from {offer['from']} to {offer['to']}.", "tone": "ok"}
 
     def prop_unlink(self, cid: str, key: str) -> dict[str, Any]:
         """Take an account out of a chain. Its rules identity falls back to whatever
         guards.json still holds under its raw key -- usually nothing."""
+        who = ownership.owned_elsewhere(str(key))
+        if who is not None:
+            return _no(f"read-only: {key} is owned by profile {who!r}")
         why = self._prop_store.unlink(str(cid), str(key))
         if why is not None:
             return _no(why)
@@ -2376,361 +2592,11 @@ class DesktopApi:
             "terminals": [{"tid": t, "name": cfg.display_name(t)} for t in cfg.terminals],
         }
 
-    # --- the setups page ---------------------------------------------------------------------
-    # A setup is who copies from whom: the master, its slaves, the account each is logged
-    # into, every one's settings, and whether copying was on and live. What one holds is
-    # mt5copier/setups.py's and loading one is the engine's; the bridge words the page
-    # (the retired TUI setups page's own sentences) and runs the logins a load needs.
-
-    def _save_setups(self) -> str | None:
-        try:
-            setups_mod.save(self._setups, setups_path())
-        except OSError as exc:
-            log.exception("setups save failed")
-            return f"could not save the setups: {exc}; the change holds until the copier closes"
-        return None
-
-    def _setup_on_account(self, setup: Setup, tid: str) -> str:
-        """A terminal's name, and the account the setup has it on if it keeps one."""
-        login = setup.accounts.get(tid)
-        return setups_mod.name_of(self._cfg, tid) + (f" · {login}" if login is not None else "")
-
-    def _setup_slaves_text(self, setup: Setup) -> str:
-        if not setup.slaves:
-            return "none"
-        return ", ".join(self._setup_on_account(setup, tid) for tid in setup.slaves)
-
-    def _setup_describe(self, setup: Setup) -> str:
-        """The roles a setup puts in place, as the change a confirmation names."""
-        n = len(setup.slaves)
-        said = (
-            "trades directly, "
-            if setup.master is None
-            else f"master {self._setup_on_account(setup, setup.master)}, "
-        )
-        said += f"{n} slave{'' if n == 1 else 's'}"
-        said += f" ({self._setup_slaves_text(setup)})" if n else ""
-        said += ", copying " + ("on" if setup.copying else "off")
-        if setup.dry_run is not None:
-            said += " (dry run)" if setup.dry_run else " (LIVE)"
-        if setup.settings:
-            said += ", settings as saved"
-        return said
-
-    @staticmethod
-    def _saved_when(ts: float, now: float) -> str:
-        """``today 13:35``, or the full date once it is not -- the TUI setups page's clock."""
-        here, today = time.localtime(ts), time.localtime(now)
-        if here[:3] == today[:3]:
-            return time.strftime("today %H:%M", here)
-        return time.strftime("%d %b %Y %H:%M", here)
+    # --- account login helpers ----------------------------------------------------------------
 
     def _account_called(self, key: str) -> str:
         called = self._cfg.account_names.get(key)
         return f"{called} ({key})" if called else key
-
-    def setups_state(self) -> dict[str, Any]:
-        """Everything the Setups page redraws from: the roles in place now against the
-        saved setups, and each setup's row with anything stopping it loading here."""
-        cfg = self._cfg
-        doc = self._setups
-        now = time.time()
-        logins = self._engine.logins()
-        live = setups_mod.capture(cfg, logins)
-        current = setups_mod.current_name(doc, cfg, logins)
-        changed: list[str] = []
-        if current is not None:
-            changed = [
-                setups_mod.name_of(cfg, t)
-                for t in setups_mod.changed_settings(doc.setups[current], cfg)
-            ]
-        rows = [
-            {
-                "name": name,
-                "master": "trades directly"
-                if s.master is None
-                else self._setup_on_account(s, s.master),
-                "slaves": self._setup_slaves_text(s),
-                "copying": s.copying,
-                "dryRun": s.dry_run,
-                "saved": self._saved_when(s.saved_at, now),
-                "current": name == current,
-                "problems": setups_mod.problems(s, cfg, logins),
-            }
-            for name, s in sorted(doc.setups.items())
-        ]
-        return {
-            "direct": cfg.mode is AppMode.TRADING,
-            "now": self._setup_describe(live) if live is not None else None,
-            "current": current,
-            "changed": changed,
-            "loading": self._setup_busy,
-            "setups": rows,
-        }
-
-    def _captured_or_why(self) -> Setup | str:
-        """The roles in place now as a setup to save, or why there is nothing to save."""
-        live = setups_mod.capture(self._cfg, self._engine.logins())
-        if live is None:
-            if self._cfg.mode is AppMode.TRADING:
-                return "no slaves are assigned: drag terminals into the SLAVES zone first"
-            return "no master is assigned: drag one into the MASTER zone before saving a setup"
-        return live
-
-    def setup_save(self, name: str) -> dict[str, Any]:
-        name = str(name or "").strip()
-        if not name:
-            return _no("give the setup a name")
-        if name in self._setups.setups:
-            return _no(f"{name} is already saved: pick it and press Update with current")
-        live = self._captured_or_why()
-        if isinstance(live, str):
-            return _no(live)
-        self._setups.setups[name] = live
-        why = self._save_setups()
-        if why is not None:
-            return _no(why)
-        return _ok(f"setup {name} saved")
-
-    def setup_update(self, name: str) -> dict[str, Any]:
-        """Save an existing setup again as the roles in place now. The page asks first."""
-        name = str(name)
-        if name not in self._setups.setups:
-            return _no("that setup is gone")
-        live = self._captured_or_why()
-        if isinstance(live, str):
-            return _no(live)
-        self._setups.setups[name] = live
-        why = self._save_setups()
-        if why is not None:
-            return _no(why)
-        return _ok(f"setup {name} updated")
-
-    def setup_rename(self, old: str, new: str) -> dict[str, Any]:
-        old, new = str(old), str(new or "").strip()
-        setups = self._setups.setups
-        if old not in setups:
-            return _no("that setup is gone")
-        if not new:
-            return _no("give the setup a name")
-        if new == old:
-            return _ok(f"setup {old} keeps its name")
-        if new in setups:
-            return _no(f"a setup called {new} is already saved")
-        setups[new] = setups.pop(old)
-        why = self._save_setups()
-        if why is not None:
-            return _no(why)
-        return _ok(f"setup {old} renamed {new}")
-
-    def setup_delete(self, name: str) -> dict[str, Any]:
-        """Forget a saved setup. The page asks first; the roles in place do not change."""
-        name = str(name)
-        if self._setups.setups.pop(name, None) is None:
-            return _no("that setup is already gone")
-        why = self._save_setups()
-        if why is not None:
-            return _no(why)
-        return _ok(f"setup {name} deleted")
-
-    def setup_load_ask(self, name: str) -> dict[str, Any]:
-        """What loading this setup would do, for the page to ask with: the change as one
-        sentence, the copies it strands, and whether it turns the dry run live. Nothing
-        happens here; :meth:`setup_load` commits, and the engine re-checks everything."""
-        name = str(name)
-        setup = self._setups.setups.get(name)
-        if setup is None:
-            return _no("that setup is gone")
-        if self._setup_busy:
-            return _no("a setup is already loading; wait for it to finish")
-        cfg = self._cfg
-        logins = self._engine.logins()
-        found = setups_mod.problems(setup, cfg, logins)
-        if found:
-            return _no(f"setup {name} cannot be loaded: {'; '.join(found)}")
-        if setups_mod.in_place(setup, cfg, logins):
-            return {"ok": False, "already": True, "message": f"setup {name} is already in place"}
-        # Unreadable reads as nothing to ask about; the engine reads again and refuses.
-        stake = self._engine.setup_stake(setup) or {}
-        changes = self._setup_describe(setup)
-        held = setups_mod.held_back(setup, cfg)
-        if held:
-            changes += (
-                "; live trading stays off on "
-                + ", ".join(cfg.display_name(t) for t in held)
-                + " (a setup never turns it on)"
-            )
-        switching: list[str] = []
-        logs_in: list[str] = []
-        for tid, login in setups_mod.switches(setup, logins).items():
-            account = setups_mod.find_account(cfg, tid, login)
-            if isinstance(account, str):  # problems() has checked; a race reads as a refusal
-                return _no(f"setup {name} cannot be loaded: {account}")
-            key = account_key(account.login, account.server) or ""
-            switching.append(cfg.display_name(tid))
-            logs_in.append(f"{cfg.display_name(tid)} logs in to {self._account_called(key)}")
-        if logs_in:
-            changes += "; " + ", ".join(logs_in)
-        dry_after = cfg.dry_run if setup.dry_run is None else setup.dry_run
-        return {
-            "ok": True,
-            "changes": changes,
-            "stake": [
-                {
-                    "tid": slave_tid,
-                    "name": cfg.display_name(slave_tid),
-                    "copies": [
-                        {
-                            "masterTicket": c.master_ticket,
-                            "slaveTicket": c.slave_ticket,
-                            "symbol": c.symbol,
-                            "volume": c.volume,
-                            "resting": c.resting,
-                        }
-                        for c in held_copies
-                    ],
-                }
-                for slave_tid, held_copies in stake.items()
-            ],
-            "goesLive": setups_mod.goes_live(setup, cfg),
-            "copying": setup.copying,
-            "live": setup.copying and not dry_after,
-            "slaves": [cfg.display_name(t) for t in setup.slaves if t in cfg.terminals],
-            "switching": switching,
-        }
-
-    def setup_load(
-        self, name: str, agreed: dict[str, list[int]] | None, go_live: bool
-    ) -> dict[str, Any]:
-        """Commit the load the page asked about: roles, settings, copying and the mode --
-        and first, any terminal the setup has on another account is logged into its saved
-        one, one at a time, blocking this bridge thread; the page's promise narrates while
-        it runs and the other polls keep arriving on their own threads.
-
-        ``agreed`` is what the person was shown and said yes to, per slave the master
-        tickets, exactly as the engine re-checks it. ``go_live`` only once LIVE has been
-        typed; without it the engine refuses a setup that turns the dry run live."""
-        with self._busy_lock:
-            if self._setup_busy:
-                return {
-                    "ok": False,
-                    "messages": [
-                        {"text": "a setup is already loading; wait for it to finish", "tone": "bad"}
-                    ],
-                }
-            self._setup_busy = True
-        try:
-            return self._setup_load(str(name), agreed, bool(go_live))
-        finally:
-            self._setup_busy = False
-
-    def _setup_load(
-        self, name: str, agreed: dict[str, list[int]] | None, go_live: bool
-    ) -> dict[str, Any]:
-        cfg = self._cfg
-
-        def refused(text: str) -> dict[str, Any]:
-            return {"ok": False, "messages": [{"text": text, "tone": "bad"}]}
-
-        setup = self._setups.setups.get(name)
-        if setup is None:
-            return refused("that setup is gone")
-        logins = self._engine.logins()
-        found = setups_mod.problems(setup, cfg, logins)
-        if found:
-            return refused(f"setup {name} was not loaded: {'; '.join(found)}")
-        accounts: dict[str, account_switch.Account] = {}
-        for tid, login in setups_mod.switches(setup, logins).items():
-            account = setups_mod.find_account(cfg, tid, login)
-            if isinstance(account, str):
-                return refused(f"setup {name} was not loaded: {account}")
-            accounts[tid] = account
-        orphan = (
-            {str(t): [int(n) for n in tickets] for t, tickets in agreed.items()} if agreed else None
-        )
-        held = setups_mod.held_back(setup, cfg)
-        refusal = self._engine.load_setup(
-            setup, orphan=orphan, leave_out=list(accounts), go_live=go_live
-        )
-        if refusal is not None:
-            return refused(f"setup {name} was not loaded: {refusal}")
-        messages: list[dict[str, str]] = []
-        why = self._persist()
-        if why is not None:
-            messages.append({"text": why, "tone": "bad"})
-        if held:
-            messages.append(
-                {
-                    "text": "live trading was allowed on "
-                    + ", ".join(cfg.display_name(t) for t in held)
-                    + " when the setup was saved; it stays off until you allow it from the"
-                    " terminal's own menu",
-                    "tone": "warn",
-                }
-            )
-        failed: list[str] = []
-        for tid, acct in accounts.items():
-            result = self._log_in(tid, acct)
-            key = account_key(acct.login, acct.server) or ""
-            if result.ok:
-                # Keep the account the login left the terminal on, as the one it was last on.
-                tcfg = cfg.terminals[tid]
-                cfg.replace_terminal(record_login(tcfg, result.login, result.server or acct.server))
-                continue
-            failed.append(tid)
-            messages.append(
-                {
-                    "text": f"{cfg.display_name(tid)} was not logged in to "
-                    f"{self._account_called(key)}: {result.said}. It is left unassigned",
-                    "tone": "bad",
-                }
-            )
-        if accounts:
-            refusal = self._engine.load_setup(setup, leave_out=failed)
-            why = self._persist()
-            if why is not None:
-                messages.append({"text": why, "tone": "bad"})
-            if refusal is not None:
-                messages.append(
-                    {"text": f"setup {name} was not loaded in full: {refusal}", "tone": "bad"}
-                )
-                return {"ok": False, "messages": messages}
-            if setup.master in failed:
-                messages.append(
-                    {
-                        "text": f"setup {name} was not loaded: its master could not log in",
-                        "tone": "bad",
-                    }
-                )
-                return {"ok": False, "messages": messages}
-        said = f"{name} (all but what could not log in)" if failed else name
-        if not setup.copying:
-            messages.append({"text": f"setup {said} loaded; copying is off", "tone": "ok"})
-        elif cfg.dry_run:
-            messages.append(
-                {
-                    "text": f"setup {said} loaded; detection on: dry run, nothing will be sent",
-                    "tone": "ok",
-                }
-            )
-        else:
-            messages.append(
-                {
-                    "text": f"setup {said} loaded. COPYING LIVE: orders will be sent to every"
-                    " connected slave",
-                    "tone": "warn",
-                }
-            )
-        orphaned = sum(len(t) for t in (orphan or {}).values())
-        if orphaned:
-            messages.append(
-                {
-                    "text": f"{orphaned} cop{'y' if orphaned == 1 else 'ies'} orphaned: they stay"
-                    " open on their slaves and are no longer managed",
-                    "tone": "warn",
-                }
-            )
-        return {"ok": True, "messages": messages}
 
     def _log_in(self, tid: str, acct: account_switch.Account) -> account_switch.LoginResult:
         """Log one terminal in, blocking this bridge thread: each login starts its
@@ -3050,6 +2916,7 @@ class DesktopApi:
             "card": card,
             "dryRun": cfg.dry_run,
             "accountKind": self._account_kind(tcfg),
+            "lockedBy": ownership.owned_elsewhere_for(tcfg),
         }
         if tcfg.role is Role.SLAVE:
             values = initial_values(tcfg)
@@ -3253,6 +3120,13 @@ class DesktopApi:
         tcfg = cfg.terminals.get(tid)
         if tcfg is None:
             return _no("that terminal is gone; rescan")
+        who = ownership.owned_elsewhere_for(tcfg)
+        if who is not None:
+            return {
+                "ok": False,
+                "errors": {},
+                "message": f"read-only: it is owned by profile {who!r}",
+            }
         outcome = apply_edits(tcfg, self._terminal_raw(raw))
         if not outcome.ok:
             return {
@@ -3270,6 +3144,9 @@ class DesktopApi:
         refusal = self._engine.apply_settings(new)
         if refusal is not None:
             return {"ok": False, "errors": {}, "message": refusal}
+        # The save is the account's newest settings: banked at once, so every other
+        # profile holding this account adopts it on its next poll.
+        config_mod.remember_policy(new)
         log.info(
             "settings changed for %s (%s): %s",
             new.label,

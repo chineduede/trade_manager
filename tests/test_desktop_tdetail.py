@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from mt5copier import shared_db
 from mt5copier.config import AppConfig, Role, TerminalConfig
 from mt5copier.desktop.api import DesktopApi
 
@@ -183,3 +184,38 @@ def test_copying_from_another_slave_keeps_this_brokers_names(tmp_path: Path) -> 
         assert brokers_own not in out["values"]
 
     assert api.terminal_settings_from(T_M)["ok"] is False  # not a slave
+
+
+def test_a_save_banks_the_settings_for_the_account(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    cfg.terminals[T_A].last_login = 51234
+    cfg.terminals[T_A].last_server = "FTMO-Demo"
+    api, _ = _api(cfg)
+
+    out = api.terminal_settings_save(T_A, {"risk_percent": "0.75"})
+    assert out["ok"] is True
+    banked = shared_db.get().fetch("account_policies", "51234@FTMO-Demo")
+    assert banked is not None and banked["risk_percent"] == 0.75
+
+
+def test_a_bank_from_another_window_is_folded_in_by_the_poll(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path)
+    cfg.terminals[T_A].last_login = 51234
+    cfg.terminals[T_A].last_server = "FTMO-Demo"
+    api, engine = _api(cfg)
+
+    api._refresh_policies()  # nothing banked yet: records the stamp, changes nothing
+    assert engine.calls == []
+
+    db = shared_db.get()
+    with db.change(shared_db.POLICIES):
+        db.put("account_policies", "51234@FTMO-Demo", {"risk_percent": 3.25, "invert": True})
+    api._refresh_policies()
+    tcfg = cfg.terminals[T_A]
+    assert (tcfg.risk_percent, tcfg.invert) == (3.25, True)
+    assert any(c[0] == "apply" for c in engine.calls)
+
+    # The same bank again: the stamp short-circuits, nothing is re-applied.
+    engine.calls.clear()
+    api._refresh_policies()
+    assert engine.calls == []

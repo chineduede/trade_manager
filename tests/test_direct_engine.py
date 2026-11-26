@@ -37,6 +37,7 @@ from mt5copier.protocol import (
     WatchCommand,
     WorkerState,
 )
+from mt5copier.shared_db import SharedDb
 
 SLAVE = "B" * 32
 OTHER = "D" * 32
@@ -75,7 +76,7 @@ def engine(cfg: AppConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> E
         cfg,
         state_path=tmp_path / "dryrun.db",
         mapping_path=tmp_path / "mapping.db",
-        guard_state_path=tmp_path / "guard_state.json",
+        shared_db=SharedDb(tmp_path / "guard_state.db"),
         history_path=tmp_path / "history.db",
         virtual_path=tmp_path / "virtual_master.json",
     )
@@ -470,7 +471,7 @@ def test_switching_to_trading_demotes_the_real_master(tmp_path: Path, exe: Path)
         cfg,
         state_path=tmp_path / "dryrun.db",
         mapping_path=tmp_path / "mapping.db",
-        guard_state_path=tmp_path / "guard_state.json",
+        shared_db=SharedDb(tmp_path / "guard_state.db"),
         history_path=tmp_path / "history.db",
         virtual_path=tmp_path / "virtual_master.json",
     )
@@ -491,7 +492,7 @@ def test_the_book_survives_a_restart_through_the_engine(
         cfg,
         state_path=tmp_path / "dryrun.db",
         mapping_path=tmp_path / "mapping.db",
-        guard_state_path=tmp_path / "guard_state.json",
+        shared_db=SharedDb(tmp_path / "guard_state.db"),
         history_path=tmp_path / "history2.db",
         virtual_path=tmp_path / "virtual_master.json",
     )
@@ -682,12 +683,46 @@ def test_the_feeds_own_watch_carries_the_inferred_suffix(engine: Engine) -> None
 def test_a_configured_decoration_outranks_the_catalogs_reading(
     engine: Engine, cfg: AppConfig
 ) -> None:
-    cfg.terminals[SLAVE].symbol_suffix = "x"
+    """p dominates this catalog, but .r is configured and genuinely carried by a name:
+    the person's word wins over the reading."""
+    cfg.terminals[SLAVE].symbol_suffix = ".r"
+    feed(engine, EURUSD_QUOTE)
+    engine._symbol_lists[SLAVE] = (*PSUFFIXED, "AUDUSD.r")
+    engine.virtual_tick()
+    with engine._lock:
+        assert engine._decor_of(SLAVE) == ("", ".r")
+
+
+def test_a_suffix_typed_into_the_prefix_field_is_honored_as_the_suffix(
+    engine: Engine, cfg: AppConfig
+) -> None:
+    """The live 50_ks failure: SignaturePrime's .fx entered in the prefix field, so taken
+    literally it stripped nothing and GBPCAD.FX went to every slave. The value is placed on
+    the side the broker's own names carry it — for stripping and for resolving alike."""
+    cfg.terminals[SLAVE].symbol_prefix = ".fx"
+    feed(engine, EURUSD_QUOTE)
+    engine._symbol_lists[SLAVE] = ("EURUSD.FX", "GBPUSD.FX", "USDJPY.FX", "GBPCAD.FX")
+    engine.virtual_tick()
+    assert engine.feed_clean_names() == ("EURUSD", "GBPUSD", "USDJPY", "GBPCAD")
+    assert engine.place_direct_market("EURUSD.FX", PositionType.BUY, 1.0, 1.08000, 0.0) is None
+    (position,) = engine.direct_positions()
+    assert position.symbol == "EURUSD"
+    engine.virtual_tick()
+    opened = [r.action for r in engine.recent_actions() if r.action.kind is ActionKind.OPEN]
+    assert opened and opened[-1].master_symbol == "EURUSD"
+    engine.watch_direct("GBPUSD")
+    warms = [c for c in engine._workers[SLAVE].cmd_q.sent if isinstance(c, WarmCommand)]
+    assert warms and (warms[-1].symbol_prefix, warms[-1].symbol_suffix) == ("", ".fx")
+
+
+def test_a_decoration_no_name_carries_gives_way_to_the_catalogs_reading(
+    engine: Engine, cfg: AppConfig
+) -> None:
+    cfg.terminals[SLAVE].symbol_suffix = ".q"
     feed(engine, EURUSD_QUOTE)
     engine._symbol_lists[SLAVE] = PSUFFIXED
     engine.virtual_tick()
-    with engine._lock:
-        assert engine._decor_of(SLAVE) == ("", "x")
+    assert engine.feed_clean_names() == ("EURUSD", "GBPUSD", "USDJPY", "XAUUSD", "US30")
 
 
 def test_a_broker_listing_both_spellings_is_not_guessed_between(engine: Engine) -> None:
@@ -715,3 +750,10 @@ def test_a_known_index_name_is_never_read_as_decorated(engine: Engine) -> None:
     engine._symbol_lists[SLAVE] = ("USTEC", "EURUSD")
     engine.virtual_tick()
     assert engine.feed_clean_names() == ("USTEC", "EURUSD")
+
+
+def test_a_parked_slave_is_never_the_feed(engine: Engine, cfg: AppConfig) -> None:
+    feed(engine, EURUSD_QUOTE)
+    cfg.terminals[SLAVE].hidden = True
+    engine.virtual_tick()
+    assert engine.direct_feed() is None

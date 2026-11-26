@@ -20,6 +20,7 @@ from mt5copier.protocol import (
     Snapshot,
     WorkerState,
 )
+from mt5copier.shared_db import SharedDb
 
 KEY = "1001@Prop-Demo"
 PRAGUE = ZoneInfo("Europe/Prague")
@@ -78,7 +79,7 @@ HELD = ((0.0, 0.0),)
 
 def book_with(*rules: GuardRule, initial: float | None = 100_000.0, tmp: Path) -> GuardBook:
     doc = GuardsDoc(accounts={KEY: AccountGuards(initial_balance=initial, rules=rules)})
-    return GuardBook(doc, state_path=tmp / "state.json")
+    return GuardBook(doc, SharedDb(tmp / "state.db"))
 
 
 def only(book: GuardBook, s: Snapshot, now: float = NOW, **kw: float):  # type: ignore[no-untyped-def]
@@ -136,19 +137,25 @@ def test_a_bad_value_is_reported_and_the_default_used() -> None:
 
 
 def test_an_unknown_rule_type_is_kept_and_reported(tmp_path: Path) -> None:
+    db = SharedDb(tmp_path / "g.db")
     doc = GuardsDoc(accounts={KEY: AccountGuards(rules=(GuardRule(type="from_the_future"),))})
-    save(doc, tmp_path / "g.json")
-    again = load(tmp_path / "g.json")
+    save(doc, db)
+    again = load(db)
     assert again.accounts[KEY].rules[0].type == "from_the_future"
-    status = GuardBook(again, tmp_path / "s.json").report(KEY, snap(), NOW).rules[0]
+    status = GuardBook(again, SharedDb(tmp_path / "s.db")).report(KEY, snap(), NOW).rules[0]
     assert status.level is Level.UNKNOWN and "from_the_future" in status.sentence
 
 
-def test_a_corrupt_file_is_moved_aside(tmp_path: Path) -> None:
-    path = tmp_path / "g.json"
-    path.write_text("{not json", encoding="utf-8")
-    assert load(path).accounts == {}
-    assert not path.exists()
+def test_a_corrupt_row_is_skipped_on_load_and_never_deleted(tmp_path: Path) -> None:
+    db = SharedDb(tmp_path / "g.db")
+    save(GuardsDoc(accounts={KEY: AccountGuards()}), db)
+    with db.change("guards"):
+        db.put("guard_accounts", "2002@Other", {"no_such_field": True})
+    assert KEY in load(db).accounts
+    assert "2002@Other" not in load(db).accounts
+    # The row survives for the version that understands it: a save does not drop it.
+    save(load(db), db)
+    assert db.fetch("guard_accounts", "2002@Other") is not None
 
 
 # --- time and history --------------------------------------------------------------------------
@@ -236,7 +243,7 @@ def test_daily_loss_on_equity_waits_for_a_watched_reset(tmp_path: Path) -> None:
     assert status.used == pytest.approx(1_000.0)
 
     # Recorded on disk, so a restart later that day still knows it.
-    again = GuardBook(book.doc, state_path=tmp_path / "state.json")
+    again = GuardBook(book.doc, SharedDb(tmp_path / "state.db"))
     assert only(again, snap(equity=100_200.0), now=after + 600).used == pytest.approx(1_000.0)
 
 
@@ -349,7 +356,7 @@ def test_a_switched_off_set_measures_nothing(tmp_path: Path) -> None:
     doc = GuardsDoc(
         accounts={KEY: AccountGuards(enabled=False, rules=(GuardRule(type="max_drawdown"),))}
     )
-    report = GuardBook(doc, tmp_path / "s.json").report(KEY, snap(), NOW)
+    report = GuardBook(doc, SharedDb(tmp_path / "s.db")).report(KEY, snap(), NOW)
     assert report.rules[0].level is Level.OFF and report.worst is None
 
 
@@ -363,5 +370,5 @@ def test_worst_is_the_most_serious_then_the_fullest(tmp_path: Path) -> None:
 
 
 def test_an_account_with_no_guards_reports_nothing(tmp_path: Path) -> None:
-    report = GuardBook(GuardsDoc(), tmp_path / "s.json").report("other@x", snap(), NOW)
+    report = GuardBook(GuardsDoc(), SharedDb(tmp_path / "s.db")).report("other@x", snap(), NOW)
     assert report.rules == () and report.worst is None

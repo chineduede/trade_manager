@@ -39,7 +39,7 @@ try {
   S.tf = localStorage.getItem('dt-tf') || 'M5';
   defaultRr = localStorage.getItem('dt-rr') || '';
   var savedPage = localStorage.getItem('dt-page');
-  if (['terminals', 'guards', 'news', 'history', 'setups', 'settings'].indexOf(savedPage) >= 0) S.page = savedPage;
+  if (['terminals', 'guards', 'news', 'history', 'settings'].indexOf(savedPage) >= 0) S.page = savedPage;
 } catch (e) { /* storage may be unavailable; defaults are fine */ }
 
 function rememberRr(text) {
@@ -1328,7 +1328,7 @@ var T = {
 var modalOnConfirm = null;
 var modalOnClose = null;
 
-var PAGES = ['trading', 'terminals', 'guards', 'prop', 'news', 'history', 'setups', 'settings', 'help', 'tdetail'];
+var PAGES = ['trading', 'terminals', 'guards', 'prop', 'news', 'history', 'settings', 'help', 'tdetail'];
 
 // --- the page polls, registered once ------------------------------------------------------
 // Every nav page polls the same way: nothing while the page is elsewhere, else ask the
@@ -1439,6 +1439,9 @@ function renderTerminals() {
     : (live.master
       ? 'Only one terminal can be master. Dropping a second one here bounces back with the reason.'
       : 'none yet — drag a detected terminal here to make it the master');
+  // With a master card up, the note would pad the zone's foot and push the card out of
+  // line with the slave cards beside it; dropping a second terminal explains itself.
+  $('master-note').hidden = !!live.master;
 
   var sc = $('slave-cards');
   sc.textContent = '';
@@ -1456,6 +1459,42 @@ function renderTerminals() {
       ? 'every terminal found is assigned · Rescan looks again'
       : 'none found yet — start your MT5 terminals and Rescan; a cTrader account joins through cTrader login…';
   $('detected-note').hidden = live.detected.length > 0;
+
+  // Parked terminals have no card — they are not even spawned. Their one home is the
+  // Hidden button in the DETECTED zone's header, which carries the count, opens the
+  // list, and does not exist at all while nothing is hidden.
+  var parked = live.parked || [];
+  $('hidden-dd').hidden = !parked.length;
+  if (!parked.length) $('hidden-menu').hidden = true;
+  $('hidden-count').textContent = 'Hidden · ' + parked.length;
+  var hr = $('hidden-rows');
+  hr.textContent = '';
+  parked.forEach(function (p) {
+    var row = document.createElement('div');
+    row.className = 'hidden-row';
+    var name = document.createElement('span');
+    name.className = 'hname';
+    name.textContent = p.name;
+    row.appendChild(name);
+    var role = document.createElement('span');
+    role.className = 'hrole';
+    role.textContent = p.role === 'slave' ? 'slave' : 'unassigned';
+    row.appendChild(role);
+    var acct = document.createElement('span');
+    acct.className = 'hacct mono';
+    acct.textContent = p.account || 'not logged in';
+    row.appendChild(acct);
+    var space = document.createElement('span');
+    space.className = 'tcard-space';
+    row.appendChild(space);
+    var back = document.createElement('button');
+    back.type = 'button';
+    back.className = 'linklike';
+    back.textContent = 'Unhide';
+    back.addEventListener('click', function () { tact(api().unhide_terminal(p.tid)); });
+    row.appendChild(back);
+    hr.appendChild(row);
+  });
 
   // A rebuild replaced the card the open popover was anchored to; hand it the new
   // element and the fresh numbers, so it stays up and current under the pointer.
@@ -1568,6 +1607,93 @@ function marginRow(c) {
   return row;
 }
 
+// --- the card's action icons ----------------------------------------------------------------
+// The everyday verbs live on the card itself: at rest the corner keeps the state word, on
+// hover (or keyboard focus) it gives way to this strip. The rare actions stay in the ···
+// menu — the same one right-click opens, so the old reflex still works.
+var ACT_ICONS = {
+  pause: '<path d="M10 4v16M15 4v16"></path>',
+  play: '<polygon points="6 4 20 12 6 20"></polygon>',
+  hide: '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 '
+    + '5.06-5.94"></path><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 '
+    + '0 1-2.16 3.19"></path><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"></path>'
+    + '<path d="M1 1l22 22"></path>',
+  unlink: '<path d="M18.84 12.25l1.72-1.71a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>'
+    + '<path d="M5.17 11.75l-1.71 1.71a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>'
+    + '<path d="M8 2v3M2 8h3M16 19v3M19 16h3"></path>',
+  key: '<path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 '
+    + '7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"></path>',
+  dots: '<circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"></circle>'
+    + '<circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"></circle>'
+    + '<circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"></circle>'
+};
+
+function actBtn(icon, tip, fn, cls) {
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'icon-btn' + (cls ? ' ' + cls : '');
+  btn.setAttribute('aria-label', tip);
+  btn.dataset.tip = tip;
+  var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('width', '15');
+  svg.setAttribute('height', '15');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('fill', 'none');
+  svg.setAttribute('stroke', 'currentColor');
+  svg.setAttribute('stroke-width', '2');
+  svg.setAttribute('stroke-linecap', 'round');
+  svg.setAttribute('stroke-linejoin', 'round');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.innerHTML = ACT_ICONS[icon];
+  btn.appendChild(svg);
+  btn.addEventListener('click', function (ev) {
+    // The document's click listener closes the ctx menu; an icon that just opened it
+    // (the ··· toggle) must not feed that same listener.
+    ev.stopPropagation();
+    fn(btn);
+  });
+  return btn;
+}
+
+function cardActions(c) {
+  var acts = document.createElement('span');
+  acts.className = 'tcard-acts';
+  if (c.role === 'unassigned') {
+    if (c.isCtrader) {
+      acts.appendChild(actBtn('key', 'Log in to cTrader…', function () { ctraderLoginFlow(); }));
+    } else if (c.canSwitch && !c.loggingIn) {
+      acts.appendChild(actBtn('key',
+        c.login ? 'Log in to a different account…' : 'Log in to an account…',
+        function () { accountLoginFlow(c); }));
+    }
+    acts.appendChild(actBtn('hide', 'Hide: park this terminal', function () { parkFlow(c); }));
+  } else if (c.role === 'slave') {
+    acts.appendChild(c.paused
+      ? actBtn('play', 'Resume copying', function () { tact(api().set_pause(c.tid, false)); })
+      : actBtn('pause', 'Pause: take no new trades', function () { tact(api().set_pause(c.tid, true)); }));
+    acts.appendChild(actBtn('hide', 'Hide: park and disconnect…', function () { parkFlow(c); }));
+    acts.appendChild(actBtn('unlink', 'Unassign: stop copying to it',
+      function () { unassignFlow(c); }, 'danger'));
+  } else {
+    // The master: no pause, no hide (its slaves would sit copying nothing) — unassign it.
+    acts.appendChild(actBtn('unlink', 'Unassign the master',
+      function () { unassignFlow(c); }, 'danger'));
+  }
+  acts.appendChild(actBtn('dots', 'More actions', function (btn) { toggleMenuAt(c, btn); }, 'icon-dots'));
+  return acts;
+}
+
+function toggleMenuAt(c, btn) {
+  var menu = $('ctx-menu');
+  if (!menu.hidden && menu.dataset.owner === 'card:' + c.tid) { closeMenu(); return; }
+  // Hang the menu off the icon itself — right edges flush, just below — and keep the
+  // card's strip up while it is open, so the two read as one control.
+  var at = btn.getBoundingClientRect();
+  openMenu(c, at.right, at.bottom + 4, true);
+  var card = btn.closest('.tcard');
+  if (card) card.classList.add('acts-open');
+}
+
 function terminalCard(c, live) {
   var el = document.createElement('article');
   el.className = 'tcard';
@@ -1578,29 +1704,38 @@ function terminalCard(c, live) {
 
   if (c.role === 'unassigned') {
     // A detected terminal: what it is and whether it could connect, nothing more.
-    if (c.isCtrader) head.appendChild(pill('SLAVE ONLY', 'muted'));
+    if (c.ownedBy) {
+      // Another profile's terminal or account: the card says so up front, instead of
+      // letting a drag to a zone collect the refusal. ASSIGNED is the harder word —
+      // the whole install is in use there, so even switching accounts is off.
+      el.classList.add('tcard-owned');
+      head.appendChild(pill((c.assignedBy ? 'ASSIGNED · ' : 'OWNED · ') + c.ownedBy, 'yellow'));
+    } else if (c.isCtrader) head.appendChild(pill('SLAVE ONLY', 'muted'));
     else if (!c.hasExe) head.appendChild(pill('NOT INSTALLED', 'muted'));
     else if (!c.login) head.appendChild(pill('NO ACCOUNT', 'muted'));
+    head.appendChild(cardActions(c));
+    el.classList.add('has-acts');
     el.appendChild(head);
     el.appendChild(acctLine(c));
-    var said;
-    if (!c.hasExe && !c.isCtrader) said = 'found in config · cannot be launched from here';
+    var said, saidCls = 'tcard-info';
+    if (c.assignedBy) {
+      // Only a closed profile can be taken from; open, the change belongs there.
+      said = 'assigned by profile ‘' + c.assignedBy + '’ — ' + (c.ownerOpen
+        ? 'that window is open: unassign or hide it there'
+        : 'unassign or hide it there, or take ownership under ···');
+      saidCls += ' yellow';
+    } else if (c.ownedBy) {
+      said = 'its account is profile ‘' + c.ownedBy + '’s — log in to another '
+        + 'account here' + (c.ownerOpen ? '' : ', or take ownership under ···');
+      saidCls += ' yellow';
+    } else if (!c.hasExe && !c.isCtrader) said = 'found in config · cannot be launched from here';
     else {
       said = c.login ? 'logged in' : 'not logged in';
       if (c.isCtrader) said += ' · can copy, cannot feed';
     }
-    el.appendChild(cardLine('tcard-info', said));
+    el.appendChild(cardLine(saidCls, said));
     if (c.loggingIn) {
       el.appendChild(cardLine('tcard-login yellow', 'logging in…'));
-    } else if (c.canSwitch) {
-      // The menu alone hid this: the card itself says an account can be picked. Only
-      // when there is a pick — a terminal with one saved account has nowhere to go.
-      var login = document.createElement('button');
-      login.type = 'button';
-      login.className = 'linklike tcard-login';
-      login.textContent = c.login ? 'log in to a different account…' : 'log in to an account…';
-      login.addEventListener('click', function () { accountLoginFlow(c); });
-      el.appendChild(login);
     }
     wireCard(el, c);
     return el;
@@ -1611,7 +1746,10 @@ function terminalCard(c, live) {
   // fixed place, so cards line up with each other whatever their content.
   var word = stateWord(c, live);
   if (word.cls !== 'muted') el.classList.add('edge-' + word.cls);
+  if (c.ownedBy) el.classList.add('tcard-owned');
   head.appendChild(cardLine('tcard-word ' + word.cls, word.text));
+  head.appendChild(cardActions(c));
+  el.classList.add('has-acts');
   el.appendChild(head);
   el.appendChild(acctLine(c));
   el.appendChild(cardLine('tcard-big mono', c.balance === null ? '—' : money(c.balance)));
@@ -1625,13 +1763,19 @@ function terminalCard(c, live) {
 
   var info, infoCls = 'tcard-info', infoTitle = '';
   if (c.claimRefused) {
-    // The whole story in one line: whose it is, and that no rescan is needed.
-    info = c.claimRefused + ' — frees itself when that app closes';
+    // The whole story in one line: whose it is, and what would change that. An owned
+    // account never frees itself -- ownership survives the other window closing --
+    // and taking it over is only on offer while the owner's window is closed.
+    info = c.ownedBy
+      ? c.claimRefused + ' — read-only here; ' + (c.ownerOpen
+        ? 'free it in that window'
+        : 'take ownership under ···')
+      : c.claimRefused + ' — frees itself when that app closes';
     infoTitle = info;
     infoCls += ' yellow';
   } else if (c.role === 'slave') {
     if (c.demoBlocked) {
-      info = 'not a demo — right-click to allow live trading';
+      info = 'not a demo — allow live trading under the card’s ··· menu';
       infoCls += ' red';
     } else if (c.holdReason) {
       info = c.holdReason;
@@ -1817,7 +1961,7 @@ function popContent(c, live) {
     frag.appendChild(popDiv('pop-alert', c.claimRefused + ' — frees itself when that app closes'));
   }
   if (c.demoBlocked) {
-    frag.appendChild(popDiv('pop-alert red', 'not a demo account — right-click the card to allow live trading'));
+    frag.appendChild(popDiv('pop-alert red', 'not a demo account — allow live trading under the card’s ··· menu'));
   }
   if (c.holdReason) frag.appendChild(popDiv('pop-alert', c.holdReason));
 
@@ -1896,7 +2040,13 @@ window.addEventListener('scroll', function () {
 
 // --- dragging a card between zones ---------------------------------------------------------
 function wireCard(el, c) {
-  wirePop(el, c);
+  // Only an assigned card earns the hover readout: it holds equity, the exact margin
+  // and the guard's word. An unassigned card's popover would only repeat the card.
+  if (c.role !== 'unassigned') wirePop(el, c);
+  // The ··· menu belongs to this card: while it is open the icon strip stays up and
+  // the ··· reads pressed, across the rebuilds the poll causes.
+  var menu = $('ctx-menu');
+  if (!menu.hidden && menu.dataset.owner === 'card:' + c.tid) el.classList.add('acts-open');
   el.addEventListener('contextmenu', function (ev) {
     ev.preventDefault();
     openMenu(c, ev.clientX, ev.clientY);
@@ -1920,6 +2070,19 @@ function wireCard(el, c) {
       if (!started) {
         if (Math.abs(e.clientX - startX) < 6 && Math.abs(e.clientY - startY) < 6) return;
         started = true;
+        if (c.role === 'unassigned' && c.ownedBy) {
+          // The drag could only end in a refusal: say it at the grab instead.
+          letGo();
+          var door = c.ownerOpen
+            ? 'that profile is open — free it in its window'
+            : 'take ownership from its ··· menu';
+          toast(c.assignedBy
+            ? 'this terminal is assigned by profile ‘' + c.assignedBy + '’ — it cannot '
+              + 'be used here; unassign or hide it there, or ' + door
+            : 'its account is owned by profile ‘' + c.ownedBy + '’ — it cannot '
+              + 'be assigned here; log it into another account, or ' + door, 'bad');
+          return;
+        }
         beginDrag(el, c, e);
       }
       moveDrag(e);
@@ -1957,20 +2120,65 @@ function beginDrag(el, c, e) {
   document.body.appendChild(ghost);
   el.classList.add('drag-src');
   document.body.classList.add('dragging-terminals');
-  T.drag = { card: c, ghost: ghost, el: el };
+  T.drag = { card: c, ghost: ghost, el: el, x: e.clientX, y: e.clientY };
   moveDrag(e);
+  revealDrop(c);
+  requestAnimationFrame(dragEdgeScroll);
 }
 
-function zoneUnder(e) {
-  var at = document.elementFromPoint(e.clientX, e.clientY);
+// With enough terminals the DETECTED grid fills the window, and a grab can find MASTER
+// and SLAVES scrolled clean out of sight — nothing visible to drop on. The grab brings
+// the card's destination back: the zones row for a detected card, the DETECTED zone for
+// an assigned card on its way out.
+function revealDrop(c) {
+  var target = $(c.role === 'unassigned' ? 'zones-row' : 'zone-detected');
+  var main = $('main');
+  if (!target || !main) return;
+  var t = target.getBoundingClientRect(), m = main.getBoundingClientRect();
+  var shown = Math.min(t.bottom, m.bottom) - Math.max(t.top, m.top);
+  if (shown >= Math.min(t.height, 120)) return; // enough of it already on screen to hit
+  target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+// While a card is held near the top or bottom edge the page keeps scrolling, so a drop
+// zone beyond the fold stays reachable without letting go. The loop lives exactly as
+// long as the drag does.
+function dragEdgeScroll() {
+  var drag = T.drag;
+  if (!drag) return;
+  var m = $('main').getBoundingClientRect();
+  var band = 70, dy = 0;
+  if (drag.y < m.top + band) dy = -Math.ceil((m.top + band - drag.y) / 4);
+  else if (drag.y > m.bottom - band) dy = Math.ceil((drag.y - (m.bottom - band)) / 4);
+  if (dy) $('main').scrollTop += dy;
+  // The reveal scroll and the edge scroll both move the page under a pointer that may
+  // be holding still — the highlight is re-aimed every frame so it stays true.
+  placeDrag();
+  requestAnimationFrame(dragEdgeScroll);
+}
+
+function zoneAt(x, y) {
+  var at = document.elementFromPoint(x, y);
   return at ? at.closest('.zone') : null;
 }
 
+function zoneUnder(e) { return zoneAt(e.clientX, e.clientY); }
+
 function moveDrag(e) {
   if (!T.drag) return;
-  T.drag.ghost.style.left = (e.clientX + 10) + 'px';
-  T.drag.ghost.style.top = (e.clientY - 20) + 'px';
-  var over = zoneUnder(e);
+  T.drag.x = e.clientX;
+  T.drag.y = e.clientY;
+  placeDrag();
+}
+
+// The ghost and the drop highlight follow whichever moved last — the pointer, or the
+// page scrolling underneath a pointer that is holding still.
+function placeDrag() {
+  var drag = T.drag;
+  if (!drag) return;
+  drag.ghost.style.left = (drag.x + 10) + 'px';
+  drag.ghost.style.top = (drag.y - 20) + 'px';
+  var over = zoneAt(drag.x, drag.y);
   document.querySelectorAll('.zone').forEach(function (z) {
     z.classList.toggle('drop-hot', z === over);
   });
@@ -2004,12 +2212,16 @@ function closeMenu() {
   var menu = $('ctx-menu');
   menu.hidden = true;
   menu.dataset.owner = '';
+  document.querySelectorAll('.tcard.acts-open').forEach(function (el) {
+    el.classList.remove('acts-open');
+  });
 }
 
-function openMenu(c, x, y) {
+function openMenu(c, x, y, alignRight) {
   var live = T.live;
   if (!live) return;
   hidePop();
+  $('tip').hidden = true; // the ··· tooltip would sit right on the opening menu
   var menu = $('ctx-menu');
   menu.dataset.owner = 'card:' + c.tid;
   menu.textContent = '';
@@ -2047,8 +2259,10 @@ function openMenu(c, x, y) {
   });
 
   menu.hidden = false;
-  // Clamp to the window once its size is real.
+  // Clamp to the window once its size is real; alignRight hangs the menu's right edge
+  // on x — the ··· icon's — the way every dropdown on the page opens.
   var w = menu.offsetWidth, h = menu.offsetHeight;
+  if (alignRight) x -= w;
   menu.style.left = Math.max(8, Math.min(x, window.innerWidth - w - 8)) + 'px';
   menu.style.top = Math.max(8, Math.min(y, window.innerHeight - h - 8)) + 'px';
 }
@@ -2058,8 +2272,38 @@ function menuItems(c, live) {
   function does(label, fn, cls) { items.push({ label: label, fn: fn, cls: cls }); }
   function says(label) { items.push({ label: label }); }
 
+  // The everyday verbs — pause, hide, unassign, log in — are the card's icons now
+  // (cardActions); this menu, behind ··· and right-click alike, keeps the rare rest.
+  function takeOwn() {
+    if (!c.ownedBy) return;
+    if (c.ownerOpen) {
+      // An open profile is never taken from: the change belongs in its window.
+      says('profile ‘' + c.ownedBy + '’ has it and is open — unassign or hide it there');
+      return;
+    }
+    var what = c.assignedBy ? 'it is assigned by' : 'its account is owned by';
+    does('Take ownership: ' + what + ' profile ‘' + c.ownedBy + '’…', function () {
+      confirmModal(
+        'Take ownership of ' + (c.accountName || c.name),
+        (c.assignedBy
+          ? 'This terminal is assigned by profile ‘' + c.assignedBy + '’, so nothing can '
+            + 'be done with it here. '
+          : 'This account is owned by profile ‘' + c.ownedBy + '’, so it is read-only here. ')
+        + 'That profile’s window is closed, so nothing is interrupted now. Taking it '
+        + 'makes it this profile’s: when that profile next opens, it will not reconnect '
+        + 'to it, and any copies it left stay open there, unmanaged.',
+        'Take ownership', true,
+        function () { tact(api().take_ownership(c.tid)); }
+      );
+    }, 'danger');
+  }
   if (c.role === 'unassigned') {
-    if (c.isCtrader) {
+    if (c.ownedBy) {
+      // Theirs, so no assign verbs: the only honest offers are the name and the takeover.
+      says(c.assignedBy
+        ? 'assigned by profile ‘' + c.assignedBy + '’ — nothing can be done with it here'
+        : 'its account is profile ‘' + c.ownedBy + '’s — log it into another account first');
+    } else if (c.isCtrader) {
       if (live.hasMaster) does('Make it a slave', function () { tact(api().assign_slave(c.tid)); });
       else says('a cTrader account can only be a slave: make an MT5 master first');
     } else if (!c.hasExe) {
@@ -2069,20 +2313,11 @@ function menuItems(c, live) {
     } else {
       does('Make it the master', function () { tact(api().assign_master(c.tid)); });
     }
-    if (c.isCtrader) {
-      does('Log in to cTrader…', ctraderLoginFlow);
-    } else if (c.loggingIn) {
-      says('logging in — the card says when it is done');
-    } else if (c.canSwitch) {
-      does(
-        c.login ? 'Log in to a different account…' : 'Log in to an account…',
-        function () { accountLoginFlow(c); }
-      );
-    }
     if (c.login) {
       does(c.accountName ? 'Rename this account…' : 'Name this account…',
         function () { accountNameFlow(c); });
     }
+    takeOwn();
     return items;
   }
 
@@ -2092,14 +2327,10 @@ function menuItems(c, live) {
     does(c.accountName ? 'Rename this account…' : 'Name this account…',
       function () { accountNameFlow(c); });
   }
-  if (c.role === 'slave') {
-    if (c.orphans) {
-      does('Acknowledge orphans: sign off its untracked positions', function () {
-        tact(api().acknowledge_orphans(c.tid));
-      });
-    }
-    if (c.paused) does('Resume copying', function () { tact(api().set_pause(c.tid, false)); });
-    else does('Pause: take no new trades', function () { tact(api().set_pause(c.tid, true)); });
+  if (c.role === 'slave' && c.orphans) {
+    does('Acknowledge orphans: sign off its untracked positions', function () {
+      tact(api().acknowledge_orphans(c.tid));
+    });
   }
   if (c.allowLive) {
     does('Live trading is allowed — turn it off', function () { liveOverrideFlow(c, false); });
@@ -2110,12 +2341,7 @@ function menuItems(c, live) {
     does('Reconnect to the terminal', function () { tact(api().reconnect(c.tid)); });
     does('Restart its worker process', function () { tact(api().restart_worker(c.tid)); });
   }
-  items.push({ sep: true });
-  does(
-    c.role === 'slave' ? 'Unassign: stop copying to it' : 'Unassign the master',
-    function () { unassignFlow(c); },
-    'danger'
-  );
+  takeOwn();
   return items;
 }
 
@@ -2180,6 +2406,45 @@ function accountNameFlow(c) {
   });
   input.focus();
   input.select();
+}
+
+function parkFlow(c) {
+  // Parking strands open copies exactly as unassigning does — the terminal stops being
+  // managed entirely — so it reuses the same stake and the same asking; only the role
+  // and settings survive for the unhide.
+  api().unassign_stake(c.tid).then(function (r) {
+    if (!r.ok) { toast(r.message, 'bad'); return; }
+    var stake = r.stake || [];
+    if (!stake.length) { tact(api().hide_terminal(c.tid, null)); return; }
+
+    var agreed = {};
+    var total = 0;
+    var body = document.createElement('div');
+    var warn = document.createElement('p');
+    warn.textContent = 'Hiding disconnects this terminal, so these copies stay open and '
+      + 'stop being managed — nothing will close them with the master, move their stops, '
+      + 'or mirror partials. They become yours to close by hand.';
+    body.appendChild(warn);
+    stake.forEach(function (s) {
+      agreed[s.tid] = s.copies.map(function (cp) { return cp.masterTicket; });
+      total += s.copies.length;
+      s.copies.forEach(function (cp) {
+        var line = document.createElement('div');
+        line.className = 'modal-line mono';
+        line.textContent = (cp.resting ? 'resting · ' : '') + cp.symbol
+          + (cp.volume ? ' · ' + cp.volume + ' lots' : '')
+          + (cp.slaveTicket ? ' · #' + cp.slaveTicket : '');
+        body.appendChild(line);
+      });
+    });
+    showModal({
+      title: 'Hide ' + c.name + '?',
+      body: body,
+      confirm: 'Hide it — orphan ' + total + (total === 1 ? ' copy' : ' copies'),
+      danger: true,
+      onConfirm: function () { tact(api().hide_terminal(c.tid, agreed)); }
+    });
+  });
 }
 
 function unassignFlow(c) {
@@ -2257,12 +2522,17 @@ function accountLoginFlow(c) {
     pickModal('Log ' + a.name + ' in to', a.accounts.map(function (acct) {
       // One account on one terminal at a time: a row another terminal holds is kept
       // visible — so the list is the whole truth — but greyed and refused with the why.
+      // A row another CLOSED profile owns stays live instead: picking it asks to take
+      // it. With the owner's window open it is held like any other — theirs to change.
       var sub = acct.now ? 'logged in now'
-        : acct.usedBy ? 'in use by ' + acct.usedBy : '';
+        : acct.usedBy ? 'in use by ' + acct.usedBy
+        : acct.ownedBy ? 'owned by profile ‘' + acct.ownedBy + '’' + (acct.ownerOpen
+          ? ' — open now: switch it there' : ' — picking it asks to take it')
+        : '';
       return {
         label: acct.words,
         sub: sub || undefined,
-        cls: (acct.now || acct.usedBy) ? 'pick-off' : '',
+        cls: (acct.now || acct.usedBy || acct.ownerOpen) ? 'pick-off' : '',
         fn: function () {
           if (acct.now) {
             toast(a.name + ' is already logged in to ' + acct.words, '');
@@ -2273,10 +2543,32 @@ function accountLoginFlow(c) {
               + ': an account is used on one terminal at a time', 'bad');
             return;
           }
-          toast(a.name + ': logging in to ' + acct.words + '…', '');
-          T.drawn = '';
-          pollTerminals();
-          tact(api().account_login(c.tid, acct.key));
+          if (acct.ownedBy && acct.ownerOpen) {
+            toast(acct.words + ' is owned by profile ‘' + acct.ownedBy + '’, whose '
+              + 'window is open — switch it there, or close that window and take it '
+              + 'over here', 'bad');
+            return;
+          }
+          function go(take) {
+            toast(a.name + ': logging in to ' + acct.words + '…', '');
+            T.drawn = '';
+            pollTerminals();
+            tact(api().account_login(c.tid, acct.key, !!take));
+          }
+          if (acct.ownedBy) {
+            confirmModal(
+              'Take ' + acct.words + ' from profile ‘' + acct.ownedBy + '’?',
+              'This account is owned by profile ‘' + acct.ownedBy + '’, whose window is '
+              + 'closed, so nothing is interrupted now. Taking it makes it this '
+              + 'profile’s and logs ' + a.name + ' into it; when that profile next '
+              + 'opens, it will not reconnect to it, and any copies it left stay open '
+              + 'there, unmanaged.',
+              'Take the account', true,
+              function () { go(true); }
+            );
+            return;
+          }
+          go(false);
         }
       };
     }));
@@ -2473,7 +2765,7 @@ function profilesFlow() {
     var note = document.createElement('p');
     note.className = 'muted small prof-note';
     note.textContent = 'Each profile is a whole copier of its own — config, accounts, '
-      + 'guards, setups and history — in its own window. Names are letters, digits, '
+      + 'guards and history — in its own window. Names are letters, digits, '
       + '- or _ (up to 32).';
     body.appendChild(note);
 
@@ -2520,7 +2812,7 @@ function profileDeleteFlow(name) {
   var body = document.createElement('div');
   var p = document.createElement('p');
   p.textContent = 'Everything ' + name + ' keeps goes with it: its config, accounts list, '
-    + 'guards, setups, history and logs. Broker accounts and their positions are '
+    + 'guards, history and logs. Broker accounts and their positions are '
     + 'untouched, but any copies it still tracked are orphaned.';
   body.appendChild(p);
   showModal({
@@ -2588,9 +2880,13 @@ function renderGuards() {
     initial.value = live.initialBalance === null || live.initialBalance === undefined
       ? '' : String(live.initialBalance);
   }
-  initial.disabled = !live.hasAccount;
+  initial.disabled = !live.hasAccount || !!live.ownedBy;
   $('g-all').checked = !!live.enabled;
   var notes = [];
+  if (live.ownedBy) {
+    notes.push('owned by profile ‘' + live.ownedBy + '’ — read-only here: '
+      + 'its rules can be read, not changed');
+  }
   if (!live.hasAccount) {
     notes.push("this terminal's account is not known yet: connect it once, then its rules can be set");
   } else {
@@ -2614,9 +2910,12 @@ function renderGuards() {
   live.rules.forEach(function (r) { rows.appendChild(guardRow(r)); });
   $('guard-empty').hidden = live.rules.length > 0;
   var picked = live.rules.filter(function (r) { return r.id === G.selected; })[0] || null;
-  $('g-change').disabled = !picked;
-  $('g-toggle').disabled = !picked;
-  $('g-remove').disabled = !picked;
+  var readOnly = !!live.ownedBy;
+  $('g-add').disabled = readOnly;
+  $('g-all').disabled = readOnly;
+  $('g-change').disabled = !picked || readOnly;
+  $('g-toggle').disabled = !picked || readOnly;
+  $('g-remove').disabled = !picked || readOnly;
   $('g-toggle').textContent = picked && !picked.enabled ? 'Rule on' : picked ? 'Rule off' : 'Rule on/off';
   $('g-clear').hidden = !(picked && picked.latched);
   $('g-clear').disabled = !(picked && picked.latched);
@@ -4014,280 +4313,12 @@ function renderLog() {
   LG.everDrawn = true;
 }
 
-// --- the setups page -------------------------------------------------------------------
-// Who copies from whom — the master, its slaves, the account each is logged into, every
-// one's settings, copying on or off and the mode — saved to put back later: the TUI w
-// page as a desktop table. What a setup holds and what loading one does are the
-// engine's; this page asks and draws, and every load is agreed to first.
-var W = {
-  live: null,
-  drawn: '',
-  selected: '',   // the selected setup's name
-  loading: ''     // the setup being loaded, while the bridge logs terminals in and applies it
-};
-
-var pollSetups = statePoll('setups', 1000, function () {
-  return api().setups_state();
-}, W, function () { renderSetups(); });
-
-function wact(promise) {
-  pageAct(promise, W, pollSetups);
-}
-
-function selSetup() {
-  var live = W.live;
-  if (!live) return null;
-  return live.setups.filter(function (s) { return s.name === W.selected; })[0] || null;
-}
-
-function renderSetups() {
-  var live = W.live;
-  if (!live) return;
-  var key = JSON.stringify(live) + '|' + W.selected + '|' + W.loading;
-  if (key === W.drawn) return;
-  W.drawn = key;
-
-  // The NOW strip: the roles in place, and whether they are a saved setup.
-  var roles = $('setups-now-roles');
-  var state = $('setups-now-state');
-  state.textContent = '';
-  if (live.now === null) {
-    roles.textContent = live.direct
-      ? 'no slaves assigned — drag terminals into the SLAVES zone on Terminals'
-      : 'no master assigned — drag one into the MASTER zone on Terminals';
-    roles.className = 'yellow';
-  } else {
-    roles.textContent = live.now;
-    roles.className = '';
-    if (live.current) {
-      var dot = document.createElement('span');
-      dot.className = 'strow-dot';
-      dot.textContent = '●';
-      state.appendChild(dot);
-      state.appendChild(document.createTextNode('setup ' + live.current));
-      state.className = 'small green';
-    } else {
-      state.textContent = 'not saved as a setup';
-      state.className = 'small yellow';
-    }
-  }
-  var note = $('setups-now-note');
-  note.hidden = !live.changed.length;
-  if (live.changed.length) {
-    note.textContent = 'settings changed since saved on ' + live.changed.join(', ')
-      + ' — Update with current keeps the change, loading puts the saved ones back';
-  }
-  $('st-save').disabled = live.now === null || !!W.loading || !!live.loading;
-
-  $('setups-count').textContent = live.setups.length
-    ? live.setups.length + ' saved' : '';
-
-  if (!live.setups.some(function (s) { return s.name === W.selected; })) W.selected = '';
-  var rows = $('setups-rows');
-  rows.textContent = '';
-  live.setups.forEach(function (s) { rows.appendChild(setupRow(s)); });
-  $('setups-empty').hidden = !!live.setups.length;
-
-  var picked = selSetup();
-  var busy = !!W.loading || !!live.loading; // ours, or a load the bridge is still running
-  $('st-load').textContent = busy ? 'Loading…' : 'Load';
-  $('st-load').disabled = !picked || busy || !!(picked && picked.problems.length);
-  $('st-update').disabled = !picked || busy || live.now === null;
-  $('st-rename').disabled = !picked || busy;
-  $('st-delete').disabled = !picked || busy;
-}
-
-function setupRow(s) {
-  var row = document.createElement('div');
-  row.className = 'strow' + (s.name === W.selected ? ' selected' : '');
-  row.setAttribute('role', 'row');
-
-  function cell(build) {
-    var el = document.createElement('span');
-    el.setAttribute('role', 'cell');
-    build(el);
-    row.appendChild(el);
-  }
-
-  cell(function (el) {
-    el.className = 'strow-name';
-    if (s.current) {
-      var dot = document.createElement('span');
-      dot.className = 'strow-dot';
-      dot.textContent = '● ';
-      dot.dataset.tip = 'the roles in place now';
-      el.appendChild(dot);
-    }
-    el.appendChild(document.createTextNode(s.name));
-  });
-  cell(function (el) { el.textContent = s.master; el.dataset.tip = s.master; });
-  cell(function (el) { el.textContent = s.slaves; el.dataset.tip = s.slaves; });
-  cell(function (el) {
-    var on = document.createElement('span');
-    on.className = s.copying ? 'green' : 'muted';
-    on.textContent = s.copying ? 'on' : 'off';
-    el.appendChild(on);
-    // Which mode the setup puts back deserves a glance, not a dialog's small print.
-    if (s.dryRun === false) {
-      var hot = document.createElement('span');
-      hot.className = 'red';
-      hot.textContent = ' · LIVE';
-      el.appendChild(hot);
-    } else if (s.dryRun === true) {
-      var dry = document.createElement('span');
-      dry.className = 'muted';
-      dry.textContent = ' · dry run';
-      el.appendChild(dry);
-    }
-  });
-  cell(function (el) { el.className = 'muted'; el.textContent = s.saved; });
-
-  if (s.problems.length) {
-    var why = document.createElement('div');
-    why.className = 'strow-note';
-    why.textContent = 'cannot load: ' + s.problems.join('; ');
-    row.appendChild(why);
-  }
-
-  row.addEventListener('click', function () {
-    W.selected = s.name;
-    W.drawn = '';
-    renderSetups();
-  });
-  row.addEventListener('dblclick', function () {
-    if (!s.problems.length) loadSetupFlow(s.name);
-  });
-  return row;
-}
-
-function setupNameModal(title, confirmWord, initial, fn) {
-  var body = document.createElement('div');
-  var field = document.createElement('div');
-  field.className = 'field';
-  var label = document.createElement('label');
-  label.className = 'flabel';
-  label.setAttribute('for', 'st-name');
-  label.textContent = 'Setup name';
-  var input = document.createElement('input');
-  input.id = 'st-name';
-  input.autocomplete = 'off';
-  input.value = initial || '';
-  field.appendChild(label);
-  field.appendChild(input);
-  body.appendChild(field);
-  showModal({
-    title: title,
-    body: body,
-    confirm: confirmWord,
-    onConfirm: function () { fn(input.value); }
-  });
-  input.focus();
-  input.select();
-}
-
-function saveSetupFlow() {
-  var live = W.live;
-  if (!live || live.direct || live.now === null || W.loading) return;
-  setupNameModal('Save the roles in place now as', 'Save it', '', function (name) {
-    wact(api().setup_save(name));
-  });
-}
-
-function updateSetupFlow() {
-  var s = selSetup();
-  var live = W.live;
-  if (!s || !live || live.now === null || W.loading) return;
-  confirmModal(
-    'Update ' + s.name + '?',
-    s.name + ' is saved again as the roles in place now: ' + live.now + '.',
-    'Update it', false,
-    function () { wact(api().setup_update(s.name)); }
-  );
-}
-
-function renameSetupFlow() {
-  var s = selSetup();
-  if (!s || W.loading) return;
-  setupNameModal('Rename ' + s.name + ' to', 'Rename it', s.name, function (name) {
-    wact(api().setup_rename(s.name, name));
-  });
-}
-
-function deleteSetupFlow() {
-  var s = selSetup();
-  if (!s || W.loading) return;
-  confirmModal(
-    'Delete ' + s.name + '?',
-    'The saved setup is forgotten. The roles in place now do not change.',
-    'Delete it', true,
-    function () { wact(api().setup_delete(s.name)); }
-  );
-}
-
-function loadSetupFlow(name) {
-  if (W.loading) return;
-  api().setup_load_ask(name).then(function (a) {
-    if (!a.ok) { toast(a.message, a.already ? '' : 'bad'); return; }
-
-    var body = document.createElement('div');
-    var p = document.createElement('p');
-    p.textContent = 'The roles become: ' + a.changes + '.';
-    body.appendChild(p);
-
-    var stake = a.stake || [];
-    var agreed = null;
-    var total = 0;
-    if (stake.length) {
-      agreed = {};
-      var warn = document.createElement('p');
-      warn.textContent = 'These copies stay open and stop being managed — nothing will close '
-        + 'them with the master, move their stops, or mirror partials. They become yours to '
-        + 'close by hand.';
-      body.appendChild(warn);
-      stake.forEach(function (s) {
-        agreed[s.tid] = s.copies.map(function (cp) { return cp.masterTicket; });
-        total += s.copies.length;
-        var h = document.createElement('div');
-        h.className = 'modal-sub';
-        h.textContent = s.name;
-        body.appendChild(h);
-        s.copies.forEach(function (cp) {
-          var line = document.createElement('div');
-          line.className = 'modal-line mono';
-          line.textContent = (cp.resting ? 'resting · ' : '') + cp.symbol
-            + (cp.volume ? ' · ' + cp.volume + ' lots' : '')
-            + (cp.slaveTicket ? ' · #' + cp.slaveTicket : '');
-          body.appendChild(line);
-        });
-      });
-    }
-    if (a.live && !a.goesLive) {
-      var hot = document.createElement('p');
-      hot.className = 'red';
-      hot.textContent = 'Copying starts LIVE: orders will be sent to the slaves.';
-      body.appendChild(hot);
-    }
-    showModal({
-      title: 'Load setup ' + name + '?',
-      body: body,
-      confirm: total
-        ? 'Load — orphan ' + total + (total === 1 ? ' copy' : ' copies')
-        : 'Load it',
-      danger: !!total || a.live,
-      onConfirm: function () {
-        if (a.goesLive) goLiveModal(name, a, agreed);
-        else commitSetupLoad(name, a, agreed, false);
-      }
-    });
-  }, function () { toast('The engine did not answer; try again.', 'bad'); });
-}
-
+// --- the typed-LIVE gate -----------------------------------------------------------------
 function typedLiveModal(opts) {
   // The copier's own gate, the TUI GoLiveDialog: a dry run turns into live copying only
   // with LIVE typed -- the word unlocks the confirm button, so going live is never one
-  // stray click, and the bridge checks the word again where the save takes it. Both
-  // go-live flows (loading a live setup, switching the settings) share this shell and
-  // bring only their own words: title, body paragraphs, confirm and field labels.
+  // stray click, and the bridge checks the word again where the save takes it. The
+  // caller brings only its own words: title, body paragraphs, confirm and field labels.
   var field = document.createElement('div');
   field.className = 'field';
   var label = document.createElement('label');
@@ -4316,52 +4347,6 @@ function typedLiveModal(opts) {
   input.focus();
 }
 
-function goLiveModal(name, a, agreed) {
-  var body = document.createElement('div');
-  var p1 = document.createElement('p');
-  p1.textContent = 'Setup ' + name + ' was saved copying live'
-    + (a.copying
-      ? ', with copying on: it starts as soon as the setup is loaded.'
-      : ', with copying off: nothing is sent until copying is resumed.');
-  body.appendChild(p1);
-  if (a.slaves.length) {
-    var p2 = document.createElement('p');
-    p2.className = 'red';
-    p2.textContent = 'Real orders will be sent to: ' + a.slaves.join(', ') + '.';
-    body.appendChild(p2);
-  }
-  typedLiveModal({
-    title: 'Go live?',
-    body: body,
-    confirm: 'Load it LIVE',
-    label: 'Type LIVE to load it live',
-    onConfirm: function () { commitSetupLoad(name, a, agreed, true); }
-  });
-}
-
-function commitSetupLoad(name, a, agreed, goLive) {
-  W.loading = name;
-  W.drawn = '';
-  renderSetups();
-  if (a.switching.length) {
-    toast('Logging ' + a.switching.join(', ') + ' in first — this can take a minute…', '', 12000);
-  }
-  function back() {
-    W.loading = '';
-    W.drawn = '';
-    pollSetups();
-  }
-  api().setup_load(name, agreed, goLive).then(function (r) {
-    back();
-    (r.messages || []).forEach(function (m) {
-      toast(m.text, m.tone, m.tone === 'ok' ? 4500 : 9000);
-    });
-  }, function () {
-    back();
-    toast('The engine did not answer; try again.', 'bad');
-  });
-}
-
 // --- the settings page -----------------------------------------------------------------
 // The copier's own settings — the TUI g form as cards. What a value means, its bounds and
 // the two gates on the mode (copying stopped, LIVE typed) are general_edit's on the bridge;
@@ -4376,7 +4361,7 @@ function commitSetupLoad(name, a, agreed, goLive) {
 
 function refillDue(store, dirty, serverKey) {
   // Only on the first show, after a save or revert (base cleared), or when the engine's
-  // truth moved (another window, a loaded setup) while the form holds no edits of its own.
+  // truth moved (another window, for instance) while the form holds no edits of its own.
   return store.base === null || (!dirty() && serverKey !== store.serverKey);
 }
 
@@ -5346,9 +5331,17 @@ function renderTdetail() {
   }
 
   var save = live.role === 'master' ? $('td-m-save') : $('td-save');
-  save.textContent = D.saving ? 'Saving…' : 'Save';
-  save.disabled = D.saving;
-  (live.role === 'master' ? $('td-m-revert') : $('td-revert')).disabled = D.saving;
+  var revert = live.role === 'master' ? $('td-m-revert') : $('td-revert');
+  if (live.lockedBy) {
+    // Owned by another profile: the form shows the account's settings, nothing saves.
+    save.textContent = 'Read-only — owned by profile ‘' + live.lockedBy + '’';
+    save.disabled = true;
+    revert.disabled = true;
+  } else {
+    save.textContent = D.saving ? 'Saving…' : 'Save';
+    save.disabled = D.saving;
+    revert.disabled = D.saving;
+  }
 }
 
 function tdLiveCard(live) {
@@ -5737,6 +5730,18 @@ function wire() {
 
   // --- terminals page ---
   $('ctrader-btn').addEventListener('click', ctraderLoginFlow);
+  $('hidden-btn').addEventListener('click', function (ev) {
+    ev.stopPropagation();
+    var menu = $('hidden-menu');
+    var opening = menu.hidden;
+    closeDropdowns();
+    closeMenu();
+    menu.hidden = !opening;
+    $('hidden-btn').setAttribute('aria-expanded', String(opening));
+  });
+  // Unhide clicks stay inside the list, which keeps itself open until the last terminal
+  // leaves it; a click anywhere else, or Escape, closes it with the other dropdowns.
+  $('hidden-menu').addEventListener('click', function (ev) { ev.stopPropagation(); });
   $('rescan-btn').addEventListener('click', function () {
     if (T.rescanning) return;
     T.rescanning = true;
@@ -5911,16 +5916,6 @@ function wire() {
 
   // --- prop accounts page ---
   $('pp-new').addEventListener('click', propNewFlow);
-
-  // --- setups page ---
-  $('st-save').addEventListener('click', saveSetupFlow);
-  $('st-load').addEventListener('click', function () {
-    var s = selSetup();
-    if (s) loadSetupFlow(s.name);
-  });
-  $('st-update').addEventListener('click', updateSetupFlow);
-  $('st-rename').addEventListener('click', renameSetupFlow);
-  $('st-delete').addEventListener('click', deleteSetupFlow);
 
   // --- settings page ---
   CFG_INPUTS.forEach(function (id) {

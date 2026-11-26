@@ -18,6 +18,102 @@ from .paths import version_seen_path
 
 NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
+        "0.1.10",
+        "2026-11-26",
+        (
+            "A symbol prefix or suffix typed into the wrong field no longer breaks direct"
+            " trading. The value is checked against the broker's own symbol list and honored"
+            " on the side its names actually carry it — “.fx” entered as a prefix still"
+            " strips GBPCAD.FX down to GBPCAD and still finds the broker's .FX name when"
+            " placing there. A value no name carries at all is set aside (the log says so),"
+            " and the automatic catalog reading takes over.",
+            "Terminals can be hidden. The eye icon on a card disconnects the terminal"
+            " entirely — no copies, never the direct-trading price feed, and the terminal"
+            " and its account are freed for other profiles — while its role and every"
+            " setting are kept. A"
+            " hidden terminal leaves the dashboard completely: its one home is the Hidden"
+            " button in the DETECTED zone's header, which carries the count, lists each"
+            " one with an Unhide, and only shows while something is hidden. Hiding a"
+            " slave that holds open copies asks first, exactly as unassigning does,"
+            " because those copies stop being managed. The master cannot be hidden —"
+            " unassign it instead.",
+            "A card's everyday actions are icons now, not a right-click menu. Hover a"
+            " card (or tab to it) and the corner's state word gives way to pause, hide"
+            " and unassign — on a detected terminal, log in and hide. The rare actions"
+            " (rename the account, reconnect, restart the worker, allow live trading,"
+            " acknowledge orphans) sit under the ··· icon, and right-click still opens"
+            " that same menu.",
+            "The Max open trades guard can now look past risk-free trades. A new option,"
+            " off by default, stops counting a trade once its stop loss sits at or past"
+            " its entry — the cap is there to limit risk, and a trade that can no longer"
+            " lose has none left to limit — so moving a stop to breakeven frees that"
+            " place for another trade. A trade with no stop is always counted, and the"
+            " rule's readout says how many risk-free trades it is looking past.",
+            "The Max trades a day guard now counts a pending order's fill. A resting order"
+            " set to not count at placement moves into the day's count the moment it fills"
+            " — on the day it fills — so a trade entered through a limit order no longer"
+            " slips past the daily cap. A rule set to count pendings at placement is"
+            " unchanged: the fill moves the count, it never adds a second one.",
+            "The Setups page is gone. Profiles already keep an arrangement — every"
+            " terminal's role, account and settings — so saved setups were a second copy"
+            " of the same thing. A setups.json left on disk is no longer read; make a"
+            " profile per arrangement instead.",
+            "Risk settings now follow the account, not the terminal — in every profile."
+            " Switching a terminal to another saved account banks the settings tuned on"
+            " the account it leaves — sizing, breakeven, no-stop policy, filters and the"
+            " rest of the trading policy — and switching back restores them, so nothing"
+            " has to be remembered by hand. The memory is shared by all profiles, live:"
+            " saving a terminal's settings banks them for its account on the spot, any"
+            " other open window holding that account folds the change in within a moment,"
+            " and a brand new profile finds every known account already tuned. The same"
+            " account is never tuned two ways in two windows. The toast says which"
+            " happened; a first login to an account the copier has no memory of keeps the"
+            " current settings and says they came along.",
+            "The memory also banks when a switch made in MT5 itself is noticed, so what"
+            " an account ran with is never lost. The broker's symbol decoration stays the"
+            " terminal's own, and allowing live trading still has to be re-confirmed"
+            " after every switch — that consent is never brought back by machinery.",
+            "The data every window shares — account names, guard rules and templates, the"
+            " guards' memory, the prop account chains, and now each account's remembered"
+            " settings — lives in one small database file (shared\\shared.db) instead of"
+            " four JSON files. Two windows saving in the same instant can no longer catch"
+            " each other mid-write, and a change that touches two of these stores lands"
+            " whole or not at all.",
+            "The move is automatic and one-time: the first start gathers what the JSON"
+            " files hold, and the files stay on disk untouched as a fallback copy.",
+            "One rule now governs accounts and terminals across profiles: the profile"
+            " using them owns them, and owns them even while its window is closed."
+            " Assigning a terminal takes the terminal itself and the account it holds;"
+            " unassigning or hiding it releases both. Everywhere else the account is"
+            " read-only — its settings, guard rules, name and prop link can be seen but"
+            " not changed, and no terminal there can be assigned to it or logged into it"
+            " — and the assigned terminal is out of reach entirely: another profile"
+            " cannot assign it, nor even switch it to a different account, because that"
+            " would pull the terminal out from under the profile running it. Its card"
+            " says so at a glance — dimmed and dashed, with an ASSIGNED pill naming the"
+            " profile — and a drag that could only be refused says so the moment it"
+            " starts instead of at the drop.",
+            "An account owned by a profile whose terminal is not assigned right now"
+            " still shows an OWNED pill instead: that terminal may be logged into a"
+            " different account and used here freely — only the account is theirs.",
+            "If a closed profile sits on a terminal or account you need, its card's ···"
+            " menu offers Take ownership, behind a confirmation that says exactly what"
+            " it costs: nothing is interrupted now, but when that profile next opens it"
+            " will not reconnect, and any copies it left stay open there, unmanaged."
+            " The account picker offers the same way through: an account a closed"
+            " profile owns is listed and says so, and picking it asks to take it over"
+            " before logging in, instead of a flat refusal. While the owning profile's"
+            " window is open, nothing is ever taken from it — the card and the picker"
+            " both say so and point at that window, where the unassign, hide or switch"
+            " belongs.",
+            "Ownership also tidies itself now. Every few seconds each open profile"
+            " re-checks that what it owns is what it actually uses, so an account row"
+            " left behind — say the terminal was switched to another account in MT5"
+            " itself and then unassigned — frees itself within a minute instead of"
+            " locking other profiles out until someone notices.",
+        ),
+    ),
+    (
         "0.1.9",
         "2026-11-24",
         (

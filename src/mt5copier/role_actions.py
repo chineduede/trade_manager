@@ -28,6 +28,7 @@ each caller.
 
 from __future__ import annotations
 
+from . import ownership
 from .config import AppConfig, AppMode, Role
 
 
@@ -55,6 +56,9 @@ def set_master(cfg: AppConfig, terminal_id: str) -> str | None:
         return f"{label} is a cTrader account, which can only be a slave"
     if tcfg.exe_path is None:
         return f"{label} has no terminal executable"
+    refused = _own(cfg, terminal_id)
+    if refused is not None:
+        return f"{label} cannot be the master: {refused}"
     cfg.set_role(terminal_id, Role.MASTER)
     return None
 
@@ -74,6 +78,9 @@ def set_slave(cfg: AppConfig, terminal_id: str) -> str | None:
         return f"no master is assigned yet; assign one before making {label} a slave"
     if not tcfg.usable:
         return f"{label} has no terminal executable"
+    refused = _own(cfg, terminal_id)
+    if refused is not None:
+        return f"{label} cannot be a slave: {refused}"
     cfg.set_role(terminal_id, Role.SLAVE)
     return None
 
@@ -88,10 +95,19 @@ def unassign(cfg: AppConfig, terminal_id: str) -> tuple[str, ...]:
     losing their role with no explanation.
     """
     was_master = cfg.terminals[terminal_id].role is Role.MASTER
+    ownership.release_for(cfg.terminals[terminal_id])
     cfg.set_role(terminal_id, Role.UNASSIGNED)
     if not was_master:
         return ()
     swept = tuple(t.terminal_id for t in cfg.terminals.values() if t.role is Role.SLAVE)
     for tid in swept:
+        ownership.release_for(cfg.terminals[tid])
         cfg.set_role(tid, Role.UNASSIGNED)
     return swept
+
+
+def _own(cfg: AppConfig, terminal_id: str) -> str | None:
+    """Assigning is using: take the install and its account for this profile, or say
+    whose they are. The install is owned at once, even never seen logged in; the account
+    joins the moment a login is known -- the worker's spawn takes it then."""
+    return ownership.take_for(cfg.terminals[terminal_id])

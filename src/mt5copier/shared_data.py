@@ -1,26 +1,26 @@
-"""The stores every profile shares, and the one-time migration that gathers them.
+"""The shared stores that stay files, and the one-time migration that gathers them all.
 
 Profiles exist to keep *copying* apart: which terminals, what roles, dry or live. But some
 of what each profile used to keep describes the account itself or this machine, and is true
 no matter which profile is looking: an account's friendly name, its guard rules and the
 guards' memory of it, the cTrader login, the week's news calendar, and the connection
-timings. Those now live under :func:`~mt5copier.paths.shared_dir`, and this module owns the
-two that have no file module of their own -- the account names and the machine timings --
-plus :func:`migrate`, which builds the shared folder once from whatever each profile had.
+timings. Those live under :func:`~mt5copier.paths.shared_dir` -- the mutable multi-writer
+stores as tables in :mod:`mt5copier.shared_db`, the rest as files. This module owns the
+account names (rows in the database, read and folded into each profile's config here), the
+machine timings (``machine.json``, last-write-wins by design: they are one machine's
+facts), and :func:`migrate`, which builds the shared folder once from whatever each profile
+had; :func:`mt5copier.shared_db.get` then carries the migrated JSON into the database.
 
-**Merging, everywhere in this module, is later-wins per key, judged by file modification
-time.** The profile that touched a thing last is the one whose word is kept. Nothing is
-deleted by a merge: a name or a rule only present in one profile survives.
+**Merging in :func:`migrate` is later-wins per key, judged by file modification time.** The
+profile that touched a thing last is the one whose word is kept. Nothing is deleted by a
+merge: a name or a rule only present in one profile survives.
 
-**Concurrent windows.** Two profiles run as two processes, so shared files are written
-read-modify-write and atomically (:func:`mt5copier.json_store.write_json`), and every
-read-modify-write holds :func:`shared_lock` -- one mutex for the whole folder -- so two
-windows writing in the
-same instant cannot each read the state from before the other's edit and drop it. For the
-names that is done per edit here; for the guards it is done in :mod:`mt5copier.guards.model`
-and ``.book``; the cTrader token refresh holds it too (:func:`mt5copier.ctrader.auth.
-refresh_if_due`), because a refresh invalidates the old refresh token. The timings are
-last-write-wins by design: they are one machine's facts.
+**Concurrent windows.** Two profiles run as two processes. The database serialises its own
+writers; the shared *files* that are read-modify-written -- the symbol catalog, and the
+cTrader token refresh (:func:`mt5copier.ctrader.auth.refresh_if_due`), because a refresh
+invalidates the old refresh token -- hold :func:`shared_lock`, one mutex for the whole
+folder, so two windows writing in the same instant cannot each read the state from before
+the other's edit and drop it.
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ try:
 except ImportError:  # not Windows: the app is, but nothing here needs to crash elsewhere
     msvcrt = None  # type: ignore[assignment]
 
+from . import shared_db
 from .json_store import read_json, write_json
 from .logging_setup import get_logger
 from .paths import (
@@ -75,18 +76,19 @@ _LOCK_NAME = "lock"
 
 @contextmanager
 def shared_lock(timeout_s: float = 5.0) -> Iterator[None]:
-    """The one mutex for every read-modify-write under ``shared/``.
+    """The one mutex for every read-modify-write against the shared *files* -- the symbol
+    catalog and the cTrader tokens; the stores in :mod:`mt5copier.shared_db` are serialised
+    by the database itself and never take this.
 
     One lock for the whole folder rather than one per file: the writes it guards are a few
-    milliseconds of read-parse-replace against human-driven edits and once-a-day engine
-    saves, so contention is negligible and a single lock cannot deadlock. Byte-range locking
-    through ``msvcrt`` conflicts across file handles too, so it also serialises two threads
-    of one window, not only two windows.
+    milliseconds of read-parse-replace against rare events, so contention is negligible and
+    a single lock cannot deadlock. Byte-range locking through ``msvcrt`` conflicts across
+    file handles too, so it also serialises two threads of one window, not only two windows.
 
-    Waiting past ``timeout_s`` raises ``TimeoutError`` -- an ``OSError``, so the guard-state
-    save's existing catch treats it as any other failed write. A timeout means another
-    process is wedged while holding it; writing unlocked then would be a silent return to
-    the race this exists to close, so failing loudly is the better outcome.
+    Waiting past ``timeout_s`` raises ``TimeoutError`` -- an ``OSError``, so existing
+    catches treat it as any other failed write. A timeout means another process is wedged
+    while holding it; writing unlocked then would be a silent return to the race this
+    exists to close, so failing loudly is the better outcome.
     """
     if msvcrt is None:
         yield
@@ -220,49 +222,41 @@ def _migrate_locked(marker: Path) -> None:
 
 # --- account names --------------------------------------------------------------------------
 
-_names_stamp_seen: float | None = None
-"""The shared names file's mtime as this process last read or wrote it, so a poll can tell a
-rename made in another window from nothing at all without parsing the file every tick."""
-
-
-def _names_stamp() -> float | None:
-    try:
-        return account_names_path().stat().st_mtime
-    except OSError:
-        return None
+_names_stamp_seen: int | None = None
+"""The names store's stamp as this process last read or wrote it, so a poll can tell a
+rename made in another window from nothing at all without loading the rows every tick."""
 
 
 def load_names() -> dict[str, str] | None:
-    """The shared names, or None when the file has never been written -- which is the one
+    """The shared names, or None when the store has never been written -- which is the one
     case the profile's own ``config.json`` copy still counts (it feeds :func:`migrate`)."""
-    raw = read_json(account_names_path())
-    if raw is None:
+    db = shared_db.get()
+    if db.stamp(shared_db.NAMES) == 0:
         return None
-    if not isinstance(raw, dict):
-        return {}
-    return {k: v for k, v in raw.items() if isinstance(k, str) and isinstance(v, str)}
+    got = db.load("account_names")
+    return {k: v for k, v in got.items() if isinstance(v, str)}
 
 
 def set_name(key: str, name: str | None) -> None:
-    """Set (or, given None, clear) one account's name, read-modify-write under the lock so a
-    rename made in another profile's window in the same instant is not lost under this one."""
+    """Set (or, given None, clear) one account's name -- one row, so a rename made in
+    another profile's window in the same instant can only race over this same account."""
     global _names_stamp_seen
-    with shared_lock():
-        names = load_names() or {}
+    db = shared_db.get()
+    with db.change(shared_db.NAMES):
         if name:
-            names[key] = name
+            db.put("account_names", key, name)
         else:
-            names.pop(key, None)
-        write_json(account_names_path(), names)
-        _names_stamp_seen = _names_stamp()
+            db.drop("account_names", key)
+    _names_stamp_seen = db.stamp(shared_db.NAMES)
 
 
 def refresh_names(cfg: AppConfig) -> bool:
     """Fold a rename made from another profile's window into this one's config; True when
-    anything changed. Cheap enough to call from a poll: a stat, and a parse only on change."""
+    anything changed. Cheap enough to call from a poll: one SELECT, rows only on change."""
     global _names_stamp_seen
-    stamp = _names_stamp()
-    if stamp is None or stamp == _names_stamp_seen:
+    db = shared_db.get()
+    stamp = db.stamp(shared_db.NAMES)
+    if stamp == 0 or stamp == _names_stamp_seen:
         return False
     _names_stamp_seen = stamp
     names = load_names()
@@ -290,7 +284,7 @@ def apply(cfg: AppConfig) -> None:
     names = load_names()
     if names is not None:
         cfg.account_names = names
-        _names_stamp_seen = _names_stamp()
+        _names_stamp_seen = shared_db.get().stamp(shared_db.NAMES)
 
     machine = read_json(machine_path())
     if not isinstance(machine, dict):

@@ -405,20 +405,57 @@ td .row-btn.more { padding: 0 12px; font-weight: 700; letter-spacing: 1px; }
 body.dragging-terminals .zone-cue { display: inline-block; }
 .zone.drop-hot { border-color: var(--blue); background: rgba(126, 166, 224, 0.10); }
 /* A grid, not a wrap: every card the same width from the track, and the same height
-   from the 1fr rows, so a zone reads as one even set rather than a ragged shelf. */
+   from the 1fr rows, so a zone reads as one even set rather than a ragged shelf.
+   flex: 1 lets the grid fill its zone — the zones row stretches both zones to one
+   height, so the master card bottom-aligns with the slave cards beside it. */
 .zone-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
   grid-auto-rows: 1fr;
   gap: 14px;
+  flex: 1 1 auto;
 }
+/* An empty grid must not grow, or the zone's note is pushed to its foot. */
+.zone-cards:empty { flex: 0 0 auto; }
 #master-cards { grid-template-columns: 1fr; }
 .zone-note { color: var(--muted); font-size: 12.5px; }
+
+/* Parked terminals: no card, just a quiet zone of chips with the way back. */
 .zone-actions { display: flex; gap: 8px; }
 #rescan-btn, #ctrader-btn {
   min-height: 44px; padding: 0 14px; border-radius: 8px;
   border: 1px solid var(--border); background: transparent;
   color: var(--fg); font-weight: 500;
+}
+
+/* The one place hidden (parked) terminals live: a button with the count in the DETECTED
+   zone's header, a dd-menu flyout behind it. The button only exists while something is
+   hidden, so it never clutters a page with nothing to unhide. */
+#hidden-btn {
+  width: auto; height: auto; min-height: 44px; padding: 0 14px;
+  gap: 8px; justify-content: center;
+  background: transparent; font: inherit; font-weight: 500;
+}
+#hidden-btn[aria-expanded="true"] {
+  border-color: var(--blue);
+  background: rgba(126, 166, 224, 0.10);
+}
+#hidden-menu { width: 400px; max-width: 86vw; padding: 10px 0 8px; gap: 0; cursor: default; }
+#hidden-menu .hmenu-head {
+  padding: 2px 14px 8px; font-size: 12px; color: var(--muted); font-family: var(--mono);
+}
+#hidden-menu .hmenu-foot { padding: 8px 14px 2px; font-size: 12px; color: var(--faint); }
+#hidden-menu .hmenu-hr { height: 1px; background: var(--hairline); }
+.hidden-row { display: flex; align-items: center; gap: 10px; padding: 9px 14px; }
+.hidden-row .hname { font-weight: 600; white-space: nowrap; }
+.hidden-row .hrole { font-size: 12px; color: var(--muted); flex: 0 0 auto; }
+.hidden-row .hacct {
+  font-size: 12px; color: var(--faint); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+#hidden-menu button.linklike {
+  height: auto; padding: 0; background: transparent;
+  font-family: 'Inter', system-ui, sans-serif; font-size: 13px; font-weight: 600;
 }
 
 .tcard {
@@ -448,7 +485,36 @@ body.dragging-terminals .zone-cue { display: inline-block; }
   transform: rotate(-2deg);
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
 }
-.tcard-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
+/* min-height holds the head at the icon strip's height, so a hover never reflows the
+   card (a card that grows under the pointer un-hovers itself and flickers). */
+.tcard-head { display: flex; align-items: center; gap: 8px; min-width: 0; min-height: 24px; }
+
+/* The card's action icons: hidden at rest — the corner is the state word — and shown on
+   hover or keyboard focus in the word's place. Only cards that have actions (has-acts)
+   swap, so the virtual master's corner never blanks. */
+.tcard-acts { display: none; gap: 2px; flex: 0 0 auto; }
+.tcard.has-acts:hover .tcard-acts, .tcard.has-acts:focus-within .tcard-acts,
+.tcard.acts-open .tcard-acts { display: inline-flex; }
+.tcard.has-acts:hover .tcard-word, .tcard.has-acts:focus-within .tcard-word,
+.tcard.acts-open .tcard-word,
+.tcard.has-acts:hover .tcard-head .pill, .tcard.has-acts:focus-within .tcard-head .pill,
+.tcard.acts-open .tcard-head .pill { display: none; }
+/* While its ··· menu is open the strip stays up and the ··· reads pressed (acts-open,
+   set by the toggle and re-applied across the poll's rebuilds). */
+.tcard.acts-open .icon-dots { background: var(--hairline); color: var(--fg); }
+/* A card whose account another profile owns: present and legible, visibly not ours --
+   dimmed and dashed so nobody starts a drag that could only be refused. Hover restores
+   full clarity for reading it. */
+.tcard-owned { opacity: 0.72; border-style: dashed; }
+.tcard-owned:hover, .tcard-owned:focus-within { opacity: 1; }
+.icon-btn {
+  width: 24px; height: 24px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 6px; background: transparent; color: var(--muted);
+}
+.icon-btn:hover { background: rgba(236, 228, 208, 0.08); color: var(--fg); }
+.icon-btn.danger { background: rgba(229, 100, 90, 0.12); color: var(--red); }
+.icon-btn.danger:hover { background: rgba(229, 100, 90, 0.22); color: var(--red); }
 .tcard-name {
   font-weight: 700; min-width: 0;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -778,39 +844,6 @@ body.dragging-terminals .zone-cue { display: inline-block; }
   padding-left: 102px; white-space: pre-wrap;
 }
 .pill.green { color: var(--green); }
-
-/* --- the setups page -----------------------------------------------------------------------
-   The TUI w page as a desktop table: the roles in place now against the saved setups. */
-#setups-now-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px 14px; }
-.now-k {
-  font-size: 12px; letter-spacing: 0.14em; font-weight: 600; color: var(--muted);
-  flex: 0 0 auto;
-}
-#setups-now-roles { font-size: 13.5px; min-width: 0; }
-#setups-now-state { white-space: nowrap; }
-#setups-now-state .strow-dot { margin-right: 4px; }
-#setups-table { min-width: 960px; }
-.strow-head, .strow {
-  display: grid;
-  grid-template-columns: 1.1fr 1.1fr 1.8fr 0.7fr 0.9fr;
-  gap: 0 14px; align-items: baseline;
-  padding: 10px 12px;
-}
-.strow-head {
-  color: var(--muted); font-size: 12.5px; font-weight: 600;
-  border-bottom: 1px solid var(--hairline);
-  padding-top: 2px; padding-bottom: 6px;
-}
-.strow { border-bottom: 1px solid var(--hairline-soft); cursor: pointer; font-size: 13.5px; }
-.strow:last-child { border-bottom: 0; }
-.strow:hover { background: rgba(236, 228, 208, 0.03); }
-.strow.selected { background: var(--panel-raise); box-shadow: inset 3px 0 0 var(--blue); }
-.strow span[role="cell"] { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.strow-name { font-weight: 600; }
-.strow-dot { color: var(--green); }
-.strow-note { grid-column: 1 / -1; color: var(--red); font-size: 12.5px; padding-top: 2px; white-space: normal; }
-#setups-foot { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
-#setups-foot > .muted { flex: 0 1 auto; max-width: 620px; }
 
 /* --- the prop accounts page --- */
 #prop-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 14px; }
