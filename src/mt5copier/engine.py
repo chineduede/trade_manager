@@ -1762,6 +1762,15 @@ class Engine:
             self._action_total += 1
             if action.skip_reason is not None:
                 self._stats.on_skipped(action.terminal_id, action.skip_reason.value)
+            if (
+                not dry
+                and action.kind is ActionKind.ORDER_FILLED
+                and action.skip_reason is SkipReason.NOTHING_TO_SEND
+            ):
+                # The resting copy became a position at its broker. The day's count moves
+                # it from the pending column to the market one, so a trade-count rule set
+                # to ignore pendings still sees the trade the order became.
+                self._guards.record_fill(self._account_of(action.terminal_id), now=now)
             cfg = cfgs.get(action.terminal_id)
             log.info(
                 "%s %s: %s",

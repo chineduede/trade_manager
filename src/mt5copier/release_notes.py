@@ -49,6 +49,11 @@ NOTES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             " lose has none left to limit — so moving a stop to breakeven frees that"
             " place for another trade. A trade with no stop is always counted, and the"
             " rule's readout says how many risk-free trades it is looking past.",
+            "The Max trades a day guard now counts a pending order's fill. A resting order"
+            " set to not count at placement moves into the day's count the moment it fills"
+            " — on the day it fills — so a trade entered through a limit order no longer"
+            " slips past the daily cap. A rule set to count pendings at placement is"
+            " unchanged: the fill moves the count, it never adds a second one.",
             "The Setups page is gone. Profiles already keep an arrangement — every"
             " terminal's role, account and settings — so saved setups were a second copy"
             " of the same thing. A setups.json left on disk is no longer read; make a"

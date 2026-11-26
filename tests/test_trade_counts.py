@@ -74,6 +74,36 @@ def test_pending_placements_follow_the_toggle(tmp_path: Path) -> None:
     assert only(counted, snap()).used == 2.0
 
 
+def test_a_pending_that_fills_counts_even_when_ignored(tmp_path: Path) -> None:
+    b = book_with(daily(pendings="ignored"), tmp=tmp_path)
+    b.record_open(KEY, pending=True, now=NOW)
+    assert only(b, snap()).used == 0.0, "resting, it is not yet a trade"
+    b.record_fill(KEY, now=NOW)
+    assert only(b, snap()).used == 1.0, "filled, it is one"
+
+
+def test_a_fill_is_never_counted_twice_when_pendings_count(tmp_path: Path) -> None:
+    b = book_with(daily(pendings="counts"), tmp=tmp_path)
+    b.record_open(KEY, pending=True, now=NOW)
+    b.record_fill(KEY, now=NOW)
+    assert only(b, snap()).used == 1.0, "the fill moves the count, it does not add one"
+
+
+def test_a_pending_placed_yesterday_counts_on_the_day_it_fills(tmp_path: Path) -> None:
+    b = book_with(daily(pendings="ignored"), tmp=tmp_path)
+    b.record_open(KEY, pending=True, now=NOW)
+    b.record_fill(KEY, now=NOW + DAY)
+    assert only(b, snap(), now=NOW + DAY).used == 1.0, "the trade happened on the fill's day"
+
+
+def test_a_fill_survives_a_restart(tmp_path: Path) -> None:
+    b = book_with(daily(limit=1, pendings="ignored"), tmp=tmp_path)
+    b.record_open(KEY, pending=True, now=NOW)
+    b.record_fill(KEY, now=NOW)
+    again = GuardBook(b.doc, SharedDb(tmp_path / "state.db"))
+    assert again.verdict(KEY, snap(), NOW).hold is not None
+
+
 def test_the_day_ends_at_this_computers_midnight(tmp_path: Path) -> None:
     b = book_with(daily(limit=1), tmp=tmp_path)
     b.record_open(KEY, pending=False, now=NOW)
