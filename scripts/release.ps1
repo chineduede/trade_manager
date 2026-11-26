@@ -15,7 +15,10 @@
 #   4. commit the bump and tag it vX.Y.Z;
 #   5. fresh PyInstaller exe + Inno Setup installer (via build_installer.ps1 -Rebuild);
 #   6. copy the installer into releases\ -- the shipping shelf, one file per version,
-#      never cleaned by rebuilds. What an end user gets is always a file from there.
+#      never cleaned by rebuilds. What an end user gets is always a file from there;
+#   7. push master and the tag when an origin remote exists -- the pushed tag makes
+#      GitHub Actions rebuild the installer and publish it as a GitHub Release
+#      (.github\workflows\release.yml), with the release_notes.py entry as the body.
 #
 # If step 5 fails: the tag already marks the right commit. Fix the build problem without
 # touching version or tag, then run  scripts\build_installer.ps1 -Rebuild  and copy the
@@ -115,7 +118,20 @@ if (-not (Test-Path $installer)) { throw "expected $installer after the build" }
 New-Item -ItemType Directory -Force "releases" | Out-Null
 Copy-Item $installer "releases\" -Force
 
+# -- 7. push -----------------------------------------------------------------------------
+# Master takes everything else through pull requests; the release bump + tag ride the
+# repository-admin bypass on purpose, so the one definition of a release stays this script.
+$pushed = $false
+if (@(git remote) -contains "origin") {
+    git push origin master "v$new"
+    if ($LASTEXITCODE -ne 0) { throw "git push failed -- push master and v$new by hand" }
+    $pushed = $true
+}
+
 Write-Host ""
 Write-Host "released v$new"
 Write-Host "  ship this file:  releases\mt5copier-setup-$new.exe"
 Write-Host "  tagged:          v$new  (commit $((git rev-parse --short HEAD).Trim()))"
+if ($pushed) {
+    Write-Host "  pushed:          master + v$new -- GitHub Actions is publishing the Release"
+}
