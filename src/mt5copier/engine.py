@@ -1,9 +1,9 @@
 """Supervisor: owns one worker process per designated terminal and aggregates their state.
 
 Deployment shape for Stage 1: the engine runs inside the UI process on a background thread,
-and workers are subprocesses. ``zele-mt5`` put a WebSocket IPC server between its engine and
-any consumer, which is the right call once there are several consumers (it grew a web dashboard
-that used exactly that seam; this project tried one and dropped it) -- but there is precisely one consumer, the desktop window, so the
+and workers are subprocesses. An IPC server between the engine and its consumers is the
+right call once there are several consumers (this project tried a web dashboard on exactly
+that seam and dropped it) -- but there is precisely one consumer, the desktop window, so the
 server would be unused indirection. The public surface here is deliberately narrow and
 serialisable-friendly (:meth:`views` returns plain data), so a future IPC layer can wrap the
 engine without reaching into it.
@@ -682,8 +682,7 @@ class Engine:
     def _stop_worker(self, terminal_id: str, *, close_terminal: bool = False) -> None:
         """Graceful stop, escalating to terminate.
 
-        Mirrors the shutdown protocol from ``zele-mt5``'s PluginManager: send a stop command,
-        join with a timeout, then terminate. The join matters because the worker needs a moment
+        The protocol: send a stop command, join with a timeout, then terminate. The join matters because the worker needs a moment
         to call ``mt5.shutdown()``; killing it outright can leave the terminal's IPC endpoint
         briefly unusable for the next connection -- and, with ``close_terminal`` set, skips the
         worker's own chance to close the terminal it launched, which only runs on a graceful

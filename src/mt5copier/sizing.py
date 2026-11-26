@@ -14,7 +14,7 @@ Why ``order_calc_profit`` rather than tick arithmetic, for whoever supplies that
 manual alternative is ``sl_distance * (trade_tick_value / trade_tick_size)``, and it has two
 traps. ``SymbolInfo`` exposes ``trade_tick_value_profit`` *and* ``trade_tick_value_loss``,
 which differ on some instruments -- risk sizing needs the loss side, and plain
-``trade_tick_value`` (what ``zele-mt5`` reaches for) is the wrong field. It also gets
+``trade_tick_value`` is the wrong field. It also gets
 cross-currency conversion wrong unless you do the conversion yourself. Asking the terminal what
 one lot would lose, in the account currency, sidesteps both.
 """
@@ -128,7 +128,7 @@ def quantize_volume(raw: float, facts: SymbolFacts, max_lot: float | None = None
     Uses ``(raw / step).to_integral_value(ROUND_DOWN) * step`` rather than
     ``Decimal.quantize(step)``. ``quantize`` honours only the step's *exponent*, so a
     ``volume_step`` of 0.05 would silently round to 0.01 granularity and emit lots like 0.07
-    that the broker rejects -- the bug in ``zele-mt5``.
+    that the broker rejects.
 
     Ceilings are applied **after** quantization, and the capped value is re-quantized in case
     ``max_lot`` is not itself a multiple of the step.

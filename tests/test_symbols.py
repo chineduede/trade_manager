@@ -46,7 +46,7 @@ def test_the_configured_suffix_resolves_a_decorated_broker() -> None:
     assert got.how is Resolution.CONFIGURED
 
 
-def test_a_prefix_works_too_which_zele_mt5_could_not_do() -> None:
+def test_a_prefix_works_too() -> None:
     got = resolve("EURUSD", ["mEURUSD"], prefix="m")
     assert got.name == "mEURUSD"
 
@@ -189,7 +189,7 @@ def test_configured_name_falls_back_to_the_decoration() -> None:
 
 
 def test_the_cache_is_keyed_per_terminal_not_per_symbol() -> None:
-    """The zele-mt5 SymbolMapper bug: two brokers mapping GOLD differently collide, and the
+    """The symbol-keyed-cache bug: two brokers mapping GOLD differently collide, and the
     second silently gets the first one's answer."""
     cache = SymbolCache()
     a = cache.resolve(TID_A, "GOLD", ["GOLD.r"])

@@ -4,6 +4,8 @@ name = "mt5copier"
 # there, and so do the build and release scripts. Nothing else states a version.
 dynamic = ["version"]
 description = "MT5 multi-terminal trade copier (Stage 1: discovery & designation)"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "metatrader5>=5.0.6180; sys_platform == 'win32'",
@@ -29,7 +31,7 @@ dev = [
 ]
 
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]

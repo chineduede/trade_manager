@@ -1,9 +1,8 @@
 """Configuration schema and persistence.
 
-Format is JSON, not YAML, and that is a deliberate reversal of the convention in ``zele-mt5``.
-There, config was commented YAML that only humans wrote; here the app itself is the primary
-editor, and round-tripping a ``model_dump()`` through ``yaml.dump`` destroys every comment in
-the file. JSON has no comments to lose, so the machine can own the file outright without
+Format is JSON, not YAML, and that is deliberate. Commented YAML suits a config that only
+humans write; here the app itself is the primary editor, and round-tripping a
+``model_dump()`` through ``yaml.dump`` destroys every comment in the file. JSON has no comments to lose, so the machine can own the file outright without
 quietly deleting the user's notes. Anything that needs explaining is explained in the README.
 
 Config is keyed on ``terminal_id`` (the MT5 32-hex instance hash) rather than on the install
