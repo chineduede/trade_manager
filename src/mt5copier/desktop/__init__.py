@@ -12,6 +12,7 @@ browser storage, matching the engine-level claim locks.
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import zlib
@@ -99,6 +100,15 @@ class _WebHandler(BaseHTTPRequestHandler):
         self._answer(head=True)
 
     def _answer(self, *, head: bool) -> None:
+        # Only the window itself is served. The socket already binds loopback, but a web
+        # page in an ordinary browser can still aim requests at 127.0.0.1 (DNS rebinding
+        # gets it past the browser's origin checks by lying in DNS, not in Host) -- and
+        # such a request arrives carrying the attacker's hostname here. WebView2 always
+        # asks by the literal address it was given.
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
+        if host not in ("127.0.0.1", "localhost", "[::1]"):
+            self.send_error(403, "Forbidden")
+            return
         path = self.path.split("?", 1)[0].split("#", 1)[0]
         hit = self.server.files.get(path)
         if hit is None and self.server.files_dir is not None:
@@ -113,6 +123,7 @@ class _WebHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         if not head:
             self.wfile.write(data)
@@ -189,6 +200,7 @@ def run() -> None:
     guards = guards_mod.load()
     try:
         config_mod.merge_discovery(cfg, discover_terminals())
+        config_mod.fold_ctrader_accounts(cfg)
         config_mod.save(cfg)
     except Exception:
         log.exception("initial discovery failed; starting with saved config only")
@@ -206,6 +218,18 @@ def run() -> None:
         # A source run works against MT5Copier-Dev data (see paths.base_data_dir); say so in
         # the taskbar so a dev window is never mistaken for the installed app.
         title += " [dev]"
+    if "--remote-debugging-port" in os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", ""):
+        # The CDP test recipe's flag. The port it opens is an unauthenticated control
+        # channel into this window -- CDP speaks WebSocket, which any web page may open
+        # to 127.0.0.1 without CORS standing in the way -- so a session with it on is for
+        # testing, never for trading. Said in the taskbar, not only the log, because the
+        # danger is precisely the session someone forgot was started this way.
+        log.warning(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS opens a remote-debugging port: "
+            "this window can be driven by any local process or web page; "
+            "do not trade in this session"
+        )
+        title += " [DEBUG PORT OPEN]"
     window = webview.create_window(
         title,
         url=_serve_web(profile),

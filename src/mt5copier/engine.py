@@ -46,6 +46,7 @@ from .config import (
     TerminalClosing,
     TerminalConfig,
     account_key,
+    fold_ctrader_accounts,
     merge_discovery,
 )
 from .config import (
@@ -988,6 +989,7 @@ class Engine:
         with self._lock:
             before = self._cfg.model_dump(mode="json")
             merge_discovery(self._cfg, found)
+            fold_ctrader_accounts(self._cfg)
             for tid, snap in self._snapshots.items():
                 tcfg = self._cfg.terminals.get(tid)
                 if tcfg is None or snap.login is None:

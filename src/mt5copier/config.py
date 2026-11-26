@@ -909,7 +909,7 @@ def merge_ctrader_accounts(
         server = ctrader_server_name(broker, is_live)
         existing = cfg.terminals.get(tid)
         if existing is None:
-            cfg.terminals[tid] = TerminalConfig(
+            fresh = TerminalConfig(
                 terminal_id=tid,
                 label=label,
                 ctrader_account_id=account_id,
@@ -917,8 +917,18 @@ def merge_ctrader_accounts(
                 last_login=login,
                 last_server=server,
             )
+            # Exactly as merge_discovery treats a brand-new terminal: an entry this profile
+            # has never configured carries no choices to protect, so the account's
+            # remembered settings go straight on -- a cTrader account arrives in a new
+            # profile already tuned, not on defaults.
+            fresh, restored = restore_policy(fresh)
+            cfg.terminals[tid] = fresh
             added.append(tid)
-            log.info("cTrader account added: %s", label)
+            log.info(
+                "cTrader account added: %s%s",
+                label,
+                "; its remembered settings applied" if restored else "",
+            )
         else:
             existing.label = label
             existing.ctrader_live = is_live
@@ -926,6 +936,30 @@ def merge_ctrader_accounts(
             if login is not None:
                 existing.last_login = login
     return added
+
+
+def fold_ctrader_accounts(cfg: AppConfig) -> list[str]:
+    """Fold the machine's shared cTrader login into this profile's terminal list.
+
+    The OAuth lives in the shared store -- one browser login serves every profile -- but the
+    ``CTRADER:`` terminal entries are per-profile, and until this fold only the profile that
+    ran the login ever created them. Called at the same seams as a discovery sweep, because
+    the shared account list is to cTrader what the install directories on disk are to MT5:
+    where a sweep runs, the fold runs. Does nothing when no cTrader login is saved, and is
+    as repeat-safe as the merge it wraps (kept-not-deleted, unchanged entries untouched).
+    """
+    from .ctrader import auth as ctrader_auth  # late: auth reads shared stores at import
+
+    try:
+        creds = ctrader_auth.load()
+    except Exception:
+        log.exception("could not read the shared cTrader login; skipping its accounts")
+        return []
+    if not creds.logged_in or not creds.accounts:
+        return []
+    return merge_ctrader_accounts(
+        cfg, [(a.account_id, a.is_live, a.login, a.broker) for a in creds.accounts]
+    )
 
 
 def load(path: Path | None = None) -> AppConfig:
