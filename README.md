@@ -81,8 +81,11 @@ powershell -ExecutionPolicy Bypass -File scripts\release.ps1 -Version 1.2.0
 
 It refuses a dirty tree or a branch other than master, runs ruff + mypy + the test suite,
 bumps the version, commits and tags `vX.Y.Z`, rebuilds the exe and installer from scratch,
-and copies the result to `releases\mt5copier-setup-X.Y.Z.exe` — the shelf rebuilds never
-clean. What an end user receives is always a file from `releases\`.
+copies the result to `releases\mt5copier-setup-X.Y.Z.exe` — the shelf rebuilds never
+clean — and pushes master and the tag. The pushed tag makes GitHub Actions rebuild the
+installer from exactly the tagged commit and publish it as a GitHub Release
+(`.github/workflows/release.yml`), with that version's `release_notes.py` entry as the
+body. An end user gets the installer either from a Release or from `releases\`.
 
 ### Non-interactive flags
 
@@ -148,8 +151,9 @@ none.
 The MT5 docs state: *"If required, the MetaTrader 5 terminal is launched to establish connection
 when executing the initialize() call."*
 
-There are 15 terminals installed on this machine. Probing them through the MT5 API to see what
-is there would therefore **cold-start all 15**. So `discovery.py` touches only the filesystem
+A trading machine easily holds a dozen or more MT5 installs, one per broker. Probing them
+through the MT5 API to see what is there would **cold-start every one of them**. So
+`discovery.py` touches only the filesystem
 and the process list, and `initialize()` is called *only* for terminals you have explicitly
 designated.
 
@@ -191,7 +195,7 @@ Conflating the two is how a copier fails silently. Staleness is judged from the 
 arrival time rather than the worker's timestamp, because `time.monotonic()` is not defined to be
 comparable across processes and wall clocks can step.
 
-### Detection (stage 2a)
+### Detection
 
 Start copying and the engine starts diffing. It polls the master's open positions and compares them
 against what it believes each slave already has, deriving opens, closes, partial closes and
@@ -224,9 +228,8 @@ partials keep being mirrored, because those are real positions and someone has t
 A slave also has to be *fresh*, not merely last-seen-`CONNECTED`. A worker that has gone quiet
 is not copyable however healthy its last snapshot looked.
 
-Two things Stage 2a deliberately left to later stages, both of which have since landed —
-**this package can now send orders**, and `dry_run` is what stands between a decision and a
-broker:
+The diff only decides; two other pieces act on its decisions, and `dry_run` is what stands
+between a decision and a broker:
 
 - **Sending.** `executor.py` is the only module that can cause an order to exist, and nothing
   reaches it while `dry_run` is true — which is the default. Underneath that, the executor
@@ -245,8 +248,11 @@ broker:
   because without a stop there is no risk distance to work from. Its risk is not the slave's
   configured risk and is not knowable in advance, and the copy opens unprotected — so it is
   opt-in per slave, and the log marks every such action `[UNPROTECTED]`.
-- **Resolve symbols properly.** Only the configured prefix/suffix is applied. The
-  `symbols_get()` fallback scan needs a connection, so it lands with Stage 2b.
+- **Symbol resolution.** A configured prefix/suffix outranks everything and is checked
+  against the broker's own symbol list — a mapping onto a name the broker does not list is
+  refused rather than sent. A feed or master whose broker decorates its names (`EURUSD.r`,
+  `mEURUSD`) has the decoration read off that broker's own catalog and stripped
+  automatically when nothing is configured.
 
 #### Pending orders
 
@@ -313,10 +319,10 @@ and saved templates), with what they recorded — the equity at a daily reset �
 
 The filtering, inversion and no-stop-policy fields (`no_stop_policy`, `invert`, `copy_sltp`,
 `copy_partials`, `symbol_prefix`/`symbol_suffix`, `symbol_whitelist`/`symbol_blacklist`) are
-read by the diff engine as of Stage 2a, as is `join_grace_seconds`.
+read by the diff engine, as is `join_grace_seconds`.
 
-The sizing fields are still unused, because lots are computed against the slave's own terminal
-in Stage 2b:
+The sizing fields drive the lot computation, which runs against the slave's own terminal
+(`order_calc_profit`, the symbol's volume step):
 
 | Field | Meaning |
 |---|---|
@@ -327,8 +333,6 @@ in Stage 2b:
 | `no_stop_lot_multiple` | Only for `no_stop_policy: lot_multiple` — the multiplier on the *master's* lots. 1.0 mirrors its size exactly. Irrelevant to any trade that has a stop. |
 | `max_lot` | Hard ceiling after quantization. The only bound left on an unstopped copy. |
 | `max_deviation_points` | MT5's `deviation` on the order. Execution only — never an input to sizing. |
-
-Carrying them all from the start avoids a migration the first time copying is switched on.
 
 Breakeven, per slave (the "Breakeven" section of the settings form). Editing only these keeps
 the slave's open copies, and the new settings apply to them too:
@@ -381,39 +385,6 @@ launcher.py          frozen entry point (see note below)
 copier.spec          PyInstaller spec
 ```
 
-## Lessons carried over from `zele-mt5`
-
-This project reuses the process-per-terminal pattern from `../zele-mt5`, and deliberately
-avoids several defects found there:
-
-- **`hiddenimports=["metatrader5"]` in lowercase.** PyInstaller's module graph is
-  case-sensitive, so that pointed at a module which does not exist; the real C extension was
-  never collected. Combined with building from the global interpreter instead of the project
-  venv, its `warn-*.txt` listed 83 missing modules including `MetaTrader5`, `yaml` and
-  `telethon` — the shipped 17MB exe could not have worked. Here the spelling is correct, the
-  build runs under `uv run`, and `--check` verifies the result.
-- **numpy.** `MetaTrader5` imports numpy from inside its C extension, so the module graph never
-  sees the dependency. The exe builds clean, warns about nothing, then dies at runtime with
-  `numpy._core.multiarray failed to import`. It is an explicit hidden import here.
-- **No reconnect.** `Mt5Service` connected once in a constructor with no retry, no backoff and
-  no health check, so a dropped connection killed the worker permanently. `worker.py` treats the
-  connection as a loop with a backoff schedule.
-- **Reads that tore down the session.** Its `get_acct_info()` called `mt5.shutdown()` when a
-  read failed, destroying the process's connection as a side effect of a query. Here a failed
-  read only marks state; teardown happens solely in the reconnect path. There is a regression
-  test for this.
-- **A global logger.** Its `get_logger()` cached one logger in a module global, so the first
-  caller's name and file won for every later caller — masked only because each executor was a
-  separate process. Plus no rotation.
-- **CWD-relative paths.** `Path("data")` and `Path("app.yaml")` meant the exe silently failed
-  when launched from a shortcut. `paths.py` is `sys.frozen`-aware.
-- **`pydantic` undeclared**, arriving transitively via `sqlmodel`. It is a direct dependency here.
-
-Also worth knowing if you reuse its `Mt5Service` in Stage 2: it hardcodes `ORDER_FILLING_IOC` in
-all four order-send paths and never inspects `symbol_info.filling_mode`, and its volume rounding
-uses `Decimal.quantize(step)`, which honours only the step's *exponent* — so `volume_step=0.05`
-silently rounds to 0.01 granularity and can emit broker-rejected lots like `0.07`.
-
 ## Frozen-build notes
 
 `launcher.py`, not `mt5copier/__main__.py`, is the PyInstaller entry script. PyInstaller runs
@@ -424,6 +395,14 @@ package"*.
 `multiprocessing.freeze_support()` runs before anything else. Under spawn, each worker
 re-launches the exe; without it every worker would re-enter the UI and spawn workers of its own.
 
+Two hidden-import traps are handled in `copier.spec` and worth knowing. PyInstaller's module
+graph is case-sensitive, so the hidden import must be spelled `MetaTrader5` exactly — the
+lowercase spelling points at a module that does not exist and the C extension is silently
+never collected. And the package imports numpy from *inside* that C extension, where the
+module graph cannot see it, so numpy is an explicit hidden import; without it the exe builds
+clean, warns about nothing, and dies at runtime with `numpy._core.multiarray failed to
+import`.
+
 After **every** build, read `build/copier/warn-copier.txt`. Benign entries are POSIX-only
 modules (`pwd`, `termios`, `fcntl`), typing-only stubs (`_typeshed`, `annotationlib`), optional
 dev tooling (`mypy`, `cython`, `email_validator`), and attribute-style false positives such as
@@ -433,22 +412,26 @@ dev tooling (`mypy`, `cython`, `email_validator`), and attribute-style false pos
 ## Development
 
 ```bash
-uv run pytest -q          # 1354 tests, no MT5 terminal required
+uv run pytest -q          # the full suite, no MT5 terminal required
 uv run ruff check .
 uv run ruff format --check .
 uv run mypy
 ```
 
-All four pass clean. `scripts/cdp_drive.py` can additionally drive the real window over CDP
+All four pass clean, and they are one command: `scripts\check.ps1` — the pre-commit hook
+runs it, `release.ps1` runs it, and GitHub Actions runs it as the `gate` job on every pull
+request. Master only takes changes through a pull request with that check green.
+
+`scripts/cdp_drive.py` can additionally drive the real window over CDP
 (WebView2's remote-debugging port) for interaction testing; `scripts/demo_master.py` drives
 the demo master terminal for live copy passes.
 
 Tests use a fake MT5 module and synthetic `%APPDATA%\MetaQuotes\Terminal` trees, so the whole
 suite runs without a terminal installed and without connecting to a broker.
 
-## Roadmap
+## Milestones
 
-Stage 1 was the shell. Everything below is written **and has been run against real demo
+All shipped. Everything below is written **and has been run against real demo
 brokers** — `ROADMAP.md`'s demo checklists, closed 2026-10-01, are the record. What came
 after (direct trading, guards, news, profiles, cTrader slaves, the desktop app itself) is
 tracked there and in the per-feature notes.
@@ -467,9 +450,9 @@ tracked there and in the per-feature notes.
    `no_stop_policy: lot_multiple` sizes it off the master's lots instead. That is off by
    default. See `ROADMAP.md`.
 6. ~~**Symbol mapping**~~ — broker suffix *and* prefix handling, cached per `(terminal, symbol)`.
-7. ~~**SL/TP sync and proportional partial closes.**~~ Partials with Stage 2c, the two
-   modifications with Stage 3. A modification does not go through the order-sending path: it
-   has no price to re-quote and no volume to fill, and MT5 answers it with zeroes.
+7. ~~**SL/TP sync and proportional partial closes.**~~ A modification does not go through
+   the order-sending path: it has no price to re-quote and no volume to fill, and MT5
+   answers it with zeroes.
 8. ~~**Pending orders**~~ — placement, modification and cancellation, per slave via
    `copy_pending` (default off).
 9. ~~**Reverse and filtered copying**~~ — per-slave inversion, symbol whitelist/blacklist.
@@ -477,3 +460,7 @@ tracked there and in the per-feature notes.
 
 Panic semantics are fixed now and will not change: it halts copying and never closes or modifies
 a position.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

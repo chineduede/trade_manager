@@ -940,7 +940,7 @@ def test_a_requote_is_repriced_and_retried() -> None:
 
 
 def test_invalid_fill_retries_with_the_other_mode() -> None:
-    """The failure zele-mt5 cannot recover from, because it never reads the mask."""
+    """The failure a copier that never reads the mask cannot recover from."""
     session = FakeSession(
         results=[
             FakeResult(retcode=int(Retcode.INVALID_FILL)),

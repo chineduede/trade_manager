@@ -648,9 +648,8 @@ thing to conflate, so verify both against the docs when implementing.
 Pick a supported mode from the mask, cache it per `(terminal_id, symbol)`, and **retry on
 `TRADE_RETCODE_INVALID_FILL` with the alternative** rather than giving up.
 
-Non-negotiable: `zele-mt5` hardcodes `ORDER_FILLING_IOC` in all four of its order paths and
-never looks at the mask. Across FTMO, Eightcap, IC Markets and the rest, FOK-only symbols would
-reject *every* copied order. This must land before any live copying.
+Non-negotiable: hardcoding `ORDER_FILLING_IOC` and never looking at the mask means FOK-only
+symbols reject *every* copied order. This must land before any live copying.
 
 ### Risk-based sizing
 
@@ -693,10 +692,9 @@ in the account currency. It is exact and it handles cross-currency instruments f
 
 The manual alternative — `sl_distance * (trade_tick_value / trade_tick_size)` — has two traps.
 `SymbolInfo` exposes `trade_tick_value_profit` *and* `trade_tick_value_loss`, which differ on
-some instruments, and risk sizing needs the **loss** side; plain `trade_tick_value` (what
-`zele-mt5` uses) is the wrong field to reach for. It also gets cross-currency conversion wrong
-unless you do the conversion yourself. Note `order_calc_profit` appears in `zele-mt5` only
-inside a commented-out block, so there is no prior art to copy — write it fresh.
+some instruments, and risk sizing needs the **loss** side; plain `trade_tick_value`
+is the wrong field to reach for. It also gets cross-currency conversion wrong unless you do
+the conversion yourself. There is no prior art to copy — write it fresh.
 
 #### The stop-loss dependency
 
@@ -726,8 +724,8 @@ Deferring the copy until the master attaches a stop was considered and **rejecte
 lots = (raw / step).to_integral_value(ROUND_DOWN) * step  # then clamp to [min, max]
 ```
 
-Not `Decimal.quantize(step)`, which honours only the step's *exponent* — the bug in `zele-mt5`,
-where `volume_step=0.05` silently rounds to 0.01 granularity and emits broker-rejected lots
+Not `Decimal.quantize(step)`, which honours only the step's *exponent* — with it,
+`volume_step=0.05` silently rounds to 0.01 granularity and emits broker-rejected lots
 like `0.07`.
 
 **When the computed size falls below `volume_min`, skip the trade and log loudly. Do not round
@@ -742,9 +740,8 @@ Apply `max_lot` as a hard ceiling after quantization, not before.
 Resolve master symbol to slave symbol by: exact match, then configured prefix/suffix
 combinations, then a `symbols_get()` scan for a base-name match, then fail and log.
 
-Cache on `(terminal_id, master_symbol)` — **not** on the symbol alone, which is the cache-key
-bug in `zele-mt5`'s `SymbolMapper`, where two sources mapping `GOLD` differently collide. Add
-prefix support, which that mapper lacks entirely.
+Cache on `(terminal_id, master_symbol)` — **not** on the symbol alone, the cache-key bug
+where two sources mapping `GOLD` differently collide. Support prefixes as well as suffixes.
 
 ### Retcode-aware retry
 
@@ -885,10 +882,9 @@ Nothing below has been done yet. One slave, on a demo account, `max_lot` small.
 - *Encode it in `magic`* — rejected. A single 64-bit field cannot hold both a copier identity
   and a master ticket reliably.
 - **SQLite mapping table, plus a fixed copier magic so we can recognise our own positions, with
-  the comment as a best-effort hint.** This is what `zele-mt5` does (ownership in SQLite, not by
-  magic) and it is the right call.
+  the comment as a best-effort hint.** Ownership in SQLite, not by magic, is the right call.
 
-Reuse `zele-mt5`'s `core/database/service.py` largely as-is: singleton per `(db_path, pid)`,
+The store: singleton per `(db_path, pid)`,
 `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=30000`. That combination is exactly
 right for engine-writes / UI-reads across processes.
 
@@ -1079,9 +1075,9 @@ ways to be wrong than positions do. Built:
 - ✅ Sizing: unchanged, since an order has an entry and usually a stop.
 
 The `order_send` calls are written now: `PLACE` and `CANCEL` with Stage 2c, `MODIFY_ORDER`
-with Stage 3. None of the three has been run against a broker. Note `zele-mt5` had no
-`TRADE_ACTION_MODIFY` path at all — it can modify a position's SL/TP but not a pending order's
-entry price — so that half had no prior art to copy and was written fresh against the MQL5
+with Stage 3. None of the three has been run against a broker. Note the
+`TRADE_ACTION_MODIFY` half — a pending order's entry price, which a position's SL/TP
+modification cannot touch — had no prior art to copy and was written fresh against the MQL5
 field list.
 
 ### Fill versus cancellation — **confirmed on a demo, 2026-09-17**

@@ -4,17 +4,17 @@
 Build with:  uv run pyinstaller copier.spec --noconfirm
 Then ALWAYS read build/mt5copier/warn-mt5copier.txt before trusting the result.
 
-Three things here are direct fixes for how the zele-mt5 exe came out broken:
+Three things here guard against the classic ways an MT5 exe comes out broken:
 
 1. ``MetaTrader5`` is spelled with its real capitalisation. PyInstaller's module graph is
-   case-sensitive, so the lowercase ``"metatrader5"`` hidden import in that project pointed at
-   a module that does not exist -- the real C extension was never collected, and the shipped
-   17MB exe could not import it at runtime.
+   case-sensitive, so a lowercase ``"metatrader5"`` hidden import points at a module that
+   does not exist -- the real C extension is never collected, and the shipped exe cannot
+   import it at runtime.
 2. ``collect_dynamic_libs`` is called for it as well, because the package is a compiled
    extension rather than pure Python.
-3. The build must run inside the project venv (``uv run``), not a global interpreter. That
-   project's build script did a bare ``pip install pyinstaller`` and ended up analysing an
-   environment that had no MetaTrader5, PyYAML or telethon in it at all.
+3. The build must run inside the project venv (``uv run``), not a global interpreter --
+   otherwise PyInstaller analyses an environment that may not hold the project's
+   dependencies at all.
 """
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs

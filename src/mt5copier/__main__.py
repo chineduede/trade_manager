@@ -76,8 +76,8 @@ def _cmd_paths() -> int:
 def _cmd_check() -> int:
     """Import the MT5 extension without connecting.
 
-    A plain import is enough to catch the failure mode that shipped in zele-mt5, where the
-    extension was never bundled and the exe only discovered this at runtime.
+    A plain import is enough to catch the classic frozen-build failure where the
+    extension was never bundled and the exe only discovers this at runtime.
     """
     try:
         import MetaTrader5 as mt5  # noqa: N813

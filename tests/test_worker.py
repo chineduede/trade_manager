@@ -522,7 +522,7 @@ def test_poll_reports_broker_link_down_as_disconnected_not_failed() -> None:
 
 
 def test_failed_read_does_not_shut_down_the_session() -> None:
-    """Regression guard for the zele-mt5 bug where get_acct_info() called mt5.shutdown() on a
+    """Regression guard for the classic bug where get_acct_info() called mt5.shutdown() on a
     read failure, destroying the process's connection as a side effect of a query."""
     mt5 = FakeMT5(raise_on_read=True)
     session = _Session(mt5, Path("x.exe"))
@@ -782,7 +782,7 @@ def test_worker_leaves_the_terminal_open_on_a_plain_stop(
 
 
 def test_worker_stops_on_bare_none_sentinel(tmp_path: Path) -> None:
-    """zele-mt5's PluginManager used a bare None as its stop sentinel; accept that too."""
+    """Some supervisors use a bare None as their stop sentinel; accept that too."""
     out_q: queue.Queue = queue.Queue()
     cmd_q: queue.Queue = queue.Queue()
     mt5 = FakeMT5()

@@ -6,7 +6,7 @@ what the copier owns, the other a display-only diary. But how they hold the file
 and lives here: a subclass supplies its schema and the columns added since it first shipped,
 and inherits everything about opening, reopening, and closing the connection.
 
-The settings follow ``zele-mt5``'s ``core/database/service.py``, which got this part right:
+The settings are the careful standard ones:
 ``journal_mode=WAL`` so a reader never blocks the writer, ``synchronous=NORMAL`` (durable
 across a process crash, which is the failure that actually happens, while not paying an fsync
 per commit for a machine-level power loss), and a 30s ``busy_timeout`` so a momentary lock

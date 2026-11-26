@@ -4,8 +4,7 @@
 were considered and rejected: brokers truncate and overwrite comments, and a single 64-bit
 ``magic`` cannot reliably carry both a copier identity *and* a master ticket. So ``magic``
 carries only "this is ours", the comment is a best-effort hint for a human reading the
-terminal, and this table is the authority. That is also what ``zele-mt5`` does, and it is the
-one design decision of its that transfers wholesale.
+terminal, and this table is the authority.
 
 The stakes are asymmetric in an unusual direction: losing this file loses no money directly,
 but it orphans every live copy -- real positions stay open on real accounts with nothing

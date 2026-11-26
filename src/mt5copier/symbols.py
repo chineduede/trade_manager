@@ -26,9 +26,8 @@ why it outranks everything and why a mapping onto a name the broker does not lis
 outright instead of falling through.
 
 The cache key is ``(terminal_id, master_symbol)`` and never the symbol alone. Caching on the
-symbol is the bug in ``zele-mt5``'s ``SymbolMapper``: two sources mapping ``GOLD`` differently
-collide, and the second broker silently gets the first broker's answer. That mapper also has
-no prefix support at all.
+symbol lets two sources mapping ``GOLD`` differently collide, and the second broker silently
+gets the first broker's answer.
 """
 
 from __future__ import annotations
