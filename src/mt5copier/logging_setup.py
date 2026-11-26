@@ -1,8 +1,8 @@
 """Logging configuration.
 
-Two things this does that ``zele-mt5``'s logger did not: it uses ``logging.getLogger(name)``
-rather than caching one logger in a module global (which made the first caller's name and file
-win for every later caller), and it rotates. A copier is expected to run for weeks.
+Two things this gets right that naive setups do not: it uses ``logging.getLogger(name)``
+rather than caching one logger in a module global (which makes the first caller's name and
+file win for every later caller), and it rotates. A copier is expected to run for weeks.
 """
 
 from __future__ import annotations

@@ -708,8 +708,8 @@ class Snapshot:
 
     ``ts`` is set by the worker, so the supervisor can tell a wedged worker (snapshots have
     stopped arriving) from a disconnected terminal (snapshots still arriving, but
-    ``state`` is DISCONNECTED). Conflating those two was what made ``zele-mt5``'s
-    connection failures invisible until a trade silently failed to copy.
+    ``state`` is DISCONNECTED). Conflating those two is how connection failures stay
+    invisible until a trade silently fails to copy.
     """
 
     terminal_id: str

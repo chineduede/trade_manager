@@ -9,14 +9,14 @@ module is the body of one such process.
 that the supervisor -- which imports this module to get at ``run_worker`` -- never loads the
 extension into the parent process.
 
-Two behaviours here are direct responses to gaps in ``zele-mt5``:
+Two behaviours here are deliberate, both learned the hard way:
 
-* **Reconnection.** That project connected once in a constructor and had no retry, no backoff
-  and no health check, so a dropped broker connection killed the worker permanently. Here the
+* **Reconnection.** Connecting once in a constructor -- no retry, no backoff, no health
+  check -- means a dropped broker connection kills the worker permanently. Here the
   connection is a loop with a backoff schedule and continuous liveness checks.
-* **Reads never tear down the session.** Its ``get_acct_info()`` called ``mt5.shutdown()`` when
-  a read failed, destroying the process's connection as a side effect of a query. Here a failed
-  read only marks state; teardown happens exclusively in the reconnect path.
+* **Reads never tear down the session.** Calling ``mt5.shutdown()`` when a read fails
+  destroys the process's connection as a side effect of a query. Here a failed read only
+  marks state; teardown happens exclusively in the reconnect path.
 """
 
 from __future__ import annotations

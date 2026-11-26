@@ -86,7 +86,7 @@ def test_volume_rounds_down_to_the_step() -> None:
 
 
 def test_a_coarse_step_is_honoured_not_just_its_decimal_places() -> None:
-    """The zele-mt5 bug: Decimal.quantize(0.05) keeps 0.01 granularity and emits 0.07, which
+    """The classic bug: Decimal.quantize(0.05) keeps 0.01 granularity and emits 0.07, which
     the broker rejects. The step itself has to divide the result."""
     result = quantize_volume(0.078, facts(volume_step=0.05, volume_min=0.05))
     assert result.lots == pytest.approx(0.05)

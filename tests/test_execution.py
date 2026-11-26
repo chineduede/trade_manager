@@ -37,12 +37,12 @@ def test_fok_is_preferred_when_permitted() -> None:
 
 
 def test_ioc_is_used_when_fok_is_not_permitted() -> None:
-    """The case zele-mt5 gets right by accident and the FOK-only case it gets wrong."""
+    """The IOC-permitted case, and the FOK-only case a hardcoded-IOC copier gets wrong."""
     assert choose_filling(IOC_ONLY, is_pending=False) is OrderFilling.IOC
 
 
 def test_a_fok_only_symbol_never_gets_an_ioc_request() -> None:
-    """Hardcoding IOC -- what zele-mt5 does in all four order paths -- rejects every order on
+    """Hardcoding IOC rejects every order on
     these symbols with INVALID_FILL."""
     assert choose_filling(FOK_ONLY, is_pending=False) is not OrderFilling.IOC
 

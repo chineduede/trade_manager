@@ -23,7 +23,7 @@ class TradeAction(IntEnum):
 
     Note ``SLTP`` and ``MODIFY`` are different operations: SLTP changes a *position's* stop
     and target, MODIFY changes a pending *order's* parameters including its entry price.
-    ``zele-mt5`` has no MODIFY path at all, which is why it cannot move a resting order.
+    A copier without a MODIFY path cannot move a resting order.
     """
 
     DEAL = 1
@@ -74,9 +74,8 @@ def choose_filling(mask: int, *, is_pending: bool) -> OrderFilling:
     wrong guess is recoverable -- ``TRADE_RETCODE_INVALID_FILL`` is retried with the
     alternative rather than being fatal.
 
-    ``zele-mt5`` hardcodes IOC in all four of its order paths and never reads the mask at all.
-    Across FTMO, Eightcap, IC Markets and the rest, an FOK-only symbol would reject *every*
-    copied order.
+    Hardcoding IOC and never reading the mask is the classic copier mistake: on an
+    FOK-only symbol it rejects *every* copied order.
     """
     if is_pending:
         return OrderFilling.RETURN
